@@ -1,0 +1,13 @@
+@import "tailwindcss";
+@import "tailwindcss/preflight"
+@tailwind utilities;
+
+
+/* @layer base {
+    .bg-main-color {
+		#EEECDC
+    }
+	.text-main-color {
+		#282828
+	}
+} */
