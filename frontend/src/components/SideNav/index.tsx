@@ -133,30 +133,28 @@ const data = {
 };
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
 	return (
-		<SidebarProvider>
-			<Sidebar {...props}>
-				<SidebarHeader>aaaaa</SidebarHeader>
-				<SidebarContent>
-					{/* We create a SidebarGroup for each parent. */}
-					{data.navMain.map((item) => (
-						<SidebarGroup key={item.title}>
-							<SidebarGroupLabel>{item.title}</SidebarGroupLabel>
-							<SidebarGroupContent>
-								<SidebarMenu>
-									{item.items.map((item) => (
-										<SidebarMenuItem key={item.title}>
-											<SidebarMenuButton asChild isActive={item.isActive}>
-												<a href={item.url}>{item.title}</a>
-											</SidebarMenuButton>
-										</SidebarMenuItem>
-									))}
-								</SidebarMenu>
-							</SidebarGroupContent>
-						</SidebarGroup>
-					))}
-				</SidebarContent>
-				<SidebarRail />
-			</Sidebar>
-		</SidebarProvider>
+		<Sidebar {...props}>
+			<SidebarHeader>aaaaa</SidebarHeader>
+			<SidebarContent>
+				{/* We create a SidebarGroup for each parent. */}
+				{data.navMain.map((item) => (
+					<SidebarGroup key={item.title}>
+						<SidebarGroupLabel>{item.title}</SidebarGroupLabel>
+						<SidebarGroupContent>
+							<SidebarMenu>
+								{item.items.map((item) => (
+									<SidebarMenuItem key={item.title}>
+										<SidebarMenuButton asChild isActive={item.isActive}>
+											<a href={item.url}>{item.title}</a>
+										</SidebarMenuButton>
+									</SidebarMenuItem>
+								))}
+							</SidebarMenu>
+						</SidebarGroupContent>
+					</SidebarGroup>
+				))}
+			</SidebarContent>
+			<SidebarRail />
+		</Sidebar>
 	);
 }
