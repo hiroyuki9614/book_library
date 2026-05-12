@@ -5,3 +5,9 @@ main {
     grid-template-rows: auto 1fr;
     height: 100vh;
 }
+
+@layer base {
+    :root {
+        --primary: 222.2 47.4% 11.2%;
+    }
+}
