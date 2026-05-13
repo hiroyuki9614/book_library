@@ -1,25 +1,48 @@
 import * as React from 'react';
-import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarRail } from '@/components/ui/sidebar';
-const data = {
+import { Link } from 'react-router-dom';
+
+import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarRail } from '@/components/ui/sidebar';
+
+type MenuGroup = {
+	title: string;
+	url: string;
+	className?: string;
+	items: {
+		title: string;
+		url: string;
+		isActive?: boolean;
+	}[];
+};
+
+const data: {
+	versions: string[];
+	navMain: MenuGroup[];
+	adminMenu: MenuGroup[];
+} = {
 	versions: ['1.0.1', '1.1.0-alpha', '2.0.0-beta1'],
+
 	navMain: [
 		{
 			title: 'BeeLib',
 			url: '#',
+
 			items: [
 				{
 					title: 'Dashboard',
 					url: '/',
 					isActive: true,
 				},
+
 				{
 					title: '本棚',
 					url: '#',
 				},
+
 				{
 					title: '読書中',
 					url: '#',
 				},
+
 				{
 					title: 'お気に入り',
 					url: '#',
@@ -27,17 +50,24 @@ const data = {
 			],
 		},
 	],
+
 	adminMenu: [
 		{
+			title: 'BeeLib',
+			url: '#',
+			className: 'mt-auto',
+
 			items: [
 				{
 					title: '管理画面',
 					url: '#',
 				},
+
 				{
 					title: 'マイページ',
 					url: '#',
 				},
+
 				{
 					title: 'ログアウト',
 					url: '#',
@@ -47,16 +77,17 @@ const data = {
 	],
 };
 
-const renderMenu = (menu: typeof data.navMain) =>
-	menu.map((item) => (
-		<SidebarGroup key={item.title}>
-			<SidebarGroupLabel>{item.title}</SidebarGroupLabel>
+const renderMenu = (menu: MenuGroup[]) =>
+	menu.map((group) => (
+		<SidebarGroup key={group.title} className={group.className}>
+			<SidebarGroupLabel>{group.title}</SidebarGroupLabel>
+
 			<SidebarGroupContent>
 				<SidebarMenu>
-					{item.items.map((item) => (
+					{group.items.map((item) => (
 						<SidebarMenuItem key={item.title}>
 							<SidebarMenuButton asChild isActive={item.isActive}>
-								<a href={item.url}>{item.title}</a>
+								<Link to={item.url}>{item.title}</Link>
 							</SidebarMenuButton>
 						</SidebarMenuItem>
 					))}
@@ -64,15 +95,18 @@ const renderMenu = (menu: typeof data.navMain) =>
 			</SidebarGroupContent>
 		</SidebarGroup>
 	));
+
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
 	return (
 		<Sidebar {...props}>
-			{/* <SidebarHeader></SidebarHeader> */}
+			{/* <SidebarHeader /> */}
+
 			<SidebarContent>
 				{renderMenu(data.navMain)}
 
-				<div className='mt-6'>{renderMenu(data.adminMenu)}</div>
+				<div className='mt-auto mb-4'>{renderMenu(data.adminMenu)}</div>
 			</SidebarContent>
+
 			<SidebarRail />
 		</Sidebar>
 	);
