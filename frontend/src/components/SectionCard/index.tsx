@@ -1,27 +1,31 @@
-// SectionCard.tsx
-
-import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import clsx from 'clsx';
 
 interface SectionCardProps {
 	children: React.ReactNode;
+	pageTitle?: string;
+	pageDescription?: string;
+	className?: string;
+	size?: 'small' | 'medium' | 'large' | 'full';
 }
 
-export function SectionCard({ children }: SectionCardProps) {
+function SectionCard({ size, children, pageTitle, pageDescription, className }: SectionCardProps) {
+	const sizeClasses = {
+		small: 'max-w-sm',
+		medium: 'max-w-md',
+		large: 'max-w-lg',
+		full: 'w-full',
+	};
+
 	return (
-		<Card className='w-full bg-card'>
+		<Card className={clsx('bg-card', size ? sizeClasses[size] : 'w-full', className)}>
 			<CardHeader>
-				<CardTitle>Card Title</CardTitle>
-
-				<CardDescription>Card Description</CardDescription>
+				{pageTitle && <CardTitle>{pageTitle}</CardTitle>}
+				{pageDescription && <CardDescription>{pageDescription}</CardDescription>}
 			</CardHeader>
-
 			<CardContent>{children}</CardContent>
-
-			<CardFooter>
-				<CardAction>
-					<button className='rounded bg-primary px-4 py-2 text-white'>Action</button>
-				</CardAction>
-			</CardFooter>
 		</Card>
 	);
 }
+
+export default SectionCard;

@@ -16,7 +16,7 @@ export type Book = {
 	coverImage: string;
 };
 
-export const books: Book[] = [
+export const booksData: Book[] = [
 	{
 		id: 1,
 		title: 'The Great Gatsby',

@@ -111,7 +111,7 @@ export function BookTable() {
 				<TableRow>
 					<TableCell colSpan={7} className='text-center'>
 						<div className='flex items-center justify-center gap-4 py-4'>
-							<button className='rounded bg-primary px-3 py-1 disabled:opacity-50' disabled={currentPage === 1} onClick={handlePreviousPage}>
+							<button className='rounded bg-primary text-white px-3 py-1 disabled:opacity-50' disabled={currentPage === 1} onClick={handlePreviousPage}>
 								前へ
 							</button>
 
@@ -119,7 +119,7 @@ export function BookTable() {
 								{currentPage} / {totalPages}
 							</span>
 
-							<button className='rounded bg-primary px-3 py-1 disabled:opacity-50' disabled={currentPage === totalPages} onClick={handleNextPage}>
+							<button className='rounded bg-primary text-white px-3 py-1 disabled:opacity-50' disabled={currentPage === totalPages} onClick={handleNextPage}>
 								次へ
 							</button>
 						</div>

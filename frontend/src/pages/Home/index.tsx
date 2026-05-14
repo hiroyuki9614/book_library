@@ -1,6 +1,6 @@
 import { BookTable } from '@/components/BookTable';
 import { MiniCard } from '@/components/MiniCard';
-import { SectionCard } from '@/components/SectionCard';
+import SectionCard from '@/components/SectionCard';
 import { Input } from '@/components/ui/input';
 
 function Home() {
