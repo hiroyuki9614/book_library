@@ -7,7 +7,7 @@ export default function AppLayout() {
 		<SidebarProvider>
 			<AppSidebar />
 			<SidebarInset>
-				<main className='min-h-screen p-6'>
+				<main className='min-h-screen'>
 					<Outlet />
 				</main>
 			</SidebarInset>

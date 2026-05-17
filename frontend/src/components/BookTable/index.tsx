@@ -65,7 +65,7 @@ export function BookTable() {
 
 			<TableBody>
 				{currentBooks.map((book) => (
-					<TableRow key={book.id} onClick={() => navigate(`/books/${book.id}`)} className='cursor-pointer hover:bg-muted'>
+					<TableRow key={book.id} onClick={() => navigate(`/reader/${book.id}`)} className='cursor-pointer hover:bg-muted'>
 						<TableCell>
 							<img src={book.coverImage} alt={`${book.title} の表紙`} className='h-16 w-12 rounded object-cover' />
 						</TableCell>
