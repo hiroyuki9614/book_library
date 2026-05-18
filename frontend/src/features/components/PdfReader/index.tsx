@@ -99,10 +99,9 @@ const PageNavigation = ({ documentId }: { documentId: string }) => {
 	};
 
 	return (
-		<div className='flex items-center justify-center gap-2 border-b border-gray-300 bg-gray-100 px-3 py-2 dark:border-gray-700 dark:bg-gray-800'>
-			{/* Previous button */}
+		<>
 			<CommandButton prevResolved={previousCommand} nextResolved={nextCommand} state={state} pageInput={pageInput} setPageInput={setPageInput} handleGoToPage={handleGoToPage} />
-		</div>
+		</>
 	);
 };
 
@@ -155,8 +154,10 @@ function PdfReader() {
 								{({ isLoaded }) =>
 									isLoaded && (
 										<div style={{ display: 'flex', height: '100%', flexDirection: 'column' }}>
-											<ZoomToolbar documentId={activeDocumentId} /> {/* 2. Add the component here with documentId */}
-											<PageNavigation documentId={activeDocumentId} />
+											<div className='mb-2 flex items-center gap-4'>
+												<ZoomToolbar documentId={activeDocumentId} />
+												<PageNavigation documentId={activeDocumentId} />
+											</div>
 											<div style={{ flex: 1, overflow: 'hidden' }}>
 												<Viewport documentId={activeDocumentId}>
 													<Scroller
