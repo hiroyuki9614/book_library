@@ -31,7 +31,7 @@ export type AppState = GlobalStoreState<{
 const myCommands: Record<string, Command<AppState>> = {
 	'nav.previous': {
 		id: 'nav.previous',
-		label: 'Previous Page',
+		label: '<',
 		shortcuts: ['arrowleft', 'k'],
 		action: ({ registry }) => {
 			registry.getPlugin('scroll')?.provides()?.scrollToPreviousPage();
@@ -43,7 +43,7 @@ const myCommands: Record<string, Command<AppState>> = {
 	},
 	'nav.next': {
 		id: 'nav.next',
-		label: 'Next Page',
+		label: '>',
 		shortcuts: ['arrowright', 'j'],
 		action: ({ registry }) => {
 			registry.getPlugin('scroll')?.provides()?.scrollToNextPage();
@@ -154,7 +154,7 @@ function PdfReader() {
 								{({ isLoaded }) =>
 									isLoaded && (
 										<div style={{ display: 'flex', height: '100%', flexDirection: 'column' }}>
-											<div className='mb-2 flex items-center gap-4'>
+											<div className='mb-2 flex items-center gap-4 justify-evenly'>
 												<ZoomToolbar documentId={activeDocumentId} />
 												<PageNavigation documentId={activeDocumentId} />
 											</div>

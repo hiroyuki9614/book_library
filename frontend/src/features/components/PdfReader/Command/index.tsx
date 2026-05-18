@@ -23,7 +23,7 @@ const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageIn
 	if (!prevResolved || !prevResolved.visible) return null;
 
 	return (
-		<>
+		<div className='flex items-center gap-4'>
 			<button
 				onClick={prevResolved.execute}
 				disabled={prevResolved.disabled}
@@ -55,7 +55,7 @@ const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageIn
 			>
 				{nextResolved?.label}
 			</button>
-		</>
+		</div>
 	);
 };
 
