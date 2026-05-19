@@ -2,10 +2,10 @@ import { createPluginRegistration } from '@embedpdf/core';
 import { EmbedPDF } from '@embedpdf/core/react';
 import { usePdfiumEngine } from '@embedpdf/engines/react';
 import { Link } from 'react-router-dom';
-import { Sheet, SheetClose, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheetCapture';
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheetCapture';
 import { Button } from '@/components/ui/button';
 import { ZoomToolbar } from './ZoomToolbar';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import CommandButton from './Command';
 import { useCommand } from '@embedpdf/plugin-commands/react';
 
@@ -17,9 +17,10 @@ import { RenderLayer, RenderPluginPackage } from '@embedpdf/plugin-render/react'
 import { ZoomPluginPackage, ZoomMode } from '@embedpdf/plugin-zoom/react';
 import { InteractionManagerPluginPackage, PagePointerProvider } from '@embedpdf/plugin-interaction-manager/react';
 import { CommandsPluginPackage } from '@embedpdf/plugin-commands/react';
-import { GlobalStoreState } from '@embedpdf/core';
-import { Command } from '@embedpdf/plugin-commands';
-import { SCROLL_PLUGIN_ID, ScrollState } from '@embedpdf/plugin-scroll';
+import type { GlobalStoreState } from '@embedpdf/core';
+import type { Command } from '@embedpdf/plugin-commands';
+import { SCROLL_PLUGIN_ID } from '@embedpdf/plugin-scroll';
+import type { ScrollState } from '@embedpdf/plugin-scroll';
 
 import { SelectionLayer, SelectionPluginPackage } from '@embedpdf/plugin-selection/react';
 
@@ -34,7 +35,10 @@ const myCommands: Record<string, Command<AppState>> = {
 		label: '<',
 		shortcuts: ['arrowleft', 'k'],
 		action: ({ registry }) => {
-			registry.getPlugin('scroll')?.provides()?.scrollToPreviousPage();
+			const scrollPlugin = registry.getPlugin('scroll');
+			const scroll = scrollPlugin?.provides?.();
+
+			scroll?.scrollToPreviousPage?.();
 		},
 		disabled: ({ state, documentId }) => {
 			const scrollState = state.plugins.scroll.documents[documentId];
@@ -46,18 +50,18 @@ const myCommands: Record<string, Command<AppState>> = {
 		label: '>',
 		shortcuts: ['arrowright', 'j'],
 		action: ({ registry }) => {
-			registry.getPlugin('scroll')?.provides()?.scrollToNextPage();
+			const scrollPlugin = registry.getPlugin('scroll');
+			const scroll = scrollPlugin?.provides?.();
+
+			scroll?.scrollToNextPage?.();
 		},
-		// The 'state' argument is now typed as AppState
 		disabled: ({ state, documentId }) => {
-			// Access specific document state safely
 			const scrollState = state.plugins.scroll.documents[documentId];
 			return scrollState ? scrollState.currentPage >= scrollState.totalPages : true;
 		},
 	},
 };
 
-// 1. Register the plugins you need
 const plugins = [
 	createPluginRegistration(DocumentManagerPluginPackage, {
 		initialDocuments: [{ url: 'https://snippet.embedpdf.com/ebook.pdf' }],
@@ -71,11 +75,11 @@ const plugins = [
 		defaultZoomLevel: ZoomMode.FitPage,
 	}),
 	createPluginRegistration(ScrollPluginPackage, {
-		defaultStrategy: ScrollStrategy.Vertical, // or Horizontal
+		defaultStrategy: ScrollStrategy.Vertical,
 		defaultPageGap: 10,
 	}),
 	createPluginRegistration(CommandsPluginPackage, {
-		commands: myCommands, // See "Defining Commands" below
+		commands: myCommands,
 	}),
 ];
 
@@ -85,10 +89,6 @@ const PageNavigation = ({ documentId }: { documentId: string }) => {
 
 	const previousCommand = useCommand('nav.previous', documentId);
 	const nextCommand = useCommand('nav.next', documentId);
-
-	useEffect(() => {
-		setPageInput(String(state.currentPage));
-	}, [state.currentPage]);
 
 	const handleGoToPage = (e: React.FormEvent<HTMLFormElement>) => {
 		e.preventDefault();
@@ -106,10 +106,8 @@ const PageNavigation = ({ documentId }: { documentId: string }) => {
 };
 
 function PdfReader() {
-	// 2. Initialize the engine with the React hook
 	const { engine, isLoading } = usePdfiumEngine();
 
-	// 3. Wrap your UI with the <EmbedPDF> provider
 	if (isLoading || !engine) {
 		return (
 			<div className='overflow-hidden rounded-lg border border-gray-300 bg-white dark:border-gray-700 dark:bg-gray-900'>
@@ -162,10 +160,10 @@ function PdfReader() {
 												<Viewport documentId={activeDocumentId}>
 													<Scroller
 														documentId={activeDocumentId}
-														renderPage={({ width, height, pageIndex, scale }) => (
+														renderPage={({ width, height, pageIndex }) => (
 															<PagePointerProvider documentId={activeDocumentId} pageIndex={pageIndex}>
 																<div style={{ width, height, position: 'relative' }}>
-																	<RenderLayer documentId={activeDocumentId} pageIndex={pageIndex} style={{ pointerEvents: 'none' }} scale={scale} />
+																	<RenderLayer documentId={activeDocumentId} pageIndex={pageIndex} style={{ pointerEvents: 'none' }} />
 																	<SelectionLayer documentId={activeDocumentId} pageIndex={pageIndex} />
 																</div>
 															</PagePointerProvider>

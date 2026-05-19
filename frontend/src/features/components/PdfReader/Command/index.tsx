@@ -7,19 +7,18 @@ type ResolvedCommand = {
 };
 
 type CommandButtonProps = {
-	resolved: ResolvedCommand | null;
 	state: {
 		currentPage: number;
 		totalPages: number;
 	};
-	pageInput: number | string;
-	setPageInput: (value: number | string) => void;
+	pageInput: string;
+	setPageInput: React.Dispatch<React.SetStateAction<string>>;
 	handleGoToPage: (event: React.FormEvent<HTMLFormElement>) => void;
 	prevResolved: ResolvedCommand | null;
 	nextResolved: ResolvedCommand | null;
 };
 
-const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageInput, handleGoToPage }: CommandButtonProps) => {
+const CommandButton = ({ prevResolved, nextResolved, state, setPageInput, handleGoToPage }: CommandButtonProps) => {
 	if (!prevResolved || !prevResolved.visible) return null;
 
 	return (
@@ -35,16 +34,14 @@ const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageIn
 
 			<form onSubmit={handleGoToPage} className='flex items-center gap-2'>
 				<span className='text-xs font-medium uppercase tracking-wide text-gray-600 dark:text-gray-300'>Page</span>
-
 				<input
 					type='number'
-					value={pageInput}
+					value={state.currentPage}
 					onChange={(event) => setPageInput(event.target.value)}
 					min={1}
 					max={state.totalPages}
 					className='h-8 w-14 rounded-md border-0 bg-white px-2 text-center font-mono text-sm font-medium text-gray-700 shadow-sm ring-1 ring-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-gray-300 dark:ring-gray-600'
 				/>
-
 				<span className='text-xs font-medium text-gray-600 dark:text-gray-300'>of {state.totalPages}</span>
 			</form>
 			<button
