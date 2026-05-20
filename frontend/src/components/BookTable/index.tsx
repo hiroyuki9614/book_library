@@ -6,8 +6,9 @@ import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, Table
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { booksData } from '@/data/booksData';
+import useReadingProgress from '@/hooks/useReadingProgress';
 
-export function BookTable({ books }: { books: typeof booksData }) {
+export function BookTable({ books, readingProgress }: { books: typeof booksData; readingProgress: ReturnType<typeof useReadingProgress> }) {
 	const itemsPerPage = 5;
 	const totalItems = books.length;
 	const totalPages = Math.ceil(totalItems / itemsPerPage);
@@ -64,47 +65,57 @@ export function BookTable({ books }: { books: typeof booksData }) {
 			</TableHeader>
 
 			<TableBody>
-				{currentBooks.map((book) => (
-					<TableRow key={book.id} onClick={() => navigate(`/reader/${book.id}`)} className='cursor-pointer hover:bg-muted'>
-						<TableCell>
-							<img src={book.coverImage} alt={`${book.title} の表紙`} className='h-16 w-12 rounded object-cover' />
-						</TableCell>
+				{currentBooks.map((book) => {
+					const progress = readingProgress.find((progress) => progress.id === book.id)?.progress || 0;
+					return (
+						<TableRow key={book.id} onClick={() => navigate(`/reader/${book.id}`)} className='cursor-pointer hover:bg-muted'>
+							<TableCell>
+								<img src={book.coverImage} alt={`${book.title} の表紙`} className='h-16 w-12 rounded object-cover' />
+							</TableCell>
 
-						<TableCell className='font-medium'>{book.title}</TableCell>
+							<TableCell className='font-medium'>{book.title}</TableCell>
 
-						<TableCell>{book.author}</TableCell>
+							<TableCell>{book.author}</TableCell>
 
-						<TableCell>{book.category}</TableCell>
+							<TableCell>{book.category}</TableCell>
 
-						<TableCell>
-							<Badge variant={getBadgeVariant(book.status)}>{book.status}</Badge>
-						</TableCell>
+							<TableCell>
+								<Badge variant={getBadgeVariant(book.status)}>{book.status}</Badge>
+							</TableCell>
 
-						<TableCell>
-							<Progress value={book.progress} className='w-24' />
-						</TableCell>
+							<TableCell>
+								<Progress value={progress} className='w-24' />
+							</TableCell>
 
-						<TableCell>
-							<div className='flex items-center gap-2'>
-								<button
-									onClick={(event) => {
-										event.stopPropagation();
-									}}
-								>
-									<MoreHorizontal className='h-4 w-4' />
-								</button>
+							<TableCell>
+								<div className='flex items-center gap-2'>
+									<button
+										onClick={(event) => {
+											event.stopPropagation();
+										}}
+									>
+										<MoreHorizontal className='h-4 w-4' />
+									</button>
 
-								<button
-									onClick={(event) => {
-										event.stopPropagation();
-									}}
-								>
-									<Star className='h-5 w-5' />
-								</button>
-							</div>
+									<button
+										onClick={(event) => {
+											event.stopPropagation();
+										}}
+									>
+										<Star className='h-5 w-5' />
+									</button>
+								</div>
+							</TableCell>
+						</TableRow>
+					);
+				})}
+				{currentBooks.length === 0 && (
+					<TableRow>
+						<TableCell colSpan={7} className='text-center py-4'>
+							データがありません。
 						</TableCell>
 					</TableRow>
-				))}
+				)}
 			</TableBody>
 
 			<TableFooter>
