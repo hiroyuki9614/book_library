@@ -7,16 +7,16 @@ import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { booksData } from '@/data/booksData';
 
-export function BookTable() {
+export function BookTable({ books }: { books: typeof booksData }) {
 	const itemsPerPage = 5;
-	const totalItems = booksData.length;
+	const totalItems = books.length;
 	const totalPages = Math.ceil(totalItems / itemsPerPage);
 
 	const [currentPage, setCurrentPage] = React.useState(1);
 
 	const startIndex = (currentPage - 1) * itemsPerPage;
 	const endIndex = startIndex + itemsPerPage;
-	const currentBooks = booksData.slice(startIndex, endIndex);
+	const currentBooks = books.slice(startIndex, endIndex);
 
 	const navigate = useNavigate();
 

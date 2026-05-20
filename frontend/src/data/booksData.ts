@@ -5,6 +5,9 @@ export type Book = {
 	year?: number;
 	status: 'Unread' | 'Reading' | 'Completed';
 	fileType: 'pdf' | 'epub';
+
+	category: 'Frontend' | 'Backend' | 'Design' | 'DevOps' | 'Database' | 'Architecture' | 'Security';
+
 	currentPage: number;
 	createdAt: string;
 	updatedAt?: string;
