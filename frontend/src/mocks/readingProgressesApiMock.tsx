@@ -1,7 +1,7 @@
 import { readingProgressData } from '@/data/readingProgress';
 import type { ReadingProgress } from '@/data/readingProgress';
 
-async function readingProgressApiMock(timeout = 1000): Promise<ReadingProgress[]> {
+async function readingProgressesApiMock(timeout = 1000): Promise<ReadingProgress[]> {
 	try {
 		const result = await new Promise<ReadingProgress[]>((resolve) => {
 			setTimeout(() => {
@@ -15,4 +15,4 @@ async function readingProgressApiMock(timeout = 1000): Promise<ReadingProgress[]
 	}
 }
 
-export default readingProgressApiMock;
+export default readingProgressesApiMock;

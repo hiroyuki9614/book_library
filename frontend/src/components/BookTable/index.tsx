@@ -6,9 +6,9 @@ import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, Table
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { booksData } from '@/data/booksData';
-import useReadingProgress from '@/hooks/useReadingProgress';
+import type { ReadingProgress } from '@/data/readingProgressData';
 
-export function BookTable({ books, readingProgress }: { books: typeof booksData; readingProgress: ReturnType<typeof useReadingProgress> }) {
+export function BookTable({ books, readingProgresses }: { books: typeof booksData; readingProgresses: ReadingProgress[] }) {
 	const itemsPerPage = 5;
 	const totalItems = books.length;
 	const totalPages = Math.ceil(totalItems / itemsPerPage);
@@ -66,7 +66,7 @@ export function BookTable({ books, readingProgress }: { books: typeof booksData;
 
 			<TableBody>
 				{currentBooks.map((book) => {
-					const progress = readingProgress.find((progress) => progress.id === book.id)?.progress || 0;
+					const progress = readingProgresses.find((progress) => progress.id === book.id)?.progress || 0;
 					return (
 						<TableRow key={book.id} onClick={() => navigate(`/reader/${book.id}`)} className='cursor-pointer hover:bg-muted'>
 							<TableCell>

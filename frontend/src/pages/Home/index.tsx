@@ -1,13 +1,12 @@
 import { BookTable } from '@/components/BookTable';
 import { MiniCard } from '@/components/MiniCard';
 import SectionCard from '@/components/SectionCard';
-import { Input } from '@/components/ui/input';
 import useBooks from '@/hooks/useBooks';
-import useReadingProgress from '@/hooks/useReadingProgress';
+import useReadingProgresses from '@/hooks/useReadingProgresses';
 
 function Home() {
 	const { books } = useBooks();
-	const { readingProgress } = useReadingProgress();
+	const { readingProgresses } = useReadingProgresses();
 	return (
 		<>
 			<div className='mb-4 flex gap-4'>
@@ -33,7 +32,7 @@ function Home() {
 			</div>
 
 			<SectionCard>
-				<BookTable books={books} readingProgress={readingProgress} />
+				<BookTable books={books} readingProgresses={readingProgresses} />
 			</SectionCard>
 		</>
 	);
