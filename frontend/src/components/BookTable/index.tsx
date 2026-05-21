@@ -6,18 +6,34 @@ import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, Table
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { booksData } from '@/data/booksData';
-import type { ReadingProgress } from '@/data/readingProgressData';
+import type { ReadingProgress } from '@/data/readingProgress';
 
-export function BookTable({ books, readingProgresses }: { books: typeof booksData; readingProgresses: ReadingProgress[] }) {
-	const itemsPerPage = 5;
-	const totalItems = books.length;
-	const totalPages = Math.ceil(totalItems / itemsPerPage);
+type BookTableProps = {
+	books: typeof booksData;
+	readingProgresses: ReadingProgress[];
+	itemsPerPage: number;
+	searchQuery: string;
+	sort: string;
+};
 
+export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery, sort }: BookTableProps) {
 	const [currentPage, setCurrentPage] = React.useState(1);
 
 	const startIndex = (currentPage - 1) * itemsPerPage;
 	const endIndex = startIndex + itemsPerPage;
-	const currentBooks = books.slice(startIndex, endIndex);
+	const filteredBooks = books.filter((book) => {
+		const query = searchQuery.toLowerCase();
+		return book.title.toLowerCase().includes(query) || book.author.toLowerCase().includes(query);
+	});
+	const totalItems = filteredBooks.length;
+	const totalPages = Math.ceil(totalItems / itemsPerPage);
+	const sortedBooks = [...filteredBooks].sort((a, b) => {
+		if (sort === 'newest') {
+			return b.id - a.id;
+		}
+		return a.id - b.id;
+	});
+	const currentBooks = sortedBooks.slice(startIndex, endIndex);
 
 	const navigate = useNavigate();
 
