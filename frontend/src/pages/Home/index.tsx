@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { useState } from 'react';
 
 function Home() {
-	const { books } = useBooks();
+	const { books, isLoading } = useBooks();
 	const { readingProgresses } = useReadingProgresses();
 	const [selectedSort, setSelectedSort] = useState('newest');
 	const [searchQuery, setSearchQuery] = useState('');
@@ -41,7 +41,7 @@ function Home() {
 			<div className='m-4'>
 				<SectionCard size='full'>
 					<div className='mb-4 flex justify-between'>
-						<Input placeholder='Search books or authors...' className='mb-4' value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+						<Input placeholder='Search books or authors...' className='mb-4 w-sm' value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
 						<Select defaultValue={selectedSort} onValueChange={setSelectedSort}>
 							<SelectTrigger className='w-full max-w-48'>
 								<SelectValue placeholder='最新順' />
@@ -52,7 +52,7 @@ function Home() {
 							</SelectContent>
 						</Select>
 					</div>
-					<BookTable books={books} readingProgresses={readingProgresses} itemsPerPage={itemsPerPage} sort={selectedSort} searchQuery={searchQuery} />
+					<BookTable books={books} readingProgresses={readingProgresses} itemsPerPage={itemsPerPage} sort={selectedSort} searchQuery={searchQuery} isLoading={isLoading} />
 				</SectionCard>
 			</div>
 		</>

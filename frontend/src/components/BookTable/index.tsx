@@ -6,6 +6,7 @@ import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, Table
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { booksData } from '@/data/booksData';
+import { Skeleton } from '@/components/ui/skeleton';
 import type { ReadingProgress } from '@/data/readingProgress';
 
 type BookTableProps = {
@@ -14,9 +15,11 @@ type BookTableProps = {
 	itemsPerPage: number;
 	searchQuery: string;
 	sort: string;
+	isLoading: boolean;
 };
 
-export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery, sort }: BookTableProps) {
+export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery, sort, isLoading }: BookTableProps) {
+	const columns = ['タイトル', '著者', 'ジャンル', 'ステータス', '進捗'];
 	const [currentPage, setCurrentPage] = React.useState(1);
 
 	const startIndex = (currentPage - 1) * itemsPerPage;
@@ -70,64 +73,71 @@ export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery,
 		<Table>
 			<TableHeader>
 				<TableRow>
-					<TableHead />
-					<TableHead>タイトル</TableHead>
-					<TableHead>著者</TableHead>
-					<TableHead>ジャンル</TableHead>
-					<TableHead>ステータス</TableHead>
-					<TableHead>進捗</TableHead>
+					{columns.map((column, index) => (
+						<TableHead key={index}>{column}</TableHead>
+					))}
 					<TableHead />
 				</TableRow>
 			</TableHeader>
 
 			<TableBody>
-				{currentBooks.map((book) => {
-					const progress = readingProgresses.find((progress) => progress.id === book.id)?.progress || 0;
-					return (
-						<TableRow key={book.id} onClick={() => navigate(`/reader/${book.id}`)} className='cursor-pointer hover:bg-muted'>
-							<TableCell>
-								<img src={book.coverImage} alt={`${book.title} の表紙`} className='h-16 w-12 rounded object-cover' />
-							</TableCell>
+				{isLoading
+					? [...Array(itemsPerPage)].map((_, index) => (
+							<TableRow key={index}>
+								{[...Array(columns.length + 1)].map((_, index) => (
+									<TableCell key={index}>
+										<Skeleton className='h-16 w-full' />
+									</TableCell>
+								))}
+							</TableRow>
+						))
+					: currentBooks.map((book) => {
+							const progress = readingProgresses.find((progress) => progress.id === book.id)?.progress || 0;
+							return (
+								<TableRow key={book.id} onClick={() => navigate(`/reader/${book.id}`)} className='cursor-pointer hover:bg-muted'>
+									<TableCell>
+										<img src={book.coverImage} alt={`${book.title} の表紙`} className='h-16 w-12 rounded object-cover' />
+									</TableCell>
 
-							<TableCell className='font-medium'>{book.title}</TableCell>
+									<TableCell className='font-medium'>{book.title}</TableCell>
 
-							<TableCell>{book.author}</TableCell>
+									<TableCell>{book.author}</TableCell>
 
-							<TableCell>{book.category}</TableCell>
+									<TableCell>{book.category}</TableCell>
 
-							<TableCell>
-								<Badge variant={getBadgeVariant(book.status)}>{book.status}</Badge>
-							</TableCell>
+									<TableCell>
+										<Badge variant={getBadgeVariant(book.status)}>{book.status}</Badge>
+									</TableCell>
 
-							<TableCell>
-								<Progress value={progress} className='w-24' />
-							</TableCell>
+									<TableCell>
+										<Progress value={progress} className='w-24' />
+									</TableCell>
 
-							<TableCell>
-								<div className='flex items-center gap-2'>
-									<button
-										onClick={(event) => {
-											event.stopPropagation();
-										}}
-									>
-										<MoreHorizontal className='h-4 w-4' />
-									</button>
+									<TableCell>
+										<div className='flex items-center gap-2'>
+											<button
+												onClick={(event) => {
+													event.stopPropagation();
+												}}
+											>
+												<MoreHorizontal className='h-4 w-4' />
+											</button>
 
-									<button
-										onClick={(event) => {
-											event.stopPropagation();
-										}}
-									>
-										<Star className='h-5 w-5' />
-									</button>
-								</div>
-							</TableCell>
-						</TableRow>
-					);
-				})}
-				{currentBooks.length === 0 && (
+											<button
+												onClick={(event) => {
+													event.stopPropagation();
+												}}
+											>
+												<Star className='h-5 w-5' />
+											</button>
+										</div>
+									</TableCell>
+								</TableRow>
+							);
+						})}
+				{currentBooks.length === 0 && !isLoading && (
 					<TableRow>
-						<TableCell colSpan={7} className='text-center py-4'>
+						<TableCell colSpan={columns.length + 1} className='text-center py-4'>
 							データがありません。
 						</TableCell>
 					</TableRow>
@@ -135,10 +145,10 @@ export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery,
 			</TableBody>
 
 			<TableFooter>
-				<TableRow>
-					<TableCell colSpan={7} className='text-center'>
+				<TableRow className='bg-card hover:bg-card'>
+					<TableCell colSpan={columns.length + 1} className='text-center'>
 						<div className='flex items-center justify-center gap-4 py-4'>
-							<button className='rounded bg-primary text-white px-3 py-1 disabled:opacity-50' disabled={currentPage === 1} onClick={handlePreviousPage}>
+							<button className='rounded bg-primary text-white px-3 py-2 disabled:opacity-50 cursor-pointer' disabled={currentPage === 1} onClick={handlePreviousPage}>
 								前へ
 							</button>
 
@@ -146,7 +156,7 @@ export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery,
 								{currentPage} / {totalPages}
 							</span>
 
-							<button className='rounded bg-primary text-white px-3 py-1 disabled:opacity-50' disabled={currentPage === totalPages} onClick={handleNextPage}>
+							<button className='rounded bg-primary text-white px-3 py-2 disabled:opacity-50 cursor-pointer' disabled={currentPage === totalPages} onClick={handleNextPage}>
 								次へ
 							</button>
 						</div>
