@@ -9,9 +9,9 @@ export type Book = {
 	category: 'Frontend' | 'Backend' | 'Design' | 'DevOps' | 'Database' | 'Architecture' | 'Security';
 
 	currentPage: number;
-	createdAt: string;
+	createdAt?: string;
 	updatedAt?: string;
-	coverImage: string;
+	coverImage?: string;
 };
 
 export const booksData: Book[] = [

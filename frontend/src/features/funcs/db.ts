@@ -1,19 +1,23 @@
 import Dexie from 'dexie';
 import type { EntityTable } from 'dexie';
+import type { File } from 'zod/v4/core';
 
-type Friend = {
+type Book = {
 	id: number;
-	name: string;
-	age: number;
+	title: string;
+	fileType: 'epub' | 'pdf';
+	file: Blob;
+	progress: number;
+	createdAt: Date;
 };
 
-const db = new Dexie('FriendsDatabase') as Dexie & {
-	friends: EntityTable<Friend, 'id'>;
+const db = new Dexie('BooksDatabase') as Dexie & {
+	books: EntityTable<Book, 'id'>;
 };
 
 db.version(1).stores({
-	friends: '++id, name, age',
+	books: '++id, title, fileType, progress, createdAt',
 });
 
-export type { Friend };
+export type { Book };
 export { db };
