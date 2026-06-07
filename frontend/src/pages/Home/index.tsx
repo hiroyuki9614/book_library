@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { useState } from 'react';
 
 function Home() {
-	const { books, isLoading } = useBooks();
+	const { books, isLoading, isError } = useBooks();
 	const { readingProgresses } = useReadingProgresses();
 	const [selectedSort, setSelectedSort] = useState('newest');
 	const [searchQuery, setSearchQuery] = useState('');
@@ -18,23 +18,24 @@ function Home() {
 		<>
 			<div className='m-4 flex gap-4'>
 				<MiniCard>
-					<p>Mini Card Content</p>
+					<p>総冊数</p>
+					<p>{books.length}冊</p>
 				</MiniCard>
-
 				<MiniCard>
-					<p>Mini Card Content</p>
+					<p>読書中</p>
+					<p>{readingProgresses.filter((progress) => progress.status === 'reading').length}冊</p>
 				</MiniCard>
-
 				<MiniCard>
-					<p>Mini Card Content</p>
+					<p>読了</p>
+					<p>{readingProgresses.filter((progress) => progress.status === 'completed').length}冊</p>
 				</MiniCard>
-
 				<MiniCard>
-					<p>Mini Card Content</p>
+					<p>未読</p>
+					<p>{readingProgresses.filter((progress) => progress.status === 'unread').length}冊</p>
 				</MiniCard>
-
 				<MiniCard>
-					<p>Mini Card Content</p>
+					<p>平均進捗</p>
+					<p>{Math.round(readingProgresses.reduce((acc, progress) => acc + progress.progress, 0) / readingProgresses.length)}%</p>
 				</MiniCard>
 			</div>
 
@@ -52,7 +53,11 @@ function Home() {
 							</SelectContent>
 						</Select>
 					</div>
-					<BookTable books={books} readingProgresses={readingProgresses} itemsPerPage={itemsPerPage} sort={selectedSort} searchQuery={searchQuery} isLoading={isLoading} />
+					{isError ? (
+						<p className='text-destructive'>書籍一覧の取得に失敗しました。</p>
+					) : (
+						<BookTable books={books} readingProgresses={readingProgresses} itemsPerPage={itemsPerPage} sort={selectedSort} searchQuery={searchQuery} isLoading={isLoading} />
+					)}
 				</SectionCard>
 			</div>
 		</>

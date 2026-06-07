@@ -1,7 +1,7 @@
 export type ReadingProgress = {
 	id: number;
 	progress: number;
-	status: 'Unread' | 'Reading' | 'Completed';
+	status: 'unread' | 'reading' | 'completed';
 	currentPage: number;
 	updatedAt?: string;
 	createdAt: string;
@@ -11,7 +11,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 1,
 		progress: 50,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 109,
 		createdAt: '2026-05-01',
 		updatedAt: '2026-05-10',
@@ -19,7 +19,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 2,
 		progress: 100,
-		status: 'Completed',
+		status: 'completed',
 		currentPage: 281,
 		createdAt: '2026-05-02',
 		updatedAt: '2026-05-10',
@@ -27,7 +27,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 3,
 		progress: 70,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 229,
 		createdAt: '2026-05-03',
 		updatedAt: '2026-05-10',
@@ -35,7 +35,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 4,
 		progress: 20,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 62,
 		createdAt: '2026-05-04',
 		updatedAt: '2026-05-10',
@@ -43,7 +43,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 5,
 		progress: 15,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 91,
 		createdAt: '2026-05-05',
 		updatedAt: '2026-05-10',
@@ -51,7 +51,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 6,
 		progress: 100,
-		status: 'Completed',
+		status: 'completed',
 		currentPage: 378,
 		createdAt: '2026-05-06',
 		updatedAt: '2026-05-10',
@@ -59,7 +59,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 7,
 		progress: 35,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 61,
 		createdAt: '2026-05-07',
 		updatedAt: '2026-05-10',
@@ -67,7 +67,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 8,
 		progress: 80,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 207,
 		createdAt: '2026-05-08',
 		updatedAt: '2026-05-10',
@@ -75,14 +75,14 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 9,
 		progress: 10,
-		status: 'Unread',
+		status: 'unread',
 		currentPage: 0,
 		createdAt: '2026-05-09',
 	},
 	{
 		id: 10,
 		progress: 65,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 208,
 		createdAt: '2026-05-10',
 		updatedAt: '2026-05-11',
@@ -90,7 +90,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 11,
 		progress: 100,
-		status: 'Completed',
+		status: 'completed',
 		currentPage: 320,
 		createdAt: '2026-05-11',
 		updatedAt: '2026-05-12',
@@ -98,7 +98,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 12,
 		progress: 40,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 118,
 		createdAt: '2026-05-12',
 		updatedAt: '2026-05-13',
@@ -106,7 +106,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 13,
 		progress: 75,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 240,
 		createdAt: '2026-05-13',
 		updatedAt: '2026-05-14',
@@ -114,7 +114,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 14,
 		progress: 30,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 67,
 		createdAt: '2026-05-14',
 		updatedAt: '2026-05-15',
@@ -122,7 +122,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 15,
 		progress: 12,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 78,
 		createdAt: '2026-05-15',
 		updatedAt: '2026-05-16',
@@ -130,7 +130,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 16,
 		progress: 90,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 317,
 		createdAt: '2026-05-16',
 		updatedAt: '2026-05-17',
@@ -138,7 +138,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 17,
 		progress: 25,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 112,
 		createdAt: '2026-05-17',
 		updatedAt: '2026-05-18',
@@ -146,14 +146,14 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 18,
 		progress: 8,
-		status: 'Unread',
+		status: 'unread',
 		currentPage: 0,
 		createdAt: '2026-05-18',
 	},
 	{
 		id: 19,
 		progress: 55,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 132,
 		createdAt: '2026-05-19',
 		updatedAt: '2026-05-20',
@@ -161,7 +161,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 20,
 		progress: 18,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 75,
 		createdAt: '2026-05-20',
 		updatedAt: '2026-05-21',
@@ -169,7 +169,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 21,
 		progress: 60,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 204,
 		createdAt: '2026-05-21',
 		updatedAt: '2026-05-22',
@@ -177,7 +177,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 22,
 		progress: 45,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 171,
 		createdAt: '2026-05-22',
 		updatedAt: '2026-05-23',
@@ -185,7 +185,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 23,
 		progress: 80,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 232,
 		createdAt: '2026-05-23',
 		updatedAt: '2026-05-24',
@@ -193,7 +193,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 24,
 		progress: 28,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 89,
 		createdAt: '2026-05-24',
 		updatedAt: '2026-05-25',
@@ -201,14 +201,14 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 25,
 		progress: 5,
-		status: 'Unread',
+		status: 'unread',
 		currentPage: 0,
 		createdAt: '2026-05-25',
 	},
 	{
 		id: 26,
 		progress: 66,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 231,
 		createdAt: '2026-05-26',
 		updatedAt: '2026-05-27',
@@ -216,7 +216,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 27,
 		progress: 48,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 134,
 		createdAt: '2026-05-27',
 		updatedAt: '2026-05-28',
@@ -224,7 +224,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 28,
 		progress: 22,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 70,
 		createdAt: '2026-05-28',
 		updatedAt: '2026-05-29',
@@ -232,7 +232,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 29,
 		progress: 38,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 263,
 		createdAt: '2026-05-29',
 		updatedAt: '2026-05-30',
@@ -240,7 +240,7 @@ export const readingProgressData: ReadingProgress[] = [
 	{
 		id: 30,
 		progress: 58,
-		status: 'Reading',
+		status: 'reading',
 		currentPage: 145,
 		createdAt: '2026-05-30',
 		updatedAt: '2026-05-31',

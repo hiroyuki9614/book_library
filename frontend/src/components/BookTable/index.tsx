@@ -19,17 +19,20 @@ type BookTableProps = {
 };
 
 export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery, sort, isLoading }: BookTableProps) {
-	const columns = ['タイトル', '著者', 'ジャンル', 'ステータス', '進捗'];
+	const columns = ['', 'タイトル', '著者', 'ジャンル', 'ステータス', '進捗'];
 	const [currentPage, setCurrentPage] = React.useState(1);
 
-	const startIndex = (currentPage - 1) * itemsPerPage;
-	const endIndex = startIndex + itemsPerPage;
 	const filteredBooks = books.filter((book) => {
 		const query = searchQuery.toLowerCase();
 		return book.title.toLowerCase().includes(query) || book.author.toLowerCase().includes(query);
 	});
 	const totalItems = filteredBooks.length;
-	const totalPages = Math.ceil(totalItems / itemsPerPage);
+	const totalPages = Math.max(1, Math.ceil(totalItems / itemsPerPage));
+	const safeCurrentPage = Math.min(currentPage, totalPages);
+
+	const startIndex = (safeCurrentPage - 1) * itemsPerPage;
+	const endIndex = startIndex + itemsPerPage;
+
 	const sortedBooks = [...filteredBooks].sort((a, b) => {
 		if (sort === 'newest') {
 			return b.id - a.id;
@@ -70,7 +73,7 @@ export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery,
 	}
 
 	return (
-		<Table>
+		<Table className='table-fixed'>
 			<TableHeader>
 				<TableRow>
 					{columns.map((column, index) => (
@@ -99,11 +102,11 @@ export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery,
 										<img src={book.coverImage} alt={`${book.title} の表紙`} className='h-16 w-12 rounded object-cover' />
 									</TableCell>
 
-									<TableCell className='font-medium'>{book.title}</TableCell>
+									<TableCell className='overflow-hidden text-ellipsis whitespace-nowrap'>{book.title}</TableCell>
 
-									<TableCell>{book.author}</TableCell>
+									<TableCell className='overflow-hidden text-ellipsis whitespace-nowrap'>{book.author}</TableCell>
 
-									<TableCell>{book.category}</TableCell>
+									<TableCell className='overflow-hidden text-ellipsis whitespace-nowrap'>{book.category}</TableCell>
 
 									<TableCell>
 										<Badge variant={getBadgeVariant(book.status)}>{book.status}</Badge>

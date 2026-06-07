@@ -1,6 +1,5 @@
 import Dexie from 'dexie';
 import type { EntityTable } from 'dexie';
-import type { File } from 'zod/v4/core';
 
 type Book = {
 	id: number;
@@ -19,5 +18,4 @@ db.version(1).stores({
 	books: '++id, title, fileType, progress, createdAt',
 });
 
-export type { Book };
 export { db };

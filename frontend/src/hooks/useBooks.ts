@@ -5,11 +5,11 @@ export default function useBooks() {
 	const {
 		data: books = [],
 		isLoading,
-		error,
+		isError,
 	} = useQuery({
 		queryKey: ['books'],
 		queryFn: () => booksApiMock(),
 	});
 
-	return { books, isLoading, error };
+	return { books, isLoading, isError };
 }
