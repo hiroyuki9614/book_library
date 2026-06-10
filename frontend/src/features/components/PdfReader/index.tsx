@@ -67,7 +67,6 @@ const plugins = [
 		initialDocuments: [{ url: 'https://snippet.embedpdf.com/ebook.pdf' }],
 	}),
 	createPluginRegistration(ViewportPluginPackage),
-	createPluginRegistration(ScrollPluginPackage),
 	createPluginRegistration(RenderPluginPackage),
 	createPluginRegistration(InteractionManagerPluginPackage),
 	createPluginRegistration(SelectionPluginPackage),

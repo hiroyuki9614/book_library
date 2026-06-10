@@ -1,12 +1,14 @@
+// TODO: 階層付きTOC(subitems)対応
+
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import ePub from 'epubjs';
 import { Field, FieldLabel } from '@/components/ui/field';
 import { Progress } from '@/components/ui/progress';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Spinner } from '@/components/ui/spinner';
 import { Button } from '@/components/ui/button';
-import { Sheet, SheetClose, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheetCapture';
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheetCapture';
 
 function EpubReader() {
 	const mainRef = useRef<HTMLElement | null>(null);
@@ -62,12 +64,6 @@ function EpubReader() {
 		rendition.on('relocated', (location) => {
 			currentCfiRef.current = location.start.cfi;
 		});
-
-		const handleTocJump = (href: string) => {
-			setHistory((prev) => [...prev, currentCfiRef.current].slice(-20));
-
-			renditionRef.current?.display(href);
-		};
 
 		const handleKeyUp = (e: KeyboardEvent) => {
 			if (e.key === 'ArrowRight') {
@@ -191,7 +187,7 @@ function EpubReader() {
 							</SheetHeader>
 							<div className='no-scrollbar overflow-y-auto px-4'>
 								{navigation?.toc.map((item, index) => (
-									<div key={index} className='ml-[calc(var(--level)*16px)]'>
+									<div key={index}>
 										<SheetTrigger asChild>
 											<Button
 												variant='outline'

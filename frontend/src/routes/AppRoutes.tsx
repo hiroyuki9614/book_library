@@ -8,6 +8,7 @@ import Home from '@/pages/Home';
 import About from '@/pages/About';
 import Contact from '@/pages/Contact';
 import ReaderPage from '@/pages/ReaderPage';
+import Admin from '@/pages/Admin';
 import NotFound from '@/pages/404';
 
 export const appRouter = createBrowserRouter([
@@ -31,6 +32,7 @@ export const appRouter = createBrowserRouter([
 					{ path: 'about', element: <About /> },
 					{ path: 'contact', element: <Contact /> },
 					{ path: 'reader/:id', element: <ReaderPage /> },
+					{ path: 'admin', element: <Admin /> },
 					{ path: '*', element: <NotFound /> },
 				],
 			},
