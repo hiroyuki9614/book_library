@@ -5,6 +5,7 @@ export type MenuGroup = {
 	items: {
 		title: string;
 		url?: string;
+		role?: 'admin' | 'user';
 		action?: string;
 		isActive?: boolean;
 	}[];
@@ -38,10 +39,7 @@ export const navItems: {
 				{
 					title: '管理画面',
 					url: '#',
-				},
-				{
-					title: 'マイページ',
-					url: '#',
+					role: 'admin',
 				},
 				{
 					title: 'ログアウト',

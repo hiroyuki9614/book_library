@@ -1,7 +1,8 @@
 import { createBrowserRouter } from 'react-router-dom';
-import GuestRoute from '@/components/GuestRouute';
+import GuestRoute from '@/components/GuestRoute';
 import AppLayout from '@/layouts/AppLayout';
 import RequireAuth from '@/components/RequireAuth';
+import RequireAdmin from '@/components/RequireAdmin';
 
 import Login from '@/pages/Login';
 import Home from '@/pages/Home';
@@ -32,7 +33,11 @@ export const appRouter = createBrowserRouter([
 					{ path: 'about', element: <About /> },
 					{ path: 'contact', element: <Contact /> },
 					{ path: 'reader/:id', element: <ReaderPage /> },
-					{ path: 'admin', element: <Admin /> },
+					{
+						path: 'admin',
+						element: <RequireAdmin />,
+						children: [{ index: true, element: <Admin /> }],
+					},
 					{ path: '*', element: <NotFound /> },
 				],
 			},
