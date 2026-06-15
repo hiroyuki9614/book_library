@@ -11,3 +11,98 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+// ユーザーテーブル 明細
+model User {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  email     String   @unique @db.VarChar(254)
+  name      String   @db.VarChar(255)
+  password  String   @db.VarChar(255)
+  roleId    Int      @map("role_id")
+  role      role     @relation(fields: [roleId], references: [id])
+
+  deletedAt DateTime? @map("deleted_at")
+
+  @@index([email])
+  @@map("users")
+}
+
+// ロールテーブル マスタ
+model role {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  name      String   @db.VarChar(255)
+  users     User[]
+  books     book[]
+
+  @@index([name])
+  @@map("roles")
+}
+
+// 書籍テーブル トランザクション
+model book {
+  id                Int              @id @default(autoincrement())
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+  title             String           @db.VarChar(255)
+  authorName        String           @map("author_name") @db.VarChar(255)
+  publishedAt       DateTime         @map("published_at") @db.Date
+  publisher         String           @db.VarChar(255)
+  description       String           @db.VarChar(255)
+  deletedAt         DateTime?        @map("deleted_at")
+  categoryId        Int              @map("category_id")
+  category          category         @relation(fields: [categoryId], references: [id])
+  roleId            Int              @map("role_id")
+  role              role             @relation(fields: [roleId], references: [id])
+  pageTurnDirection String           @map("page_turn_direction") @db.VarChar(255) // 頁のめくり方向
+  bookFileId        Int              @map("book_file_id")
+  bookFile          book_file        @relation(fields: [bookFileId], references: [id])
+  readingStatute    reading_statute? @relation(fields: [readingStatuteId], references: [id])
+  readingStatuteId  Int?
+
+  @@index([title, authorName])
+  @@map("books")
+}
+
+// カテゴリーテーブル マスタ
+model category {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  name      String   @db.VarChar(255)
+  books     book[]
+
+  @@index([name])
+  @@map("categories")
+}
+
+model book_file {
+  id               Int      @id @default(autoincrement())
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+  extension        String   @db.VarChar(10) // ファイルの拡張子
+  filePath         String   @map("file_path") @db.VarChar(255)
+  originalFileName String   @map("original_file_name") @db.VarChar(255) // アップロードされたファイルの元の名前
+  storedFileName   String   @map("stored_file_name") @db.VarChar(255) // サーバーに保存されたファイルの名前
+  fileSize         Int      @map("file_size")
+  bookFileId       Int      @map("book_file_id")
+  books            book[]
+
+  @@map("book_files")
+}
+
+model reading_statute {
+  id              Int      @id @default(autoincrement())
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  currentPosition Int      @map("current_position")
+  readStatus      String   @map("read_status") @db.VarChar(255)
+  userId          Int      @map("user_id")
+  bookId          Int      @map("book_id")
+  books           book[]
+
+  @@map("reading_statutes")
+}
