@@ -14,95 +14,119 @@ datasource db {
 
 // ユーザーテーブル 明細
 model User {
-  id        Int      @id @default(autoincrement())
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-  email     String   @unique @db.VarChar(254)
-  name      String   @db.VarChar(255)
-  password  String   @db.VarChar(255)
-  roleId    Int      @map("role_id")
-  role      role     @relation(fields: [roleId], references: [id])
+  id           Int      @id @default(autoincrement())
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  email        String   @unique @db.VarChar(254)
+  name         String   @db.VarChar(255)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  roleId       Int      @map("role_id")
+  role         Role     @relation(fields: [roleId], references: [id])
 
-  deletedAt DateTime? @map("deleted_at")
+  deletedAt    DateTime?     @map("deleted_at")
+  readingInfos ReadingInfo[]
 
-  @@index([email])
   @@map("users")
 }
 
 // ロールテーブル マスタ
-model role {
-  id        Int      @id @default(autoincrement())
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-  name      String   @db.VarChar(255)
-  users     User[]
-  books     book[]
+model Role {
+  id                  Int                  @id @default(autoincrement())
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+  name                String               @unique @db.VarChar(255)
+  users               User[]
+  roleBookPermissions RoleBookPermission[]
 
-  @@index([name])
   @@map("roles")
 }
 
 // 書籍テーブル トランザクション
-model book {
-  id                Int              @id @default(autoincrement())
-  createdAt         DateTime         @default(now()) @map("created_at")
-  updatedAt         DateTime         @updatedAt @map("updated_at")
-  title             String           @db.VarChar(255)
-  authorName        String           @map("author_name") @db.VarChar(255)
-  publishedAt       DateTime         @map("published_at") @db.Date
-  publisher         String           @db.VarChar(255)
-  description       String           @db.VarChar(255)
-  deletedAt         DateTime?        @map("deleted_at")
-  categoryId        Int              @map("category_id")
-  category          category         @relation(fields: [categoryId], references: [id])
-  roleId            Int              @map("role_id")
-  role              role             @relation(fields: [roleId], references: [id])
-  pageTurnDirection String           @map("page_turn_direction") @db.VarChar(255) // 頁のめくり方向
-  bookFileId        Int              @map("book_file_id")
-  bookFile          book_file        @relation(fields: [bookFileId], references: [id])
-  readingStatute    reading_statute? @relation(fields: [readingStatuteId], references: [id])
-  readingStatuteId  Int?
+model Book {
+  id                  Int                  @id @default(autoincrement())
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+  title               String               @db.VarChar(255)
+  authorName          String?              @map("author_name") @db.VarChar(255)
+  publishedAt         DateTime?            @map("published_at") @db.Date
+  publisher           String?              @db.VarChar(255)
+  description         String?              @db.Text
+  deletedAt           DateTime?            @map("deleted_at")
+  categoryId          Int                  @map("category_id")
+  category            Category             @relation(fields: [categoryId], references: [id])
+  pageTurnDirection   String               @default("ltr") @map("page_turn_direction") @db.VarChar(50) // 頁のめくり方向
+  bookFiles           BookFile[]
+  readingInfos        ReadingInfo[]
+  roleBookPermissions RoleBookPermission[]
 
   @@index([title, authorName])
   @@map("books")
 }
 
 // カテゴリーテーブル マスタ
-model category {
-  id        Int      @id @default(autoincrement())
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-  name      String   @db.VarChar(255)
-  books     book[]
+model Category {
+  id           Int      @id @default(autoincrement())
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  name         String   @unique @db.VarChar(255)
+  displayOrder Int      @default(0) @map("display_order")
+  isActive     Boolean  @default(true) @map("is_active")
+  books        Book[]
 
-  @@index([name])
   @@map("categories")
 }
 
-model book_file {
+model BookFile {
   id               Int      @id @default(autoincrement())
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
   extension        String   @db.VarChar(10) // ファイルの拡張子
+  mimeType         String   @map("mime_type") @db.VarChar(100) // ファイルのMIMEタイプ
   filePath         String   @map("file_path") @db.VarChar(255)
   originalFileName String   @map("original_file_name") @db.VarChar(255) // アップロードされたファイルの元の名前
   storedFileName   String   @map("stored_file_name") @db.VarChar(255) // サーバーに保存されたファイルの名前
   fileSize         Int      @map("file_size")
-  bookFileId       Int      @map("book_file_id")
-  books            book[]
+  bookId           Int      @map("book_id")
+  book             Book     @relation(fields: [bookId], references: [id])
 
+  @@index([bookId])
   @@map("book_files")
 }
 
-model reading_statute {
+model ReadingInfo {
   id              Int      @id @default(autoincrement())
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
-  currentPosition Int      @map("current_position")
-  readStatus      String   @map("read_status") @db.VarChar(255)
+  currentPosition String?  @map("current_position") @db.VarChar(255)
+  readStatus      String   @default("unread") @map("read_status") @db.VarChar(50)
   userId          Int      @map("user_id")
   bookId          Int      @map("book_id")
-  books           book[]
+  user            User     @relation(fields: [userId], references: [id])
+  book            Book     @relation(fields: [bookId], references: [id])
 
-  @@map("reading_statutes")
+  @@unique([userId, bookId])
+  @@index([userId])
+  @@index([bookId])
+  @@map("reading_infos")
+}
+
+model RoleBookPermission {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  bookId    Int      @map("book_id")
+  roleId    Int      @map("role_id")
+
+  role Role @relation(fields: [roleId], references: [id])
+  book Book @relation(fields: [bookId], references: [id])
+
+  @@unique([roleId, bookId])
+  @@index([roleId])
+  @@index([bookId])
+  @@map("role_book_permissions")
+}
+
+generator erd {
+  provider = "prisma-erd-generator"
+  output   = "../../docs/ER図.svg"
 }
