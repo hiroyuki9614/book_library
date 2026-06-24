@@ -74,6 +74,28 @@ In particular:
 - `reading_infos.read_status` defaults to `unread`.
 - `books.page_turn_direction` defaults to `ltr`.
 
+## Documentation Reading Policy
+
+Before starting an implementation task, inspect the `docs` directory and read only the documentation relevant to the requested change.
+
+Do not read every document by default.
+Select documents based on the task scope.
+
+Use the following guide:
+
+- Requirements or feature behavior changes: read `docs/requirements.md`
+- UI, layout, or design changes: read `docs/design.md`
+- Database, Prisma, model, relation, or permission changes: read `docs/database.md` and `docs/ER図.svg`
+- Project rules or Japanese notes: read `docs/AGENTS_ja.md`
+- Development conventions or workflow notes: read `docs/guidline.md`
+
+Use these documents as supporting context.
+For database structure, `schema.prisma` remains the source of truth.
+
+If the relevant documentation conflicts with `schema.prisma`, prefer `schema.prisma` for database structure and mention the inconsistency in the final response.
+
+If a change affects behavior, database structure, UI design, or requirements, update the relevant documentation when appropriate.
+
 ## Development Policy
 
 ### One feature, one test
@@ -246,3 +268,33 @@ When finishing a task, respond with:
 3. Notes or follow-up items
 
 If something could not be completed, state it clearly.
+
+## Required Documentation Reading
+
+Before starting any implementation task, inspect the `docs` directory and read the relevant project documentation when it exists.
+
+At minimum, check these files before making changes:
+
+- `docs/requirements.md`
+- `docs/design.md`
+- `docs/database.md`
+- `docs/AGENTS_ja.md`
+- `docs/guidline.md`
+- `docs/ER図.svg` when database structure or relationships are involved
+
+Use these documents as supporting context, but keep `schema.prisma` as the source of truth for the actual database structure.
+
+When implementing or modifying a feature, follow this priority order:
+
+1. The user's current request
+2. `AGENTS.md`
+3. `schema.prisma` for database structure
+4. Relevant documents in `docs/`
+5. Existing code behavior
+
+If the documents and `schema.prisma` conflict, do not guess.
+Prefer `schema.prisma` for database structure, and mention the inconsistency in the final response.
+
+If a task affects behavior, database structure, UI design, or requirements, update the relevant documentation in `docs/` when appropriate.
+
+Do not ignore the documentation simply because the requested change appears small.

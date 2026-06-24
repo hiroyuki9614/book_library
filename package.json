@@ -20,6 +20,7 @@
   },
   "homepage": "https://github.com/hiroyuki9614/hono-todo#readme",
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "tsx": "^4.22.4"
   }
 }

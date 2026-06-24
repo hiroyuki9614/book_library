@@ -136,6 +136,7 @@ export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery,
 									<TableCell>
 										<div className='flex items-center gap-2'>
 											<button
+												aria-label={`${book.title} のメニューを開く`}
 												onClick={(event) => {
 													event.stopPropagation();
 												}}
@@ -144,6 +145,7 @@ export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery,
 											</button>
 
 											<button
+												aria-label={`${book.title} をお気に入りにする`}
 												onClick={(event) => {
 													event.stopPropagation();
 												}}
