@@ -1,47 +1,43 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
   output   = "./generated/prisma/"
+}
+
+generator erd {
+  provider = "prisma-erd-generator"
+  output   = "../../docs/ER図.svg"
 }
 
 datasource db {
   provider = "postgresql"
 }
 
-// ユーザーテーブル 明細
 model User {
-  id           Int      @id @default(autoincrement())
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
-  email        String   @unique @db.VarChar(254)
-  name         String   @db.VarChar(255)
-  passwordHash String   @map("password_hash") @db.VarChar(255)
-  roleId       Int      @map("role_id")
-  role         Role     @relation(fields: [roleId], references: [id])
-
+  id           Int           @id @default(autoincrement())
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+  email        String        @unique @db.VarChar(254)
+  name         String        @db.VarChar(255)
+  passwordHash String        @map("password_hash") @db.VarChar(255)
+  roleId       Int           @map("role_id")
   deletedAt    DateTime?     @map("deleted_at")
   readingInfos ReadingInfo[]
+  role         Role          @relation(fields: [roleId], references: [id])
 
   @@map("users")
 }
 
-// ロールテーブル マスタ
 model Role {
   id                  Int                  @id @default(autoincrement())
   createdAt           DateTime             @default(now()) @map("created_at")
   updatedAt           DateTime             @updatedAt @map("updated_at")
   name                String               @unique @db.VarChar(255)
-  users               User[]
   roleBookPermissions RoleBookPermission[]
+  users               User[]
 
   @@map("roles")
 }
 
-// 書籍テーブル トランザクション
 model Book {
   id                  Int                  @id @default(autoincrement())
   createdAt           DateTime             @default(now()) @map("created_at")
@@ -50,12 +46,12 @@ model Book {
   authorName          String?              @map("author_name") @db.VarChar(255)
   publishedAt         DateTime?            @map("published_at") @db.Date
   publisher           String?              @db.VarChar(255)
-  description         String?              @db.Text
+  description         String?
   deletedAt           DateTime?            @map("deleted_at")
   categoryId          Int                  @map("category_id")
-  category            Category             @relation(fields: [categoryId], references: [id])
-  pageTurnDirection   String               @default("ltr") @map("page_turn_direction") @db.VarChar(50) // 頁のめくり方向
+  pageTurnDirection   String               @default("ltr") @map("page_turn_direction") @db.VarChar(50)
   bookFiles           BookFile[]
+  category            Category             @relation(fields: [categoryId], references: [id])
   readingInfos        ReadingInfo[]
   roleBookPermissions RoleBookPermission[]
 
@@ -63,7 +59,6 @@ model Book {
   @@map("books")
 }
 
-// カテゴリーテーブル マスタ
 model Category {
   id           Int      @id @default(autoincrement())
   createdAt    DateTime @default(now()) @map("created_at")
@@ -80,11 +75,11 @@ model BookFile {
   id               Int      @id @default(autoincrement())
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
-  extension        String   @db.VarChar(10) // ファイルの拡張子
-  mimeType         String   @map("mime_type") @db.VarChar(100) // ファイルのMIMEタイプ
+  extension        String   @db.VarChar(10)
+  mimeType         String   @map("mime_type") @db.VarChar(100)
   filePath         String   @map("file_path") @db.VarChar(255)
-  originalFileName String   @map("original_file_name") @db.VarChar(255) // アップロードされたファイルの元の名前
-  storedFileName   String   @map("stored_file_name") @db.VarChar(255) // サーバーに保存されたファイルの名前
+  originalFileName String   @map("original_file_name") @db.VarChar(255)
+  storedFileName   String   @map("stored_file_name") @db.VarChar(255)
   fileSize         Int      @map("file_size")
   bookId           Int      @map("book_id")
   book             Book     @relation(fields: [bookId], references: [id])
@@ -101,8 +96,8 @@ model ReadingInfo {
   readStatus      String   @default("unread") @map("read_status") @db.VarChar(50)
   userId          Int      @map("user_id")
   bookId          Int      @map("book_id")
-  user            User     @relation(fields: [userId], references: [id])
   book            Book     @relation(fields: [bookId], references: [id])
+  user            User     @relation(fields: [userId], references: [id])
 
   @@unique([userId, bookId])
   @@index([userId])
@@ -116,17 +111,11 @@ model RoleBookPermission {
   updatedAt DateTime @updatedAt @map("updated_at")
   bookId    Int      @map("book_id")
   roleId    Int      @map("role_id")
-
-  role Role @relation(fields: [roleId], references: [id])
-  book Book @relation(fields: [bookId], references: [id])
+  book      Book     @relation(fields: [bookId], references: [id])
+  role      Role     @relation(fields: [roleId], references: [id])
 
   @@unique([roleId, bookId])
   @@index([roleId])
   @@index([bookId])
   @@map("role_book_permissions")
-}
-
-generator erd {
-  provider = "prisma-erd-generator"
-  output   = "../../docs/ER図.svg"
 }

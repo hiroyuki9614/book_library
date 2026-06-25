@@ -10,6 +10,14 @@ app.get('/health', (c) => {
 	});
 });
 
+app.post('/test', async (c) => {
+	const body = await c.req.json();
+	return c.json({
+		message: 'Received data',
+		data: body,
+	});
+});
+
 const port = Number(process.env.APP_PORT ?? 3000);
 
 serve({
