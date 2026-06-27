@@ -1,0 +1,73 @@
+openapi: 3.0.3
+info:
+    title: 書籍閲覧・管理API
+    version: 0.5.0
+    description: |
+        このAPIは、epub 及び、pdf形式の書籍を閲覧・管理するソフトウエアのバックエンドAPIです。
+
+servers:
+    - url: https://app.hiroyuki9614.com/api
+      description: Production
+    - url: http://localhost:3000/api
+      description: Local development
+
+paths:
+    /users:
+        get:
+            summary: ユーザー一覧を取得
+            responses:
+                '200':
+                    description: ユーザー一覧の取得に成功
+                    content:
+                        application/json:
+                            schema:
+                                type: array
+                                items:
+                                    $ref: '#/components/schemas/User'
+                '400':
+                    description: リクエストが不正
+                '401':
+                    description: 認証エラー
+                '403':
+                    description: 認可エラー
+                '500':
+                    description: サーバーエラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+    /users/{userId}:
+        get:
+            summary: ユーザー情報を取得
+            parameters:
+                - name: userId
+                  in: path
+                  required: true
+                  description: 取得するユーザーのID
+                  schema:
+                      type: integer
+            responses:
+                '200':
+                    description: ユーザー情報の取得に成功
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/User'
+                '400':
+                    description: リクエストが不正
+                '401':
+                    description: 認証エラー
+                '403':
+                    description: 認可エラー
+                '404':
+                    description: ユーザーが見つからない
+                '500':
+                    description: サーバーエラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+    /books:
+        get:
+            summary: 書籍一覧を取得
+            responses:
