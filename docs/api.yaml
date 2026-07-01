@@ -24,8 +24,16 @@ paths:
                                 $ref: '#/components/schemas/User'
                 '401':
                     description: 認証エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '403':
                     description: 認可エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '500':
                     description: サーバーエラー
                     content:
@@ -47,17 +55,22 @@ paths:
                                         type: integer
                                     page:
                                         type: integer
+                                        default: 1
+                                        minimum: 1
                                     limit:
                                         type: integer
+                                        default: 20
+                                        minimum: 1
+                                        maximum: 100
                                     users:
                                         type: array
                                         items:
                                             $ref: '#/components/schemas/User'
-                                    required:
-                                        - total
-                                        - page
-                                        - limit
-                                        - users
+                                required:
+                                    - total
+                                    - page
+                                    - limit
+                                    - users
                 '400':
                     description: リクエストが不正
                 '401':
@@ -71,16 +84,15 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/Error'
             parameters:
-                - name: page
-                  in: query
-                  schema:
-                      type: integer
-                      default: 1
-                - name: limit
-                  in: query
-                  schema:
-                      type: integer
-                      default: 20
+                page:
+                    type: integer
+                    default: 1
+                    minimum: 1
+                limit:
+                    type: integer
+                    default: 20
+                    minimum: 1
+                    maximum: 100
         post:
             summary: ユーザーを作成
             requestBody:
@@ -88,7 +100,7 @@ paths:
                 content:
                     application/json:
                         schema:
-                            $ref: '#/components/schemas/UserUpdateRequest'
+                            $ref: '#/components/schemas/UserCreateRequest'
             responses:
                 '201':
                     description: ユーザーの作成に成功
@@ -219,9 +231,14 @@ paths:
                                     page:
                                         type: integer
                                         description: 現在のページ番号
+                                        default: 1
+                                        minimum: 1
                                     limit:
                                         type: integer
                                         description: 1ページあたりの件数
+                                        default: 20
+                                        minimum: 1
+                                        maximum: 100
                                     books:
                                         type: array
                                         items:
@@ -239,8 +256,16 @@ paths:
                                 $ref: '#/components/schemas/Error'
                 '401':
                     description: 認証エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '403':
                     description: 認可エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '500':
                     description: サーバーエラー
                     content:
@@ -270,7 +295,7 @@ paths:
                   description: カテゴリIDでフィルタリング
                   schema:
                       type: integer
-                - name: readingStatus
+                - name: readStatus
                   in: query
                   description: 読書状況
                   schema:
@@ -287,7 +312,7 @@ paths:
                 content:
                     application/json:
                         schema:
-                            $ref: '#/components/schemas/BookUpdateRequest'
+                            $ref: '#/components/schemas/BookCreateRequest'
             responses:
                 '201':
                     description: 書籍の登録に成功
@@ -320,58 +345,6 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/Error'
     /admin/books/{bookId}:
-        post:
-            summary: 書籍情報を更新
-            parameters:
-                - name: bookId
-                  in: path
-                  required: true
-                  description: 更新する書籍のID
-                  schema:
-                      type: integer
-            requestBody:
-                required: true
-                content:
-                    application/json:
-                        schema:
-                            $ref: '#/components/schemas/BookUpdateRequest'
-            responses:
-                '200':
-                    description: 書籍情報の更新に成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Book'
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: 書籍が見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
         patch:
             summary: 書籍情報を更新
             parameters:
@@ -482,18 +455,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                type: object
-                                properties:
-                                    fileName:
-                                        type: string
-                                    fileSize:
-                                        type: integer
-                                    fileType:
-                                        type: string
-                                required:
-                                    - fileName
-                                    - fileSize
-                                    - fileType
+                                $ref: '#/components/schemas/BookFile'
                 '400':
                     description: リクエストが不正
                     content:
@@ -543,15 +505,22 @@ paths:
                                 file:
                                     type: string
                                     format: binary
+                                fileType:
+                                    type: string
+                                    enum:
+                                        - epub
+                                        - pdf
+                            required:
+                                - file
             responses:
-                '200':
+                '201':
                     description: 書籍ファイルのアップロードに成功
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/Book'
+                                $ref: '#/components/schemas/BookFile'
                 '400':
-                    description: リクエストが不正
+                    description: 既にファイルが登録されています
                     content:
                         application/json:
                             schema:
@@ -636,7 +605,11 @@ paths:
                 '200':
                     description: 書籍ファイルのダウンロードに成功
                     content:
-                        application/octet-stream:
+                        application/pdf:
+                            schema:
+                                type: string
+                                format: binary
+                        application/epub+zip:
                             schema:
                                 type: string
                                 format: binary
@@ -745,6 +718,12 @@ paths:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/Error'
+                '404':
+                    description: 書籍が見つからない
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '500':
                     description: サーバーエラー
                     content:
@@ -759,7 +738,7 @@ paths:
                   schema:
                       type: integer
         patch:
-            summary: 読書情報を更新
+            summary: 読書情報を更新または作成
             parameters:
                 - name: bookId
                   in: path
@@ -781,6 +760,7 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ReadingInfo'
                 '400':
+                    description: リクエストが不正
                     content:
                         application/json:
                             schema:
@@ -798,7 +778,58 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/Error'
                 '404':
-                    description: 読書情報が見つからない
+                    description: 書籍が見つからない
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                '500':
+                    description: サーバーエラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+    /books/{bookId}/file:
+        get:
+            summary: 書籍ファイルを取得
+            parameters:
+                - name: bookId
+                  in: path
+                  required: true
+                  schema:
+                      type: integer
+            responses:
+                '200':
+                    description: 書籍ファイルの取得に成功
+                    content:
+                        application/pdf:
+                            schema:
+                                type: string
+                                format: binary
+                        application/epub+zip:
+                            schema:
+                                type: string
+                                format: binary
+                '400':
+                    description: リクエストが不正
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                '401':
+                    description: 認証エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                '403':
+                    description: 認可エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                '404':
+                    description: 書籍またはファイルが見つからない
                     content:
                         application/json:
                             schema:
@@ -835,6 +866,9 @@ components:
                                 type: string
                             message:
                                 type: string
+            required:
+                - message
+                - code
 
         User:
             type: object
@@ -852,6 +886,24 @@ components:
                 - id
                 - name
                 - email
+        UserCreateRequest:
+            type: object
+            properties:
+                name:
+                    type: string
+                email:
+                    type: string
+                    format: email
+                password:
+                    type: string
+                    format: password
+                roleId:
+                    type: integer
+            required:
+                - name
+                - email
+                - password
+                - roleId
         UserUpdateRequest:
             type: object
             properties:
@@ -865,6 +917,12 @@ components:
         Book:
             type: object
             properties:
+                createdAt:
+                    type: string
+                    format: date-time
+                updatedAt:
+                    type: string
+                    format: date-time
                 id:
                     type: integer
                 title:
@@ -881,9 +939,46 @@ components:
                         - unread
                         - reading
                         - finished
+                fileType:
+                    type: string
+                    nullable: true
+                    enum:
+                        - epub
+                        - pdf
+                hasFile:
+                    type: boolean
             required:
                 - id
                 - title
+                - readStatus
+                - hasFile
+                - createdAt
+                - updatedAt
+        BookFile:
+            type: object
+            properties:
+                id:
+                    type: integer
+                bookId:
+                    type: integer
+                fileName:
+                    type: string
+                fileSize:
+                    type: integer
+                fileType:
+                    type: string
+                    enum:
+                        - epub
+                        - pdf
+                mimeType:
+                    type: string
+            required:
+                - id
+                - bookId
+                - fileName
+                - fileSize
+                - fileType
+                - mimeType
         BookUpdateRequest:
             type: object
             properties:
@@ -895,6 +990,19 @@ components:
                 categoryId:
                     type: integer
                     nullable: true
+        BookCreateRequest:
+            type: object
+            properties:
+                title:
+                    type: string
+                author:
+                    type: string
+                    nullable: true
+                categoryId:
+                    type: integer
+                    nullable: true
+            required:
+                - title
         ReadingInfo:
             type: object
             properties:
