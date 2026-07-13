@@ -224,8 +224,8 @@ export type RoleBookPermissionWhereInput = {
   updatedAt?: Prisma.DateTimeFilter<"RoleBookPermission"> | Date | string
   bookId?: Prisma.IntFilter<"RoleBookPermission"> | number
   roleId?: Prisma.IntFilter<"RoleBookPermission"> | number
-  role?: Prisma.XOR<Prisma.RoleScalarRelationFilter, Prisma.RoleWhereInput>
   book?: Prisma.XOR<Prisma.BookScalarRelationFilter, Prisma.BookWhereInput>
+  role?: Prisma.XOR<Prisma.RoleScalarRelationFilter, Prisma.RoleWhereInput>
 }
 
 export type RoleBookPermissionOrderByWithRelationInput = {
@@ -234,8 +234,8 @@ export type RoleBookPermissionOrderByWithRelationInput = {
   updatedAt?: Prisma.SortOrder
   bookId?: Prisma.SortOrder
   roleId?: Prisma.SortOrder
-  role?: Prisma.RoleOrderByWithRelationInput
   book?: Prisma.BookOrderByWithRelationInput
+  role?: Prisma.RoleOrderByWithRelationInput
 }
 
 export type RoleBookPermissionWhereUniqueInput = Prisma.AtLeast<{
@@ -248,8 +248,8 @@ export type RoleBookPermissionWhereUniqueInput = Prisma.AtLeast<{
   updatedAt?: Prisma.DateTimeFilter<"RoleBookPermission"> | Date | string
   bookId?: Prisma.IntFilter<"RoleBookPermission"> | number
   roleId?: Prisma.IntFilter<"RoleBookPermission"> | number
-  role?: Prisma.XOR<Prisma.RoleScalarRelationFilter, Prisma.RoleWhereInput>
   book?: Prisma.XOR<Prisma.BookScalarRelationFilter, Prisma.BookWhereInput>
+  role?: Prisma.XOR<Prisma.RoleScalarRelationFilter, Prisma.RoleWhereInput>
 }, "id" | "roleId_bookId">
 
 export type RoleBookPermissionOrderByWithAggregationInput = {
@@ -279,8 +279,8 @@ export type RoleBookPermissionScalarWhereWithAggregatesInput = {
 export type RoleBookPermissionCreateInput = {
   createdAt?: Date | string
   updatedAt?: Date | string
-  role: Prisma.RoleCreateNestedOneWithoutRoleBookPermissionsInput
   book: Prisma.BookCreateNestedOneWithoutRoleBookPermissionsInput
+  role: Prisma.RoleCreateNestedOneWithoutRoleBookPermissionsInput
 }
 
 export type RoleBookPermissionUncheckedCreateInput = {
@@ -294,8 +294,8 @@ export type RoleBookPermissionUncheckedCreateInput = {
 export type RoleBookPermissionUpdateInput = {
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
-  role?: Prisma.RoleUpdateOneRequiredWithoutRoleBookPermissionsNestedInput
   book?: Prisma.BookUpdateOneRequiredWithoutRoleBookPermissionsNestedInput
+  role?: Prisma.RoleUpdateOneRequiredWithoutRoleBookPermissionsNestedInput
 }
 
 export type RoleBookPermissionUncheckedUpdateInput = {
@@ -613,8 +613,8 @@ export type RoleBookPermissionSelect<ExtArgs extends runtime.Types.Extensions.In
   updatedAt?: boolean
   bookId?: boolean
   roleId?: boolean
-  role?: boolean | Prisma.RoleDefaultArgs<ExtArgs>
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
+  role?: boolean | Prisma.RoleDefaultArgs<ExtArgs>
 }, ExtArgs["result"]["roleBookPermission"]>
 
 export type RoleBookPermissionSelectCreateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetSelect<{
@@ -623,8 +623,8 @@ export type RoleBookPermissionSelectCreateManyAndReturn<ExtArgs extends runtime.
   updatedAt?: boolean
   bookId?: boolean
   roleId?: boolean
-  role?: boolean | Prisma.RoleDefaultArgs<ExtArgs>
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
+  role?: boolean | Prisma.RoleDefaultArgs<ExtArgs>
 }, ExtArgs["result"]["roleBookPermission"]>
 
 export type RoleBookPermissionSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetSelect<{
@@ -633,8 +633,8 @@ export type RoleBookPermissionSelectUpdateManyAndReturn<ExtArgs extends runtime.
   updatedAt?: boolean
   bookId?: boolean
   roleId?: boolean
-  role?: boolean | Prisma.RoleDefaultArgs<ExtArgs>
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
+  role?: boolean | Prisma.RoleDefaultArgs<ExtArgs>
 }, ExtArgs["result"]["roleBookPermission"]>
 
 export type RoleBookPermissionSelectScalar = {
@@ -647,23 +647,23 @@ export type RoleBookPermissionSelectScalar = {
 
 export type RoleBookPermissionOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "createdAt" | "updatedAt" | "bookId" | "roleId", ExtArgs["result"]["roleBookPermission"]>
 export type RoleBookPermissionInclude<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
-  role?: boolean | Prisma.RoleDefaultArgs<ExtArgs>
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
+  role?: boolean | Prisma.RoleDefaultArgs<ExtArgs>
 }
 export type RoleBookPermissionIncludeCreateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
-  role?: boolean | Prisma.RoleDefaultArgs<ExtArgs>
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
+  role?: boolean | Prisma.RoleDefaultArgs<ExtArgs>
 }
 export type RoleBookPermissionIncludeUpdateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
-  role?: boolean | Prisma.RoleDefaultArgs<ExtArgs>
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
+  role?: boolean | Prisma.RoleDefaultArgs<ExtArgs>
 }
 
 export type $RoleBookPermissionPayload<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   name: "RoleBookPermission"
   objects: {
-    role: Prisma.$RolePayload<ExtArgs>
     book: Prisma.$BookPayload<ExtArgs>
+    role: Prisma.$RolePayload<ExtArgs>
   }
   scalars: runtime.Types.Extensions.GetPayloadResult<{
     id: number
@@ -1065,8 +1065,8 @@ readonly fields: RoleBookPermissionFieldRefs;
  */
 export interface Prisma__RoleBookPermissionClient<T, Null = never, ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs, GlobalOmitOptions = {}> extends Prisma.PrismaPromise<T> {
   readonly [Symbol.toStringTag]: "PrismaPromise"
-  role<T extends Prisma.RoleDefaultArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.RoleDefaultArgs<ExtArgs>>): Prisma.Prisma__RoleClient<runtime.Types.Result.GetResult<Prisma.$RolePayload<ExtArgs>, T, "findUniqueOrThrow", GlobalOmitOptions> | Null, Null, ExtArgs, GlobalOmitOptions>
   book<T extends Prisma.BookDefaultArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.BookDefaultArgs<ExtArgs>>): Prisma.Prisma__BookClient<runtime.Types.Result.GetResult<Prisma.$BookPayload<ExtArgs>, T, "findUniqueOrThrow", GlobalOmitOptions> | Null, Null, ExtArgs, GlobalOmitOptions>
+  role<T extends Prisma.RoleDefaultArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.RoleDefaultArgs<ExtArgs>>): Prisma.Prisma__RoleClient<runtime.Types.Result.GetResult<Prisma.$RolePayload<ExtArgs>, T, "findUniqueOrThrow", GlobalOmitOptions> | Null, Null, ExtArgs, GlobalOmitOptions>
   /**
    * Attaches callbacks for the resolution and/or rejection of the Promise.
    * @param onfulfilled The callback to execute when the Promise is resolved.

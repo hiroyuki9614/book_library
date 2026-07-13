@@ -77,7 +77,7 @@ model BookFile {
   updatedAt        DateTime @updatedAt @map("updated_at")
   extension        String   @db.VarChar(10)
   mimeType         String   @map("mime_type") @db.VarChar(100)
-  filePath         String   @map("file_path") @db.VarChar(255)
+  fileUrl          String   @map("file_url") @db.VarChar(2048)
   originalFileName String   @map("original_file_name") @db.VarChar(255)
   storedFileName   String   @map("stored_file_name") @db.VarChar(255)
   fileSize         Int      @map("file_size")

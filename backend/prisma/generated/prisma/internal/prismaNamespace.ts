@@ -1026,7 +1026,7 @@ export const BookFileScalarFieldEnum = {
   updatedAt: 'updatedAt',
   extension: 'extension',
   mimeType: 'mimeType',
-  filePath: 'filePath',
+  fileUrl: 'fileUrl',
   originalFileName: 'originalFileName',
   storedFileName: 'storedFileName',
   fileSize: 'fileSize',

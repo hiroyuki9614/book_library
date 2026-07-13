@@ -38,8 +38,7 @@ export const navItems: {
 			items: [
 				{
 					title: '管理画面',
-					url: '#',
-					role: 'admin',
+					url: '/admin',
 				},
 				{
 					title: 'ログアウト',

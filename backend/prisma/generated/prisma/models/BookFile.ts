@@ -44,7 +44,7 @@ export type BookFileMinAggregateOutputType = {
   updatedAt: Date | null
   extension: string | null
   mimeType: string | null
-  filePath: string | null
+  fileUrl: string | null
   originalFileName: string | null
   storedFileName: string | null
   fileSize: number | null
@@ -57,7 +57,7 @@ export type BookFileMaxAggregateOutputType = {
   updatedAt: Date | null
   extension: string | null
   mimeType: string | null
-  filePath: string | null
+  fileUrl: string | null
   originalFileName: string | null
   storedFileName: string | null
   fileSize: number | null
@@ -70,7 +70,7 @@ export type BookFileCountAggregateOutputType = {
   updatedAt: number
   extension: number
   mimeType: number
-  filePath: number
+  fileUrl: number
   originalFileName: number
   storedFileName: number
   fileSize: number
@@ -97,7 +97,7 @@ export type BookFileMinAggregateInputType = {
   updatedAt?: true
   extension?: true
   mimeType?: true
-  filePath?: true
+  fileUrl?: true
   originalFileName?: true
   storedFileName?: true
   fileSize?: true
@@ -110,7 +110,7 @@ export type BookFileMaxAggregateInputType = {
   updatedAt?: true
   extension?: true
   mimeType?: true
-  filePath?: true
+  fileUrl?: true
   originalFileName?: true
   storedFileName?: true
   fileSize?: true
@@ -123,7 +123,7 @@ export type BookFileCountAggregateInputType = {
   updatedAt?: true
   extension?: true
   mimeType?: true
-  filePath?: true
+  fileUrl?: true
   originalFileName?: true
   storedFileName?: true
   fileSize?: true
@@ -223,7 +223,7 @@ export type BookFileGroupByOutputType = {
   updatedAt: Date
   extension: string
   mimeType: string
-  filePath: string
+  fileUrl: string
   originalFileName: string
   storedFileName: string
   fileSize: number
@@ -259,7 +259,7 @@ export type BookFileWhereInput = {
   updatedAt?: Prisma.DateTimeFilter<"BookFile"> | Date | string
   extension?: Prisma.StringFilter<"BookFile"> | string
   mimeType?: Prisma.StringFilter<"BookFile"> | string
-  filePath?: Prisma.StringFilter<"BookFile"> | string
+  fileUrl?: Prisma.StringFilter<"BookFile"> | string
   originalFileName?: Prisma.StringFilter<"BookFile"> | string
   storedFileName?: Prisma.StringFilter<"BookFile"> | string
   fileSize?: Prisma.IntFilter<"BookFile"> | number
@@ -273,7 +273,7 @@ export type BookFileOrderByWithRelationInput = {
   updatedAt?: Prisma.SortOrder
   extension?: Prisma.SortOrder
   mimeType?: Prisma.SortOrder
-  filePath?: Prisma.SortOrder
+  fileUrl?: Prisma.SortOrder
   originalFileName?: Prisma.SortOrder
   storedFileName?: Prisma.SortOrder
   fileSize?: Prisma.SortOrder
@@ -290,7 +290,7 @@ export type BookFileWhereUniqueInput = Prisma.AtLeast<{
   updatedAt?: Prisma.DateTimeFilter<"BookFile"> | Date | string
   extension?: Prisma.StringFilter<"BookFile"> | string
   mimeType?: Prisma.StringFilter<"BookFile"> | string
-  filePath?: Prisma.StringFilter<"BookFile"> | string
+  fileUrl?: Prisma.StringFilter<"BookFile"> | string
   originalFileName?: Prisma.StringFilter<"BookFile"> | string
   storedFileName?: Prisma.StringFilter<"BookFile"> | string
   fileSize?: Prisma.IntFilter<"BookFile"> | number
@@ -304,7 +304,7 @@ export type BookFileOrderByWithAggregationInput = {
   updatedAt?: Prisma.SortOrder
   extension?: Prisma.SortOrder
   mimeType?: Prisma.SortOrder
-  filePath?: Prisma.SortOrder
+  fileUrl?: Prisma.SortOrder
   originalFileName?: Prisma.SortOrder
   storedFileName?: Prisma.SortOrder
   fileSize?: Prisma.SortOrder
@@ -325,7 +325,7 @@ export type BookFileScalarWhereWithAggregatesInput = {
   updatedAt?: Prisma.DateTimeWithAggregatesFilter<"BookFile"> | Date | string
   extension?: Prisma.StringWithAggregatesFilter<"BookFile"> | string
   mimeType?: Prisma.StringWithAggregatesFilter<"BookFile"> | string
-  filePath?: Prisma.StringWithAggregatesFilter<"BookFile"> | string
+  fileUrl?: Prisma.StringWithAggregatesFilter<"BookFile"> | string
   originalFileName?: Prisma.StringWithAggregatesFilter<"BookFile"> | string
   storedFileName?: Prisma.StringWithAggregatesFilter<"BookFile"> | string
   fileSize?: Prisma.IntWithAggregatesFilter<"BookFile"> | number
@@ -337,7 +337,7 @@ export type BookFileCreateInput = {
   updatedAt?: Date | string
   extension: string
   mimeType: string
-  filePath: string
+  fileUrl: string
   originalFileName: string
   storedFileName: string
   fileSize: number
@@ -350,7 +350,7 @@ export type BookFileUncheckedCreateInput = {
   updatedAt?: Date | string
   extension: string
   mimeType: string
-  filePath: string
+  fileUrl: string
   originalFileName: string
   storedFileName: string
   fileSize: number
@@ -362,7 +362,7 @@ export type BookFileUpdateInput = {
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   extension?: Prisma.StringFieldUpdateOperationsInput | string
   mimeType?: Prisma.StringFieldUpdateOperationsInput | string
-  filePath?: Prisma.StringFieldUpdateOperationsInput | string
+  fileUrl?: Prisma.StringFieldUpdateOperationsInput | string
   originalFileName?: Prisma.StringFieldUpdateOperationsInput | string
   storedFileName?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -375,7 +375,7 @@ export type BookFileUncheckedUpdateInput = {
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   extension?: Prisma.StringFieldUpdateOperationsInput | string
   mimeType?: Prisma.StringFieldUpdateOperationsInput | string
-  filePath?: Prisma.StringFieldUpdateOperationsInput | string
+  fileUrl?: Prisma.StringFieldUpdateOperationsInput | string
   originalFileName?: Prisma.StringFieldUpdateOperationsInput | string
   storedFileName?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -388,7 +388,7 @@ export type BookFileCreateManyInput = {
   updatedAt?: Date | string
   extension: string
   mimeType: string
-  filePath: string
+  fileUrl: string
   originalFileName: string
   storedFileName: string
   fileSize: number
@@ -400,7 +400,7 @@ export type BookFileUpdateManyMutationInput = {
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   extension?: Prisma.StringFieldUpdateOperationsInput | string
   mimeType?: Prisma.StringFieldUpdateOperationsInput | string
-  filePath?: Prisma.StringFieldUpdateOperationsInput | string
+  fileUrl?: Prisma.StringFieldUpdateOperationsInput | string
   originalFileName?: Prisma.StringFieldUpdateOperationsInput | string
   storedFileName?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -412,7 +412,7 @@ export type BookFileUncheckedUpdateManyInput = {
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   extension?: Prisma.StringFieldUpdateOperationsInput | string
   mimeType?: Prisma.StringFieldUpdateOperationsInput | string
-  filePath?: Prisma.StringFieldUpdateOperationsInput | string
+  fileUrl?: Prisma.StringFieldUpdateOperationsInput | string
   originalFileName?: Prisma.StringFieldUpdateOperationsInput | string
   storedFileName?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -435,7 +435,7 @@ export type BookFileCountOrderByAggregateInput = {
   updatedAt?: Prisma.SortOrder
   extension?: Prisma.SortOrder
   mimeType?: Prisma.SortOrder
-  filePath?: Prisma.SortOrder
+  fileUrl?: Prisma.SortOrder
   originalFileName?: Prisma.SortOrder
   storedFileName?: Prisma.SortOrder
   fileSize?: Prisma.SortOrder
@@ -454,7 +454,7 @@ export type BookFileMaxOrderByAggregateInput = {
   updatedAt?: Prisma.SortOrder
   extension?: Prisma.SortOrder
   mimeType?: Prisma.SortOrder
-  filePath?: Prisma.SortOrder
+  fileUrl?: Prisma.SortOrder
   originalFileName?: Prisma.SortOrder
   storedFileName?: Prisma.SortOrder
   fileSize?: Prisma.SortOrder
@@ -467,7 +467,7 @@ export type BookFileMinOrderByAggregateInput = {
   updatedAt?: Prisma.SortOrder
   extension?: Prisma.SortOrder
   mimeType?: Prisma.SortOrder
-  filePath?: Prisma.SortOrder
+  fileUrl?: Prisma.SortOrder
   originalFileName?: Prisma.SortOrder
   storedFileName?: Prisma.SortOrder
   fileSize?: Prisma.SortOrder
@@ -527,7 +527,7 @@ export type BookFileCreateWithoutBookInput = {
   updatedAt?: Date | string
   extension: string
   mimeType: string
-  filePath: string
+  fileUrl: string
   originalFileName: string
   storedFileName: string
   fileSize: number
@@ -539,7 +539,7 @@ export type BookFileUncheckedCreateWithoutBookInput = {
   updatedAt?: Date | string
   extension: string
   mimeType: string
-  filePath: string
+  fileUrl: string
   originalFileName: string
   storedFileName: string
   fileSize: number
@@ -580,7 +580,7 @@ export type BookFileScalarWhereInput = {
   updatedAt?: Prisma.DateTimeFilter<"BookFile"> | Date | string
   extension?: Prisma.StringFilter<"BookFile"> | string
   mimeType?: Prisma.StringFilter<"BookFile"> | string
-  filePath?: Prisma.StringFilter<"BookFile"> | string
+  fileUrl?: Prisma.StringFilter<"BookFile"> | string
   originalFileName?: Prisma.StringFilter<"BookFile"> | string
   storedFileName?: Prisma.StringFilter<"BookFile"> | string
   fileSize?: Prisma.IntFilter<"BookFile"> | number
@@ -593,7 +593,7 @@ export type BookFileCreateManyBookInput = {
   updatedAt?: Date | string
   extension: string
   mimeType: string
-  filePath: string
+  fileUrl: string
   originalFileName: string
   storedFileName: string
   fileSize: number
@@ -604,7 +604,7 @@ export type BookFileUpdateWithoutBookInput = {
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   extension?: Prisma.StringFieldUpdateOperationsInput | string
   mimeType?: Prisma.StringFieldUpdateOperationsInput | string
-  filePath?: Prisma.StringFieldUpdateOperationsInput | string
+  fileUrl?: Prisma.StringFieldUpdateOperationsInput | string
   originalFileName?: Prisma.StringFieldUpdateOperationsInput | string
   storedFileName?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -616,7 +616,7 @@ export type BookFileUncheckedUpdateWithoutBookInput = {
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   extension?: Prisma.StringFieldUpdateOperationsInput | string
   mimeType?: Prisma.StringFieldUpdateOperationsInput | string
-  filePath?: Prisma.StringFieldUpdateOperationsInput | string
+  fileUrl?: Prisma.StringFieldUpdateOperationsInput | string
   originalFileName?: Prisma.StringFieldUpdateOperationsInput | string
   storedFileName?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -628,7 +628,7 @@ export type BookFileUncheckedUpdateManyWithoutBookInput = {
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   extension?: Prisma.StringFieldUpdateOperationsInput | string
   mimeType?: Prisma.StringFieldUpdateOperationsInput | string
-  filePath?: Prisma.StringFieldUpdateOperationsInput | string
+  fileUrl?: Prisma.StringFieldUpdateOperationsInput | string
   originalFileName?: Prisma.StringFieldUpdateOperationsInput | string
   storedFileName?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -642,7 +642,7 @@ export type BookFileSelect<ExtArgs extends runtime.Types.Extensions.InternalArgs
   updatedAt?: boolean
   extension?: boolean
   mimeType?: boolean
-  filePath?: boolean
+  fileUrl?: boolean
   originalFileName?: boolean
   storedFileName?: boolean
   fileSize?: boolean
@@ -656,7 +656,7 @@ export type BookFileSelectCreateManyAndReturn<ExtArgs extends runtime.Types.Exte
   updatedAt?: boolean
   extension?: boolean
   mimeType?: boolean
-  filePath?: boolean
+  fileUrl?: boolean
   originalFileName?: boolean
   storedFileName?: boolean
   fileSize?: boolean
@@ -670,7 +670,7 @@ export type BookFileSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.Exte
   updatedAt?: boolean
   extension?: boolean
   mimeType?: boolean
-  filePath?: boolean
+  fileUrl?: boolean
   originalFileName?: boolean
   storedFileName?: boolean
   fileSize?: boolean
@@ -684,14 +684,14 @@ export type BookFileSelectScalar = {
   updatedAt?: boolean
   extension?: boolean
   mimeType?: boolean
-  filePath?: boolean
+  fileUrl?: boolean
   originalFileName?: boolean
   storedFileName?: boolean
   fileSize?: boolean
   bookId?: boolean
 }
 
-export type BookFileOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "createdAt" | "updatedAt" | "extension" | "mimeType" | "filePath" | "originalFileName" | "storedFileName" | "fileSize" | "bookId", ExtArgs["result"]["bookFile"]>
+export type BookFileOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "createdAt" | "updatedAt" | "extension" | "mimeType" | "fileUrl" | "originalFileName" | "storedFileName" | "fileSize" | "bookId", ExtArgs["result"]["bookFile"]>
 export type BookFileInclude<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
 }
@@ -713,7 +713,7 @@ export type $BookFilePayload<ExtArgs extends runtime.Types.Extensions.InternalAr
     updatedAt: Date
     extension: string
     mimeType: string
-    filePath: string
+    fileUrl: string
     originalFileName: string
     storedFileName: string
     fileSize: number
@@ -1147,7 +1147,7 @@ export interface BookFileFieldRefs {
   readonly updatedAt: Prisma.FieldRef<"BookFile", 'DateTime'>
   readonly extension: Prisma.FieldRef<"BookFile", 'String'>
   readonly mimeType: Prisma.FieldRef<"BookFile", 'String'>
-  readonly filePath: Prisma.FieldRef<"BookFile", 'String'>
+  readonly fileUrl: Prisma.FieldRef<"BookFile", 'String'>
   readonly originalFileName: Prisma.FieldRef<"BookFile", 'String'>
   readonly storedFileName: Prisma.FieldRef<"BookFile", 'String'>
   readonly fileSize: Prisma.FieldRef<"BookFile", 'Int'>

@@ -268,8 +268,8 @@ export type BookWhereInput = {
   deletedAt?: Prisma.DateTimeNullableFilter<"Book"> | Date | string | null
   categoryId?: Prisma.IntFilter<"Book"> | number
   pageTurnDirection?: Prisma.StringFilter<"Book"> | string
-  category?: Prisma.XOR<Prisma.CategoryScalarRelationFilter, Prisma.CategoryWhereInput>
   bookFiles?: Prisma.BookFileListRelationFilter
+  category?: Prisma.XOR<Prisma.CategoryScalarRelationFilter, Prisma.CategoryWhereInput>
   readingInfos?: Prisma.ReadingInfoListRelationFilter
   roleBookPermissions?: Prisma.RoleBookPermissionListRelationFilter
 }
@@ -286,8 +286,8 @@ export type BookOrderByWithRelationInput = {
   deletedAt?: Prisma.SortOrderInput | Prisma.SortOrder
   categoryId?: Prisma.SortOrder
   pageTurnDirection?: Prisma.SortOrder
-  category?: Prisma.CategoryOrderByWithRelationInput
   bookFiles?: Prisma.BookFileOrderByRelationAggregateInput
+  category?: Prisma.CategoryOrderByWithRelationInput
   readingInfos?: Prisma.ReadingInfoOrderByRelationAggregateInput
   roleBookPermissions?: Prisma.RoleBookPermissionOrderByRelationAggregateInput
 }
@@ -307,8 +307,8 @@ export type BookWhereUniqueInput = Prisma.AtLeast<{
   deletedAt?: Prisma.DateTimeNullableFilter<"Book"> | Date | string | null
   categoryId?: Prisma.IntFilter<"Book"> | number
   pageTurnDirection?: Prisma.StringFilter<"Book"> | string
-  category?: Prisma.XOR<Prisma.CategoryScalarRelationFilter, Prisma.CategoryWhereInput>
   bookFiles?: Prisma.BookFileListRelationFilter
+  category?: Prisma.XOR<Prisma.CategoryScalarRelationFilter, Prisma.CategoryWhereInput>
   readingInfos?: Prisma.ReadingInfoListRelationFilter
   roleBookPermissions?: Prisma.RoleBookPermissionListRelationFilter
 }, "id">
@@ -359,8 +359,8 @@ export type BookCreateInput = {
   description?: string | null
   deletedAt?: Date | string | null
   pageTurnDirection?: string
-  category: Prisma.CategoryCreateNestedOneWithoutBooksInput
   bookFiles?: Prisma.BookFileCreateNestedManyWithoutBookInput
+  category: Prisma.CategoryCreateNestedOneWithoutBooksInput
   readingInfos?: Prisma.ReadingInfoCreateNestedManyWithoutBookInput
   roleBookPermissions?: Prisma.RoleBookPermissionCreateNestedManyWithoutBookInput
 }
@@ -392,8 +392,8 @@ export type BookUpdateInput = {
   description?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
   pageTurnDirection?: Prisma.StringFieldUpdateOperationsInput | string
-  category?: Prisma.CategoryUpdateOneRequiredWithoutBooksNestedInput
   bookFiles?: Prisma.BookFileUpdateManyWithoutBookNestedInput
+  category?: Prisma.CategoryUpdateOneRequiredWithoutBooksNestedInput
   readingInfos?: Prisma.ReadingInfoUpdateManyWithoutBookNestedInput
   roleBookPermissions?: Prisma.RoleBookPermissionUpdateManyWithoutBookNestedInput
 }
@@ -772,8 +772,8 @@ export type BookCreateWithoutReadingInfosInput = {
   description?: string | null
   deletedAt?: Date | string | null
   pageTurnDirection?: string
-  category: Prisma.CategoryCreateNestedOneWithoutBooksInput
   bookFiles?: Prisma.BookFileCreateNestedManyWithoutBookInput
+  category: Prisma.CategoryCreateNestedOneWithoutBooksInput
   roleBookPermissions?: Prisma.RoleBookPermissionCreateNestedManyWithoutBookInput
 }
 
@@ -819,8 +819,8 @@ export type BookUpdateWithoutReadingInfosInput = {
   description?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
   pageTurnDirection?: Prisma.StringFieldUpdateOperationsInput | string
-  category?: Prisma.CategoryUpdateOneRequiredWithoutBooksNestedInput
   bookFiles?: Prisma.BookFileUpdateManyWithoutBookNestedInput
+  category?: Prisma.CategoryUpdateOneRequiredWithoutBooksNestedInput
   roleBookPermissions?: Prisma.RoleBookPermissionUpdateManyWithoutBookNestedInput
 }
 
@@ -850,8 +850,8 @@ export type BookCreateWithoutRoleBookPermissionsInput = {
   description?: string | null
   deletedAt?: Date | string | null
   pageTurnDirection?: string
-  category: Prisma.CategoryCreateNestedOneWithoutBooksInput
   bookFiles?: Prisma.BookFileCreateNestedManyWithoutBookInput
+  category: Prisma.CategoryCreateNestedOneWithoutBooksInput
   readingInfos?: Prisma.ReadingInfoCreateNestedManyWithoutBookInput
 }
 
@@ -897,8 +897,8 @@ export type BookUpdateWithoutRoleBookPermissionsInput = {
   description?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
   pageTurnDirection?: Prisma.StringFieldUpdateOperationsInput | string
-  category?: Prisma.CategoryUpdateOneRequiredWithoutBooksNestedInput
   bookFiles?: Prisma.BookFileUpdateManyWithoutBookNestedInput
+  category?: Prisma.CategoryUpdateOneRequiredWithoutBooksNestedInput
   readingInfos?: Prisma.ReadingInfoUpdateManyWithoutBookNestedInput
 }
 
@@ -1036,8 +1036,8 @@ export type BookSelect<ExtArgs extends runtime.Types.Extensions.InternalArgs = r
   deletedAt?: boolean
   categoryId?: boolean
   pageTurnDirection?: boolean
-  category?: boolean | Prisma.CategoryDefaultArgs<ExtArgs>
   bookFiles?: boolean | Prisma.Book$bookFilesArgs<ExtArgs>
+  category?: boolean | Prisma.CategoryDefaultArgs<ExtArgs>
   readingInfos?: boolean | Prisma.Book$readingInfosArgs<ExtArgs>
   roleBookPermissions?: boolean | Prisma.Book$roleBookPermissionsArgs<ExtArgs>
   _count?: boolean | Prisma.BookCountOutputTypeDefaultArgs<ExtArgs>
@@ -1089,8 +1089,8 @@ export type BookSelectScalar = {
 
 export type BookOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "createdAt" | "updatedAt" | "title" | "authorName" | "publishedAt" | "publisher" | "description" | "deletedAt" | "categoryId" | "pageTurnDirection", ExtArgs["result"]["book"]>
 export type BookInclude<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
-  category?: boolean | Prisma.CategoryDefaultArgs<ExtArgs>
   bookFiles?: boolean | Prisma.Book$bookFilesArgs<ExtArgs>
+  category?: boolean | Prisma.CategoryDefaultArgs<ExtArgs>
   readingInfos?: boolean | Prisma.Book$readingInfosArgs<ExtArgs>
   roleBookPermissions?: boolean | Prisma.Book$roleBookPermissionsArgs<ExtArgs>
   _count?: boolean | Prisma.BookCountOutputTypeDefaultArgs<ExtArgs>
@@ -1105,8 +1105,8 @@ export type BookIncludeUpdateManyAndReturn<ExtArgs extends runtime.Types.Extensi
 export type $BookPayload<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   name: "Book"
   objects: {
-    category: Prisma.$CategoryPayload<ExtArgs>
     bookFiles: Prisma.$BookFilePayload<ExtArgs>[]
+    category: Prisma.$CategoryPayload<ExtArgs>
     readingInfos: Prisma.$ReadingInfoPayload<ExtArgs>[]
     roleBookPermissions: Prisma.$RoleBookPermissionPayload<ExtArgs>[]
   }
@@ -1516,8 +1516,8 @@ readonly fields: BookFieldRefs;
  */
 export interface Prisma__BookClient<T, Null = never, ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs, GlobalOmitOptions = {}> extends Prisma.PrismaPromise<T> {
   readonly [Symbol.toStringTag]: "PrismaPromise"
-  category<T extends Prisma.CategoryDefaultArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.CategoryDefaultArgs<ExtArgs>>): Prisma.Prisma__CategoryClient<runtime.Types.Result.GetResult<Prisma.$CategoryPayload<ExtArgs>, T, "findUniqueOrThrow", GlobalOmitOptions> | Null, Null, ExtArgs, GlobalOmitOptions>
   bookFiles<T extends Prisma.Book$bookFilesArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.Book$bookFilesArgs<ExtArgs>>): Prisma.PrismaPromise<runtime.Types.Result.GetResult<Prisma.$BookFilePayload<ExtArgs>, T, "findMany", GlobalOmitOptions> | Null>
+  category<T extends Prisma.CategoryDefaultArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.CategoryDefaultArgs<ExtArgs>>): Prisma.Prisma__CategoryClient<runtime.Types.Result.GetResult<Prisma.$CategoryPayload<ExtArgs>, T, "findUniqueOrThrow", GlobalOmitOptions> | Null, Null, ExtArgs, GlobalOmitOptions>
   readingInfos<T extends Prisma.Book$readingInfosArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.Book$readingInfosArgs<ExtArgs>>): Prisma.PrismaPromise<runtime.Types.Result.GetResult<Prisma.$ReadingInfoPayload<ExtArgs>, T, "findMany", GlobalOmitOptions> | Null>
   roleBookPermissions<T extends Prisma.Book$roleBookPermissionsArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.Book$roleBookPermissionsArgs<ExtArgs>>): Prisma.PrismaPromise<runtime.Types.Result.GetResult<Prisma.$RoleBookPermissionPayload<ExtArgs>, T, "findMany", GlobalOmitOptions> | Null>
   /**

@@ -6,9 +6,9 @@ info:
         このAPIは、epub 及び、pdf形式の書籍を閲覧・管理するソフトウエアのバックエンドAPIです。
 
 servers:
-    - url: https://app.hiroyuki9614.com/api/v1/
+    - url: https://app.hiroyuki9614.com/api/v1
       description: Production
-    - url: http://localhost:3000/api/v1/
+    - url: http://localhost:3000/api/v1
       description: Local development
 
 paths:
@@ -43,6 +43,20 @@ paths:
     /admin/users:
         get:
             summary: ユーザー一覧を取得
+            parameters:
+                - name: page
+                  in: query
+                  schema:
+                      type: integer
+                      default: 1
+                      minimum: 1
+                - name: limit
+                  in: query
+                  schema:
+                      type: integer
+                      default: 20
+                      minimum: 1
+                      maximum: 100
             responses:
                 '200':
                     description: ユーザー一覧の取得に成功
@@ -73,26 +87,28 @@ paths:
                                     - users
                 '400':
                     description: リクエストが不正
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '401':
                     description: 認証エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '403':
                     description: 認可エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '500':
                     description: サーバーエラー
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/Error'
-            parameters:
-                page:
-                    type: integer
-                    default: 1
-                    minimum: 1
-                limit:
-                    type: integer
-                    default: 20
-                    minimum: 1
-                    maximum: 100
         post:
             summary: ユーザーを作成
             requestBody:
@@ -110,10 +126,22 @@ paths:
                                 $ref: '#/components/schemas/User'
                 '400':
                     description: リクエストが不正
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '401':
                     description: 認証エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '403':
                     description: 認可エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '500':
                     description: サーバーエラー
                     content:
@@ -140,12 +168,28 @@ paths:
                                 $ref: '#/components/schemas/User'
                 '400':
                     description: リクエストが不正
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '401':
                     description: 認証エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '403':
                     description: 認可エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '404':
                     description: ユーザーが見つからない
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '500':
                     description: サーバーエラー
                     content:
@@ -176,12 +220,28 @@ paths:
                                 $ref: '#/components/schemas/User'
                 '400':
                     description: リクエストが不正
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '401':
                     description: 認証エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '403':
                     description: 認可エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '404':
                     description: ユーザーが見つからない
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '500':
                     description: サーバーエラー
                     content:
@@ -202,12 +262,28 @@ paths:
                     description: ユーザー情報の削除に成功
                 '400':
                     description: リクエストが不正
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '401':
                     description: 認証エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '403':
                     description: 認可エラー
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '404':
                     description: ユーザーが見つからない
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
                 '500':
                     description: サーバーエラー
                     content:
@@ -513,8 +589,14 @@ paths:
                             required:
                                 - file
             responses:
+                '200':
+                    description: 既存の書籍ファイルの差し替えに成功
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/BookFile'
                 '201':
-                    description: 書籍ファイルのアップロードに成功
+                    description: 初回の書籍ファイルアップロードに成功
                     content:
                         application/json:
                             schema:
@@ -886,6 +968,7 @@ components:
                 - id
                 - name
                 - email
+                - role
         UserCreateRequest:
             type: object
             properties:
@@ -961,8 +1044,9 @@ components:
                     type: integer
                 bookId:
                     type: integer
-                fileName:
+                fileUrl:
                     type: string
+                    format: uri
                 fileSize:
                     type: integer
                 fileType:
@@ -975,7 +1059,7 @@ components:
             required:
                 - id
                 - bookId
-                - fileName
+                - fileUrl
                 - fileSize
                 - fileType
                 - mimeType
@@ -1020,6 +1104,8 @@ components:
                 progress:
                     type: number
                     format: float
+                    minimum: 0
+                    maximum: 100
             required:
                 - bookId
                 - readStatus
@@ -1038,6 +1124,8 @@ components:
                 progress:
                     type: number
                     format: float
+                    minimum: 0
+                    maximum: 100
 
 security:
     - bearerAuth: []

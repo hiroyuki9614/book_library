@@ -22,5 +22,8 @@
   "devDependencies": {
     "concurrently": "^9.2.1",
     "tsx": "^4.22.4"
+  },
+  "dependencies": {
+    "@scalar/hono-api-reference": "^0.11.9"
   }
 }

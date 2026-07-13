@@ -240,8 +240,8 @@ export type ReadingInfoWhereInput = {
   readStatus?: Prisma.StringFilter<"ReadingInfo"> | string
   userId?: Prisma.IntFilter<"ReadingInfo"> | number
   bookId?: Prisma.IntFilter<"ReadingInfo"> | number
-  user?: Prisma.XOR<Prisma.UserScalarRelationFilter, Prisma.UserWhereInput>
   book?: Prisma.XOR<Prisma.BookScalarRelationFilter, Prisma.BookWhereInput>
+  user?: Prisma.XOR<Prisma.UserScalarRelationFilter, Prisma.UserWhereInput>
 }
 
 export type ReadingInfoOrderByWithRelationInput = {
@@ -252,8 +252,8 @@ export type ReadingInfoOrderByWithRelationInput = {
   readStatus?: Prisma.SortOrder
   userId?: Prisma.SortOrder
   bookId?: Prisma.SortOrder
-  user?: Prisma.UserOrderByWithRelationInput
   book?: Prisma.BookOrderByWithRelationInput
+  user?: Prisma.UserOrderByWithRelationInput
 }
 
 export type ReadingInfoWhereUniqueInput = Prisma.AtLeast<{
@@ -268,8 +268,8 @@ export type ReadingInfoWhereUniqueInput = Prisma.AtLeast<{
   readStatus?: Prisma.StringFilter<"ReadingInfo"> | string
   userId?: Prisma.IntFilter<"ReadingInfo"> | number
   bookId?: Prisma.IntFilter<"ReadingInfo"> | number
-  user?: Prisma.XOR<Prisma.UserScalarRelationFilter, Prisma.UserWhereInput>
   book?: Prisma.XOR<Prisma.BookScalarRelationFilter, Prisma.BookWhereInput>
+  user?: Prisma.XOR<Prisma.UserScalarRelationFilter, Prisma.UserWhereInput>
 }, "id" | "userId_bookId">
 
 export type ReadingInfoOrderByWithAggregationInput = {
@@ -305,8 +305,8 @@ export type ReadingInfoCreateInput = {
   updatedAt?: Date | string
   currentPosition?: string | null
   readStatus?: string
-  user: Prisma.UserCreateNestedOneWithoutReadingInfosInput
   book: Prisma.BookCreateNestedOneWithoutReadingInfosInput
+  user: Prisma.UserCreateNestedOneWithoutReadingInfosInput
 }
 
 export type ReadingInfoUncheckedCreateInput = {
@@ -324,8 +324,8 @@ export type ReadingInfoUpdateInput = {
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   currentPosition?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   readStatus?: Prisma.StringFieldUpdateOperationsInput | string
-  user?: Prisma.UserUpdateOneRequiredWithoutReadingInfosNestedInput
   book?: Prisma.BookUpdateOneRequiredWithoutReadingInfosNestedInput
+  user?: Prisma.UserUpdateOneRequiredWithoutReadingInfosNestedInput
 }
 
 export type ReadingInfoUncheckedUpdateInput = {
@@ -685,8 +685,8 @@ export type ReadingInfoSelect<ExtArgs extends runtime.Types.Extensions.InternalA
   readStatus?: boolean
   userId?: boolean
   bookId?: boolean
-  user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
+  user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
 }, ExtArgs["result"]["readingInfo"]>
 
 export type ReadingInfoSelectCreateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetSelect<{
@@ -697,8 +697,8 @@ export type ReadingInfoSelectCreateManyAndReturn<ExtArgs extends runtime.Types.E
   readStatus?: boolean
   userId?: boolean
   bookId?: boolean
-  user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
+  user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
 }, ExtArgs["result"]["readingInfo"]>
 
 export type ReadingInfoSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetSelect<{
@@ -709,8 +709,8 @@ export type ReadingInfoSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.E
   readStatus?: boolean
   userId?: boolean
   bookId?: boolean
-  user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
+  user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
 }, ExtArgs["result"]["readingInfo"]>
 
 export type ReadingInfoSelectScalar = {
@@ -725,23 +725,23 @@ export type ReadingInfoSelectScalar = {
 
 export type ReadingInfoOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "createdAt" | "updatedAt" | "currentPosition" | "readStatus" | "userId" | "bookId", ExtArgs["result"]["readingInfo"]>
 export type ReadingInfoInclude<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
-  user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
+  user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
 }
 export type ReadingInfoIncludeCreateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
-  user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
+  user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
 }
 export type ReadingInfoIncludeUpdateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
-  user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
+  user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
 }
 
 export type $ReadingInfoPayload<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   name: "ReadingInfo"
   objects: {
-    user: Prisma.$UserPayload<ExtArgs>
     book: Prisma.$BookPayload<ExtArgs>
+    user: Prisma.$UserPayload<ExtArgs>
   }
   scalars: runtime.Types.Extensions.GetPayloadResult<{
     id: number
@@ -1145,8 +1145,8 @@ readonly fields: ReadingInfoFieldRefs;
  */
 export interface Prisma__ReadingInfoClient<T, Null = never, ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs, GlobalOmitOptions = {}> extends Prisma.PrismaPromise<T> {
   readonly [Symbol.toStringTag]: "PrismaPromise"
-  user<T extends Prisma.UserDefaultArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.UserDefaultArgs<ExtArgs>>): Prisma.Prisma__UserClient<runtime.Types.Result.GetResult<Prisma.$UserPayload<ExtArgs>, T, "findUniqueOrThrow", GlobalOmitOptions> | Null, Null, ExtArgs, GlobalOmitOptions>
   book<T extends Prisma.BookDefaultArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.BookDefaultArgs<ExtArgs>>): Prisma.Prisma__BookClient<runtime.Types.Result.GetResult<Prisma.$BookPayload<ExtArgs>, T, "findUniqueOrThrow", GlobalOmitOptions> | Null, Null, ExtArgs, GlobalOmitOptions>
+  user<T extends Prisma.UserDefaultArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.UserDefaultArgs<ExtArgs>>): Prisma.Prisma__UserClient<runtime.Types.Result.GetResult<Prisma.$UserPayload<ExtArgs>, T, "findUniqueOrThrow", GlobalOmitOptions> | Null, Null, ExtArgs, GlobalOmitOptions>
   /**
    * Attaches callbacks for the resolution and/or rejection of the Promise.
    * @param onfulfilled The callback to execute when the Promise is resolved.
