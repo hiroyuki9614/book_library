@@ -26,4 +26,5 @@ const withPrisma = createMiddleware<PrismaVariables>(async (c, next) => {
 });
 
 export type { PrismaVariables };
+export { prisma };
 export default withPrisma;

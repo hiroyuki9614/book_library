@@ -2,6 +2,7 @@ import { serve } from '@hono/node-server';
 import { Scalar } from '@scalar/hono-api-reference';
 import { Hono } from 'hono';
 import { describeRoute } from 'hono-openapi';
+import { auth } from './lib/auth.js';
 import { createOpenApiHandler } from './routes/openApi/route.js';
 
 const app = new Hono();
@@ -37,6 +38,10 @@ app.get(
 		});
 	},
 );
+
+app.on(['GET', 'POST'], '/api/auth/*', (c) => {
+	return auth.handler(c.req.raw);
+});
 
 app.get('/doc', createOpenApiHandler(app));
 
