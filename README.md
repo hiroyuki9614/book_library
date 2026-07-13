@@ -50,6 +50,17 @@ npx prisma generate
 - OpenAPI JSON: `/doc`
 - Scalar UI: `/scalar`
 
+## 仕様書
+
+仕様や設計の確認は以下を参照してください。
+
+- 要件定義: `docs/requirements.md`
+- 画面設計: `docs/design.md`
+- データベース定義: `docs/database.md`
+- API仕様: `docs/api.yaml`
+- 開発ガイドライン: `docs/guidline.md`
+- プロジェクト運用ルール: `AGENTS.md`
+
 ## BookFile の保存先について
 
 BookFile はローカルファイルパスではなく、Cloudflare R2 の URL を保存します。
