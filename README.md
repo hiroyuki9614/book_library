@@ -1,67 +1,191 @@
-# BeLib
+# 1. プロジェクト名
 
-BeLib は、EPUB/PDF をブラウザで管理・閲覧する個人向け Web アプリです。
+BeLib
 
-## 技術スタック
+## 2. アプリ概要
 
-- Frontend: React + TypeScript + Vite
-- Backend: Hono + Prisma + PostgreSQL
+BeLib は、電子書籍の閲覧体験と書籍メタデータ管理を同じ画面遷移上で扱うことを目的にしたアプリです。  
+現状は MVP 段階で、フロントエンド中心に読書画面と管理画面の基盤を実装しています。
 
-## ディレクトリ構成
+## 3. 制作背景・目的
 
-- `frontend`: フロントエンドアプリ
-- `backend`: API サーバーと Prisma スキーマ
-- `docs`: 要件・設計・DB定義・API仕様
+- EPUB/PDF の閲覧と管理が別アプリに分かれがちな課題を、単一アプリで扱いたかった
+- 読書位置保存やカテゴリ管理を含む「自分用ライブラリ」の体験を検証したかった
+- React + Hono + Prisma を使ったフルスタック構成の設計力を示すポートフォリオを作りたかった
 
-## 開発環境の起動
+## 4. 主な機能（実装済み）
 
-リポジトリルートで実行します。
+- ログイン画面とルートガード
+	- `GuestRoute` / `RequireAuth` を実装
+	- ロール情報は localStorage を使った仮実装で保持
+- 書籍一覧画面
+	- 検索、ステータス絞り込み、並び替え UI
+	- 読書サマリー表示（総冊数、読書中、読了、未読、平均進捗）
+- EPUB リーダー
+	- ページ移動、目次ジャンプ、進捗表示
+	- 読書位置を localStorage に保存（仮実装）
+- PDF リーダー
+	- ページ移動、ズーム、表示制御
+- 管理画面
+	- 書籍登録フォーム（React Hook Form + Zod）
+	- 画面内状態への登録反映（仮実装）
+- バックエンド基盤
+	- Hono API (`/health`, `/test`, `/api/auth/*`)
+	- OpenAPI/Scalar (`/doc`, `/scalar`)
+	- Prisma スキーマ（ユーザー、ロール、書籍、書籍ファイル、読書情報など）
 
-```bash
-npm install
-npm run dev
+## 5. スクリーンショット
+
+現時点では README 掲載用に整理した画面キャプチャが未配置のため、追加予定です。
+
+- ログイン画面
+- 書籍一覧画面
+- EPUB/PDF リーダー画面
+- 管理画面
+
+## 6. 使用技術
+
+### フロントエンド
+
+- React 19
+- TypeScript
+- Vite
+- React Router
+- Tailwind CSS
+- shadcn/ui
+- React Hook Form
+- Zod
+- TanStack Query
+- epubjs
+- @embedpdf 系プラグイン
+
+### バックエンド
+
+- Node.js
+- Hono
+- TypeScript
+- Prisma
+- PostgreSQL
+- better-auth
+
+### 開発・インフラ
+
+- Docker
+- Docker Compose
+- pgAdmin4
+- Vitest
+
+## 7. システム構成
+
+```mermaid
+flowchart LR
+	Browser[Browser]
+	FE[Frontend: Vite React]
+	BE[Backend: Hono API]
+	DB[(PostgreSQL)]
+	PGA[pgAdmin4]
+
+	Browser --> FE
+	FE --> BE
+	BE --> DB
+	PGA --> DB
 ```
 
-- Frontend: Vite 開発サーバー
-- Backend: Hono 開発サーバー
+開発時の主なポート:
 
-## バックエンド単体での実行
+- Frontend: `5173` (Vite デフォルト)
+- Backend API: `3000`
+- PostgreSQL: `5432`
+- pgAdmin: `8080`
 
-```bash
-cd backend
-npm install
-npm run dev
-```
-
-## よく使うコマンド（backend）
-
-```bash
-npm run build
-npm run test
-npx prisma format
-npx prisma validate
-npx prisma generate
-```
-
-## API ドキュメント
-
-バックエンド起動後:
-
-- OpenAPI JSON: `/doc`
-- Scalar UI: `/scalar`
-
-## 仕様書
-
-仕様や設計の確認は以下を参照してください。
+参照仕様書:
 
 - 要件定義: `docs/requirements.md`
 - 画面設計: `docs/design.md`
 - データベース定義: `docs/database.md`
-- API仕様: `docs/api.yaml`
+- API 仕様: `docs/api.yaml`
 - 開発ガイドライン: `docs/guidline.md`
 - プロジェクト運用ルール: `AGENTS.md`
 
-## BookFile の保存先について
+## 8. 技術的に工夫した点
 
-BookFile はローカルファイルパスではなく、Cloudflare R2 の URL を保存します。
-Prisma モデル `BookFile` では `fileUrl`（DB カラム `file_url`）を使用します。
+- フロントエンド/バックエンドを別パッケージで分離し、責務を明確化
+- Hono + OpenAPI で API 仕様をコードから確認しやすい構成にした
+- Prisma スキーマで権限や読書状態のリレーションを先に定義し、DB設計を先行
+- `BookFile.fileUrl` を採用し、ローカルパス依存を避けたストレージ抽象化を意識
+- React Hook Form + Zod によりフォーム入力の型安全性とバリデーションを両立
+- Docker Compose で API / DB / pgAdmin を一括起動できる開発環境を用意
+
+## 9. 苦労した点・課題
+
+- 認証基盤（better-auth）導入と既存ロール設計の整合
+- EPUB と PDF でライブラリが異なるため、操作体験の統一設計に工夫が必要
+- 現在は UI 先行のため、一部がモックデータやローカル状態に依存している
+
+## 10. ローカル環境での起動方法
+
+必要ソフトウェア:
+
+- Node.js 22 以上
+- npm
+- Docker / Docker Compose
+
+手順:
+
+1. 環境変数ファイルを作成（リポジトリルート: `.env.development`）
+
+```env
+POSTGRES_USER=user
+POSTGRES_PASSWORD=your_password
+POSTGRES_DB=app_db
+DATABASE_URL=postgresql://user:your_password@localhost:5432/app_db?schema=public
+NODE_ENV=development
+```
+
+2. DB と pgAdmin を起動
+
+```bash
+docker compose -f docker-compose.dev.yml --env-file .env.development up -d db pgadmin4
+```
+
+3. 依存関係をインストール
+
+```bash
+npm install
+npm install --prefix backend
+npm install --prefix frontend
+```
+
+4. Prisma マイグレーションを適用
+
+```bash
+cd backend
+npx prisma migrate dev
+```
+
+5. 開発サーバーを起動（リポジトリルート）
+
+```bash
+npm run dev
+```
+
+アクセス先:
+
+- Frontend: `http://localhost:5173`
+- Backend: `http://localhost:3000`
+- OpenAPI: `http://localhost:3000/doc`
+- Scalar: `http://localhost:3000/scalar`
+- pgAdmin: `http://localhost:8080`
+
+## 11. 今後の予定
+
+- 書籍・カテゴリ・ユーザー管理 API の本実装
+- 管理画面登録処理の DB 永続化
+- 読書位置保存のサーバー連携（localStorage 仮実装から移行）
+- ロールベース権限管理のエンドツーエンド実装
+- オブジェクトストレージ連携（Cloudflare R2 への実アップロード）
+- README 向けスクリーンショット整備
+
+## 12. ライセンス
+
+ISC
