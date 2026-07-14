@@ -1,11 +1,22 @@
 import { Hono } from 'hono';
-import withPrisma from '../../lib/prisma.js';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { PrismaClient } from '@prisma/client';
+import { Pool } from 'pg';
 import type { PrismaVariables } from '../../lib/prisma.js';
 
 const app = new Hono<PrismaVariables>();
 
-app.use('*', withPrisma);
+app.get('/', async (c) => {
+	try {
+		const prisma = c.get('prisma');
+		const books = await prisma.book.findMany();
 
-app.get('/books', (c) => c.text('Hono!'));
+		console.log('Fetched books:', books);
+		return c.json(books);
+	} catch (error) {
+		console.error(error);
+		return c.json({ error: 'Failed to fetch books' }, 500);
+	}
+});
 
 export default app;

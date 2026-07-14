@@ -2,6 +2,7 @@ import { serve } from '@hono/node-server';
 import { Scalar } from '@scalar/hono-api-reference';
 import { Hono } from 'hono';
 import { describeRoute } from 'hono-openapi';
+import { pathToFileURL } from 'node:url';
 import { auth } from './lib/auth.js';
 import { createOpenApiHandler } from './routes/openApi/route.js';
 
@@ -100,10 +101,16 @@ export default app;
 
 const port = Number(process.env.APP_PORT ?? 3000);
 
-serve({
-	fetch: app.fetch,
-	port,
-	hostname: '0.0.0.0',
-});
+const isEntryPoint = process.argv[1]
+	? import.meta.url === pathToFileURL(process.argv[1]).href
+	: false;
 
-console.log(`Server is running on http://0.0.0.0:${port}`);
+if (isEntryPoint) {
+	serve({
+		fetch: app.fetch,
+		port,
+		hostname: '0.0.0.0',
+	});
+
+	console.log(`Server is running on http://0.0.0.0:${port}`);
+}

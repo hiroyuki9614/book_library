@@ -7,13 +7,13 @@ services:
       - "127.0.0.1:3000:3000"
     volumes:
       - ./backend:/app
-      - hono-node-modules:/app/node_modules
+      - ./backend/node_modules:/app/node_modules
     command: npm run dev
     depends_on:
       - db
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-
+    restart: unless-stopped
   db:
     image: postgres:16.14-bookworm
     container_name: postgres_db
@@ -41,8 +41,8 @@ services:
       PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
     depends_on:
       - db
+    restart: unless-stopped
 
 volumes:
   db-store:
   pgadmin-data:
-  hono-node-modules:

@@ -400,10 +400,6 @@ export type CategoryUpdateOneRequiredWithoutBooksNestedInput = {
   update?: Prisma.XOR<Prisma.XOR<Prisma.CategoryUpdateToOneWithWhereWithoutBooksInput, Prisma.CategoryUpdateWithoutBooksInput>, Prisma.CategoryUncheckedUpdateWithoutBooksInput>
 }
 
-export type BoolFieldUpdateOperationsInput = {
-  set?: boolean
-}
-
 export type CategoryCreateWithoutBooksInput = {
   createdAt?: Date | string
   updatedAt?: Date | string
