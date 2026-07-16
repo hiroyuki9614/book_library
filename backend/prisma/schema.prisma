@@ -13,18 +13,68 @@ datasource db {
 }
 
 model User {
-  id           Int           @id @default(autoincrement())
-  createdAt    DateTime      @default(now()) @map("created_at")
-  updatedAt    DateTime      @updatedAt @map("updated_at")
-  email        String        @unique @db.VarChar(254)
-  name         String        @db.VarChar(255)
-  passwordHash String        @map("password_hash") @db.VarChar(255)
-  roleId       Int           @map("role_id")
-  deletedAt    DateTime?     @map("deleted_at")
-  readingInfos ReadingInfo[]
-  role         Role          @relation(fields: [roleId], references: [id])
+  id            Int           @id @default(autoincrement())
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+  email         String        @unique @db.VarChar(254)
+  emailVerified Boolean       @default(false) @map("email_verified")
+  name          String        @db.VarChar(255)
+  image         String?       @db.VarChar(2048)
+  roleId        Int           @map("role_id")
+  deletedAt     DateTime?     @map("deleted_at")
+  accounts      Account[]
+  readingInfos  ReadingInfo[]
+  role          Role          @relation(fields: [roleId], references: [id])
+  sessions      Session[]
 
   @@map("users")
+}
+
+model Session {
+  id        Int      @id @default(autoincrement())
+  expiresAt DateTime @map("expires_at")
+  token     String   @unique @db.VarChar(255)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  ipAddress String?  @map("ip_address") @db.VarChar(45)
+  userAgent String?  @map("user_agent")
+  userId    Int      @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Account {
+  id                    Int       @id @default(autoincrement())
+  accountId             String    @map("account_id") @db.VarChar(255)
+  providerId            String    @map("provider_id") @db.VarChar(255)
+  userId                Int       @map("user_id")
+  accessToken           String?   @map("access_token")
+  refreshToken          String?   @map("refresh_token")
+  idToken               String?   @map("id_token")
+  accessTokenExpiresAt  DateTime? @map("access_token_expires_at")
+  refreshTokenExpiresAt DateTime? @map("refresh_token_expires_at")
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Verification {
+  id         Int      @id @default(autoincrement())
+  identifier String   @db.VarChar(255)
+  value      String
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([identifier])
+  @@map("verifications")
 }
 
 model Role {

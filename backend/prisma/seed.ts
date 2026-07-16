@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { hashPassword } from 'better-auth/crypto';
 import { PrismaClient } from './generated/prisma/client.js';
 
 const connectionString = process.env.DATABASE_URL;
@@ -12,6 +13,9 @@ if (!connectionString) {
 const pool = new Pool({ connectionString });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
+
+const userPassword = process.env.SEED_USER_PASSWORD ?? 'DummyPass123!';
+const adminPassword = process.env.SEED_ADMIN_PASSWORD ?? 'AdminPass123!';
 
 const categorySeeds = [
 	{ name: '小説', displayOrder: 1 },
@@ -60,6 +64,36 @@ const bookSeeds = [
 	},
 ] as const;
 
+async function upsertCredentialAccount(userId: number, password: string) {
+	const passwordHash = await hashPassword(password);
+	const existingAccount = await prisma.account.findFirst({
+		where: {
+			userId,
+			providerId: 'credential',
+		},
+	});
+	const data = {
+		accountId: String(userId),
+		providerId: 'credential',
+		password: passwordHash,
+	};
+
+	if (existingAccount) {
+		await prisma.account.update({
+			where: { id: existingAccount.id },
+			data,
+		});
+		return;
+	}
+
+	await prisma.account.create({
+		data: {
+			...data,
+			userId,
+		},
+	});
+}
+
 async function main() {
 	const userRole = await prisma.role.upsert({
 		where: { name: 'user' },
@@ -87,12 +121,11 @@ async function main() {
 		create: {
 			email: 'dummy@example.com',
 			name: 'Dummy User',
-			passwordHash: 'dummyhash',
 			roleId: userRole.id,
 		},
 	});
 
-	await prisma.user.upsert({
+	const admin = await prisma.user.upsert({
 		where: { email: 'admin@example.com' },
 		update: {
 			name: 'Admin User',
@@ -102,10 +135,12 @@ async function main() {
 		create: {
 			email: 'admin@example.com',
 			name: 'Admin User',
-			passwordHash: 'adminhash',
 			roleId: adminRole.id,
 		},
 	});
+
+	await upsertCredentialAccount(user.id, userPassword);
+	await upsertCredentialAccount(admin.id, adminPassword);
 
 	const categories = new Map<string, number>();
 
@@ -222,7 +257,7 @@ async function main() {
 	}
 
 	console.log(
-		`Seed completed: ${categorySeeds.length} categories, ${bookSeeds.length} books, ${sampleReadingInfos.length} reading infos`,
+		`Seed completed: 2 credential users, ${categorySeeds.length} categories, ${bookSeeds.length} books, ${sampleReadingInfos.length} reading infos`,
 	);
 }
 

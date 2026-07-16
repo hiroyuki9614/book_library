@@ -522,10 +522,6 @@ export type BookScalarRelationFilter = {
   isNot?: Prisma.BookWhereInput
 }
 
-export type NullableStringFieldUpdateOperationsInput = {
-  set?: string | null
-}
-
 export type BookCreateNestedManyWithoutCategoryInput = {
   create?: Prisma.XOR<Prisma.BookCreateWithoutCategoryInput, Prisma.BookUncheckedCreateWithoutCategoryInput> | Prisma.BookCreateWithoutCategoryInput[] | Prisma.BookUncheckedCreateWithoutCategoryInput[]
   connectOrCreate?: Prisma.BookCreateOrConnectWithoutCategoryInput | Prisma.BookCreateOrConnectWithoutCategoryInput[]

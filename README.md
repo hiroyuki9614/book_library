@@ -16,23 +16,23 @@ BeLib は、電子書籍の閲覧体験と書籍メタデータ管理を同じ�
 ## 4. 主な機能（実装済み）
 
 - ログイン画面とルートガード
-	- `GuestRoute` / `RequireAuth` を実装
-	- ロール情報は localStorage を使った仮実装で保持
+  - `GuestRoute` / `RequireAuth` を実装
+  - ロール情報は localStorage を使った仮実装で保持
 - 書籍一覧画面
-	- 検索、ステータス絞り込み、並び替え UI
-	- 読書サマリー表示（総冊数、読書中、読了、未読、平均進捗）
+  - 検索、ステータス絞り込み、並び替え UI
+  - 読書サマリー表示（総冊数、読書中、読了、未読、平均進捗）
 - EPUB リーダー
-	- ページ移動、目次ジャンプ、進捗表示
-	- 読書位置を localStorage に保存（仮実装）
+  - ページ移動、目次ジャンプ、進捗表示
+  - 読書位置を localStorage に保存（仮実装）
 - PDF リーダー
-	- ページ移動、ズーム、表示制御
+  - ページ移動、ズーム、表示制御
 - 管理画面
-	- 書籍登録フォーム（React Hook Form + Zod）
-	- 画面内状態への登録反映（仮実装）
+  - 書籍登録フォーム（React Hook Form + Zod）
+  - 画面内状態への登録反映（仮実装）
 - バックエンド基盤
-	- Hono API (`/health`, `/test`, `/api/auth/*`)
-	- OpenAPI/Scalar (`/doc`, `/scalar`)
-	- Prisma スキーマ（ユーザー、ロール、書籍、書籍ファイル、読書情報など）
+  - Hono API (`/health`, `/test`, `/api/auth/*`)
+  - OpenAPI/Scalar (`/doc`, `/scalar`)
+  - Prisma スキーマ（ユーザー、ロール、書籍、書籍ファイル、読書情報など）
 
 ## 5. スクリーンショット
 
@@ -79,16 +79,16 @@ BeLib は、電子書籍の閲覧体験と書籍メタデータ管理を同じ�
 
 ```mermaid
 flowchart LR
-	Browser[Browser]
-	FE[Frontend: Vite React]
-	BE[Backend: Hono API]
-	DB[(PostgreSQL)]
-	PGA[pgAdmin4]
+ Browser[Browser]
+ FE[Frontend: Vite React]
+ BE[Backend: Hono API]
+ DB[(PostgreSQL)]
+ PGA[pgAdmin4]
 
-	Browser --> FE
-	FE --> BE
-	BE --> DB
-	PGA --> DB
+ Browser --> FE
+ FE --> BE
+ BE --> DB
+ PGA --> DB
 ```
 
 開発時の主なポート:
@@ -142,13 +142,13 @@ DATABASE_URL=postgresql://user:your_password@localhost:5432/app_db?schema=public
 NODE_ENV=development
 ```
 
-2. DB と pgAdmin を起動
+1. DB と pgAdmin を起動
 
 ```bash
-docker compose -f docker-compose.dev.yml --env-file .env.development up -d db pgadmin4
+docker compose -f docker-compose.dev.yml --env-file .env.development up -d db pgadmin4 app
 ```
 
-3. 依存関係をインストール
+1. 依存関係をインストール
 
 ```bash
 npm install
@@ -156,14 +156,14 @@ npm install --prefix backend
 npm install --prefix frontend
 ```
 
-4. Prisma マイグレーションを適用
+1. Prisma マイグレーションを適用
 
 ```bash
 cd backend
 npx prisma migrate dev
 ```
 
-5. 開発サーバーを起動（リポジトリルート）
+1. 開発サーバーを起動（リポジトリルート）
 
 ```bash
 npm run dev
