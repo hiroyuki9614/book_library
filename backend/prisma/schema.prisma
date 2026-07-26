@@ -131,6 +131,7 @@ model BookFile {
   originalFileName String   @map("original_file_name") @db.VarChar(255)
   storedFileName   String   @map("stored_file_name") @db.VarChar(255)
   fileSize         Int      @map("file_size")
+  fileHash         String   @unique @map("file_hash") @db.VarChar(64)
   bookId           Int      @map("book_id")
   book             Book     @relation(fields: [bookId], references: [id])
 
