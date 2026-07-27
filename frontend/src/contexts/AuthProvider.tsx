@@ -1,34 +1,81 @@
-// localStorageを使用してロールを永続化する仮実装のAuthProvider
-// バックエンド実装時には cookieやJWTなどを使用して認証情報を管理する
-
-import { useState } from "react";
-import type { ReactNode } from "react";
-import { authContext } from "./authContext";
-import type { Role } from "./authContext";
+import { useCallback, useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
+import { authClient } from '@/lib/auth-client';
+import { getCurrentUser } from '@/api/me';
+import { authContext } from './authContext';
+import type { AuthenticatedUser } from './authContext';
 
 interface Props {
-  children: ReactNode;
+	children: ReactNode;
 }
 
 export function AuthProvider({ children }: Props) {
-  // const [role, setRole] = useState<Role>(null);
+	const [user, setUser] = useState<AuthenticatedUser | null>(null);
+	const [isPending, setIsPending] = useState(true);
 
-  // 仮実装：ロールをローカルストレージに保存して永続化
-  const [role, setRole] = useState<Role>(() => {
-    return localStorage.getItem("role") as Role;
-  });
+	const refreshAuth = useCallback(async () => {
+		setIsPending(true);
 
-  const login = (role: Exclude<Role, null>) => {
-    // 仮実装：ロールをローカルストレージに保存して永続化
-    localStorage.setItem("role", role);
-    setRole(role);
-  };
+		try {
+			const currentUser = await getCurrentUser();
+			setUser(currentUser);
+			return currentUser;
+		} catch {
+			setUser(null);
+			return null;
+		} finally {
+			setIsPending(false);
+		}
+	}, []);
 
-  const logout = () => {
-    // 仮実装：ロールをローカルストレージから削除して永続化
-    localStorage.removeItem("role");
-    setRole(null);
-  };
+	useEffect(() => {
+		let isActive = true;
 
-  return <authContext.Provider value={{ role, login, logout }}>{children}</authContext.Provider>;
+		void getCurrentUser()
+			.then((currentUser) => {
+				if (isActive) {
+					setUser(currentUser);
+				}
+			})
+			.catch(() => {
+				if (isActive) {
+					setUser(null);
+				}
+			})
+			.finally(() => {
+				if (isActive) {
+					setIsPending(false);
+				}
+			});
+
+		return () => {
+			isActive = false;
+		};
+	}, []);
+
+	const signOut = async () => {
+		try {
+			await authClient.signOut();
+		} finally {
+			setUser(null);
+		}
+	};
+
+	const role = user?.role ?? null;
+
+	return (
+		<authContext.Provider
+			value={{
+				user,
+				isPending,
+				isAuthenticated: Boolean(user),
+				role,
+				refreshAuth,
+				signOut,
+				logout: signOut,
+			}}
+		>
+			{children}
+		</authContext.Provider>
+	);
 }

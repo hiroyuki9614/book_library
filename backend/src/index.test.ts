@@ -28,4 +28,18 @@ describe('OpenAPI', () => {
 		const html = await res.text();
 		expect(html).toContain('/doc');
 	});
+
+	test('フロントエンドからの認証APIプリフライトを許可する', async () => {
+		const res = await app.request('/api/auth/get-session', {
+			method: 'OPTIONS',
+			headers: {
+				Origin: 'http://localhost:5173',
+				'Access-Control-Request-Method': 'GET',
+			},
+		});
+
+		expect(res.status).toBe(204);
+		expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
+		expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+	});
 });

@@ -17,7 +17,7 @@ BeLib は、電子書籍の閲覧体験と書籍メタデータ管理を同じ�
 
 - ログイン画面とルートガード
   - `GuestRoute` / `RequireAuth` を実装
-  - ロール情報は localStorage を使った仮実装で保持
+  - better-authのCookieセッションと`GET /api/v1/me`から認証ユーザーとロールを取得
 - 書籍一覧画面
   - 検索、ステータス絞り込み、並び替え UI
   - 読書サマリー表示（総冊数、読書中、読了、未読、平均進捗）
@@ -141,6 +141,8 @@ POSTGRES_DB=app_db
 DATABASE_URL=postgresql://user:your_password@localhost:5432/app_db?schema=public
 NODE_ENV=development
 ```
+
+`backend/.env.example` を `backend/.env`、`frontend/.env.example` を `frontend/.env` にコピーし、認証用secretとAPI URLを設定する。
 
 1. DB と pgAdmin を起動
 
