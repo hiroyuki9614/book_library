@@ -5,7 +5,6 @@ import useBooks from '@/hooks/useBooks';
 import useReadingProgresses from '@/hooks/useReadingProgresses';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Skeleton } from '@/components/ui/skeleton';
 import { useState } from 'react';
 
 function Home() {

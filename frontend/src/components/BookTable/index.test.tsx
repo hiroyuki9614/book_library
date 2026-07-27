@@ -162,7 +162,7 @@ describe('BookTable', () => {
 	test('navigates to the reader page when a book row is clicked', async () => {
 		const { container } = await renderBookTable({ sort: 'oldest' });
 
-		await getBookRow(container, 'React Design Patterns').click();
+		(getBookRow(container, 'React Design Patterns') as HTMLElement).click();
 
 		expect(routerMocks.navigate).toHaveBeenCalledWith('/reader/1');
 	});

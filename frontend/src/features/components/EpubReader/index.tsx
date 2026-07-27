@@ -9,19 +9,27 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Spinner } from '@/components/ui/spinner';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheetCapture';
+import type Book from 'epubjs/types/book';
+import type Navigation from 'epubjs/types/navigation';
+import type Rendition from 'epubjs/types/rendition';
+import type { Location as RenditionLocation } from 'epubjs/types/rendition';
+
+function isRightToLeft(book: Book) {
+	const metadata: object = book.packaging.metadata;
+	return 'direction' in metadata && metadata.direction === 'rtl';
+}
 
 function EpubReader() {
 	const mainRef = useRef<HTMLElement | null>(null);
 	const viewerRef = useRef<HTMLDivElement | null>(null);
 	const currentCfiRef = useRef('');
-	const renditionRef = useRef<any>(null);
+	const renditionRef = useRef<Rendition | null>(null);
 	const [spread, setSpread] = useState<'always' | 'none' | 'auto'>('always');
-	const [percentage, setPercentage] = useState<string>('0');
+	const [percentage, setPercentage] = useState(0);
 	const [totalPage, setTotalPage] = useState<number>(0);
 	const [currentPage, setCurrentPage] = useState<number>(0);
-	const [cfi, setCfi] = useState<string>('');
 	const [isLoading, setIsLoading] = useState(true);
-	const [navigation, setNavigation] = useState<any>(null);
+	const [navigation, setNavigation] = useState<Navigation | null>(null);
 	const [history, setHistory] = useState<string[]>([]);
 
 	useEffect(() => {
@@ -41,15 +49,15 @@ function EpubReader() {
 
 		renditionRef.current = rendition;
 
-		const handleRelocated = (location: any) => {
+		const handleRelocated = (location: RenditionLocation) => {
 			const cfi = location.start.cfi;
-
-			const currentPage = book.locations.locationFromCfi(cfi);
-			const totalPage = book.locations.total;
+			const totalPage = book.locations.length();
+			const progress = book.locations.percentageFromCfi(cfi);
+			const currentPage = totalPage > 0 ? Math.max(1, Math.round(progress * totalPage)) : 0;
 
 			setNavigation(book.navigation);
 
-			const percentage = totalPage > 0 ? Math.round((currentPage / totalPage) * 100) : 0;
+			const percentage = Math.round(progress * 100);
 
 			setPercentage(percentage);
 			setTotalPage(totalPage);
@@ -58,16 +66,15 @@ function EpubReader() {
 			// 暫定 DBから読み込むようにするまでは localStorage に保存しておく
 			// ***************************************************************
 			localStorage.setItem('reader-location', cfi);
-			setCfi(cfi);
 		};
 
-		rendition.on('relocated', (location) => {
+		rendition.on('relocated', (location: RenditionLocation) => {
 			currentCfiRef.current = location.start.cfi;
 		});
 
 		const handleKeyUp = (e: KeyboardEvent) => {
 			if (e.key === 'ArrowRight') {
-				if (book.package.metadata.direction === 'rtl') {
+				if (isRightToLeft(book)) {
 					rendition.prev();
 				} else {
 					rendition.next();
@@ -75,7 +82,7 @@ function EpubReader() {
 			}
 
 			if (e.key === 'ArrowLeft') {
-				if (book.package.metadata.direction === 'rtl') {
+				if (isRightToLeft(book)) {
 					rendition.next();
 				} else {
 					rendition.prev();
@@ -115,7 +122,7 @@ function EpubReader() {
 	const handlePrev = () => {
 		const book = renditionRef.current?.book;
 
-		if (book?.package?.metadata?.direction === 'rtl') {
+		if (book && isRightToLeft(book)) {
 			renditionRef.current?.next();
 		} else {
 			renditionRef.current?.prev();
@@ -125,7 +132,7 @@ function EpubReader() {
 	const handleNext = () => {
 		const book = renditionRef.current?.book;
 
-		if (book?.package?.metadata?.direction === 'rtl') {
+		if (book && isRightToLeft(book)) {
 			renditionRef.current?.prev();
 		} else {
 			renditionRef.current?.next();
