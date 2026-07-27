@@ -7,9 +7,19 @@ import RequireAdmin from './RequireAdmin';
 import RequireAuth from './RequireAuth';
 import { authContext, type Role } from '@/contexts/authContext';
 
-const renderWithAuth = ({ children, initialEntries, role }: { children: ReactNode; initialEntries: string[]; role: Role }) =>
+const renderWithAuth = ({ children, initialEntries, role, isPending = false }: { children: ReactNode; initialEntries: string[]; role: Role; isPending?: boolean }) =>
 	render(
-		<authContext.Provider value={{ role, login: vi.fn(), logout: vi.fn() }}>
+		<authContext.Provider
+			value={{
+				session: null,
+				user: role ? { id: 1, email: 'x', role } : null,
+				isPending,
+				isAuthenticated: Boolean(role),
+				role,
+				signOut: vi.fn(),
+				logout: vi.fn(),
+			}}
+		>
 			<MemoryRouter initialEntries={initialEntries}>{children}</MemoryRouter>
 		</authContext.Provider>,
 	);
@@ -46,6 +56,25 @@ describe('route guard components', () => {
 
 		await expect.element(getByText('Login page')).toBeInTheDocument();
 		await expect.element(getByText('Current path: /login')).toBeInTheDocument();
+		await expect.element(getByText('Private page')).not.toBeInTheDocument();
+	});
+
+	test('RequireAuth shows loading while session is pending', async () => {
+		const { getByText } = await renderWithAuth({
+			role: null,
+			isPending: true,
+			initialEntries: ['/private'],
+			children: (
+				<Routes>
+					<Route element={<RequireAuth />}>
+						<Route path='/private' element={<div>Private page</div>} />
+					</Route>
+					<Route path='/login' element={<TestPage label='Login page' />} />
+				</Routes>
+			),
+		});
+
+		await expect.element(getByText('Loading...')).toBeInTheDocument();
 		await expect.element(getByText('Private page')).not.toBeInTheDocument();
 	});
 

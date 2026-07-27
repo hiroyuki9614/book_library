@@ -9,7 +9,7 @@ type LoginFormValues = z.infer<typeof formSchema>;
 
 const formSchema = z.object({
 	userInput: z.string().min(1, 'ユーザーIDを入力してください。'),
-	passwordInput: z.string().min(1, 'パスワードを入力してください。'),
+	passwordInput: z.string().min(8, 'パスワードは8文字以上で入力してください。'),
 });
 
 function Login({ onSubmit, isPending }: { onSubmit: (values: LoginFormValues) => void | Promise<void>; isPending: boolean }) {
