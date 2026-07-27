@@ -7,9 +7,19 @@ import RequireAdmin from './RequireAdmin';
 import RequireAuth from './RequireAuth';
 import { authContext, type Role } from '@/contexts/authContext';
 
-const renderWithAuth = ({ children, initialEntries, role }: { children: ReactNode; initialEntries: string[]; role: Role }) =>
+const renderWithAuth = ({ children, initialEntries, role, isPending = false }: { children: ReactNode; initialEntries: string[]; role: Role; isPending?: boolean }) =>
 	render(
-		<authContext.Provider value={{ role, login: vi.fn(), logout: vi.fn() }}>
+		<authContext.Provider
+			value={{
+				user: role ? { id: 1, name: 'Test User', email: 'x@example.com', role } : null,
+				isPending,
+				isAuthenticated: Boolean(role),
+				role,
+				refreshAuth: vi.fn(),
+				signOut: vi.fn(),
+				logout: vi.fn(),
+			}}
+		>
 			<MemoryRouter initialEntries={initialEntries}>{children}</MemoryRouter>
 		</authContext.Provider>,
 	);
@@ -46,6 +56,25 @@ describe('route guard components', () => {
 
 		await expect.element(getByText('Login page')).toBeInTheDocument();
 		await expect.element(getByText('Current path: /login')).toBeInTheDocument();
+		await expect.element(getByText('Private page')).not.toBeInTheDocument();
+	});
+
+	test('RequireAuth shows loading while session is pending', async () => {
+		const { getByText } = await renderWithAuth({
+			role: null,
+			isPending: true,
+			initialEntries: ['/private'],
+			children: (
+				<Routes>
+					<Route element={<RequireAuth />}>
+						<Route path='/private' element={<div>Private page</div>} />
+					</Route>
+					<Route path='/login' element={<TestPage label='Login page' />} />
+				</Routes>
+			),
+		});
+
+		await expect.element(getByText('Loading...')).toBeInTheDocument();
 		await expect.element(getByText('Private page')).not.toBeInTheDocument();
 	});
 
@@ -122,6 +151,26 @@ describe('route guard components', () => {
 		await expect.element(getByText('Home page')).not.toBeInTheDocument();
 	});
 
+	test('RequireAdmin shows loading without redirecting while session is pending', async () => {
+		const { getByText } = await renderWithAuth({
+			role: null,
+			isPending: true,
+			initialEntries: ['/admin'],
+			children: (
+				<Routes>
+					<Route path='/admin' element={<RequireAdmin />}>
+						<Route index element={<div>Admin page</div>} />
+					</Route>
+					<Route path='/' element={<TestPage label='Home page' />} />
+				</Routes>
+			),
+		});
+
+		await expect.element(getByText('Loading...')).toBeInTheDocument();
+		await expect.element(getByText('Admin page')).not.toBeInTheDocument();
+		await expect.element(getByText('Home page')).not.toBeInTheDocument();
+	});
+
 	test('RequireAdmin redirects non-admin users to the home page', async () => {
 		const { getByText } = await renderWithAuth({
 			role: 'user',
@@ -150,6 +199,50 @@ describe('route guard components', () => {
 					<Route path='/admin' element={<RequireAdmin />}>
 						<Route index element={<div>Admin page</div>} />
 					</Route>
+					<Route path='/' element={<TestPage label='Home page' />} />
+				</Routes>
+			),
+		});
+
+		await expect.element(getByText('Home page')).toBeInTheDocument();
+		await expect.element(getByText('Current path: /')).toBeInTheDocument();
+		await expect.element(getByText('Admin page')).not.toBeInTheDocument();
+	});
+
+	test('RequireAuthとRequireAdminの組み合わせで未認証ユーザーを/adminからloginへ戻す', async () => {
+		const { getByText } = await renderWithAuth({
+			role: null,
+			initialEntries: ['/admin'],
+			children: (
+				<Routes>
+					<Route element={<RequireAuth />}>
+						<Route path='/admin' element={<RequireAdmin />}>
+							<Route index element={<div>Admin page</div>} />
+						</Route>
+					</Route>
+					<Route path='/login' element={<TestPage label='Login page' />} />
+					<Route path='/' element={<div>Home page</div>} />
+				</Routes>
+			),
+		});
+
+		await expect.element(getByText('Login page')).toBeInTheDocument();
+		await expect.element(getByText('Current path: /login')).toBeInTheDocument();
+		await expect.element(getByText('Admin page')).not.toBeInTheDocument();
+	});
+
+	test('RequireAuthとRequireAdminの組み合わせで一般ユーザーを/adminからhomeへ戻す', async () => {
+		const { getByText } = await renderWithAuth({
+			role: 'user',
+			initialEntries: ['/admin'],
+			children: (
+				<Routes>
+					<Route element={<RequireAuth />}>
+						<Route path='/admin' element={<RequireAdmin />}>
+							<Route index element={<div>Admin page</div>} />
+						</Route>
+					</Route>
+					<Route path='/login' element={<div>Login page</div>} />
 					<Route path='/' element={<TestPage label='Home page' />} />
 				</Routes>
 			),
