@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/useAuth';
 import LoginForm from '@/components/forms/Login';
 import { toast } from 'sonner';
@@ -28,6 +28,12 @@ export default function Login() {
 				<LoginForm onSubmit={handleLogin} isPending={isPending} />
 
 				<p>current role: {role ?? '未ログイン'}</p>
+				<p className='mt-4 text-sm'>
+					初回セットアップは{' '}
+					<Link className='underline' to='/admin/register'>
+						管理者登録
+					</Link>
+				</p>
 			</SectionCard>
 		</main>
 	);
