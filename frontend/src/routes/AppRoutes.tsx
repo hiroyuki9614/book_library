@@ -4,6 +4,7 @@ import AppLayout from '@/layouts/AppLayout';
 import RequireAuth from '@/components/RequireAuth';
 
 import Login from '@/pages/Login';
+import AdminRegistration from '@/pages/AdminRegistration';
 import Home from '@/pages/Home';
 import About from '@/pages/About';
 import Contact from '@/pages/Contact';
@@ -18,6 +19,10 @@ export const appRouter = createBrowserRouter([
 			{
 				path: '/login',
 				element: <Login />,
+			},
+			{
+				path: '/admin/register',
+				element: <AdminRegistration />,
 			},
 		],
 	},
