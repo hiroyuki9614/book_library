@@ -1,7 +1,6 @@
 import { hashPassword } from 'better-auth/crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { prisma } from '../../lib/prisma.js';
 
 const adminRegistrationSchema = z.object({
 	name: z.string().trim().min(1).max(255),
@@ -80,8 +79,14 @@ export function createAdminSetupRoutes(dependencies: AdminSetupDependencies) {
 	return routes;
 }
 
+async function getPrisma() {
+	const { prisma } = await import('../../lib/prisma.js');
+	return prisma;
+}
+
 const adminSetupRoutes = createAdminSetupRoutes({
 	hasAdmin: async () => {
+		const prisma = await getPrisma();
 		const admin = await prisma.user.findFirst({
 			where: { role: { name: 'admin' } },
 			select: { id: true },
@@ -90,6 +95,7 @@ const adminSetupRoutes = createAdminSetupRoutes({
 		return admin !== null;
 	},
 	createAdmin: async ({ name, email, password }) => {
+		const prisma = await getPrisma();
 		const passwordHash = await hashPassword(password);
 
 		return prisma.$transaction(
