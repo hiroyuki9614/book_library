@@ -2,9 +2,13 @@ import { Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from '@/contexts/useAuth';
 
 export default function GuestRoute() {
-	const { role } = useAuth();
+	const { isAuthenticated, isPending } = useAuth();
 
-	if (role) {
+	if (isPending) {
+		return <div>Loading...</div>;
+	}
+
+	if (isAuthenticated) {
 		return <Navigate to='/' replace />;
 	}
 

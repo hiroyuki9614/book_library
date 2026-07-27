@@ -4,6 +4,7 @@ import { prisma } from './prisma.js';
 
 const appPort = process.env.APP_PORT ?? '3000';
 const authSecret = process.env.BETTER_AUTH_SECRET;
+const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:5173';
 
 if (!authSecret) {
 	throw new Error('BETTER_AUTH_SECRET is not defined');
@@ -11,6 +12,7 @@ if (!authSecret) {
 
 export const auth = betterAuth({
 	baseURL: process.env.BETTER_AUTH_URL ?? `http://localhost:${appPort}`,
+	trustedOrigins: [frontendUrl],
 	secret: authSecret,
 	database: prismaAdapter(prisma, {
 		provider: 'postgresql',

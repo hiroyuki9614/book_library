@@ -9,6 +9,7 @@ import About from '@/pages/About';
 import Contact from '@/pages/Contact';
 import ReaderPage from '@/pages/ReaderPage';
 import Admin from '@/pages/Admin';
+import RequireAdmin from '@/components/RequireAdmin';
 import NotFound from '@/pages/404';
 
 export const appRouter = createBrowserRouter([
@@ -22,11 +23,6 @@ export const appRouter = createBrowserRouter([
 		],
 	},
 	{
-		path: '/admin',
-		element: <AppLayout />,
-		children: [{ index: true, element: <Admin /> }],
-	},
-	{
 		element: <RequireAuth />,
 		children: [
 			{
@@ -38,6 +34,16 @@ export const appRouter = createBrowserRouter([
 					{ path: 'contact', element: <Contact /> },
 					{ path: 'reader/:id', element: <ReaderPage /> },
 					{ path: '*', element: <NotFound /> },
+				],
+			},
+			{
+				path: '/admin',
+				element: <RequireAdmin />,
+				children: [
+					{
+						element: <AppLayout />,
+						children: [{ index: true, element: <Admin /> }],
+					},
 				],
 			},
 		],
