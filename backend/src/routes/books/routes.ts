@@ -1,7 +1,4 @@
 import { Hono } from 'hono';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { PrismaClient } from '@prisma/client';
-import { Pool } from 'pg';
 import type { PrismaVariables } from '../../lib/prisma.js';
 
 const app = new Hono<PrismaVariables>();
