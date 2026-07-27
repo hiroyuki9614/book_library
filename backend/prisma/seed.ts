@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { hashPassword } from 'better-auth/crypto';
 import { PrismaClient } from './generated/prisma/client.js';
+import { bookSeeds, categorySeeds } from './seedData.js';
 
 const connectionString = process.env.DATABASE_URL;
 
@@ -16,53 +17,6 @@ const prisma = new PrismaClient({ adapter });
 
 const userPassword = process.env.SEED_USER_PASSWORD ?? 'DummyPass123!';
 const adminPassword = process.env.SEED_ADMIN_PASSWORD ?? 'AdminPass123!';
-
-const categorySeeds = [
-	{ name: '小説', displayOrder: 1 },
-	{ name: '技術書', displayOrder: 2 },
-	{ name: 'ビジネス', displayOrder: 3 },
-	{ name: '歴史', displayOrder: 4 },
-	{ name: 'その他', displayOrder: 5 },
-] as const;
-
-const bookSeeds = [
-	{
-		title: 'ブラウザで読むサンプル小説',
-		authorName: 'BeLib Sample Author',
-		publishedAt: new Date('2024-01-15T00:00:00.000Z'),
-		publisher: 'BeLib Press',
-		description: 'EPUBリーダーと右開き表示を確認するためのサンプル小説です。',
-		categoryName: '小説',
-		pageTurnDirection: 'rtl',
-	},
-	{
-		title: 'TypeScript API開発入門',
-		authorName: 'BeLib Development Team',
-		publishedAt: new Date('2025-03-10T00:00:00.000Z'),
-		publisher: 'BeLib Press',
-		description: 'TypeScriptとHonoを使ったAPI開発を学ぶためのサンプル技術書です。',
-		categoryName: '技術書',
-		pageTurnDirection: 'ltr',
-	},
-	{
-		title: 'PostgreSQLデータベース設計',
-		authorName: 'BeLib Development Team',
-		publishedAt: new Date('2025-06-20T00:00:00.000Z'),
-		publisher: 'BeLib Press',
-		description: 'リレーショナルデータベース設計を確認するためのサンプル技術書です。',
-		categoryName: '技術書',
-		pageTurnDirection: 'ltr',
-	},
-	{
-		title: 'チーム開発の基本',
-		authorName: 'BeLib Development Team',
-		publishedAt: new Date('2025-09-01T00:00:00.000Z'),
-		publisher: 'BeLib Press',
-		description: 'チームでソフトウェアを開発する際の基本をまとめたサンプル書籍です。',
-		categoryName: 'ビジネス',
-		pageTurnDirection: 'ltr',
-	},
-] as const;
 
 async function upsertCredentialAccount(userId: number, password: string) {
 	const passwordHash = await hashPassword(password);
@@ -169,20 +123,22 @@ async function main() {
 			throw new Error(`Category not found: ${bookSeed.categoryName}`);
 		}
 
+		const authorName = 'authorName' in bookSeed ? bookSeed.authorName : null;
+		const publisher = 'publisher' in bookSeed ? bookSeed.publisher : null;
 		const data = {
 			title: bookSeed.title,
-			authorName: bookSeed.authorName,
-			publishedAt: bookSeed.publishedAt,
-			publisher: bookSeed.publisher,
-			description: bookSeed.description,
+			authorName,
+			publishedAt: null,
+			publisher,
+			description: null,
 			categoryId,
-			pageTurnDirection: bookSeed.pageTurnDirection,
+			pageTurnDirection: 'ltr',
 			deletedAt: null,
 		};
 		const existingBook = await prisma.book.findFirst({
 			where: {
 				title: bookSeed.title,
-				authorName: bookSeed.authorName,
+				authorName,
 			},
 		});
 		const book = existingBook
@@ -257,7 +213,7 @@ async function main() {
 	}
 
 	console.log(
-		`Seed completed: 2 credential users, ${categorySeeds.length} categories, ${bookSeeds.length} books, ${sampleReadingInfos.length} reading infos`,
+		`Seed completed: 2 credential users, ${categorySeeds.length} categories, ${bookSeeds.length} personal library books, ${sampleReadingInfos.length} reading infos`,
 	);
 }
 
