@@ -7,6 +7,31 @@ vi.mock('@hono/node-server', () => ({
 vi.mock('./lib/auth.js', () => ({
 	auth: {
 		handler: vi.fn(() => new Response(JSON.stringify({ message: 'Auth route is mocked in contract tests', code: 'AUTH_MOCK' }), { status: 501, headers: { 'content-type': 'application/json' } })),
+		api: {
+			getSession: vi.fn(({ headers }: { headers: Headers }) => {
+				if (!headers.get('Authorization')) {
+					return null;
+				}
+
+				return {
+					user: { id: '1' },
+					session: { id: 'test-session' },
+				};
+			}),
+		},
+	},
+}));
+
+vi.mock('./lib/prisma.js', () => ({
+	prisma: {
+		user: {
+			findFirst: vi.fn(() => ({
+				id: 1,
+				name: 'Test User',
+				email: 'test@example.com',
+				role: { name: 'user' },
+			})),
+		},
 	},
 }));
 

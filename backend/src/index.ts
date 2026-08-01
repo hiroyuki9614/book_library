@@ -1,13 +1,26 @@
 import { serve } from '@hono/node-server';
 import { Scalar } from '@scalar/hono-api-reference';
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 import { describeRoute } from 'hono-openapi';
 import { pathToFileURL } from 'node:url';
 import { auth } from './lib/auth.js';
 import { createOpenApiHandler } from './routes/openApi/route.js';
+import { getMe } from './routes/me/route.js';
 
 const app = new Hono();
 const environment = process.env.ENVIRONMENT;
+const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:5173';
+
+app.use(
+	'/api/*',
+	cors({
+		origin: frontendUrl,
+		allowHeaders: ['Content-Type'],
+		allowMethods: ['GET', 'POST', 'OPTIONS'],
+		credentials: true,
+	}),
+);
 
 app.get(
 	'/health',
@@ -43,6 +56,8 @@ app.get(
 app.on(['GET', 'POST'], '/api/auth/*', (c) => {
 	return auth.handler(c.req.raw);
 });
+
+app.get('/api/v1/me', getMe);
 
 app.get('/doc', createOpenApiHandler(app));
 
