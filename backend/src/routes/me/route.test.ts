@@ -65,4 +65,34 @@ describe('GET /me', () => {
 			role: 'admin',
 		});
 	});
+
+	test('ユーザーIDを数値へ変換できないセッションを401で拒否する', async () => {
+		mocks.getSession.mockResolvedValue({
+			user: { id: 'not-a-number' },
+		});
+
+		const response = await app.request('/me');
+
+		expect(response.status).toBe(401);
+		expect(await response.json()).toEqual({
+			message: 'Authentication required',
+			code: 'UNAUTHORIZED',
+		});
+		expect(mocks.findFirst).not.toHaveBeenCalled();
+	});
+
+	test('セッションのユーザーが削除済みまたは存在しない場合を401で拒否する', async () => {
+		mocks.getSession.mockResolvedValue({
+			user: { id: '1' },
+		});
+		mocks.findFirst.mockResolvedValue(null);
+
+		const response = await app.request('/me');
+
+		expect(response.status).toBe(401);
+		expect(await response.json()).toEqual({
+			message: 'Authentication required',
+			code: 'UNAUTHORIZED',
+		});
+	});
 });
