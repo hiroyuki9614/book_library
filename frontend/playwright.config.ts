@@ -1,9 +1,11 @@
 import path from 'node:path';
 import { defineConfig } from '@playwright/test';
+import { fileURLToPath } from 'node:url';
 import { getE2EConfig } from './src/e2e/e2eEnv.js';
 
 const e2eConfig = getE2EConfig(process.env);
-const repositoryDirectory = path.resolve(process.cwd(), '..');
+const configDirectory = path.dirname(fileURLToPath(import.meta.url));
+const repositoryDirectory = path.resolve(configDirectory, '..');
 
 process.env.DATABASE_URL = e2eConfig.databaseUrl;
 process.env.VITE_API_BASE_URL = 'http://localhost:3000';

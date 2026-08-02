@@ -17,6 +17,7 @@ function createPrismaDouble(overrides: Record<string, unknown> = {}) {
 			create: vi.fn().mockResolvedValue({ id: 20, roleId: 10 }),
 		},
 		account: {
+			findFirst: vi.fn().mockResolvedValue({ password: 'existing-hash' }),
 			create: vi.fn().mockResolvedValue({ id: 30 }),
 		},
 		...overrides,
@@ -63,10 +64,42 @@ describe('createInitialAdmin', () => {
 		const prisma = createPrismaDouble();
 		prisma.tx.user.findUnique.mockResolvedValue({ id: 40, roleId: 10 });
 
-		const result = await createInitialAdmin(prisma, VALID_PARAMS);
+		const result = await createInitialAdmin(prisma, VALID_PARAMS, {
+			verifyPassword: vi.fn().mockResolvedValue(true),
+		});
 
 		expect(result).toEqual({ created: false, userId: 40 });
 		expect(prisma.tx.user.create).not.toHaveBeenCalled();
+		expect(prisma.tx.account.create).not.toHaveBeenCalled();
+	});
+
+	test.each([
+		['without a credential account', null],
+		['with a null credential password', { password: null }],
+	])('rejects an existing admin %s', async (_description, account) => {
+		const prisma = createPrismaDouble();
+		prisma.tx.user.findUnique.mockResolvedValue({ id: 40, roleId: 10, deletedAt: null });
+		prisma.tx.account.findFirst.mockResolvedValue(account);
+
+		await expect(createInitialAdmin(prisma, VALID_PARAMS)).rejects.toThrow('existing admin is not ready for login');
+		expect(prisma.tx.account.create).not.toHaveBeenCalled();
+	});
+
+	test('rejects a logically deleted admin without changing it', async () => {
+		const prisma = createPrismaDouble();
+		prisma.tx.user.findUnique.mockResolvedValue({ id: 40, roleId: 10, deletedAt: new Date() });
+
+		await expect(createInitialAdmin(prisma, VALID_PARAMS)).rejects.toThrow('existing admin is not ready for login');
+		expect(prisma.tx.account.findFirst).not.toHaveBeenCalled();
+	});
+
+	test('rejects an existing admin when the supplied password does not match', async () => {
+		const prisma = createPrismaDouble();
+		prisma.tx.user.findUnique.mockResolvedValue({ id: 40, roleId: 10, deletedAt: null });
+
+		await expect(createInitialAdmin(prisma, VALID_PARAMS, {
+			verifyPassword: vi.fn().mockResolvedValue(false),
+		})).rejects.toThrow('existing admin is not ready for login');
 		expect(prisma.tx.account.create).not.toHaveBeenCalled();
 	});
 
