@@ -94,7 +94,7 @@ flowchart LR
 開発時の主なポート:
 
 - Frontend: `5173` (Vite デフォルト)
-- Backend API: `3000`
+- Backend API: `3000` (ローカル) / `3001` (Docker)
 - PostgreSQL: `5432`
 - pgAdmin: `8080`
 
@@ -149,8 +149,8 @@ cp backend/.env.example backend/.env
 cp frontend/.env.example frontend/.env
 ```
 
-- `VITE_API_BASE_URL` はブラウザから接続するバックエンドURLで、ローカル開発の既定値は `http://localhost:3000`
-- フロントエンドの標準ポートは `5173`、バックエンドの標準ポートは `3000`
+- `VITE_API_BASE_URL` はブラウザから接続するバックエンドURLで、ローカル開発の既定値は `http://localhost:3000`。Docker版バックエンドを使う場合は `http://localhost:3001` に変更する
+- フロントエンドの標準ポートは `5173`、ローカルバックエンドは `3000`、Docker版バックエンドは `3001`
 - Cookieセッションを使用する認証リクエストでは、Fetch APIの`credentials`を有効にする必要がある
 - `frontend/.env` はローカル設定のためGit管理せず、設定例の`frontend/.env.example`だけをコミットする
 
@@ -159,6 +159,23 @@ cp frontend/.env.example frontend/.env
 ```bash
 docker compose -f docker-compose.dev.yml --env-file .env.development up -d db pgadmin4 app
 ```
+
+Docker Compose の `app`、`db`、`pgadmin4` には `restart: unless-stopped` を設定しています。
+Docker デーモンが起動すると、明示的に停止していないコンテナは自動的に起動します。
+ホスト再起動後も Docker デーモンが自動起動することを確認してください。
+
+```bash
+systemctl is-enabled docker
+docker compose -f docker-compose.dev.yml --env-file .env.development ps
+```
+
+`docker compose stop` または `docker compose down` で明示的に停止した場合は、自動再起動の対象外になるため、次のコマンドで復旧します。
+
+```bash
+docker compose -f docker-compose.dev.yml --env-file .env.development up -d app
+```
+
+Docker の `app` はホスト側の `3001` 番ポートで公開されるため、ローカルで `npm run dev` を起動したままでもポート競合しません。Docker版バックエンドを使う場合は `frontend/.env` の `VITE_API_BASE_URL` を `http://localhost:3001` に変更してください。
 
 1. 依存関係をインストール
 
@@ -184,9 +201,10 @@ npm run dev
 アクセス先:
 
 - Frontend: `http://localhost:5173`
-- Backend: `http://localhost:3000`
-- OpenAPI: `http://localhost:3000/doc`
-- Scalar: `http://localhost:3000/scalar`
+- Backend (ローカル): `http://localhost:3000`
+- Backend (Docker): `http://localhost:3001`
+- OpenAPI (Docker): `http://localhost:3001/doc`
+- Scalar (Docker): `http://localhost:3001/scalar`
 - pgAdmin: `http://localhost:8080`
 
 ## 11. 今後の予定
