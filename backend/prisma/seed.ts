@@ -15,7 +15,7 @@ const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 const userPassword = process.env.SEED_USER_PASSWORD ?? 'DummyPass123!';
-const adminPassword = process.env.SEED_ADMIN_PASSWORD ?? 'AdminPass123!';
+const adminPassword = process.env.SEED_ADMIN_PASSWORD;
 
 const categorySeeds = [
 	{ name: '小説', displayOrder: 1 },
@@ -125,22 +125,29 @@ async function main() {
 		},
 	});
 
-	const admin = await prisma.user.upsert({
-		where: { email: 'admin@example.com' },
-		update: {
-			name: 'Admin User',
-			roleId: adminRole.id,
-			deletedAt: null,
-		},
-		create: {
-			email: 'admin@example.com',
-			name: 'Admin User',
-			roleId: adminRole.id,
-		},
-	});
-
+	// For safety, seed does not create an admin when ADMIN password is not explicitly provided.
+	// Use the dedicated `create-initial-admin` script to create a real admin.
 	await upsertCredentialAccount(user.id, userPassword);
-	await upsertCredentialAccount(admin.id, adminPassword);
+	if (adminPassword) {
+		// If someone explicitly set SEED_ADMIN_PASSWORD in environment, create or update the admin.
+		const admin = await prisma.user.upsert({
+			where: { email: 'admin@example.com' },
+			update: {
+				name: 'Admin User',
+				roleId: adminRole.id,
+				deletedAt: null,
+			},
+			create: {
+				email: 'admin@example.com',
+				name: 'Admin User',
+				roleId: adminRole.id,
+			},
+		});
+
+		await upsertCredentialAccount(admin.id, adminPassword);
+	} else {
+		console.log('Skipping admin creation in seed (no SEED_ADMIN_PASSWORD provided)');
+	}
 
 	const categories = new Map<string, number>();
 

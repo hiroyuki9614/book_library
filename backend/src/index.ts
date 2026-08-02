@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { auth } from './lib/auth.js';
 import { createOpenApiHandler } from './routes/openApi/route.js';
 import { getMe } from './routes/me/route.js';
+import { bookRoutes } from './routes/books/routes.js';
 
 const app = new Hono();
 const environment = process.env.ENVIRONMENT;
@@ -58,6 +59,8 @@ app.on(['GET', 'POST'], '/api/auth/*', (c) => {
 });
 
 app.get('/api/v1/me', getMe);
+
+app.route('/api/v1/books', bookRoutes);
 
 app.get('/doc', createOpenApiHandler(app));
 
@@ -116,9 +119,7 @@ export default app;
 
 const port = Number(process.env.APP_PORT ?? 3000);
 
-const isEntryPoint = process.argv[1]
-	? import.meta.url === pathToFileURL(process.argv[1]).href
-	: false;
+const isEntryPoint = process.argv[1] ? import.meta.url === pathToFileURL(process.argv[1]).href : false;
 
 if (isEntryPoint) {
 	serve({

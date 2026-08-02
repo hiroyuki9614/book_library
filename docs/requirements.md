@@ -399,6 +399,44 @@ MVPでは以下を管理しない。
 
 ### 9.3 可用性
 
+## 初期管理者の作成方法 (運用手順)
+
+- 環境変数（またはCLI引数）で以下を指定して、初期管理者を安全に作成する。値は本番の秘密管理システムで管理すること。
+	- `INITIAL_ADMIN_EMAIL`
+	- `INITIAL_ADMIN_NAME`
+	- `INITIAL_ADMIN_PASSWORD` (最低8文字)
+- バックエンドで次のコマンドを実行する：
+
+```
+cd backend
+npm run create:initial-admin -- --INITIAL_ADMIN_EMAIL=admin@example.com --INITIAL_ADMIN_NAME="Admin" --INITIAL_ADMIN_PASSWORD="S3curePass!"
+```
+
+- `seed.ts`は明示的に `SEED_ADMIN_PASSWORD` を与えない限り管理者を自動生成しない。開発時に一時的に管理者を作る場合は `SEED_ADMIN_PASSWORD` を環境変数で与えてください（本番リポジトリへコミットしないこと）。
+
+## E2E実行手順 (概要)
+
+- E2Eはローカルでバックエンドとフロントエンドを起動した状態で実行します。前提として `DATABASE_URL` または `DATABASE_URL_TEST` がテスト用DBを指していることを確認してください。
+- 簡易実行例：
+
+```
+# in one terminal: run a Postgres test instance and set DATABASE_URL
+cd backend
+export DATABASE_URL="postgres://user:pass@localhost:5432/belib_test"
+npx prisma migrate deploy || true
+npm run dev
+
+# in another terminal: start frontend
+cd frontend
+npm run dev
+
+# then run e2e (will call create-initial-admin)
+npm run test:e2e
+```
+
+詳細はリポジトリ内の `backend/scripts/create-initial-admin.ts` と `frontend/e2e/initial-admin-login.spec.ts` を参照してください。
+
+
 - 通常時は常時利用可能な状態で運用する
 - 計画停止、障害、メンテナンスによる停止は許容する
 - サーバー再起動により復旧可能な構成を目標とする
