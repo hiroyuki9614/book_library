@@ -1,41 +1,24 @@
-import path from 'node:path';
+<<<<<<< HEAD
 import { defineConfig } from '@playwright/test';
-import { fileURLToPath } from 'node:url';
-import { getE2EConfig } from './src/e2e/e2eEnv.js';
-
-const e2eConfig = getE2EConfig(process.env);
-const configDirectory = path.dirname(fileURLToPath(import.meta.url));
-const repositoryDirectory = path.resolve(configDirectory, '..');
-
-process.env.DATABASE_URL = e2eConfig.databaseUrl;
-process.env.VITE_API_BASE_URL = 'http://localhost:3000';
-process.env.FRONTEND_URL = 'http://localhost:5173';
 
 export default defineConfig({
 	testDir: './e2e',
-	globalSetup: './e2e/global-setup.ts',
-	timeout: 120_000,
-	reporter: [['list'], ['html', { outputFolder: 'playwright-report', open: 'never' }]],
+	timeout: 120000,
+	expect: {
+		timeout: 5000,
+	},
+	reporter: [['list'], ['html', { open: 'never' }]],
 	use: {
 		baseURL: 'http://localhost:5173',
 		trace: 'on-first-retry',
 		screenshot: 'only-on-failure',
-		video: 'retain-on-failure',
+		actionTimeout: 10000,
 	},
-	webServer: [
-		{
-			command: 'npm run dev',
-			cwd: path.join(repositoryDirectory, 'backend'),
-			url: 'http://localhost:3000/health',
-			timeout: 120_000,
-			reuseExistingServer: false,
-		},
-		{
-			command: 'npm run dev',
-			cwd: path.join(repositoryDirectory, 'frontend'),
-			url: 'http://localhost:5173',
-			timeout: 120_000,
-			reuseExistingServer: false,
-		},
-	],
+	webServer: {
+		// start-servers.sh is used to set up the E2E environment (E2E DB, env vars, start backend/frontend)
+		command: 'sh ./e2e/start-servers.sh',
+		url: 'http://localhost:5173',
+		timeout: 120000,
+		reuseExistingServer: false,
+	},
 });
