@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { hashPassword } from 'better-auth/crypto';
 import { PrismaClient } from './generated/prisma/client.js';
+import { readOptionalSeedPassword } from '../src/lib/seedCredentials.js';
 
 const connectionString = process.env.DATABASE_URL;
 
@@ -14,8 +15,8 @@ const pool = new Pool({ connectionString });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
-const userPassword = process.env.SEED_USER_PASSWORD ?? 'DummyPass123!';
-const adminPassword = process.env.SEED_ADMIN_PASSWORD ?? 'AdminPass123!';
+const userPassword = readOptionalSeedPassword(process.env.SEED_USER_PASSWORD);
+const adminPassword = readOptionalSeedPassword(process.env.SEED_ADMIN_PASSWORD);
 
 const categorySeeds = [
 	{ name: '小説', displayOrder: 1 },
@@ -111,36 +112,41 @@ async function main() {
 		},
 	});
 
-	const user = await prisma.user.upsert({
-		where: { email: 'dummy@example.com' },
-		update: {
-			name: 'Dummy User',
-			roleId: userRole.id,
-			deletedAt: null,
-		},
-		create: {
-			email: 'dummy@example.com',
-			name: 'Dummy User',
-			roleId: userRole.id,
-		},
-	});
+	let user: { id: number } | undefined;
+	if (userPassword) {
+		user = await prisma.user.upsert({
+			where: { email: 'dummy@example.com' },
+			update: {
+				name: 'Dummy User',
+				roleId: userRole.id,
+				deletedAt: null,
+			},
+			create: {
+				email: 'dummy@example.com',
+				name: 'Dummy User',
+				roleId: userRole.id,
+			},
+		});
+		await upsertCredentialAccount(user.id, userPassword);
+	}
 
-	const admin = await prisma.user.upsert({
-		where: { email: 'admin@example.com' },
-		update: {
-			name: 'Admin User',
-			roleId: adminRole.id,
-			deletedAt: null,
-		},
-		create: {
-			email: 'admin@example.com',
-			name: 'Admin User',
-			roleId: adminRole.id,
-		},
-	});
-
-	await upsertCredentialAccount(user.id, userPassword);
-	await upsertCredentialAccount(admin.id, adminPassword);
+	let admin: { id: number } | undefined;
+	if (adminPassword) {
+		admin = await prisma.user.upsert({
+			where: { email: 'admin@example.com' },
+			update: {
+				name: 'Admin User',
+				roleId: adminRole.id,
+				deletedAt: null,
+			},
+			create: {
+				email: 'admin@example.com',
+				name: 'Admin User',
+				roleId: adminRole.id,
+			},
+		});
+		await upsertCredentialAccount(admin.id, adminPassword);
+	}
 
 	const categories = new Map<string, number>();
 
@@ -195,69 +201,77 @@ async function main() {
 	const allBookIds = [...books.values()];
 	const generalUserBookIds = allBookIds.slice(0, 3);
 
-	for (const bookId of allBookIds) {
-		await prisma.roleBookPermission.upsert({
-			where: {
-				roleId_bookId: { roleId: adminRole.id, bookId },
-			},
-			update: {},
-			create: { roleId: adminRole.id, bookId },
-		});
-	}
-
-	for (const bookId of generalUserBookIds) {
-		await prisma.roleBookPermission.upsert({
-			where: {
-				roleId_bookId: { roleId: userRole.id, bookId },
-			},
-			update: {},
-			create: { roleId: userRole.id, bookId },
-		});
-	}
-
-	const sampleReadingInfos = [
-		{
-			bookId: generalUserBookIds[0],
-			readStatus: 'completed',
-			currentPosition: null,
-		},
-		{
-			bookId: generalUserBookIds[1],
-			readStatus: 'reading',
-			currentPosition: 'epubcfi(/6/4[chapter2]!/4/2/8)',
-		},
-		{
-			bookId: generalUserBookIds[2],
-			readStatus: 'unread',
-			currentPosition: null,
-		},
-	];
-
-	for (const readingInfo of sampleReadingInfos) {
-		if (!readingInfo.bookId) {
-			throw new Error('Book for reading info was not created');
-		}
-
-		await prisma.readingInfo.upsert({
-			where: {
-				userId_bookId: {
-					userId: user.id,
-					bookId: readingInfo.bookId,
+	if (admin) {
+		for (const bookId of allBookIds) {
+			await prisma.roleBookPermission.upsert({
+				where: {
+					roleId_bookId: { roleId: adminRole.id, bookId },
 				},
-			},
-			update: {
-				readStatus: readingInfo.readStatus,
-				currentPosition: readingInfo.currentPosition,
-			},
-			create: {
-				userId: user.id,
-				...readingInfo,
-			},
-		});
+				update: {},
+				create: { roleId: adminRole.id, bookId },
+			});
+		}
+	}
+
+	if (user) {
+		for (const bookId of generalUserBookIds) {
+			await prisma.roleBookPermission.upsert({
+				where: {
+					roleId_bookId: { roleId: userRole.id, bookId },
+				},
+				update: {},
+				create: { roleId: userRole.id, bookId },
+			});
+		}
+	}
+
+	const sampleReadingInfos = user
+		? [
+				{
+					bookId: generalUserBookIds[0],
+					readStatus: 'completed',
+					currentPosition: null,
+				},
+				{
+					bookId: generalUserBookIds[1],
+					readStatus: 'reading',
+					currentPosition: 'epubcfi(/6/4[chapter2]!/4/2/8)',
+				},
+				{
+					bookId: generalUserBookIds[2],
+					readStatus: 'unread',
+					currentPosition: null,
+				},
+			]
+		: [];
+
+	if (user) {
+		for (const readingInfo of sampleReadingInfos) {
+			if (!readingInfo.bookId) {
+				throw new Error('Book for reading info was not created');
+			}
+
+			await prisma.readingInfo.upsert({
+				where: {
+					userId_bookId: {
+						userId: user.id,
+						bookId: readingInfo.bookId,
+					},
+				},
+				update: {
+					readStatus: readingInfo.readStatus,
+					currentPosition: readingInfo.currentPosition,
+					},
+				create: {
+					userId: user.id,
+					...readingInfo,
+				},
+			});
+		}
 	}
 
 	console.log(
-		`Seed completed: 2 credential users, ${categorySeeds.length} categories, ${bookSeeds.length} books, ${sampleReadingInfos.length} reading infos`,
+		`Seed completed: ${Number(Boolean(user)) + Number(Boolean(admin))} credential users, ${categorySeeds.length} categories, ${bookSeeds.length} books, ${sampleReadingInfos.length} reading infos`,
 	);
 }
 

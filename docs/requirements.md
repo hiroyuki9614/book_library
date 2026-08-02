@@ -473,3 +473,13 @@ MVPでは以下を管理しない。
 - 公開前の書籍閲覧検証
 - OCR、全文検索
 - しおり、ブックマーク、メモ、レビュー
+
+## 14. 初期管理者とログインE2Eの秘密情報
+
+- 初期管理者は公開HTTP APIでは作成せず、`backend` の `npm run create:initial-admin` から作成する
+- 初期管理者のメールアドレス、名前、パスワードは `INITIAL_ADMIN_EMAIL`、`INITIAL_ADMIN_NAME`、`INITIAL_ADMIN_PASSWORD` で必須指定する
+- パスワードは8文字以上とし、ログ、CLI引数、リポジトリへ出力・保存しない
+- `SEED_ADMIN_PASSWORD` または `SEED_USER_PASSWORD` を明示しないseed実行では、認証ユーザーを作成しない
+- ログインE2Eは `E2E_ADMIN_EMAIL`、`E2E_ADMIN_NAME`、`E2E_ADMIN_PASSWORD`、`E2E_DATABASE_URL` を必須とする
+- E2E用DB名は末尾が `_e2e` のPostgreSQLデータベースに限定し、開発・本番DBの全データを削除する操作は行わない
+- Playwrightのtrace、動画、スクリーンショット、レポート、storage stateはリポジトリへコミットしない

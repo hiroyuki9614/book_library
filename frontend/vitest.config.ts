@@ -9,6 +9,7 @@ export default defineConfig({
 		include: ['@tanstack/react-query', 'react', 'react-dom', 'react-router-dom', 'lucide-react', 'vitest-browser-react'],
 	},
 	test: {
+		exclude: ['**/node_modules/**', 'e2e/**', 'src/e2e/**'],
 		browser: {
 			enabled: true,
 			provider: playwright(),

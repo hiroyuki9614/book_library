@@ -1,3 +1,19 @@
 .env
 .env.*
 !.env.example
+
+# Build and generated output
+backend/dist/
+backend/prisma/generated/
+
+# Playwright output and authentication state
+playwright-report/
+test-results/
+blob-report/
+frontend/playwright-report/
+frontend/test-results/
+frontend/blob-report/
+frontend/playwright/.auth/
+frontend/e2e/.auth/
+*.zip
+.git-pr-body.md
