@@ -4,14 +4,13 @@ export type InitialAdminConfig = {
 	password: string;
 };
 
-const KNOWN_DEFAULT_PASSWORDS = new Set(['AdminPass123!', 'DummyPass123!', 'E2eAdminPass123!', 'E2ePass123!']);
-
 export function readInitialAdminConfig(environment: NodeJS.ProcessEnv): InitialAdminConfig {
 	const email = environment.INITIAL_ADMIN_EMAIL;
 	const name = environment.INITIAL_ADMIN_NAME;
 	const password = environment.INITIAL_ADMIN_PASSWORD;
 
-	if (!email?.trim() || !name?.trim() || !password?.trim()) {
+	// Require presence; use trim only for email/name existence check and normalization.
+	if (!email?.trim() || !name?.trim() || password === undefined || password === null || password.length === 0 || password.trim().length === 0) {
 		throw new Error('INITIAL_ADMIN_EMAIL, INITIAL_ADMIN_NAME, and INITIAL_ADMIN_PASSWORD are required');
 	}
 
@@ -27,11 +26,11 @@ export function readInitialAdminConfig(environment: NodeJS.ProcessEnv): InitialA
 	if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalizedEmail)) {
 		throw new Error('INITIAL_ADMIN_EMAIL must be a valid email address');
 	}
+
+	// Password rules: required, reject empty or whitespace-only, must be at least 8 characters.
+	// Do NOT trim the password or compare against a blacklist of known defaults here.
 	if (password.length < 8) {
 		throw new Error('INITIAL_ADMIN_PASSWORD must be at least 8 characters');
-	}
-	if (KNOWN_DEFAULT_PASSWORDS.has(password)) {
-		throw new Error('INITIAL_ADMIN_PASSWORD must not be a known default password');
 	}
 
 	return {
