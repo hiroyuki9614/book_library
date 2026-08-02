@@ -3,33 +3,37 @@ set -e
 
 echo "[e2e] starting helper script"
 
-if [ -z "${DATABASE_URL}" ]; then
-  echo "ERROR: DATABASE_URL must be set to an E2E database (contains 'e2e' or 'test')."
+# All required values must come from the environment. No defaults are used so
+# that a missing value fails fast instead of silently running against the
+# wrong database or with a predictable password.
+if [ -z "${E2E_DATABASE_URL:-}" ] || [ -z "${E2E_ADMIN_EMAIL:-}" ] || [ -z "${E2E_ADMIN_NAME:-}" ] || [ -z "${E2E_ADMIN_PASSWORD:-}" ]; then
+  echo "ERROR: E2E_DATABASE_URL, E2E_ADMIN_EMAIL, E2E_ADMIN_NAME, and E2E_ADMIN_PASSWORD must all be set (values omitted)."
   exit 1
 fi
 
-echo "[e2e] checking DATABASE_URL (masked)"
-# Basic check without printing the full value to logs
-echo "${DATABASE_URL}" | grep -E "e2e|test" >/dev/null || {
-  echo "ERROR: DATABASE_URL does not look like an E2E/test database (value omitted)."
+echo "[e2e] validating E2E_DATABASE_URL naming convention"
+node ./e2e/validate-e2e-db-url.mjs || {
+  echo "ERROR: E2E_DATABASE_URL failed validation (value omitted)."
   exit 2
 }
-
-INITIAL_ADMIN_EMAIL=${INITIAL_ADMIN_EMAIL:-e2e-admin@example.test}
-INITIAL_ADMIN_NAME=${INITIAL_ADMIN_NAME:-"E2E Admin"}
-INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD:-E2eAdminPass123!}
 
 echo "[e2e] creating initial admin using backend script"
 
 cd ../backend
-# Run create:initial-admin but do not leak secrets to logs. Rely on exit code.
-INITIAL_ADMIN_EMAIL="$INITIAL_ADMIN_EMAIL" INITIAL_ADMIN_NAME="$INITIAL_ADMIN_NAME" INITIAL_ADMIN_PASSWORD="$INITIAL_ADMIN_PASSWORD" npm run create:initial-admin >/dev/null 2>&1 || {
-  echo "ERROR: create:initial-admin failed (see backend logs locally)."
+# Map E2E_* inputs to the names the backend script expects, only for this
+# call. Secrets are passed through the environment only, never as command
+# arguments, and are not printed on failure.
+DATABASE_URL="$E2E_DATABASE_URL" \
+INITIAL_ADMIN_EMAIL="$E2E_ADMIN_EMAIL" \
+INITIAL_ADMIN_NAME="$E2E_ADMIN_NAME" \
+INITIAL_ADMIN_PASSWORD="$E2E_ADMIN_PASSWORD" \
+npm run create:initial-admin >/dev/null 2>&1 || {
+  echo "ERROR: create:initial-admin failed (see backend logs locally; no secrets printed)."
   exit 3
 }
 
 echo "[e2e] starting backend (dev)"
-npm run dev &
+DATABASE_URL="$E2E_DATABASE_URL" npm run dev &
 BACKEND_PID=$!
 
 # Ensure backend process is killed on exit

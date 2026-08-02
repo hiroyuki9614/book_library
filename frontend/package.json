@@ -71,6 +71,11 @@
     "vite": "^7.2.4",
     "vite-tsconfig-paths": "^6.1.1",
     "vitest": "^4.1.9",
+<<<<<<< HEAD
     "vitest-browser-react": "^2.2.0"
+=======
+    "vitest-browser-react": "^2.2.0",
+    "@playwright/test": "^1.62.1"
+>>>>>>> 997f299 (e2e: fix PR #10 review comments)
   }
 }
