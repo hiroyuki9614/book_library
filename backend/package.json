@@ -5,7 +5,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "vitest --run"
+    "test": "vitest --run",
+    "create:initial-admin": "tsx scripts/create-initial-admin.ts"
   },
   "dependencies": {
     "@better-auth/prisma-adapter": "^1.6.23",
