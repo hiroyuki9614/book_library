@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 
+<<<<<<< HEAD
 # Build and generated output
 backend/dist/
 backend/prisma/generated/
@@ -15,5 +16,36 @@ frontend/test-results/
 frontend/blob-report/
 frontend/playwright/.auth/
 frontend/e2e/.auth/
+*.zip
+.git-pr-body.md
+=======
+# Ignore built backend artifacts
+backend/dist/
+
+# Playwright artifacts
+playwright-report/
+test-results/
+**/playwright-report/
+**/test-results/
+
+# Frontend local dev artifacts
+frontend/playwright-report/
+frontend/test-results/
+>>>>>>> a29fe1a (E2E: mask DB value, add cleanup trap; remove backend/dist from repo; update .gitignore)
+
+# Generated prisma client
+backend/prisma/generated/
+
+# Playwright and frontend artifacts
+playwright-report/
+test-results/
+**/playwright-report/
+**/test-results/
+frontend/playwright-report/
+frontend/test-results/
+frontend/playwright/.auth/
+frontend/e2e/.auth/
+
+# Misc
 *.zip
 .git-pr-body.md
