@@ -51,7 +51,7 @@
     "@eslint/js": "^9.39.1",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/vite": "^4.3.0",
-    "@types/node": "^24.10.1",
+    "@types_node": "^24.10.1",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react-swc": "^4.2.2",
@@ -71,11 +71,6 @@
     "vite": "^7.2.4",
     "vite-tsconfig-paths": "^6.1.1",
     "vitest": "^4.1.9",
-<<<<<<< HEAD
     "vitest-browser-react": "^2.2.0"
-=======
-    "vitest-browser-react": "^2.2.0",
-    "@playwright/test": "^1.62.1"
->>>>>>> 997f299 (e2e: fix PR #10 review comments)
   }
 }
