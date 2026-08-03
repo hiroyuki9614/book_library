@@ -145,10 +145,17 @@ NODE_ENV=development
 バックエンドとフロントエンドの環境変数ファイルを作成する。
 
 ```bash
+cp .env.example .env.development
 cp backend/.env.example backend/.env
 cp frontend/.env.example frontend/.env
 ```
 
+- DockerCompose（`.env.development`）を利用する場合、`BETTER_AUTH_SECRET` の設定が必須です（未設定の場合はエラーで起動が停止します）。
+- ランダムな値を生成して `.env.development` に設定してください。
+  ```bash
+  umask 077
+  printf 'BETTER_AUTH_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env.development
+  ```
 - `VITE_API_BASE_URL` はブラウザから接続するバックエンドURLで、ローカル開発の既定値は `http://localhost:3000`。Docker版バックエンドを使う場合は `http://localhost:3001` に変更する
 - フロントエンドの標準ポートは `5173`、ローカルバックエンドは `3000`、Docker版バックエンドは `3001`
 - Cookieセッションを使用する認証リクエストでは、Fetch APIの`credentials`を有効にする必要がある
