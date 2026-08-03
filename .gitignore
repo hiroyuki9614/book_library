@@ -6,14 +6,23 @@
 backend/dist/
 backend/prisma/generated/
 
-# Playwright output and authentication state
+# Playwright and test artifacts
 playwright-report/
 test-results/
-blob-report/
+**/playwright-report/
+**/test-results/
+
+# Frontend local dev artifacts and auth state
 frontend/playwright-report/
 frontend/test-results/
 frontend/blob-report/
 frontend/playwright/.auth/
 frontend/e2e/.auth/
+
+# Ignore env files created for local runs; keep .env.example in repo
+# (do not commit secrets)
+*.env.local
+
+# Misc
 *.zip
-.git-pr-body.md
+.git-pr-body*.md

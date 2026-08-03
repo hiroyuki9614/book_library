@@ -1,13 +1,18 @@
 import { expect, test } from '@playwright/test';
-import { getE2EConfig } from '../src/e2e/e2eEnv.js';
 
-test('initial admin can log in with supplied E2E credentials', async ({ page }) => {
-	const config = getE2EConfig(process.env);
+test('logs in with the E2E initial admin', async ({ page }) => {
+	const email = process.env.E2E_ADMIN_EMAIL;
+	const password = process.env.E2E_ADMIN_PASSWORD;
+
+	if (!email || !password) {
+		throw new Error('E2E_ADMIN_EMAIL and E2E_ADMIN_PASSWORD are required');
+	}
 
 	await page.goto('/login');
-	await page.getByLabel('ユーザーID').fill(config.email);
-	await page.getByLabel('パスワード').fill(config.password);
-	await page.getByRole('button', { name: 'Submit' }).click();
+	await page.locator('input[name="userInput"]').fill(email);
+	await page.locator('input[name="passwordInput"]').fill(password);
+	await page.locator('button[type="submit"]').click();
 
-	await expect(page).not.toHaveURL(/\/login$/);
+	await expect(page).toHaveURL((url) => url.pathname === '/');
+	await expect(page.getByPlaceholder('Search books or authors...')).toBeVisible();
 });
