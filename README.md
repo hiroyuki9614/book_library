@@ -150,11 +150,13 @@ cp backend/.env.example backend/.env
 cp frontend/.env.example frontend/.env
 ```
 
-- DockerCompose（`.env.development`）を利用する場合、`BETTER_AUTH_SECRET` の設定が必須です（未設定の場合はエラーで起動が停止します）。
-- ランダムな値を生成して `.env.development` に設定してください。
+- `.env.example` の `BETTER_AUTH_SECRET` は意図的に空になっています。DockerCompose（`.env.development`）を利用する場合、`BETTER_AUTH_SECRET` の設定が必須です（未設定・空値の場合はエラーで起動が停止します）。
+- `.env.development` へコピー後、ランダムな値を生成して `BETTER_AUTH_SECRET` 行を置換してください（重複定義を避けるため追記ではなく置換します）。
   ```bash
   umask 077
-  printf 'BETTER_AUTH_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env.development
+  secret="$(openssl rand -hex 32)"
+  sed -i "s/^BETTER_AUTH_SECRET=.*/BETTER_AUTH_SECRET=${secret}/" .env.development
+  unset secret
   ```
 - `VITE_API_BASE_URL` はブラウザから接続するバックエンドURLで、ローカル開発の既定値は `http://localhost:3000`。Docker版バックエンドを使う場合は `http://localhost:3001` に変更する
 - フロントエンドの標準ポートは `5173`、ローカルバックエンドは `3000`、Docker版バックエンドは `3001`
