@@ -50,6 +50,8 @@ fi
 
 node ./e2e/validate-e2e-db-url.mjs
 
+BETTER_AUTH_SECRET=$(openssl rand -hex 32)
+
 cd ../backend
 DATABASE_URL="$E2E_DATABASE_URL" \
 INITIAL_ADMIN_EMAIL="$E2E_ADMIN_EMAIL" \
@@ -60,13 +62,13 @@ npm run create:initial-admin >/dev/null 2>&1 || {
   exit 1
 }
 
-DATABASE_URL="$E2E_DATABASE_URL" npm run dev &
+BETTER_AUTH_SECRET="$BETTER_AUTH_SECRET" DATABASE_URL="$E2E_DATABASE_URL" npm run dev &
 BACKEND_PID=$!
 
 wait_for_url 'http://localhost:3000/health' "$BACKEND_PID" 'backend' 60
 
 cd ../frontend
-npm run dev &
+VITE_API_BASE_URL='http://localhost:3000' npm run dev &
 FRONTEND_PID=$!
 
 wait_for_url 'http://localhost:5173' "$FRONTEND_PID" 'frontend' 60
