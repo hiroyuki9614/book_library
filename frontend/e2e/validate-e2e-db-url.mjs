@@ -1,8 +1,4 @@
 #!/usr/bin/env node
-// Validates that E2E_DATABASE_URL points at a database intended for E2E use,
-// based on the database name suffix rather than a substring match on the
-// full connection string. The full connection string (which may contain
-// credentials) is never logged.
 
 const value = process.env.E2E_DATABASE_URL;
 
@@ -19,16 +15,27 @@ try {
   process.exit(2);
 }
 
-const dbName = parsed.pathname.replace(/^\//, '');
-
-if (!dbName) {
-  console.error('ERROR: E2E_DATABASE_URL does not contain a database name.');
+if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
+  console.error('ERROR: E2E_DATABASE_URL must use the postgres or postgresql protocol.');
   process.exit(3);
 }
 
-if (!/_e2e$/.test(dbName)) {
-  console.error(`ERROR: database name "${dbName}" must end with "_e2e" to be used for E2E tests.`);
+let dbName;
+try {
+  dbName = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
+} catch {
+  console.error('ERROR: E2E_DATABASE_URL contains an invalid encoded database name.');
   process.exit(4);
 }
 
-console.log(`[e2e] database name "${dbName}" is a valid E2E database.`);
+if (!dbName) {
+  console.error('ERROR: E2E_DATABASE_URL does not contain a database name.');
+  process.exit(5);
+}
+
+if (!dbName.endsWith('_e2e')) {
+  console.error('ERROR: the E2E database name must end with "_e2e".');
+  process.exit(6);
+}
+
+console.log(`[e2e] validated database name: ${dbName}`);
