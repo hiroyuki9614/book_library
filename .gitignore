@@ -5,6 +5,7 @@
 # Build and generated output
 backend/dist/
 backend/prisma/generated/
+backend/storage/
 
 # Playwright and test artifacts
 playwright-report/

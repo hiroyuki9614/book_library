@@ -16,5 +16,5 @@ export default function ReaderPageT() {
 		return <p>書籍が見つかりません。</p>;
 	}
 
-	return <>{book.type === 'epub' ? <EpubReader /> : <PdfReader />}</>;
+	return <>{book.type === 'epub' ? <EpubReader /> : <PdfReader bookId={book.id} />}</>;
 }

@@ -33,6 +33,57 @@ vi.mock('./lib/prisma.js', () => ({
 			})),
 		},
 	},
+	default: async (c: { set: (key: string, value: unknown) => void }, next: () => Promise<void>) => {
+		c.set('prisma', {
+			user: {
+				findFirst: vi.fn(() => ({ id: 1, roleId: 2 })),
+			},
+			book: {
+				count: vi.fn(() => 1),
+				findMany: vi.fn(() => [
+					{
+						id: 1,
+						title: 'Test Book',
+						authorName: 'Test Author',
+						publishedAt: null,
+						publisher: null,
+						description: null,
+						deletedAt: null,
+						pageTurnDirection: 'ltr',
+						createdAt: new Date(),
+						updatedAt: new Date(),
+						category: { id: 1, name: '技術書' },
+						bookFiles: [],
+					},
+				]),
+				findUnique: vi.fn(({ where }: { where: { id: number } }) =>
+					(where.id === 1 || where.id === 2)
+						? {
+							id: 1,
+							title: 'Test Book',
+							authorName: 'Test Author',
+							publishedAt: null,
+							publisher: null,
+							description: null,
+							deletedAt: null,
+							pageTurnDirection: 'ltr',
+							createdAt: new Date(),
+							updatedAt: new Date(),
+							category: { id: 1, name: '技術書' },
+							bookFiles: [],
+						}
+						: null),
+			},
+			roleBookPermission: {
+				findUnique: vi.fn(({ where }: { where: { roleId_bookId: { bookId: number } } }) => (where.roleId_bookId.bookId === 1 ? { id: 1 } : null)),
+			},
+			readingInfo: {
+				findUnique: vi.fn(() => null),
+				upsert: vi.fn(({ create }: { create: { currentPosition: string; readStatus: string } }) => create),
+			},
+		});
+		return next();
+	},
 }));
 
 let app: (typeof import('./index.js'))['app'];
@@ -185,30 +236,29 @@ describe('MVP API contract RED tests based on docs/api.yaml', () => {
 			const response = await app.request('/api/v1/books/1/reading-info', { method: 'GET', headers: AUTH_HEADERS });
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
-			expect(body).toMatchObject({ bookId: 1, readStatus: expect.stringMatching(/^(unread|reading|completed)$/) });
-			expect(body).toHaveProperty('currentPosition');
+			expect(body).toMatchObject({ bookId: 1, currentPage: 1, readStatus: 'unread' });
 		});
 
-		test('PATCH /api/v1/books/{bookId}/reading-info は読書進捗を作成または更新できる', async () => {
+		test('PATCH /api/v1/books/{bookId}/reading-info はcurrentPageを保存してreadingを返す', async () => {
 			const response = await app.request('/api/v1/books/1/reading-info', {
 				method: 'PATCH',
 				headers: JSON_HEADERS,
-				body: JSON.stringify({ readStatus: 'reading', currentPosition: 'epubcfi(/6/2!/4/2/8)', progress: 42.5 }),
+				body: JSON.stringify({ currentPage: 3 }),
 			});
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
-			expect(body).toMatchObject({ bookId: 1, readStatus: 'reading', currentPosition: 'epubcfi(/6/2!/4/2/8)', progress: 42.5 });
+			expect(body).toEqual({ bookId: 1, currentPage: 3, readStatus: 'reading' });
 		});
 
-		test('PATCH /api/v1/books/{bookId}/reading-info はschema.prismaで正規値のcompletedを受け入れる', async () => {
+		test('PATCH /api/v1/books/{bookId}/reading-info はclient指定のreadStatusを無視してreadingを返す', async () => {
 			const response = await app.request('/api/v1/books/1/reading-info', {
 				method: 'PATCH',
 				headers: JSON_HEADERS,
-				body: JSON.stringify({ readStatus: 'completed', currentPosition: null, progress: 100 }),
+				body: JSON.stringify({ readStatus: 'completed', currentPage: 4 }),
 			});
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
-			expect(body).toMatchObject({ bookId: 1, readStatus: 'completed', currentPosition: null, progress: 100 });
+			expect(body).toEqual({ bookId: 1, currentPage: 4, readStatus: 'reading' });
 		});
 
 		test('PATCH /api/v1/books/{bookId}/reading-info はapi.yaml上のfinishedをDB正規値ではないため400で拒否する', async () => {

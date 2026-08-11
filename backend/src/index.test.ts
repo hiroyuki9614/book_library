@@ -1,5 +1,10 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { app } from './index.js';
+
+vi.hoisted(() => {
+	process.env.DATABASE_URL ??= 'postgresql://test:test@127.0.0.1:5432/belib_vitest';
+	process.env.BETTER_AUTH_SECRET ??= 'belib-vitest-only-secret-000000000000000000000000000000';
+});
 
 describe('OpenAPI', () => {
 	test('OpenAPIドキュメントを返す', async () => {

@@ -8,13 +8,15 @@ import useReadingProgresses from './useReadingProgresses';
 import useUser from './useUser';
 
 const mocks = vi.hoisted(() => ({
-	booksApiMock: vi.fn(),
+	fetchBooks: vi.fn(),
+	fetchBook: vi.fn(),
 	readingProgressesApiMock: vi.fn(),
 	userApiMock: vi.fn(),
 }));
 
-vi.mock('@/mocks/booksApiMock', () => ({
-	default: mocks.booksApiMock,
+vi.mock('@/api/books', () => ({
+	fetchBooks: mocks.fetchBooks,
+	fetchBook: mocks.fetchBook,
 }));
 
 vi.mock('@/mocks/readingProgressesApiMock', () => ({
@@ -52,7 +54,7 @@ afterEach(() => {
 describe('React Query hooks', () => {
 	test('useBooks returns fetched books', async () => {
 		const books = [{ id: 1, title: 'React Design Patterns' }];
-		mocks.booksApiMock.mockResolvedValueOnce(books);
+		mocks.fetchBooks.mockResolvedValueOnce(books);
 
 		const { result } = await renderHook(() => useBooks(), {
 			wrapper: createWrapper(),
@@ -61,21 +63,21 @@ describe('React Query hooks', () => {
 		await expect.poll(() => result.current.isLoading).toBe(false);
 		expect(result.current.books).toEqual(books);
 		expect(result.current.isError).toBe(false);
-		expect(mocks.booksApiMock).toHaveBeenCalledWith();
+		expect(mocks.fetchBooks).toHaveBeenCalledWith();
 	});
 
 	test('useBook passes the selected book id to the API', async () => {
-		const books = [{ id: 2, title: 'Learning TypeScript' }];
-		mocks.booksApiMock.mockResolvedValueOnce(books);
+		const book = { id: 2, title: 'Learning TypeScript', fileType: 'pdf' };
+		mocks.fetchBook.mockResolvedValueOnce(book);
 
 		const { result } = await renderHook(() => useBook(2), {
 			wrapper: createWrapper(),
 		});
 
 		await expect.poll(() => result.current.isLoading).toBe(false);
-		expect(result.current.books).toEqual(books);
+		expect(result.current.book).toEqual(book);
 		expect(result.current.error).toBeNull();
-		expect(mocks.booksApiMock).toHaveBeenCalledWith(2);
+		expect(mocks.fetchBook).toHaveBeenCalledWith(2);
 	});
 
 	test('useReadingProgresses returns fetched reading progress records', async () => {
