@@ -2,13 +2,12 @@
 
 - Updated: 2026-08-14
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
-- Current implementation checkpoint: `checkpoint/belib-mvp-phase6-20260812`
-- Checkpoint reviewed: `a64fd12dd53b2f090d913fc71f6dded5b0c2883a`
+- Current implementation checkpoint reviewed: `checkpoint/belib-mvp-phase6-20260812` at `a64fd12dd53b2f090d913fc71f6dded5b0c2883a`
 - Default `main` is older than this checkpoint and must not be used alone to judge current MVP progress
 
-## 1. Source-of-truth boundary
+## Source-of-truth boundary
 
-This document is a status snapshot, not a requirements or schema source of truth.
+This is a status snapshot, not a requirements/schema source of truth.
 
 ```text
 current user request
@@ -16,44 +15,41 @@ current user request
 > backend/prisma/schema.prisma (database structure)
 > docs/requirements.md (target behavior)
 > current implementation + tests (implementation fact)
-> docs/api.yaml (currently implemented HTTP contract)
+> docs/api.yaml (implemented HTTP contract)
 > this status document
 ```
 
-A temporary implementation does not silently change a confirmed requirement. Protected local PDF storage is an implementation step; the confirmed R2 requirement remains in `docs/requirements.md`.
+Temporary implementation does not silently change a confirmed requirement. Protected local PDF storage is an implementation step; the R2 requirement remains in `docs/requirements.md`.
 
-## 2. High-level state
+## High-level state
 
 BeLib now has a real PDF MVP vertical slice rather than a mock-only frontend.
 
 ```text
-Better Auth Cookie authentication                implemented
+Better Auth session                              implemented
 GET /api/v1/me                                   implemented
 role-authorized book list/detail                 implemented
 protected PDF delivery                           implemented with local ignored storage
 reading-info GET/PATCH                           implemented
 reading position persistence to PostgreSQL       implemented
 frontend book/detail/PDF integration             implemented
-real browser + PostgreSQL + Cookie E2E            implemented
+real browser + PostgreSQL E2E                    implemented
 minimal admin book metadata API                  implemented
 minimal admin PDF upload API                     implemented
 admin UI -> admin API wiring                     not implemented
-Cloudflare R2 upload / signed URL                 not implemented
+per-user readStatus in book list                 not implemented correctly yet
+Cloudflare R2 / formal file delivery             not implemented
 EPUB protected backend path                      not implemented
 formal publication-scope selection               not implemented
 completed auto transition                        not implemented
 full MVP management functions                    not implemented
 ```
 
-The core path has reached a verified implementation checkpoint, but the formal requirements in `docs/requirements.md` are not all complete.
+The core path is verified, but the formal requirements are not all complete.
 
-## 3. Backend current implementation
+## Backend
 
-`backend/src/index.ts` mounts the authentication, `/api/v1/me`, books, and admin routers. CORS for `/api/*` currently allows `GET`, `POST`, `PATCH`, and `OPTIONS` with credentials.
-
-### Books
-
-Implemented endpoints:
+### Implemented book endpoints
 
 ```text
 GET   /api/v1/books
@@ -67,185 +63,173 @@ Current behavior:
 
 - session user is resolved through Better Auth
 - deleted users are rejected
-- book list is filtered by `role_book_permissions`
-- book detail/file/reading-info require the same role permission
-- logically deleted books are not returned
+- list is filtered by `role_book_permissions`
+- detail/file/reading-info require the same role permission
+- logically deleted books are excluded
 - list supports `page` and `limit`
 - protected file endpoint currently serves PDF only
-- local file keys are resolved under `BOOK_FILE_STORAGE_ROOT`
-- path traversal, absolute-path escape, remote URL use, and symlink escape are rejected
-- PDF responses use `application/pdf` and private no-store caching
+- file keys are resolved below `BOOK_FILE_STORAGE_ROOT`
+- storage-root escape patterns are rejected
+- PDF responses use private no-store caching
 
-Not yet implemented on the list endpoint:
+### Known list drift
 
-- title/author search
-- category filter
-- read-status filter
+`GET /api/v1/books` currently calls `toBookResponse(book)` without loading the current user's `ReadingInfo` for each list item. Because the response helper defaults `readStatus` to `unread`, the list does not yet return the real per-user status.
+
+This means:
+
+- detail API can return the current user's stored status
+- list-level status filters/summary cannot be considered complete
+- frontend summary values based on list `readStatus` may be inaccurate until the list joins reading info
+
+This is implementation drift, not a requirement change.
 
 ### Reading info
 
-Current API contract is intentionally minimal:
+Current request contract:
 
 ```json
 { "currentPage": 2 }
 ```
 
-The backend stores `currentPage` as `ReadingInfo.currentPosition` and upserts per `userId + bookId`.
+The backend stores the page as `ReadingInfo.currentPosition` and upserts per `userId + bookId`.
 
 Current limitations:
 
-- PATCH currently persists `readStatus = reading`
-- automatic `completed` transition is not implemented yet
-- EPUB CFI persistence is not connected yet
-- progress percentage is not stored in the DB, consistent with the requirement
+- PATCH currently stores `readStatus = reading`
+- automatic `completed` transition is not implemented
+- EPUB position persistence is not connected
+- progress percentage is not stored in DB, consistent with the requirement
 
 ### Minimal admin registration
 
-Implemented endpoints:
+Implemented:
 
 ```text
 POST /api/v1/admin/books
 POST /api/v1/admin/books/:bookId/files
 ```
 
-Current metadata registration accepts `title` and an active `categoryId`.
+Current PDF upload is backend-admin-only, PDF-only, maximum 200 MB, validates metadata and actual PDF header, stores SHA-256 hash, uses a generated relative storage key, and removes the newly written file if the DB create fails.
 
-Current PDF upload:
+Current requirement drift:
 
-- admin-only on the backend
-- PDF only
-- maximum 200 MB
-- validates extension, MIME metadata, PDF header, and byte length
-- uses SHA-256 for `BookFile.fileHash`
-- stores a generated relative key under protected local storage
-- removes the newly written local file when DB creation fails
+- metadata registration currently creates `user` role permission automatically
+- confirmed requirements require explicit publication-scope selection with no default
+- current admin API is therefore a vertical-slice implementation rather than final publication behavior
 
-Current formal-requirement drift:
+## Frontend
 
-- metadata registration currently creates a `user` role permission automatically
-- the formal requirement says publication scope must be explicitly selected and have no default
-- current admin API is therefore a minimal vertical-slice implementation, not the final publication-scope implementation
+### Connected to real API
 
-## 4. Frontend current implementation
+- session-based authentication
+- current user / role
+- book list
+- book detail
+- protected PDF fetch
+- PDF reading-info fetch/save/restore
+- authenticated Reader route
+- admin route guard
 
-### Authentication
+### Admin screen remains prototype
 
-- `GuestRoute` and `RequireAuth` use the real session path
-- `/admin` is additionally protected by `RequireAdmin`
-- `/reader/:id` is under the authenticated route tree
-
-### Books / PDF
-
-Production hooks now use real API clients for the main book path. `frontend/src/api/books.ts` provides `fetchBooks`, `fetchBook`, and `fetchBookFile`. PDF fetches include browser credentials and reject non-PDF responses.
-
-### Reading progress
-
-`frontend/src/api/readingInfo.ts` provides `fetchReadingInfo` and `saveReadingInfo`. The PDF reader restores the server-side page and saves page changes through the backend.
-
-### Admin screen
-
-`frontend/src/pages/Admin/index.tsx` is still a prototype:
-
-- starts from `booksData`
-- uses component state
-- submitting `BookRegistar` only updates local state
-- does not call the implemented admin metadata/PDF APIs
-
-Therefore, "admin API exists" and "admin UI is fully connected" are different completion states.
+`frontend/src/pages/Admin/index.tsx` still starts from `booksData` and local component state. `BookRegistar` submission updates local state only and does not call the implemented admin registration endpoints.
 
 ### EPUB
 
-The EPUB reader UI remains in the repository, but the current protected backend file path and real E2E vertical slice are PDF-specific. EPUB must not be described as server-integrated until its backend/storage/progress path is verified.
+EPUB Reader UI exists, but the protected backend/storage/progress vertical slice currently verified is PDF-specific. Do not describe EPUB as server-integrated yet.
 
-## 5. Database / Prisma
+## Database / Prisma
 
-The schema source of truth is `backend/prisma/schema.prisma`.
+DB structure source of truth: `backend/prisma/schema.prisma`.
+
+Current models:
 
 ```text
-Better Auth infrastructure:
+Authentication infrastructure:
 User, Session, Account, Verification, Role
 
 BeLib domain:
 Book, Category, BookFile, ReadingInfo, RoleBookPermission
 ```
 
-Important current constraints:
+Important constraints:
 
-- `BookFile.fileHash` is unique
-- `ReadingInfo` is unique by `userId + bookId`
-- `RoleBookPermission` is unique by `roleId + bookId`
-- `Book.categoryId` is required
-- `ReadingInfo.currentPosition` is nullable
+- `BookFile.fileHash` unique
+- `ReadingInfo` unique by `userId + bookId`
+- `RoleBookPermission` unique by `roleId + bookId`
+- `Book.categoryId` required
+- `ReadingInfo.currentPosition` nullable
 - `ReadingInfo.readStatus` defaults to `unread`
 - `Book.pageTurnDirection` defaults to `ltr`
 
-Known migration issue from the latest MVP verification record:
+Known migration issue from the latest verification record:
 
-- schema includes `book_files.file_hash`
-- a fresh isolated E2E database required temporary schema synchronization because committed migrations did not fully reproduce the current schema
-- this migration/schema drift remains a Phase 6 completion item
+- current schema includes `book_files.file_hash`
+- fresh isolated E2E required temporary schema synchronization because committed migrations did not fully reproduce the current schema
+- migration/schema drift remains a Phase 6 completion item
 
-Do not solve this by rewriting an old committed migration without an explicit migration decision.
+Use a forward migration; do not rewrite an old committed migration just to erase the historical gap.
 
-## 6. Verification evidence
+## Verification evidence
 
-The current checkpoint includes a Playwright real-runtime test covering:
+The checkpoint contains a Playwright real-runtime path covering:
 
 ```text
-permissioned user login
-→ GET /api/v1/me
+permissioned login
+→ current user API
 → permitted book visible
 → protected PDF
 → page 1 -> 2
-→ reading-info PATCH
+→ reading-info save
 → PostgreSQL read-back
-→ browser reload
+→ reload
 → page 2 restore
 ```
 
 It also covers:
 
-- unpermissioned user: book hidden, detail/file return 403
-- unauthenticated user: protected list/detail return 401 and Reader redirects to login
+- unpermissioned user: book hidden, detail/file 403
+- unauthenticated user: protected APIs 401 and Reader redirects to login
 
 The Personal Vault schedule records the broader checkpoint verification as backend full tests green, backend build green, Prisma validation green, and real browser E2E green. Frontend full build still has known non-MVP TypeScript failures separated from the PDF core path.
 
-These are historical checkpoint evidence and should be rerun after behavior-changing code changes.
+These are checkpoint evidence, not a promise that later code is automatically green.
 
-## 7. Confirmed requirements not yet satisfied
+## Confirmed requirements still open
 
-The following remain requirements, not deleted scope:
-
-- Cloudflare R2 storage and the formal signed-URL behavior
+- Cloudflare R2 storage and formal file-delivery behavior
 - EPUB upload/viewing through the protected server path
 - explicit publication scope (`all users` / `admin only`) with no default
-- automatic `unread -> reading -> completed` behavior
+- automatic `unread -> reading -> completed`
+- correct per-user readStatus in book list
 - search and category filtering
 - category management
 - general-user administration
 - logical delete / restore / permanent delete
-- file replacement and recovery behavior
+- file replacement and recovery
 - PostgreSQL backup/restore acceptance
 - PC Chrome + Android Chrome formal acceptance
 
-See `docs/requirements.md` for the complete target.
+See `docs/requirements.md` for the full target.
 
-## 8. Current priority
+## Current priority
 
-1. Resolve `book_files.file_hash` migration/schema drift with a forward migration and fresh-DB verification.
+1. Resolve `book_files.file_hash` migration/schema drift and prove fresh-DB reproducibility.
 2. Make README setup reproducible on a fresh environment.
-3. Keep the verified PDF vertical slice green while wiring the admin UI to the existing admin APIs.
-4. Implement explicit publication-scope behavior without weakening the confirmed requirement.
-5. Implement automatic `completed` transition for PDF.
-6. Replace protected local storage with the confirmed R2/signed-URL design while preserving authorization checks.
-7. Connect EPUB to the same protected authorization/storage/progress boundary.
-8. Continue remaining MVP management features from `docs/requirements.md`.
+3. Correct per-user `readStatus` on the book list before treating list summary/filter as complete.
+4. Wire Admin UI to existing admin APIs.
+5. Implement explicit publication scope.
+6. Implement PDF `completed` transition.
+7. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
+8. Connect EPUB to the same authorization/storage/progress boundary.
+9. Continue remaining management requirements.
 
-## 9. Documentation maintenance rule
+## Documentation responsibilities
 
-- `docs/requirements.md` describes target behavior.
-- `backend/prisma/schema.prisma` describes current DB structure.
-- `docs/api.yaml` describes the currently implemented versioned HTTP contract.
-- this document describes current implementation status and known drift.
-- `docs/mvp_plan.md` describes execution order and completion gates.
-- Git history and Personal Vault records hold dated execution evidence; do not duplicate long logs here.
+- `docs/requirements.md`: target behavior
+- `backend/prisma/schema.prisma`: current DB structure
+- `docs/api.yaml`: implemented versioned HTTP contract
+- `docs/current-status.md`: current implementation and known drift
+- `docs/mvp_plan.md`: execution order and completion gates
+- Git history / Personal Vault records: dated execution evidence
