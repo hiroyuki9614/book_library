@@ -243,7 +243,7 @@ describe('MVP API contract RED tests based on docs/api.yaml', () => {
 			const response = await app.request('/api/v1/books/1/reading-info', {
 				method: 'PATCH',
 				headers: JSON_HEADERS,
-				body: JSON.stringify({ currentPage: 3 }),
+				body: JSON.stringify({ currentPage: 3, totalPages: 10 }),
 			});
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
@@ -254,7 +254,7 @@ describe('MVP API contract RED tests based on docs/api.yaml', () => {
 			const response = await app.request('/api/v1/books/1/reading-info', {
 				method: 'PATCH',
 				headers: JSON_HEADERS,
-				body: JSON.stringify({ readStatus: 'completed', currentPage: 4 }),
+				body: JSON.stringify({ readStatus: 'completed', currentPage: 4, totalPages: 10 }),
 			});
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);

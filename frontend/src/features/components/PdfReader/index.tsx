@@ -24,7 +24,7 @@ import type { ScrollState } from '@embedpdf/plugin-scroll';
 import { SelectionLayer, SelectionPluginPackage } from '@embedpdf/plugin-selection/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { fetchBookFile } from '@/api/books';
-import { fetchReadingInfo, saveReadingInfo } from '@/api/readingInfo';
+import { fetchReadingInfo, saveReadingInfo, type ReadingInfo } from '@/api/readingInfo';
 
 export type AppState = GlobalStoreState<{
 	[SCROLL_PLUGIN_ID]: ScrollState;
@@ -90,7 +90,7 @@ function createPlugins(documentUrl: string) {
 	];
 }
 
-const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; documentId: string; initialPage: number }) => {
+export const PageNavigation = ({ bookId, documentId, initialPage, initialReadStatus }: { bookId: number; documentId: string; initialPage: number; initialReadStatus: ReadingInfo['readStatus'] }) => {
 	const { provides: scroll, state } = useScroll(documentId);
 	const [pageInput, setPageInput] = useState(String(state.currentPage));
 	const [isReadyToPersist, setIsReadyToPersist] = useState(false);
@@ -114,6 +114,10 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 		if (!isReadyToPersist) {
 			if (state.currentPage === targetPage) {
 				setIsReadyToPersist(true);
+				if (initialReadStatus === 'unread' && targetPage === state.totalPages) {
+					lastPersistedPage.current = state.currentPage;
+					void saveReadingInfo(bookId, state.currentPage, state.totalPages).catch(() => undefined);
+				}
 			}
 			return;
 		}
@@ -123,8 +127,8 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 		}
 
 		lastPersistedPage.current = state.currentPage;
-		void saveReadingInfo(bookId, state.currentPage).catch(() => undefined);
-	}, [bookId, isReadyToPersist, state.currentPage, targetPage]);
+		void saveReadingInfo(bookId, state.currentPage, state.totalPages).catch(() => undefined);
+	}, [bookId, initialReadStatus, isReadyToPersist, state.currentPage, state.totalPages, targetPage]);
 
 	const handleGoToPage = (e: React.FormEvent<HTMLFormElement>) => {
 		e.preventDefault();
@@ -145,6 +149,7 @@ function PdfReader({ bookId }: { bookId: number }) {
 	const [documentUrl, setDocumentUrl] = useState<string | null>(null);
 	const [fileError, setFileError] = useState(false);
 	const [initialPage, setInitialPage] = useState<number | null>(null);
+	const [initialReadStatus, setInitialReadStatus] = useState<ReadingInfo['readStatus']>('unread');
 	const { engine, isLoading } = usePdfiumEngine();
 
 	useEffect(() => {
@@ -152,6 +157,7 @@ function PdfReader({ bookId }: { bookId: number }) {
 		setDocumentUrl(null);
 		setFileError(false);
 		setInitialPage(null);
+		setInitialReadStatus('unread');
 
 		void fetchBookFile(bookId)
 			.then((blob) => {
@@ -161,7 +167,10 @@ function PdfReader({ bookId }: { bookId: number }) {
 			.catch(() => setFileError(true));
 
 		void fetchReadingInfo(bookId)
-			.then((readingInfo) => setInitialPage(readingInfo.currentPage))
+			.then((readingInfo) => {
+				setInitialPage(readingInfo.currentPage);
+				setInitialReadStatus(readingInfo.readStatus);
+			})
 			.catch(() => setInitialPage(1));
 
 		return () => {
@@ -223,7 +232,7 @@ function PdfReader({ bookId }: { bookId: number }) {
 										<div style={{ display: 'flex', height: '100%', flexDirection: 'column' }}>
 											<div className='mb-2 flex items-center gap-4 justify-evenly'>
 												<ZoomToolbar documentId={activeDocumentId} />
-																											<PageNavigation bookId={bookId} documentId={activeDocumentId} initialPage={initialPage} />
+																											<PageNavigation bookId={bookId} documentId={activeDocumentId} initialPage={initialPage} initialReadStatus={initialReadStatus} />
 											</div>
 											<div style={{ flex: 1, overflow: 'hidden' }}>
 												<Viewport documentId={activeDocumentId}>

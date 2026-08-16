@@ -1,6 +1,6 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-08-16
+- Updated: 2026-08-14
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
 - Current implementation checkpoint reviewed: `checkpoint/belib-mvp-phase6-20260812` at `a64fd12dd53b2f090d913fc71f6dded5b0c2883a`
 - Default `main` is older than this checkpoint and must not be used alone to judge current MVP progress
@@ -36,12 +36,12 @@ frontend book/detail/PDF integration             implemented
 real browser + PostgreSQL E2E                    implemented
 minimal admin book metadata API                  implemented
 minimal admin PDF upload API                     implemented
-admin UI -> admin API wiring                     implemented for metadata registration; file upload remains separate
-per-user readStatus in book list                 not implemented correctly yet
+admin UI -> admin API wiring                     not implemented
+per-user readStatus in book list                 implemented
 Cloudflare R2 / formal file delivery             not implemented
 EPUB protected backend path                      not implemented
 formal publication-scope selection               not implemented
-completed auto transition                        not implemented
+completed auto transition                        implemented for PDF final-page saves
 full MVP management functions                    not implemented
 ```
 
@@ -72,32 +72,25 @@ Current behavior:
 - storage-root escape patterns are rejected
 - PDF responses use private no-store caching
 
-### Known list drift
+### Per-user list readStatus
 
-`GET /api/v1/books` currently calls `toBookResponse(book)` without loading the current user's `ReadingInfo` for each list item. Because the response helper defaults `readStatus` to `unread`, the list does not yet return the real per-user status.
+`GET /api/v1/books` loads at most the requesting user's `ReadingInfo` for each book and maps that bounded relation to `readStatus`. A missing `ReadingInfo` remains `unread`.
 
-This means:
-
-- detail API can return the current user's stored status
-- list-level status filters/summary cannot be considered complete
-- frontend summary values based on list `readStatus` may be inaccurate until the list joins reading info
-
-This is implementation drift, not a requirement change.
+The list and detail APIs therefore use the same current-user isolation boundary without changing the `ReadingInfo` schema or migration history.
 
 ### Reading info
 
 Current request contract:
 
 ```json
-{ "currentPage": 2 }
+{ "currentPage": 2, "totalPages": 10 }
 ```
 
-The backend stores the page as `ReadingInfo.currentPosition` and upserts per `userId + bookId`.
+The backend stores the page as `ReadingInfo.currentPosition`, computes the monotonic `readStatus` transition from page information and the existing status, and upserts per `userId + bookId`.
 
 Current limitations:
 
-- PATCH currently stores `readStatus = reading`
-- automatic `completed` transition is not implemented
+- PDF final-page saves transition to `completed`; later backward page saves keep `completed`
 - EPUB position persistence is not connected
 - progress percentage is not stored in DB, consistent with the requirement
 
@@ -202,7 +195,6 @@ These are checkpoint evidence, not a promise that later code is automatically gr
 - EPUB upload/viewing through the protected server path
 - explicit publication scope (`all users` / `admin only`) with no default
 - automatic `unread -> reading -> completed`
-- correct per-user readStatus in book list
 - search and category filtering
 - category management
 - general-user administration
@@ -217,13 +209,12 @@ See `docs/requirements.md` for the full target.
 
 1. Resolve `book_files.file_hash` migration/schema drift and prove fresh-DB reproducibility.
 2. Make README setup reproducible on a fresh environment.
-3. Correct per-user `readStatus` on the book list before treating list summary/filter as complete.
-4. Wire Admin UI to existing admin APIs.
-5. Implement explicit publication scope.
-6. Implement PDF `completed` transition.
-7. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
-8. Connect EPUB to the same authorization/storage/progress boundary.
-9. Continue remaining management requirements.
+3. Wire Admin UI to existing admin APIs.
+4. Implement explicit publication scope.
+5. Extend PDF `completed` transition verification and remaining reader acceptance.
+6. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
+7. Connect EPUB to the same authorization/storage/progress boundary.
+8. Continue remaining management requirements.
 
 ## Documentation responsibilities
 

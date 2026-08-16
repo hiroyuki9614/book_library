@@ -258,10 +258,23 @@ app.patch('/:bookId/reading-info', async (c) => {
 			return jsonError(c, 400, 'currentPage must be a positive integer', 'INVALID_CURRENT_PAGE');
 		}
 
+		const totalPages = (body as { totalPages?: unknown })?.totalPages;
+		if (typeof totalPages !== 'number' || !Number.isSafeInteger(totalPages) || totalPages < 1) {
+			return jsonError(c, 400, 'totalPages must be a positive integer', 'INVALID_TOTAL_PAGES');
+		}
+		if (currentPage > totalPages) {
+			return jsonError(c, 400, 'currentPage must not exceed totalPages', 'INVALID_PAGE_RANGE');
+		}
+
+		const existingReadingInfo = await result.prisma.readingInfo.findUnique({
+			where: { userId_bookId: { userId: result.userId, bookId } },
+		});
+		const readStatus = existingReadingInfo?.readStatus === 'completed' || currentPage === totalPages ? 'completed' : 'reading';
+
 		const readingInfo = await result.prisma.readingInfo.upsert({
 			where: { userId_bookId: { userId: result.userId, bookId } },
-			create: { userId: result.userId, bookId, currentPosition: String(currentPage), readStatus: 'reading' },
-			update: { currentPosition: String(currentPage), readStatus: 'reading' },
+			create: { userId: result.userId, bookId, currentPosition: String(currentPage), readStatus },
+			update: { currentPosition: String(currentPage), readStatus },
 		});
 		return c.json(toReadingInfoResponse(bookId, readingInfo));
 	} catch (error) {
