@@ -102,4 +102,17 @@ describe('book file storage adapters', () => {
 		expect(mocks.send.mock.calls[1][0].input).toMatchObject({ Bucket: 'private-books', Key: 'books/1/file.pdf' });
 		expect(mocks.send.mock.calls[2][0].input).toMatchObject({ Bucket: 'private-books', Key: 'books/1/file.pdf' });
 	});
+
+	test('R2 adapter propagates PUT failures', async () => {
+		mocks.send.mockRejectedValueOnce(new Error('R2 PUT failed'));
+		const storage = createBookFileStorage({
+			BOOK_FILE_STORAGE_DRIVER: 'r2',
+			R2_ENDPOINT: 'https://account.r2.cloudflarestorage.com',
+			R2_BUCKET_NAME: 'private-books',
+			R2_ACCESS_KEY_ID: 'test-access-key-id',
+			R2_SECRET_ACCESS_KEY: 'test-secret-access-key',
+		});
+
+		await expect(storage.put('books/1/file.pdf', Buffer.from('%PDF-1.7'), 'application/pdf')).rejects.toThrow('R2 PUT failed');
+	});
 });

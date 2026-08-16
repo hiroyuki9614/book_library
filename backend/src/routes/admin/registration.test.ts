@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -411,5 +411,26 @@ describe('Admin book registration', () => {
 		expect(response.status).toBe(409);
 		expect(await response.json()).toMatchObject({ code: 'DUPLICATE_FILE' });
 		expect(await readdir(storageRoot)).toEqual(before);
+	});
+
+	test('storage PUT失敗時は成功やBookFile登録を返さない', async () => {
+		mocks.bookFindUnique.mockResolvedValue({ id: 42, deletedAt: null });
+		const failedStorageRoot = await mkdtemp(join(tmpdir(), 'belib-storage-file-'));
+		await rm(failedStorageRoot, { recursive: true, force: true });
+		await writeFile(failedStorageRoot, 'not-a-directory');
+		const previousStorageRoot = process.env.BOOK_FILE_STORAGE_ROOT;
+		process.env.BOOK_FILE_STORAGE_ROOT = failedStorageRoot;
+		const formData = new FormData();
+		formData.append('file', new Blob(['%PDF-1.7'], { type: 'application/pdf' }), 'put-failure.pdf');
+
+		try {
+			const response = await app.request('/api/v1/admin/books/42/files', { method: 'POST', body: formData });
+			expect(response.status).toBe(500);
+			expect(mocks.bookFileCreate).not.toHaveBeenCalled();
+		} finally {
+			if (previousStorageRoot === undefined) delete process.env.BOOK_FILE_STORAGE_ROOT;
+			else process.env.BOOK_FILE_STORAGE_ROOT = previousStorageRoot;
+			await rm(failedStorageRoot, { force: true });
+		}
 	});
 });
