@@ -95,8 +95,8 @@ No `PRODUCT_FAILURE` was observed in the executed capabilities. The fixed `NOT_I
 ## Metrics
 
 ```text
-METRICS_RUN_ID = pending
-METRICS_SAVE = pending
+METRICS_RUN_ID = belib-e2e-w1-20260816-lane-b-implementation-fe38cc7
+METRICS_SAVE = saved
 CREDIT_MEASUREMENT_STATUS = pending_external_snapshot
 CREDITS_CONSUMED = null
 CASH_COST_JPY = null
