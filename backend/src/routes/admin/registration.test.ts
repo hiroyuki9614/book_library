@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
 	categoryFindUnique: vi.fn(),
 	bookCreate: vi.fn(),
 	bookFindUnique: vi.fn(),
+	bookFileFindFirst: vi.fn(),
 	bookFileCreate: vi.fn(),
 }));
 
@@ -33,7 +34,7 @@ vi.mock('../../lib/prisma.js', () => ({
 			user: { findFirst: mocks.userFindFirst },
 			category: { findMany: mocks.categoryFindMany, findUnique: mocks.categoryFindUnique },
 			book: { create: mocks.bookCreate, findUnique: mocks.bookFindUnique },
-			bookFile: { create: mocks.bookFileCreate },
+		bookFile: { findFirst: mocks.bookFileFindFirst, create: mocks.bookFileCreate },
 		});
 		await next();
 	},
@@ -56,6 +57,7 @@ beforeEach(() => {
 	vi.resetAllMocks();
 	mocks.getSession.mockResolvedValue({ user: { id: '1' } });
 	mocks.userFindFirst.mockResolvedValue({ id: 1, role: { name: 'admin' } });
+	mocks.bookFileFindFirst.mockResolvedValue(null);
 });
 
 describe('Admin book registration', () => {
@@ -325,6 +327,21 @@ describe('Admin book registration', () => {
 		expect(createInput.data.fileUrl).toMatch(/^[\da-f]{8}-[\da-f-]+\.pdf$/);
 		expect(createInput.data.originalFileName).toBe('../escape.pdf');
 		expect(await readFile(join(storageRoot, createInput.data.fileUrl))).toEqual(Buffer.from('%PDF-1.7'));
+	});
+
+	test('同一内容のPDFはfile hash重複として保存しない', async () => {
+		mocks.bookFindUnique.mockResolvedValue({ id: 42, deletedAt: null });
+		mocks.bookFileFindFirst.mockResolvedValue({ id: 99 });
+		const before = await readdir(storageRoot);
+		const formData = new FormData();
+		formData.append('file', new Blob(['%PDF-1.7'], { type: 'application/pdf' }), 'duplicate.pdf');
+
+		const response = await app.request('/api/v1/admin/books/42/files', { method: 'POST', body: formData });
+
+		expect(response.status).toBe(409);
+		expect(await response.json()).toMatchObject({ code: 'DUPLICATE_FILE' });
+		expect(mocks.bookFileCreate).not.toHaveBeenCalled();
+		expect(await readdir(storageRoot)).toEqual(before);
 	});
 
 	test('非adminユーザーは書籍登録を403で拒否する', async () => {

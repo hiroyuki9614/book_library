@@ -1,9 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
 import type { Context } from 'hono';
 import { Hono } from 'hono';
 import { auth } from '../../lib/auth.js';
+import { createBookFileStorage } from '../../lib/bookFileStorage.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
 
 const app = new Hono<PrismaVariables>();
@@ -230,7 +229,9 @@ app.post('/books', async (c) => {
 });
 
 app.post('/books/:bookId/files', async (c) => {
-	let storedPath: string | undefined;
+	let storedKey: string | undefined;
+	let storage: ReturnType<typeof createBookFileStorage> | undefined;
+	let storageWritten = false;
 	try {
 		const admin = await getAdminUser(c);
 		if ('response' in admin) {
@@ -269,17 +270,17 @@ app.post('/books/:bookId/files', async (c) => {
 			return jsonError(c, 400, 'Uploaded file is not a valid PDF', 'INVALID_PDF');
 		}
 
-		const storageRoot = resolve(process.env.BOOK_FILE_STORAGE_ROOT ?? resolve(process.cwd(), 'storage'));
-		await mkdir(storageRoot, { recursive: true });
-		const storedRoot = await realpath(storageRoot);
-		const storedFileName = `${randomUUID()}.pdf`;
-		storedPath = resolve(storedRoot, storedFileName);
-		const pathFromRoot = relative(storedRoot, storedPath);
-		if (pathFromRoot.startsWith('..') || isAbsolute(pathFromRoot)) {
-			return jsonError(c, 500, 'Storage path is invalid', 'STORAGE_PATH_INVALID');
+		const fileHash = createHash('sha256').update(bytes).digest('hex');
+		const duplicate = await c.get('prisma').bookFile.findFirst({ where: { fileHash }, select: { id: true } });
+		if (duplicate) {
+			return jsonError(c, 409, 'The same PDF file is already registered', 'DUPLICATE_FILE');
 		}
 
-		await writeFile(storedPath, bytes, { flag: 'wx' });
+		const storedFileName = `${randomUUID()}.pdf`;
+		storedKey = storedFileName;
+		storage = createBookFileStorage();
+		await storage.put(storedKey, bytes, PDF_MIME_TYPE);
+		storageWritten = true;
 		const record = await c.get('prisma').bookFile.create({
 			data: {
 				extension: 'pdf',
@@ -288,14 +289,18 @@ app.post('/books/:bookId/files', async (c) => {
 				originalFileName: validation.file.name,
 				storedFileName,
 				fileSize: bytes.length,
-				fileHash: createHash('sha256').update(bytes).digest('hex'),
+				fileHash,
 				bookId,
 			},
 		});
 		return c.json(record, 201);
 	} catch (error) {
-		if (storedPath) {
-			await rm(storedPath, { force: true });
+		if (storageWritten && storage && storedKey) {
+			try {
+				await storage.delete(storedKey);
+			} catch (cleanupError) {
+				console.error('Failed to clean up uploaded storage object', cleanupError);
+			}
 		}
 		console.error(error);
 		return c.json({ error: 'Failed to register PDF file' }, 500);

@@ -11,6 +11,7 @@
     "create:initial-admin": "tsx scripts/create-initial-admin.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1111.0",
     "@better-auth/prisma-adapter": "^1.6.23",
     "@hono/node-server": "^1.19.6",
     "@hono/standard-validator": "^0.2.3",

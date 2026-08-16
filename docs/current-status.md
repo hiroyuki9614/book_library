@@ -29,7 +29,7 @@ BeLib now has a real PDF MVP vertical slice rather than a mock-only frontend.
 Better Auth session                              implemented
 GET /api/v1/me                                   implemented
 role-authorized book list/detail                 implemented
-protected PDF delivery                           implemented with local ignored storage
+protected PDF delivery                           implemented through protected storage adapter
 reading-info GET/PATCH                           implemented
 reading position persistence to PostgreSQL       implemented
 frontend book/detail/PDF integration             implemented
@@ -38,7 +38,7 @@ minimal admin book metadata API                  implemented
 minimal admin PDF upload API                     implemented
 admin UI -> admin API wiring                     not implemented
 per-user readStatus in book list                 implemented
-Cloudflare R2 / formal file delivery             not implemented
+Cloudflare R2 adapter / formal file delivery     code implemented; real runtime pending authorization
 EPUB protected backend path                      not implemented
 formal publication-scope selection               not implemented
 completed auto transition                        implemented for PDF final-page saves
@@ -103,7 +103,7 @@ POST /api/v1/admin/books
 POST /api/v1/admin/books/:bookId/files
 ```
 
-Current PDF upload is backend-admin-only, PDF-only, maximum 200 MB, validates metadata and actual PDF header, stores SHA-256 hash, uses a generated relative storage key, and removes the newly written file if the DB create fails.
+Current PDF upload is backend-admin-only, PDF-only, maximum 200 MB, validates metadata and actual PDF header, rejects SHA-256 duplicates, stores through the configured local/R2 adapter, and removes the newly written object if the DB create fails. R2 credentials are server-side only and no public URL is emitted.
 
 Current requirement drift:
 
@@ -191,7 +191,7 @@ These are checkpoint evidence, not a promise that later code is automatically gr
 
 ## Confirmed requirements still open
 
-- Cloudflare R2 storage and formal file-delivery behavior
+- Real Cloudflare R2 runtime verification (explicit authorization is still required)
 - EPUB upload/viewing through the protected server path
 - explicit publication scope (`all users` / `admin only`) with no default
 - automatic `unread -> reading -> completed`

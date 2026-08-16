@@ -97,8 +97,8 @@ paths:
     get:
       summary: 認可済みPDFを取得
       description: |
-        現在の実装はPDF専用。保護local storageからbackend経由でstreamする。
-        EPUBおよびR2 signed URLは正式要件には存在するが、このendpointのcurrent implementationには未接続。
+        現在の実装はPDF専用。認証・role permission確認後、storage adapter経由でbackendからprivate streamする。
+        ブラウザへpublic URLやpresigned URLは返さない。local adapterまたは設定済みR2 adapterを使用する。
       responses:
         '200':
           description: PDF stream
@@ -224,7 +224,7 @@ paths:
     post:
       summary: 管理者がPDFを登録
       description: |
-        現在はPDFのみ、最大200MB。metadataとPDF headerを検証し、保護local storageへ保存後にBookFileを作成する。
+        現在はPDFのみ、最大200MB。metadata、PDF header、SHA-256重複を検証し、storage adapterへの保存成功後にBookFileを作成する。
       requestBody:
         required: true
         content:
@@ -521,7 +521,7 @@ components:
           enum: [application/pdf]
         fileUrl:
           type: string
-          description: Current implementation stores a protected local relative key, not a public URL.
+          description: Opaque protected storage key or locator. It is never a public URL.
         originalFileName:
           type: string
         storedFileName:
