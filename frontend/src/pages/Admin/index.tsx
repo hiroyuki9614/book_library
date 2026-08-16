@@ -1,51 +1,51 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { BookOpen, Library, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 
+import { createAdminBook, fetchAdminCategories, type AdminBook, type AdminCategory } from '@/api/admin';
 import BookRegistar, { type BookRegistrationValues } from '@/components/forms/BookRegistar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { booksData } from '@/data/booksData';
 
-type AdminBook = {
-	id: number;
-	title: string;
-	authorName: string;
-	categoryName: string;
-	publishedAt: string;
-	pageTurnDirection: 'ltr' | 'rtl';
-	fileName?: string;
-};
-
-const initialBooks: AdminBook[] = booksData.slice(0, 5).map((book) => ({
-	id: book.id,
-	title: book.title,
-	authorName: book.author,
-	categoryName: book.category,
-	publishedAt: book.year?.toString() ?? '—',
-	pageTurnDirection: 'ltr',
-}));
+function formatPublishedAt(value: string | null) {
+	return value ? value.slice(0, 10) : '—';
+}
 
 function Admin() {
-	const [books, setBooks] = useState(initialBooks);
+	const [books, setBooks] = useState<AdminBook[]>([]);
+	const [categories, setCategories] = useState<AdminCategory[]>([]);
+	const [categoriesLoading, setCategoriesLoading] = useState(true);
+	const [categoriesError, setCategoriesError] = useState<string | null>(null);
 	const [isSheetOpen, setIsSheetOpen] = useState(false);
 
-	const handleBookRegistration = (values: BookRegistrationValues) => {
-		setBooks((currentBooks) => [
-			{
-				id: Math.max(0, ...currentBooks.map((book) => book.id)) + 1,
-				title: values.title,
-				authorName: values.authorName || '未設定',
-				categoryName: values.categoryName,
-				publishedAt: values.publishedAt || '—',
-				pageTurnDirection: values.pageTurnDirection,
-				fileName: values.file?.[0]?.name,
-			},
-			...currentBooks,
-		]);
+	useEffect(() => {
+		let isMounted = true;
+		setCategoriesLoading(true);
+		fetchAdminCategories()
+			.then((loadedCategories) => {
+				if (!isMounted) return;
+				setCategories(loadedCategories);
+				setCategoriesError(null);
+			})
+			.catch(() => {
+				if (!isMounted) return;
+				setCategoriesError('カテゴリの取得に失敗しました。再読み込みしてください。');
+			})
+			.finally(() => {
+				if (isMounted) setCategoriesLoading(false);
+			});
+
+		return () => {
+			isMounted = false;
+		};
+	}, []);
+
+	const handleBookRegistration = async (values: BookRegistrationValues) => {
+		const registeredBook = await createAdminBook(values);
+		setBooks((currentBooks) => [registeredBook, ...currentBooks]);
 		setIsSheetOpen(false);
 		toast.success('書籍を登録しました。');
 	};
@@ -56,7 +56,7 @@ function Admin() {
 				<div>
 					<p className='mb-1 text-sm font-medium text-muted-foreground'>ADMIN CONSOLE</p>
 					<h1 className='text-3xl font-semibold tracking-tight'>書籍管理</h1>
-					<p className='mt-2 text-sm text-muted-foreground'>書籍情報とファイルを登録・管理します。</p>
+					<p className='mt-2 text-sm text-muted-foreground'>書籍メタデータを登録・管理します。</p>
 				</div>
 
 				<Sheet open={isSheetOpen} onOpenChange={setIsSheetOpen}>
@@ -69,9 +69,14 @@ function Admin() {
 					<SheetContent className='w-full sm:max-w-xl'>
 						<SheetHeader className='border-b px-5 py-5'>
 							<SheetTitle className='text-xl'>書籍を登録</SheetTitle>
-							<SheetDescription>基本情報を入力してください。タイトルのみ必須です。</SheetDescription>
+							<SheetDescription>タイトルとカテゴリが必須です。ファイル登録は別工程です。</SheetDescription>
 						</SheetHeader>
-						<BookRegistar onSubmit={handleBookRegistration} />
+						<BookRegistar
+							categories={categories}
+							categoriesLoading={categoriesLoading}
+							categoriesError={categoriesError}
+							onSubmit={handleBookRegistration}
+						/>
 					</SheetContent>
 				</Sheet>
 			</header>
@@ -80,7 +85,7 @@ function Admin() {
 				<Card>
 					<CardHeader className='flex-row items-center justify-between'>
 						<div>
-							<CardDescription>登録書籍</CardDescription>
+							<CardDescription>この画面で登録した書籍</CardDescription>
 							<CardTitle className='mt-2 text-3xl'>{books.length}</CardTitle>
 						</div>
 						<Library className='size-7 text-muted-foreground' />
@@ -90,7 +95,7 @@ function Admin() {
 					<CardHeader className='flex-row items-center justify-between'>
 						<div>
 							<CardDescription>ファイル登録済み</CardDescription>
-							<CardTitle className='mt-2 text-3xl'>{books.filter((book) => book.fileName).length}</CardTitle>
+							<CardTitle className='mt-2 text-3xl'>0</CardTitle>
 						</div>
 						<BookOpen className='size-7 text-muted-foreground' />
 					</CardHeader>
@@ -100,7 +105,7 @@ function Admin() {
 			<Card>
 				<CardHeader>
 					<CardTitle>書籍一覧</CardTitle>
-					<CardDescription>登録されている書籍を確認できます。</CardDescription>
+					<CardDescription>この画面でバックエンド登録に成功した書籍を表示します。</CardDescription>
 				</CardHeader>
 				<CardContent className='overflow-x-auto'>
 					<Table className='min-w-[720px]'>
@@ -118,13 +123,11 @@ function Admin() {
 							{books.map((book) => (
 								<TableRow key={book.id}>
 									<TableCell className='font-medium'>{book.title}</TableCell>
-									<TableCell>{book.authorName}</TableCell>
-									<TableCell>{book.categoryName}</TableCell>
-									<TableCell>{book.publishedAt}</TableCell>
+									<TableCell>{book.authorName ?? '未設定'}</TableCell>
+									<TableCell>{book.category.name}</TableCell>
+									<TableCell>{formatPublishedAt(book.publishedAt)}</TableCell>
 									<TableCell>{book.pageTurnDirection === 'rtl' ? '右から左' : '左から右'}</TableCell>
-									<TableCell>
-										{book.fileName ? <Badge variant='secondary'>{book.fileName}</Badge> : <span className='text-muted-foreground'>未登録</span>}
-									</TableCell>
+									<TableCell><Badge variant='secondary'>未登録（別工程）</Badge></TableCell>
 								</TableRow>
 							))}
 						</TableBody>

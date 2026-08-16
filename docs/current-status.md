@@ -1,6 +1,6 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-08-14
+- Updated: 2026-08-16
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
 - Current implementation checkpoint reviewed: `checkpoint/belib-mvp-phase6-20260812` at `a64fd12dd53b2f090d913fc71f6dded5b0c2883a`
 - Default `main` is older than this checkpoint and must not be used alone to judge current MVP progress
@@ -36,7 +36,7 @@ frontend book/detail/PDF integration             implemented
 real browser + PostgreSQL E2E                    implemented
 minimal admin book metadata API                  implemented
 minimal admin PDF upload API                     implemented
-admin UI -> admin API wiring                     not implemented
+admin UI -> admin API wiring                     implemented for metadata registration; file upload remains separate
 per-user readStatus in book list                 not implemented correctly yet
 Cloudflare R2 / formal file delivery             not implemented
 EPUB protected backend path                      not implemented

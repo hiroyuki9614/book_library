@@ -170,11 +170,31 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /admin/categories:
+    get:
+      summary: 管理者が有効なカテゴリ一覧を取得
+      description: |
+        管理者だけが取得できる。isActive=trueのカテゴリをdisplayOrder、idの昇順で返す。
+      responses:
+        '200':
+          description: Active categories
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminCategoriesResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /admin/books:
     post:
-      summary: 管理者が最小書籍メタデータを登録
+      summary: 管理者が書籍メタデータを登録
       description: |
-        現在のvertical sliceではtitleとactive categoryIdを受け取る。
+        title、active categoryIdと、現在のBook schemaで表現できるメタデータを受け取る。
+        ファイルはこのendpointでは登録しない。
         現実装はuser role向けRoleBookPermissionも作成するため、正式な公開範囲選択要件とはまだ一致していない。
       requestBody:
         required: true
@@ -195,6 +215,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Duplicate or conflicting registration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -322,6 +348,15 @@ components:
         name:
           type: string
 
+    AdminCategoriesResponse:
+      type: object
+      required: [categories]
+      properties:
+        categories:
+          type: array
+          items:
+            $ref: '#/components/schemas/CategorySummary'
+
     Book:
       type: object
       required:
@@ -403,6 +438,7 @@ components:
     AdminBookCreateRequest:
       type: object
       required: [title, categoryId]
+      additionalProperties: false
       properties:
         title:
           type: string
@@ -410,10 +446,33 @@ components:
         categoryId:
           type: integer
           minimum: 1
+        authorName:
+          type: string
+          nullable: true
+          maxLength: 255
+        publisher:
+          type: string
+          nullable: true
+          maxLength: 255
+        publishedAt:
+          type: string
+          format: date
+          nullable: true
+        pageTurnDirection:
+          type: string
+          enum: [ltr, rtl]
+          default: ltr
+        description:
+          type: string
+          nullable: true
 
     AdminBookCreateResponse:
+      allOf:
+        - $ref: '#/components/schemas/AdminBookRecord'
+
+    AdminBookRecord:
       type: object
-      required: [id, title, categoryId]
+      required: [id, title, categoryId, category, pageTurnDirection]
       properties:
         id:
           type: integer
@@ -422,8 +481,23 @@ components:
         authorName:
           type: string
           nullable: true
+        publisher:
+          type: string
+          nullable: true
+        publishedAt:
+          type: string
+          format: date-time
+          nullable: true
         categoryId:
           type: integer
+        category:
+          $ref: '#/components/schemas/CategorySummary'
+        pageTurnDirection:
+          type: string
+          enum: [ltr, rtl]
+        description:
+          type: string
+          nullable: true
 
     BookFile:
       type: object
