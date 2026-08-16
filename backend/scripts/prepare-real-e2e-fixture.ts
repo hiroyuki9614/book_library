@@ -12,11 +12,13 @@ const storageRoot = process.env.E2E_BOOK_FILE_STORAGE_ROOT;
 const metadataPath = process.env.E2E_MVP_METADATA_PATH;
 const taskSuffix = '20260811';
 const permissionedEmail = `belib-mvp-real-e2e-permissioned-${taskSuffix}@example.com`;
+const permissionedPeerEmail = `belib-mvp-real-e2e-permissioned-peer-${taskSuffix}@example.com`;
 const unpermissionedEmail = `belib-mvp-real-e2e-unpermissioned-${taskSuffix}@example.com`;
 const permissionedRoleName = `belib_e2e_permissioned_${taskSuffix}`;
 const unpermissionedRoleName = `belib_e2e_unpermissioned_${taskSuffix}`;
 const categoryName = `BeLib E2E Category ${taskSuffix}`;
 const bookTitle = `BeLib MVP Real E2E Book ${taskSuffix}`;
+const adminOnlyBookTitle = `BeLib MVP Admin Only E2E Book ${taskSuffix}`;
 const pdfFileName = `belib-mvp-real-e2e-${taskSuffix}.pdf`;
 
 if (!databaseUrl || !mvpPassword || !storageRoot || !metadataPath) {
@@ -74,12 +76,14 @@ const prisma = new PrismaClient({ adapter });
 
 try {
 	const userRole = await prisma.role.upsert({ where: { name: 'user' }, update: {}, create: { name: 'user' } });
+	const adminRole = await prisma.role.upsert({ where: { name: 'admin' }, update: {}, create: { name: 'admin' } });
 	const permissionedRole = await prisma.role.create({ data: { name: permissionedRoleName } });
 	const unpermissionedRole = await prisma.role.create({ data: { name: unpermissionedRoleName } });
 
 	const permissionedUser = await createCredentialUser(permissionedEmail, 'BeLib E2E Permissioned User', permissionedRole.id, mvpPassword);
+	const permissionedPeerUser = await createCredentialUser(permissionedPeerEmail, 'BeLib E2E Permissioned Peer User', permissionedRole.id, mvpPassword);
 	const unpermissionedUser = await createCredentialUser(unpermissionedEmail, 'BeLib E2E Unpermissioned User', unpermissionedRole.id, mvpPassword);
-	if (!permissionedUser.id || !unpermissionedUser.id || !userRole.id) {
+	if (!permissionedUser.id || !permissionedPeerUser.id || !unpermissionedUser.id || !userRole.id || !adminRole.id) {
 		throw new Error('E2E users were not created');
 	}
 
@@ -89,6 +93,13 @@ try {
 			title: bookTitle,
 			categoryId: category.id,
 			roleBookPermissions: { create: [{ role: { connect: { id: permissionedRole.id } } }] },
+		},
+	});
+	const adminOnlyBook = await prisma.book.create({
+		data: {
+			title: adminOnlyBookTitle,
+			categoryId: category.id,
+			roleBookPermissions: { create: [{ role: { connect: { id: adminRole.id } } }] },
 		},
 	});
 
@@ -108,7 +119,7 @@ try {
 			bookId: book.id,
 		},
 	});
-	await writeFile(metadataPath, JSON.stringify({ bookId: book.id, bookTitle }));
+	await writeFile(metadataPath, JSON.stringify({ bookId: book.id, bookTitle, adminOnlyBookId: adminOnlyBook.id, adminOnlyBookTitle }));
 
 	process.stdout.write(String(book.id));
 } finally {

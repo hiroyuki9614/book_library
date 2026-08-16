@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 
 const password = process.env.E2E_MVP_PASSWORD;
 const permissionedEmail = 'belib-mvp-real-e2e-permissioned-20260811@example.com';
+const permissionedPeerEmail = 'belib-mvp-real-e2e-permissioned-peer-20260811@example.com';
 const unpermissionedEmail = 'belib-mvp-real-e2e-unpermissioned-20260811@example.com';
 const metadataPath = process.env.E2E_MVP_METADATA_PATH;
 
@@ -10,9 +11,18 @@ if (!metadataPath || !password) {
 	throw new Error('E2E_MVP_METADATA_PATH and E2E_MVP_PASSWORD are required');
 }
 
-const metadata = JSON.parse(readFileSync(metadataPath, 'utf8')) as { bookId: number; bookTitle: string };
-const bookId = metadata.bookId;
-const bookTitle = metadata.bookTitle;
+let bookId: number;
+let bookTitle: string;
+let adminOnlyBookId: number;
+let adminOnlyBookTitle: string;
+
+test.beforeAll(() => {
+	const metadata = JSON.parse(readFileSync(metadataPath, 'utf8')) as { bookId: number; bookTitle: string; adminOnlyBookId: number; adminOnlyBookTitle: string };
+	bookId = metadata.bookId;
+	bookTitle = metadata.bookTitle;
+	adminOnlyBookId = metadata.adminOnlyBookId;
+	adminOnlyBookTitle = metadata.adminOnlyBookTitle;
+});
 
 async function login(page: Page, email: string) {
 	await page.goto('/login');
@@ -22,10 +32,11 @@ async function login(page: Page, email: string) {
 	await expect(page).toHaveURL('/');
 }
 
-test('authorized user logs in, reads protected PDF, and restores saved page from PostgreSQL', async ({ page }) => {
+test('authorized user logs in, reads protected PDF, persists reading state, and cannot read another user\'s progress', async ({ page, browser }) => {
 	await login(page, permissionedEmail);
 	await expect(page.getByPlaceholder('Search books or authors...')).toBeVisible();
 	await expect(page.getByText(bookTitle, { exact: true })).toBeVisible();
+	await expect(page.getByText(adminOnlyBookTitle, { exact: true })).toHaveCount(0);
 
 	const sessionResponse = await page.evaluate(async () => {
 		const response = await fetch(`${location.protocol}//localhost:3000/api/v1/me`, { credentials: 'include' });
@@ -48,14 +59,14 @@ test('authorized user logs in, reads protected PDF, and restores saved page from
 	await expect(pageInput).toHaveValue('2');
 	const saveResponse = await saveResponsePromise;
 	expect(saveResponse.status()).toBe(200);
-	expect((await saveResponse.json()).currentPage).toBe(2);
+	expect(await saveResponse.json()).toEqual(expect.objectContaining({ currentPage: 2, readStatus: 'reading' }));
 
 	const persistedResponse = await page.evaluate(async (id) => {
 		const response = await fetch(`http://localhost:3000/api/v1/books/${id}/reading-info`, { credentials: 'include' });
 		return { status: response.status, body: await response.json() };
 	}, bookId);
 	expect(persistedResponse.status).toBe(200);
-	expect(persistedResponse.body.currentPage).toBe(2);
+	expect(persistedResponse.body).toEqual(expect.objectContaining({ currentPage: 2, readStatus: 'reading' }));
 
 	const restoreResponsePromise = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${bookId}/reading-info`) && response.request().method() === 'GET');
 	await page.reload();
@@ -63,6 +74,19 @@ test('authorized user logs in, reads protected PDF, and restores saved page from
 	expect(restoreResponse.status()).toBe(200);
 	expect((await restoreResponse.json()).currentPage).toBe(2);
 	await expect(page.getByRole('spinbutton')).toHaveValue('2', { timeout: 30_000 });
+
+	const peerContext = await browser.newContext();
+	try {
+		const peerPage = await peerContext.newPage();
+		await login(peerPage, permissionedPeerEmail);
+		const peerReadingInfo = await peerPage.evaluate(async (id) => {
+			const response = await fetch(`http://localhost:3000/api/v1/books/${id}/reading-info`, { credentials: 'include' });
+			return { status: response.status, body: await response.json() };
+		}, bookId);
+		expect(peerReadingInfo).toEqual({ status: 200, body: { bookId, currentPage: 1, readStatus: 'unread' } });
+	} finally {
+		await peerContext.close();
+	}
 });
 
 test('unpermissioned user cannot see the book or access protected book APIs', async ({ browser }) => {
@@ -71,6 +95,7 @@ test('unpermissioned user cannot see the book or access protected book APIs', as
 	try {
 		await login(page, unpermissionedEmail);
 		await expect(page.getByText(bookTitle, { exact: true })).toHaveCount(0);
+		await expect(page.getByText(adminOnlyBookTitle, { exact: true })).toHaveCount(0);
 
 		const statuses = await page.evaluate(async (id) => {
 			const detail = await fetch(`http://localhost:3000/api/v1/books/${id}`, { credentials: 'include' });
@@ -78,6 +103,13 @@ test('unpermissioned user cannot see the book or access protected book APIs', as
 			return { detail: detail.status, file: file.status };
 		}, bookId);
 		expect(statuses).toEqual({ detail: 403, file: 403 });
+
+		const adminOnlyStatuses = await page.evaluate(async (id) => {
+			const detail = await fetch(`http://localhost:3000/api/v1/books/${id}`, { credentials: 'include' });
+			const file = await fetch(`http://localhost:3000/api/v1/books/${id}/file`, { credentials: 'include' });
+			return { detail: detail.status, file: file.status };
+		}, adminOnlyBookId);
+		expect(adminOnlyStatuses).toEqual({ detail: 403, file: 403 });
 	} finally {
 		await context.close();
 	}
