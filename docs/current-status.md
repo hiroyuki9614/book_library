@@ -196,7 +196,6 @@ These are checkpoint evidence, not a promise that later code is automatically gr
 - EPUB upload/viewing through the protected server path
 - explicit publication scope (`all users` / `admin only`) with no default
 - automatic `unread -> reading -> completed`
-- correct per-user readStatus in book list
 - search and category filtering
 - category management
 - general-user administration
