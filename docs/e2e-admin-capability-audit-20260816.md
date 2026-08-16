@@ -7,20 +7,21 @@ Scope: browser user capability audit only; no product feature implementation
 
 ## Method
 
-The audit uses `frontend/e2e/admin-capability-audit.spec.ts` with the existing real-runtime Playwright setup. Upload files are generated in test runtime and are not committed. A capability is `PASS` only when the browser UI reaches the API and the result is persisted in the database/storage boundary. The matrix `failure_class` column uses the audit enum (`PRODUCT_FAILURE`, `TEST_FAILURE`, `ENVIRONMENT_FAILURE`, `FLAKY`, `NOT_RUN`); `NOT_RUN` means the requested browser capability was not exercised because no browser-capable path exists. The separate `surface` column distinguishes `E2E成立`, `UIのみ`, `backend APIのみ`, and `未実装`.
+The audit uses `frontend/e2e/admin-capability-audit.spec.ts` with the existing real-runtime Playwright setup. Upload files are generated in test runtime and are not committed. A book-management capability is `PASS` only when the browser UI reaches the API and the result is persisted in the database/storage boundary. Navigation and authorization boundary checks are reported separately as PASS when their stated browser/API boundary is observed. The matrix `failure_class` column uses the audit enum (`PRODUCT_FAILURE`, `TEST_FAILURE`, `ENVIRONMENT_FAILURE`, `FLAKY`, `NOT_RUN`); `NOT_RUN` means the requested browser capability was not exercised because no browser-capable path exists. The separate `surface` column distinguishes `E2E成立`, `UIのみ`, `backend APIのみ`, and `未実装`.
 
 The baseline documentation states that the admin screen is still local state, while the backend exposes only minimal metadata and PDF registration endpoints. This audit keeps those states separate:
 
-- `E2E成立`: UI → API → DB/storage was observed.
-- `UIのみ`: the screen accepts input, but no admin API request or persistence was observed.
+- `E2E成立`: the browser UI reaches the API and the requested result is persisted in DB/storage.
+- `UIのみ`: the screen or navigation boundary is observed, but no backend request or persistence is observed for that capability.
 - `backend APIのみ`: an API behavior can be exercised directly, but no admin UI path reaches it.
+- `UI + backend API`: browser UI and a direct backend response are both observed, but not as one persisted UI flow.
 - `未実装`: no browser-capable path exists for the requested MVP operation.
 
 ## Capability matrix
 
 | ID | Capability | Status | Failure class | Surface | Evidence / classification |
-| --- | --- | --- | --- | --- |
-| BOOK-01 | 管理者が書籍登録画面を開く | PASS | — | E2E成立 | `/admin` and registration sheet opened in browser |
+| --- | --- | --- | --- | --- | --- |
+| BOOK-01 | 管理者が書籍登録画面を開く | PASS | — | UIのみ | `/admin` and registration sheet opened in browser |
 | BOOK-02 | PDFを選択し登録 | NOT_IMPLEMENTED | NOT_RUN | UIのみ | UI shows local filename only; no admin API request |
 | BOOK-03 | EPUBを選択し登録 | NOT_IMPLEMENTED | NOT_RUN | UIのみ | UI accepts EPUB locally; protected EPUB registration is not implemented |
 | BOOK-04 | 200MB上限 | NOT_IMPLEMENTED | NOT_RUN | backend APIのみ | backend validator exists, but UI has no upload API path |
@@ -48,7 +49,7 @@ The baseline documentation states that the admin screen is still local state, wh
 | DELETE-05 | 復元後に再閲覧 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no restore flow |
 | DELETE-06 | 完全削除 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no permanent-delete control/endpoint |
 | REPLACE-01 | 登録済みfileを差し替え | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no replacement control/endpoint |
-| ACCESS-01 | 一般ユーザーはAdmin操作を実行できない | PASS | — | E2E成立 | `/admin` redirects to `/`; admin POST returns 403 |
+| ACCESS-01 | 一般ユーザーはAdmin操作を実行できない | PASS | — | UI + backend API | `/admin` redirects to `/`; admin POST returns 403 |
 
 ## Summary
 
@@ -91,7 +92,9 @@ The two `PASS` results are limited to opening the existing admin screen and enfo
 BASELINE_HEAD = c20180e4887164a3dfcc78b977553eb78f655e04
 REVIEWED_HEAD = f13512ef658faf63a10a93a54d8b0c619b7ccb18
 CORRECTION_HEAD = d3089e77b25bfa9c2818d2713f9125462d4db000
-FINAL_HEAD = d3089e77b25bfa9c2818d2713f9125462d4db000
+IMPLEMENTATION_FINAL_HEAD = d3089e77b25bfa9c2818d2713f9125462d4db000
+FORMAL_REVIEWED_HEAD = 290ac31d4e9b389de0ff235daaebada9afa007fb
+FINAL_HEAD = 290ac31d4e9b389de0ff235daaebada9afa007fb
 BRANCH = test/e2e-admin-capability-audit-20260816
 WAVE_ID = BELIB-E2E-W1-20260816
 LANE = C
@@ -102,11 +105,14 @@ METRICS_RUN_ID = belib-e2e-w1-20260816-lane-c-admin-implementation
 JUNIOR_REVIEW_RUN_ID = belib-deepseek-junior-trial-v1-lane-c-admin-20260816
 JUNIOR_REVIEW_VERDICT = REQUEST_CHANGES
 CORRECTION_APPLIED = true
+INDEPENDENT_REVIEW_RUN_ID = belib-luna-independent-review-lane-c-admin-20260816
+INDEPENDENT_REVIEW_VERDICT = REQUEST_CHANGES
+FOCUSED_REVIEW_STATUS = pending
 E2E_COMMAND = npm --prefix frontend run test:e2e -- admin-capability-audit.spec.ts
 E2E_RESULT = 13 passed (corrected run)
 METRICS_SAVE = saved
 CREDIT_MEASUREMENT_STATUS = pending_external_snapshot
 CREDITS_CONSUMED = null
 CASH_COST_JPY = null
-NEXT_STATE = junior_review_pending
+NEXT_STATE = focused_review_pending
 ```
