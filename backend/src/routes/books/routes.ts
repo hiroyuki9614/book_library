@@ -31,6 +31,7 @@ type BookWithRelations = {
 		originalFileName: string;
 		fileUrl: string;
 	}>;
+	readingInfos?: Array<{ readStatus: string }>;
 };
 
 function jsonError(c: BooksContext, status: 400 | 401 | 403 | 404 | 500, message: string, code: string) {
@@ -185,7 +186,11 @@ app.get('/', async (c) => {
 			prisma.book.count({ where }),
 			prisma.book.findMany({
 				where,
-				include: { category: true, bookFiles: { orderBy: { id: 'asc' } } },
+				include: {
+					category: true,
+					bookFiles: { orderBy: { id: 'asc' } },
+					readingInfos: { where: { userId: user.id }, select: { readStatus: true } },
+				},
 				orderBy: { createdAt: 'desc' },
 				skip: (page - 1) * limit,
 				take: limit,
@@ -196,7 +201,10 @@ app.get('/', async (c) => {
 			total,
 			page,
 			limit,
-			books: books.map((book) => toBookResponse(book as BookWithRelations)),
+			books: books.map((book) => {
+				const bookWithRelations = book as BookWithRelations;
+				return toBookResponse(bookWithRelations, bookWithRelations.readingInfos?.[0]?.readStatus ?? 'unread');
+			}),
 		});
 	} catch (error) {
 		console.error(error);
