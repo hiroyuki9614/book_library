@@ -37,7 +37,7 @@ real browser + PostgreSQL E2E                    implemented
 minimal admin book metadata API                  implemented
 minimal admin PDF upload API                     implemented
 admin UI -> admin API wiring                     not implemented
-per-user readStatus in book list                 not implemented correctly yet
+per-user readStatus in book list                 implemented
 Cloudflare R2 / formal file delivery             not implemented
 EPUB protected backend path                      not implemented
 formal publication-scope selection               not implemented
@@ -72,17 +72,11 @@ Current behavior:
 - storage-root escape patterns are rejected
 - PDF responses use private no-store caching
 
-### Known list drift
+### Per-user list readStatus
 
-`GET /api/v1/books` currently calls `toBookResponse(book)` without loading the current user's `ReadingInfo` for each list item. Because the response helper defaults `readStatus` to `unread`, the list does not yet return the real per-user status.
+`GET /api/v1/books` loads at most the requesting user's `ReadingInfo` for each book and maps that bounded relation to `readStatus`. A missing `ReadingInfo` remains `unread`.
 
-This means:
-
-- detail API can return the current user's stored status
-- list-level status filters/summary cannot be considered complete
-- frontend summary values based on list `readStatus` may be inaccurate until the list joins reading info
-
-This is implementation drift, not a requirement change.
+The list and detail APIs therefore use the same current-user isolation boundary without changing the `ReadingInfo` schema or migration history.
 
 ### Reading info
 
@@ -217,13 +211,12 @@ See `docs/requirements.md` for the full target.
 
 1. Resolve `book_files.file_hash` migration/schema drift and prove fresh-DB reproducibility.
 2. Make README setup reproducible on a fresh environment.
-3. Correct per-user `readStatus` on the book list before treating list summary/filter as complete.
-4. Wire Admin UI to existing admin APIs.
-5. Implement explicit publication scope.
-6. Implement PDF `completed` transition.
-7. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
-8. Connect EPUB to the same authorization/storage/progress boundary.
-9. Continue remaining management requirements.
+3. Wire Admin UI to existing admin APIs.
+4. Implement explicit publication scope.
+5. Implement PDF `completed` transition.
+6. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
+7. Connect EPUB to the same authorization/storage/progress boundary.
+8. Continue remaining management requirements.
 
 ## Documentation responsibilities
 

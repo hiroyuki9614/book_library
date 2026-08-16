@@ -99,6 +99,52 @@ describe('protected book viewing APIs', () => {
 		);
 	});
 
+	test('一覧は同一書籍でもrequesting user自身のReadingInfoだけを返す', async () => {
+		const statusByUserId = new Map([
+			[7, 'reading'],
+			[8, 'completed'],
+		]);
+		const queriedUserIds: number[] = [];
+		mocks.bookCount.mockResolvedValue(1);
+		mocks.bookFindMany.mockImplementation(async (args: { include?: { readingInfos?: { where?: { userId?: number } } } }) => {
+			const userId = args.include?.readingInfos?.where?.userId;
+			if (userId === undefined) {
+				return [book];
+			}
+
+			queriedUserIds.push(userId);
+			return [{ ...book, readingInfos: [{ readStatus: statusByUserId.get(userId) }] }];
+		});
+
+		const userAResponse = await app.request('/');
+		mocks.getSession.mockResolvedValue({ user: { id: '8' } });
+		mocks.userFindFirst.mockResolvedValue({ id: 8, roleId: 2 });
+		const userBResponse = await app.request('/');
+
+		expect(userAResponse.status).toBe(200);
+		expect(userBResponse.status).toBe(200);
+		expect((await userAResponse.json()).books[0].readStatus).toBe('reading');
+		expect((await userBResponse.json()).books[0].readStatus).toBe('completed');
+		expect(queriedUserIds).toEqual([7, 8]);
+		expect(mocks.bookFindMany).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				include: expect.objectContaining({
+					readingInfos: { where: { userId: 8 }, select: { readStatus: true } },
+				}),
+			}),
+		);
+	});
+
+	test('一覧はReadingInfoがないユーザーをunreadとして返す', async () => {
+		mocks.bookCount.mockResolvedValue(1);
+		mocks.bookFindMany.mockResolvedValue([{ ...book, readingInfos: [] }]);
+
+		const response = await app.request('/');
+
+		expect(response.status).toBe(200);
+		expect((await response.json()).books[0].readStatus).toBe('unread');
+	});
+
 	test('RoleBookPermissionがない一般ユーザーの一覧には書籍が表示されない', async () => {
 		mocks.bookCount.mockResolvedValue(0);
 		mocks.bookFindMany.mockResolvedValue([]);
@@ -123,6 +169,23 @@ describe('protected book viewing APIs', () => {
 			title: 'Phase 3 PDF',
 			hasFile: true,
 			readStatus: 'unread',
+		});
+	});
+
+	test('詳細はrequesting user自身のReadingInfoだけを返す', async () => {
+		mocks.readingInfoFindUnique.mockImplementation(async ({ where }: { where: { userId_bookId: { userId: number } } }) => ({
+			readStatus: where.userId_bookId.userId === 7 ? 'reading' : 'completed',
+		}));
+
+		const userAResponse = await app.request('/1');
+		mocks.getSession.mockResolvedValue({ user: { id: '8' } });
+		mocks.userFindFirst.mockResolvedValue({ id: 8, roleId: 2 });
+		const userBResponse = await app.request('/1');
+
+		expect((await userAResponse.json()).readStatus).toBe('reading');
+		expect((await userBResponse.json()).readStatus).toBe('completed');
+		expect(mocks.readingInfoFindUnique).toHaveBeenLastCalledWith({
+			where: { userId_bookId: { userId: 8, bookId: 1 } },
 		});
 	});
 
