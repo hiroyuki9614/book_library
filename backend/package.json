@@ -6,6 +6,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest --run",
+    "verify:file-hash-migration": "tsx scripts/verify-file-hash-migration.ts",
     "prepare:real-e2e-fixture": "tsx scripts/prepare-real-e2e-fixture.ts",
     "create:initial-admin": "tsx scripts/create-initial-admin.ts"
   },
