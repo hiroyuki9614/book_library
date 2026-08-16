@@ -7,7 +7,8 @@
     "start": "node dist/index.js",
     "test": "vitest --run",
     "prepare:real-e2e-fixture": "tsx scripts/prepare-real-e2e-fixture.ts",
-    "create:initial-admin": "tsx scripts/create-initial-admin.ts"
+    "create:initial-admin": "tsx scripts/create-initial-admin.ts",
+    "prepare:wave1a-auth-fixture": "tsx scripts/prepare-wave1a-auth-fixture.ts"
   },
   "dependencies": {
     "@better-auth/prisma-adapter": "^1.6.23",
