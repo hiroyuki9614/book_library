@@ -7,6 +7,7 @@ import { MAX_PDF_FILE_SIZE, validatePdfUploadMetadata } from './routes.js';
 const mocks = vi.hoisted(() => ({
 	getSession: vi.fn(),
 	userFindFirst: vi.fn(),
+	categoryFindMany: vi.fn(),
 	categoryFindUnique: vi.fn(),
 	bookCreate: vi.fn(),
 	bookFindUnique: vi.fn(),
@@ -30,7 +31,7 @@ vi.mock('../../lib/prisma.js', () => ({
 	default: async (c: { set: (key: string, value: unknown) => void }, next: () => Promise<void>) => {
 		c.set('prisma', {
 			user: { findFirst: mocks.userFindFirst },
-			category: { findUnique: mocks.categoryFindUnique },
+			category: { findMany: mocks.categoryFindMany, findUnique: mocks.categoryFindUnique },
 			book: { create: mocks.bookCreate, findUnique: mocks.bookFindUnique },
 			bookFile: { create: mocks.bookFileCreate },
 		});
@@ -57,7 +58,40 @@ beforeEach(() => {
 	mocks.userFindFirst.mockResolvedValue({ id: 1, role: { name: 'admin' } });
 });
 
-describe('Phase 5 admin book registration', () => {
+describe('Admin book registration', () => {
+	test('未認証ユーザーはadmin categories APIを401で拒否する', async () => {
+		mocks.getSession.mockResolvedValue(null);
+
+		const response = await app.request('/api/v1/admin/categories');
+
+		expect(response.status).toBe(401);
+	});
+
+	test('非adminユーザーはadmin categories APIを403で拒否する', async () => {
+		mocks.userFindFirst.mockResolvedValue({ id: 1, role: { name: 'user' } });
+
+		const response = await app.request('/api/v1/admin/categories');
+
+		expect(response.status).toBe(403);
+	});
+
+	test('adminはactiveカテゴリだけをdisplayOrderとid順で取得できる', async () => {
+		mocks.categoryFindMany.mockResolvedValue([
+			{ id: 2, name: '技術書' },
+			{ id: 5, name: '小説' },
+		]);
+
+		const response = await app.request('/api/v1/admin/categories');
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ categories: [{ id: 2, name: '技術書' }, { id: 5, name: '小説' }] });
+		expect(mocks.categoryFindMany).toHaveBeenCalledWith({
+			where: { isActive: true },
+			orderBy: [{ displayOrder: 'asc' }, { id: 'asc' }],
+			select: { id: true, name: true },
+		});
+	});
+
 	test('未認証ユーザーはadmin book APIを401で拒否する', async () => {
 		mocks.getSession.mockResolvedValue(null);
 
@@ -72,7 +106,17 @@ describe('Phase 5 admin book registration', () => {
 
 	test('adminは最小metadataで書籍を1冊作成できる', async () => {
 		mocks.categoryFindUnique.mockResolvedValue({ id: 1, isActive: true });
-		mocks.bookCreate.mockResolvedValue({ id: 42, title: 'Phase 5 book', authorName: null, categoryId: 1 });
+		mocks.bookCreate.mockResolvedValue({
+			id: 42,
+			title: 'Phase 5 book',
+			authorName: null,
+			publisher: null,
+			publishedAt: null,
+			categoryId: 1,
+			pageTurnDirection: 'ltr',
+			description: null,
+			category: { id: 1, name: '技術書' },
+		});
 
 		const response = await app.request('/api/v1/admin/books', {
 			method: 'POST',
@@ -85,11 +129,123 @@ describe('Phase 5 admin book registration', () => {
 		expect(mocks.bookCreate).toHaveBeenCalledWith({
 			data: {
 				title: 'Phase 5 book',
+				authorName: null,
+				publisher: null,
+				publishedAt: null,
+				pageTurnDirection: 'ltr',
+				description: null,
 				category: { connect: { id: 1 } },
 				roleBookPermissions: { create: [{ role: { connect: { name: 'user' } } }] },
 			},
-			select: { id: true, title: true, authorName: true, categoryId: true },
+			select: {
+				id: true,
+				title: true,
+				authorName: true,
+				publisher: true,
+				publishedAt: true,
+				categoryId: true,
+				pageTurnDirection: true,
+				description: true,
+				category: { select: { id: true, name: true } },
+			},
 		});
+	});
+
+	test('admin book API persists all supported metadata', async () => {
+		mocks.categoryFindUnique.mockResolvedValue({ id: 9, isActive: true });
+		const publishedAt = new Date('2026-08-16T00:00:00.000Z');
+		mocks.bookCreate.mockResolvedValue({
+			id: 43,
+			title: 'Metadata book',
+			authorName: 'Author',
+			publisher: 'Publisher',
+			publishedAt,
+			categoryId: 9,
+			pageTurnDirection: 'rtl',
+			description: 'Description',
+			category: { id: 9, name: '技術書' },
+		});
+
+		const response = await app.request('/api/v1/admin/books', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				title: ' Metadata book ',
+				authorName: ' Author ',
+				publisher: ' Publisher ',
+				publishedAt: '2026-08-16',
+				categoryId: 9,
+				pageTurnDirection: 'rtl',
+				description: ' Description ',
+			}),
+		});
+
+		expect(response.status).toBe(201);
+		expect(await response.json()).toMatchObject({ id: 43, title: 'Metadata book', categoryId: 9, pageTurnDirection: 'rtl' });
+		expect(mocks.bookCreate).toHaveBeenCalledWith(expect.objectContaining({
+			data: expect.objectContaining({
+				title: 'Metadata book',
+				authorName: 'Author',
+				publisher: 'Publisher',
+				publishedAt,
+				pageTurnDirection: 'rtl',
+				description: 'Description',
+			}),
+		}));
+	});
+
+	test.each([
+		['inactive', { title: 'Inactive', categoryId: 2 }],
+		['nonexistent', { title: 'Missing', categoryId: 999 }],
+	])('activeでないカテゴリ(%s)なら書籍を作成しない', async (_label, body) => {
+		mocks.categoryFindUnique.mockResolvedValue(null);
+
+		const response = await app.request('/api/v1/admin/books', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+		});
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toMatchObject({ code: 'INVALID_CATEGORY' });
+		expect(mocks.bookCreate).not.toHaveBeenCalled();
+	});
+
+	test('invalid pageTurnDirectionなら書籍を作成しない', async () => {
+		const response = await app.request('/api/v1/admin/books', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ title: 'Invalid direction', categoryId: 1, pageTurnDirection: 'vertical' }),
+		});
+
+		expect(response.status).toBe(400);
+		expect(mocks.categoryFindUnique).not.toHaveBeenCalled();
+		expect(mocks.bookCreate).not.toHaveBeenCalled();
+	});
+
+	test('invalid publishedAtなら書籍を作成しない', async () => {
+		const response = await app.request('/api/v1/admin/books', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ title: 'Invalid date', categoryId: 1, publishedAt: '2026-02-30' }),
+		});
+
+		expect(response.status).toBe(400);
+		expect(mocks.categoryFindUnique).not.toHaveBeenCalled();
+		expect(mocks.bookCreate).not.toHaveBeenCalled();
+	});
+
+	test('malformed request bodyなら書籍を作成しない', async () => {
+		const response = await app.request('/api/v1/admin/books', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(['not', 'an', 'object']),
+		});
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toMatchObject({ code: 'INVALID_BOOK' });
+		expect(mocks.categoryFindUnique).not.toHaveBeenCalled();
+		expect(mocks.bookCreate).not.toHaveBeenCalled();
 	});
 
 	test('adminが作成したMVP書籍はuser roleのRoleBookPermissionを持つ', async () => {
@@ -106,10 +262,25 @@ describe('Phase 5 admin book registration', () => {
 		expect(mocks.bookCreate).toHaveBeenCalledWith({
 			data: {
 				title: 'Phase 5 visible book',
+				authorName: null,
+				publisher: null,
+				publishedAt: null,
+				pageTurnDirection: 'ltr',
+				description: null,
 				category: { connect: { id: 1 } },
 				roleBookPermissions: { create: [{ role: { connect: { name: 'user' } } }] },
 			},
-			select: { id: true, title: true, authorName: true, categoryId: true },
+			select: {
+				id: true,
+				title: true,
+				authorName: true,
+				publisher: true,
+				publishedAt: true,
+				categoryId: true,
+				pageTurnDirection: true,
+				description: true,
+				category: { select: { id: true, name: true } },
+			},
 		});
 	});
 

@@ -1,6 +1,6 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-08-14
+- Updated: 2026-08-16
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
 - Current implementation checkpoint reviewed: `checkpoint/belib-mvp-phase6-20260812` at `a64fd12dd53b2f090d913fc71f6dded5b0c2883a`
 - Default `main` is older than this checkpoint and must not be used alone to judge current MVP progress
@@ -36,8 +36,8 @@ frontend book/detail/PDF integration             implemented
 real browser + PostgreSQL E2E                    implemented
 minimal admin book metadata API                  implemented
 minimal admin PDF upload API                     implemented
-admin UI -> admin API wiring                     not implemented
-per-user readStatus in book list                 implemented
+admin UI -> admin API wiring                     implemented for metadata registration; file upload remains separate
+per-user readStatus in book list                 not implemented correctly yet
 Cloudflare R2 / formal file delivery             not implemented
 EPUB protected backend path                      not implemented
 formal publication-scope selection               not implemented
@@ -72,11 +72,17 @@ Current behavior:
 - storage-root escape patterns are rejected
 - PDF responses use private no-store caching
 
-### Per-user list readStatus
+### Known list drift
 
-`GET /api/v1/books` loads at most the requesting user's `ReadingInfo` for each book and maps that bounded relation to `readStatus`. A missing `ReadingInfo` remains `unread`.
+`GET /api/v1/books` currently calls `toBookResponse(book)` without loading the current user's `ReadingInfo` for each list item. Because the response helper defaults `readStatus` to `unread`, the list does not yet return the real per-user status.
 
-The list and detail APIs therefore use the same current-user isolation boundary without changing the `ReadingInfo` schema or migration history.
+This means:
+
+- detail API can return the current user's stored status
+- list-level status filters/summary cannot be considered complete
+- frontend summary values based on list `readStatus` may be inaccurate until the list joins reading info
+
+This is implementation drift, not a requirement change.
 
 ### Reading info
 
@@ -157,12 +163,13 @@ Important constraints:
 - `ReadingInfo.readStatus` defaults to `unread`
 - `Book.pageTurnDirection` defaults to `ltr`
 
-Migration reproducibility status:
+Known migration issue from the latest verification record:
 
-- `backend/prisma/migrations/20260816140000_add_book_file_hash/migration.sql` adds the required `book_files.file_hash` column and unique index without rewriting historical migrations
-- fresh PostgreSQL verification applies all four migrations from zero, checks `VARCHAR(64) NOT NULL`, and verifies Prisma read/write plus duplicate rejection
-- `backend/scripts/verify-file-hash-migration.ts` provides the repeatable contract check
-- an existing non-empty `book_files` table requires an explicit real-content hash backfill policy before applying; production/shared DBs were not modified by this work
+- current schema includes `book_files.file_hash`
+- fresh isolated E2E required temporary schema synchronization because committed migrations did not fully reproduce the current schema
+- migration/schema drift remains a Phase 6 completion item
+
+Use a forward migration; do not rewrite an old committed migration just to erase the historical gap.
 
 ## Verification evidence
 
@@ -195,6 +202,7 @@ These are checkpoint evidence, not a promise that later code is automatically gr
 - EPUB upload/viewing through the protected server path
 - explicit publication scope (`all users` / `admin only`) with no default
 - automatic `unread -> reading -> completed`
+- correct per-user readStatus in book list
 - search and category filtering
 - category management
 - general-user administration
@@ -209,12 +217,13 @@ See `docs/requirements.md` for the full target.
 
 1. Resolve `book_files.file_hash` migration/schema drift and prove fresh-DB reproducibility.
 2. Make README setup reproducible on a fresh environment.
-3. Wire Admin UI to existing admin APIs.
-4. Implement explicit publication scope.
-5. Implement PDF `completed` transition.
-6. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
-7. Connect EPUB to the same authorization/storage/progress boundary.
-8. Continue remaining management requirements.
+3. Correct per-user `readStatus` on the book list before treating list summary/filter as complete.
+4. Wire Admin UI to existing admin APIs.
+5. Implement explicit publication scope.
+6. Implement PDF `completed` transition.
+7. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
+8. Connect EPUB to the same authorization/storage/progress boundary.
+9. Continue remaining management requirements.
 
 ## Documentation responsibilities
 

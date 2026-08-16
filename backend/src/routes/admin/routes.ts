@@ -19,6 +19,15 @@ type PdfUpload = {
 };
 
 type ValidationResult = { valid: true; file: PdfUpload } | { valid: false; status: 400 | 413; message: string; code: string };
+type AdminBookCreateBody = {
+	title?: unknown;
+	authorName?: unknown;
+	publisher?: unknown;
+	publishedAt?: unknown;
+	categoryId?: unknown;
+	pageTurnDirection?: unknown;
+	description?: unknown;
+};
 
 export function validatePdfUploadMetadata(value: unknown): ValidationResult {
 	if (
@@ -75,6 +84,92 @@ async function getAdminUser(c: AdminContext) {
 	return { user };
 }
 
+function normalizeOptionalString(value: unknown, fieldName: string, maxLength?: number): string | null {
+	if (value === undefined || value === null) {
+		return null;
+	}
+	if (typeof value !== 'string') {
+		throw new Error(`${fieldName} must be a string`);
+	}
+
+	const normalized = value.trim();
+	if (maxLength !== undefined && normalized.length > maxLength) {
+		throw new Error(`${fieldName} is too long`);
+	}
+	return normalized || null;
+}
+
+function parsePublishedAt(value: unknown): Date | null {
+	if (value === undefined || value === null || value === '') {
+		return null;
+	}
+	if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+		throw new Error('publishedAt must be a valid date');
+	}
+
+	const parsed = new Date(`${value}T00:00:00.000Z`);
+	const [year, month, day] = value.split('-').map(Number);
+	if (
+		!Number.isFinite(parsed.getTime()) ||
+		parsed.getUTCFullYear() !== year ||
+		parsed.getUTCMonth() + 1 !== month ||
+		parsed.getUTCDate() !== day
+	) {
+		throw new Error('publishedAt must be a valid date');
+	}
+	return parsed;
+}
+
+function parseAdminBookCreateBody(body: unknown) {
+	if (!body || typeof body !== 'object' || Array.isArray(body)) {
+		throw new Error('Request body must be an object');
+	}
+
+	const input = body as AdminBookCreateBody;
+	const allowedFields = new Set(['title', 'authorName', 'publisher', 'publishedAt', 'categoryId', 'pageTurnDirection', 'description']);
+	if (Object.keys(input).some((field) => !allowedFields.has(field))) {
+		throw new Error('Request body contains an unsupported field');
+	}
+	if (typeof input.title !== 'string' || !input.title.trim() || input.title.trim().length > 255) {
+		throw new Error('title is required and must be 255 characters or fewer');
+	}
+	if (typeof input.categoryId !== 'number' || !Number.isSafeInteger(input.categoryId) || input.categoryId < 1) {
+		throw new Error('categoryId is required');
+	}
+	if (input.pageTurnDirection !== undefined && input.pageTurnDirection !== 'ltr' && input.pageTurnDirection !== 'rtl') {
+		throw new Error('pageTurnDirection must be ltr or rtl');
+	}
+
+	return {
+		title: input.title.trim(),
+		authorName: normalizeOptionalString(input.authorName, 'authorName', 255),
+		publisher: normalizeOptionalString(input.publisher, 'publisher', 255),
+		publishedAt: parsePublishedAt(input.publishedAt),
+		categoryId: input.categoryId,
+		pageTurnDirection: input.pageTurnDirection === undefined ? 'ltr' : input.pageTurnDirection,
+		description: normalizeOptionalString(input.description, 'description'),
+	};
+}
+
+app.get('/categories', async (c) => {
+	try {
+		const admin = await getAdminUser(c);
+		if ('response' in admin) {
+			return admin.response;
+		}
+
+		const categories = await c.get('prisma').category.findMany({
+			where: { isActive: true },
+			orderBy: [{ displayOrder: 'asc' }, { id: 'asc' }],
+			select: { id: true, name: true },
+		});
+		return c.json({ categories });
+	} catch (error) {
+		console.error(error);
+		return c.json({ error: 'Failed to load categories' }, 500);
+	}
+});
+
 app.post('/books', async (c) => {
 	try {
 		const admin = await getAdminUser(c);
@@ -89,14 +184,15 @@ app.post('/books', async (c) => {
 			return jsonError(c, 400, 'Request body must be valid JSON', 'INVALID_REQUEST');
 		}
 
-		const title = (body as { title?: unknown })?.title;
-		const categoryId = (body as { categoryId?: unknown })?.categoryId;
-		if (typeof title !== 'string' || !title.trim() || typeof categoryId !== 'number' || !Number.isSafeInteger(categoryId) || categoryId < 1) {
-			return jsonError(c, 400, 'title and categoryId are required', 'INVALID_BOOK');
+		let input: ReturnType<typeof parseAdminBookCreateBody>;
+		try {
+			input = parseAdminBookCreateBody(body);
+		} catch {
+			return jsonError(c, 400, 'Book metadata is invalid', 'INVALID_BOOK');
 		}
 
 		const category = await c.get('prisma').category.findUnique({
-			where: { id: categoryId },
+			where: { id: input.categoryId },
 			select: { id: true, isActive: true },
 		});
 		if (!category || !category.isActive) {
@@ -105,11 +201,26 @@ app.post('/books', async (c) => {
 
 		const book = await c.get('prisma').book.create({
 			data: {
-				title: title.trim(),
-				category: { connect: { id: categoryId } },
+				title: input.title,
+				authorName: input.authorName,
+				publisher: input.publisher,
+				publishedAt: input.publishedAt,
+				pageTurnDirection: input.pageTurnDirection,
+				description: input.description,
+				category: { connect: { id: input.categoryId } },
 				roleBookPermissions: { create: [{ role: { connect: { name: 'user' } } }] },
 			},
-			select: { id: true, title: true, authorName: true, categoryId: true },
+			select: {
+				id: true,
+				title: true,
+				authorName: true,
+				publisher: true,
+				publishedAt: true,
+				categoryId: true,
+				pageTurnDirection: true,
+				description: true,
+				category: { select: { id: true, name: true } },
+			},
 		});
 		return c.json(book, 201);
 	} catch (error) {
