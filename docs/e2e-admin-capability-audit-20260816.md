@@ -89,15 +89,15 @@ The two `PASS` results are limited to opening the existing admin screen and enfo
 
 ```text
 BASELINE_HEAD = c20180e4887164a3dfcc78b977553eb78f655e04
-FINAL_HEAD = reported in task completion after commit
+FINAL_HEAD = reported in task completion after final report commit
 BRANCH = test/e2e-admin-capability-audit-20260816
 WAVE_ID = BELIB-E2E-W1-20260816
 LANE = C
 ROLE = implementation
 MODEL = gpt-5.6-luna
 REASONING = high
-METRICS_RUN_ID = reported in task completion
-METRICS_SAVE = pending
+METRICS_RUN_ID = belib-e2e-w1-20260816-lane-c-admin-implementation
+METRICS_SAVE = saved
 CREDIT_MEASUREMENT_STATUS = pending_external_snapshot
 CREDITS_CONSUMED = null
 CASH_COST_JPY = null
