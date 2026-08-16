@@ -1,0 +1,194 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { isAbsolute, relative, resolve } from 'node:path';
+import type { Context } from 'hono';
+import { Hono } from 'hono';
+import { auth } from '../../lib/auth.js';
+import type { PrismaVariables } from '../../lib/prisma.js';
+
+const app = new Hono<PrismaVariables>();
+type AdminContext = Context<PrismaVariables>;
+const PDF_MIME_TYPE = 'application/pdf';
+export const MAX_PDF_FILE_SIZE = 200 * 1024 * 1024;
+
+type PdfUpload = {
+	name: string;
+	type: string;
+	size: number;
+	arrayBuffer: () => Promise<ArrayBuffer>;
+};
+
+type ValidationResult = { valid: true; file: PdfUpload } | { valid: false; status: 400 | 413; message: string; code: string };
+
+export function validatePdfUploadMetadata(value: unknown): ValidationResult {
+	if (
+		!value ||
+		typeof value !== 'object' ||
+		typeof (value as PdfUpload).name !== 'string' ||
+		typeof (value as PdfUpload).type !== 'string' ||
+		typeof (value as PdfUpload).size !== 'number' ||
+		typeof (value as PdfUpload).arrayBuffer !== 'function'
+	) {
+		return { valid: false, status: 400, message: 'A single PDF file is required', code: 'INVALID_FILE' };
+	}
+
+	const file = value as PdfUpload;
+	if (file.type.toLowerCase() !== PDF_MIME_TYPE || !file.name.toLowerCase().endsWith('.pdf')) {
+		return { valid: false, status: 400, message: 'Only PDF files are supported', code: 'INVALID_PDF' };
+	}
+	if (file.name.length > 255) {
+		return { valid: false, status: 400, message: 'PDF filename is too long', code: 'INVALID_FILE_NAME' };
+	}
+	if (!Number.isSafeInteger(file.size) || file.size < 1) {
+		return { valid: false, status: 400, message: 'PDF file size is invalid', code: 'INVALID_FILE_SIZE' };
+	}
+	if (file.size > MAX_PDF_FILE_SIZE) {
+		return { valid: false, status: 413, message: 'PDF file exceeds the 200MB limit', code: 'FILE_TOO_LARGE' };
+	}
+
+	return { valid: true, file };
+}
+
+function jsonError(c: AdminContext, status: 400 | 401 | 403 | 404 | 409 | 413 | 500, message: string, code: string) {
+	return c.json({ message, code }, status);
+}
+
+async function getAdminUser(c: AdminContext) {
+	const session = await auth.api.getSession({ headers: c.req.raw.headers });
+	if (!session) {
+		return { response: jsonError(c, 401, 'Authentication required', 'UNAUTHORIZED') };
+	}
+
+	const userId = Number(session.user.id);
+	if (!Number.isSafeInteger(userId)) {
+		return { response: jsonError(c, 401, 'Authentication required', 'UNAUTHORIZED') };
+	}
+
+	const user = await c.get('prisma').user.findFirst({
+		where: { id: userId, deletedAt: null },
+		select: { id: true, role: { select: { name: true } } },
+	});
+	if (!user || user.role.name !== 'admin') {
+		return { response: jsonError(c, 403, 'Administrator role required', 'FORBIDDEN') };
+	}
+
+	return { user };
+}
+
+app.post('/books', async (c) => {
+	try {
+		const admin = await getAdminUser(c);
+		if ('response' in admin) {
+			return admin.response;
+		}
+
+		let body: unknown;
+		try {
+			body = await c.req.json();
+		} catch {
+			return jsonError(c, 400, 'Request body must be valid JSON', 'INVALID_REQUEST');
+		}
+
+		const title = (body as { title?: unknown })?.title;
+		const categoryId = (body as { categoryId?: unknown })?.categoryId;
+		if (typeof title !== 'string' || !title.trim() || typeof categoryId !== 'number' || !Number.isSafeInteger(categoryId) || categoryId < 1) {
+			return jsonError(c, 400, 'title and categoryId are required', 'INVALID_BOOK');
+		}
+
+		const category = await c.get('prisma').category.findUnique({
+			where: { id: categoryId },
+			select: { id: true, isActive: true },
+		});
+		if (!category || !category.isActive) {
+			return jsonError(c, 400, 'Active category is required', 'INVALID_CATEGORY');
+		}
+
+		const book = await c.get('prisma').book.create({
+			data: {
+				title: title.trim(),
+				category: { connect: { id: categoryId } },
+				roleBookPermissions: { create: [{ role: { connect: { name: 'user' } } }] },
+			},
+			select: { id: true, title: true, authorName: true, categoryId: true },
+		});
+		return c.json(book, 201);
+	} catch (error) {
+		console.error(error);
+		return c.json({ error: 'Failed to register book' }, 500);
+	}
+});
+
+app.post('/books/:bookId/files', async (c) => {
+	let storedPath: string | undefined;
+	try {
+		const admin = await getAdminUser(c);
+		if ('response' in admin) {
+			return admin.response;
+		}
+
+		const bookId = Number(c.req.param('bookId'));
+		if (!Number.isSafeInteger(bookId) || bookId < 1) {
+			return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
+		}
+
+		const book = await c.get('prisma').book.findUnique({
+			where: { id: bookId },
+			select: { id: true, deletedAt: true },
+		});
+		if (!book || book.deletedAt) {
+			return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
+		}
+
+		let body: Record<string, unknown>;
+		try {
+			body = await c.req.parseBody();
+		} catch {
+			return jsonError(c, 400, 'Request body must be multipart form data', 'INVALID_REQUEST');
+		}
+		const validation = validatePdfUploadMetadata(body.file);
+		if (!validation.valid) {
+			return jsonError(c, validation.status, validation.message, validation.code);
+		}
+
+		const bytes = Buffer.from(await validation.file.arrayBuffer());
+		if (bytes.length > MAX_PDF_FILE_SIZE) {
+			return jsonError(c, 413, 'PDF file exceeds the 200MB limit', 'FILE_TOO_LARGE');
+		}
+		if (bytes.length < 5 || bytes.subarray(0, 5).toString('ascii') !== '%PDF-') {
+			return jsonError(c, 400, 'Uploaded file is not a valid PDF', 'INVALID_PDF');
+		}
+
+		const storageRoot = resolve(process.env.BOOK_FILE_STORAGE_ROOT ?? resolve(process.cwd(), 'storage'));
+		await mkdir(storageRoot, { recursive: true });
+		const storedRoot = await realpath(storageRoot);
+		const storedFileName = `${randomUUID()}.pdf`;
+		storedPath = resolve(storedRoot, storedFileName);
+		const pathFromRoot = relative(storedRoot, storedPath);
+		if (pathFromRoot.startsWith('..') || isAbsolute(pathFromRoot)) {
+			return jsonError(c, 500, 'Storage path is invalid', 'STORAGE_PATH_INVALID');
+		}
+
+		await writeFile(storedPath, bytes, { flag: 'wx' });
+		const record = await c.get('prisma').bookFile.create({
+			data: {
+				extension: 'pdf',
+				mimeType: PDF_MIME_TYPE,
+				fileUrl: storedFileName,
+				originalFileName: validation.file.name,
+				storedFileName,
+				fileSize: bytes.length,
+				fileHash: createHash('sha256').update(bytes).digest('hex'),
+				bookId,
+			},
+		});
+		return c.json(record, 201);
+	} catch (error) {
+		if (storedPath) {
+			await rm(storedPath, { force: true });
+		}
+		console.error(error);
+		return c.json({ error: 'Failed to register PDF file' }, 500);
+	}
+});
+
+export default app;

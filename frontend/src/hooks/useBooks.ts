@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import booksApiMock from '@/mocks/booksApiMock';
+import { fetchBooks } from '@/api/books';
 
 export default function useBooks() {
 	const {
@@ -8,7 +8,7 @@ export default function useBooks() {
 		isError,
 	} = useQuery({
 		queryKey: ['books'],
-		queryFn: () => booksApiMock(),
+		queryFn: () => fetchBooks(),
 	});
 
 	return { books, isLoading, isError };

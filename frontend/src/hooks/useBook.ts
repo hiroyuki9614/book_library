@@ -1,15 +1,16 @@
 import { useQuery } from '@tanstack/react-query';
-import booksApiMock from '@/mocks/booksApiMock';
+import { fetchBook } from '@/api/books';
 
 export default function useBook(id: number) {
 	const {
-		data: books = [],
+		data: book = null,
 		isLoading,
 		error,
 	} = useQuery({
 		queryKey: ['books', id],
-		queryFn: () => booksApiMock(id),
+		queryFn: () => fetchBook(id),
+		enabled: Number.isSafeInteger(id),
 	});
 
-	return { books, isLoading, error };
+	return { book, isLoading, error };
 }

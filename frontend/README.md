@@ -1,73 +1,62 @@
-# React + TypeScript + Vite
+# BeLib Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + TypeScript + Vite でBeLibのログイン、書籍一覧、PDF/EPUB Reader、管理画面UIを提供します。
 
-Currently, two official plugins are available:
+## 現在の実装状態
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+### 実APIへ接続済み
 
-## React Compiler
+- セッションベースの認証フロー
+- `GET /api/v1/me` に基づく認証状態
+- 書籍一覧
+- 書籍詳細
+- 認可済みPDF取得
+- PDF読書位置の取得・保存・復元
+- Readerの認証保護
+- 管理者画面のルート保護
 
-The React Compiler is currently not compatible with SWC. See [this issue](https://github.com/vitejs/vite-plugin-react/issues/428) for tracking the progress.
+### まだ仮実装 / 未接続
 
-## Expanding the ESLint configuration
+- 管理画面の書籍一覧と登録フォームは `booksData` とlocal component stateを使用
+- 管理画面UIはbackendのadmin registration APIへ未接続
+- EPUB Readerは存在するが、現在の保護backend/storage/progress縦切りはPDF中心
+- 一覧UIには検索・絞り込みがあるが、backendの正式な検索/filter contractは未完成
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+詳細は `../docs/current-status.md` を参照してください。
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+## 主なルート
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```text
+/login       guest only
+/            authenticated
+/reader/:id  authenticated
+/admin       authenticated + admin
+/about       authenticated
+/contact     authenticated
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## API layer
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+主な本番経路:
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+- `src/api/books.ts`
+  - `fetchBooks`
+  - `fetchBook`
+  - `fetchBookFile`
+- `src/api/readingInfo.ts`
+  - `fetchReadingInfo`
+  - `saveReadingInfo`
+
+PDF取得ではresponseのContent-Typeを確認し、非PDFレスポンスをReaderへ渡さないようにします。
+
+## 開発・検証
+
+利用可能なscriptは `package.json` を正本として確認してください。
+
+現在は `dev`、`test`、`lint`、`build`、`test:e2e` が定義されています。Playwrightのreal MVP vertical testは、実PostgreSQL・認証済みbrowser・保護PDF・読書位置保存/復元の縦切りを検証します。
+
+現在のcheckpointではMVP PDF導線とは別の既知TypeScriptエラーがfrontend full buildに残るため、build failureは変更起因か既存課題かを分離して扱ってください。
+
+## UI / design
+
+UIの正本補助は `../docs/design.md`、正式要件は `../docs/requirements.md` です。デザイン変更が目的でない作業では既存レイアウトを不要に変更しないでください。

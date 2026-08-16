@@ -5,7 +5,6 @@ import { Link } from 'react-router-dom';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheetCapture';
 import { Button } from '@/components/ui/button';
 import { ZoomToolbar } from './ZoomToolbar';
-import { useState } from 'react';
 import CommandButton from './Command';
 import { useCommand } from '@embedpdf/plugin-commands/react';
 
@@ -23,6 +22,9 @@ import { SCROLL_PLUGIN_ID } from '@embedpdf/plugin-scroll';
 import type { ScrollState } from '@embedpdf/plugin-scroll';
 
 import { SelectionLayer, SelectionPluginPackage } from '@embedpdf/plugin-selection/react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { fetchBookFile } from '@/api/books';
+import { fetchReadingInfo, saveReadingInfo } from '@/api/readingInfo';
 
 export type AppState = GlobalStoreState<{
 	[SCROLL_PLUGIN_ID]: ScrollState;
@@ -38,7 +40,9 @@ const myCommands: Record<string, Command<AppState>> = {
 			const scrollPlugin = registry.getPlugin('scroll');
 			const scroll = scrollPlugin?.provides?.();
 
-			scroll?.scrollToPreviousPage?.();
+			if (scroll) {
+				scroll.scrollToPage({ pageNumber: Math.max(1, scroll.getCurrentPage() - 1), behavior: 'auto' });
+			}
 		},
 		disabled: ({ state, documentId }) => {
 			const scrollState = state.plugins.scroll.documents[documentId];
@@ -53,7 +57,9 @@ const myCommands: Record<string, Command<AppState>> = {
 			const scrollPlugin = registry.getPlugin('scroll');
 			const scroll = scrollPlugin?.provides?.();
 
-			scroll?.scrollToNextPage?.();
+			if (scroll) {
+				scroll.scrollToPage({ pageNumber: Math.min(scroll.getTotalPages(), scroll.getCurrentPage() + 1), behavior: 'auto' });
+			}
 		},
 		disabled: ({ state, documentId }) => {
 			const scrollState = state.plugins.scroll.documents[documentId];
@@ -62,32 +68,63 @@ const myCommands: Record<string, Command<AppState>> = {
 	},
 };
 
-const plugins = [
-	createPluginRegistration(DocumentManagerPluginPackage, {
-		initialDocuments: [{ url: 'https://snippet.embedpdf.com/ebook.pdf' }],
-	}),
-	createPluginRegistration(ViewportPluginPackage),
-	createPluginRegistration(RenderPluginPackage),
-	createPluginRegistration(InteractionManagerPluginPackage),
-	createPluginRegistration(SelectionPluginPackage),
-	createPluginRegistration(ZoomPluginPackage, {
-		defaultZoomLevel: ZoomMode.FitPage,
-	}),
-	createPluginRegistration(ScrollPluginPackage, {
-		defaultStrategy: ScrollStrategy.Vertical,
-		defaultPageGap: 10,
-	}),
-	createPluginRegistration(CommandsPluginPackage, {
-		commands: myCommands,
-	}),
-];
+function createPlugins(documentUrl: string) {
+	return [
+		createPluginRegistration(DocumentManagerPluginPackage, {
+			initialDocuments: [{ url: documentUrl }],
+		}),
+		createPluginRegistration(ViewportPluginPackage),
+		createPluginRegistration(RenderPluginPackage),
+		createPluginRegistration(InteractionManagerPluginPackage),
+		createPluginRegistration(SelectionPluginPackage),
+		createPluginRegistration(ZoomPluginPackage, {
+			defaultZoomLevel: ZoomMode.FitPage,
+		}),
+		createPluginRegistration(ScrollPluginPackage, {
+			defaultStrategy: ScrollStrategy.Vertical,
+			defaultPageGap: 10,
+		}),
+		createPluginRegistration(CommandsPluginPackage, {
+			commands: myCommands,
+		}),
+	];
+}
 
-const PageNavigation = ({ documentId }: { documentId: string }) => {
+const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; documentId: string; initialPage: number }) => {
 	const { provides: scroll, state } = useScroll(documentId);
 	const [pageInput, setPageInput] = useState(String(state.currentPage));
+	const [isReadyToPersist, setIsReadyToPersist] = useState(false);
+	const targetPage = Math.min(initialPage, state.totalPages);
+	const lastPersistedPage = useRef<number | null>(null);
 
 	const previousCommand = useCommand('nav.previous', documentId);
 	const nextCommand = useCommand('nav.next', documentId);
+
+	useEffect(() => {
+		if (!scroll || state.totalPages < 1 || lastPersistedPage.current === targetPage) {
+			return;
+		}
+
+		lastPersistedPage.current = targetPage;
+		setIsReadyToPersist(false);
+		scroll.scrollToPage({ pageNumber: targetPage });
+	}, [scroll, state.totalPages, targetPage]);
+
+	useEffect(() => {
+		if (!isReadyToPersist) {
+			if (state.currentPage === targetPage) {
+				setIsReadyToPersist(true);
+			}
+			return;
+		}
+
+		if (state.currentPage === lastPersistedPage.current) {
+			return;
+		}
+
+		lastPersistedPage.current = state.currentPage;
+		void saveReadingInfo(bookId, state.currentPage).catch(() => undefined);
+	}, [bookId, isReadyToPersist, state.currentPage, targetPage]);
 
 	const handleGoToPage = (e: React.FormEvent<HTMLFormElement>) => {
 		e.preventDefault();
@@ -104,10 +141,43 @@ const PageNavigation = ({ documentId }: { documentId: string }) => {
 	);
 };
 
-function PdfReader() {
+function PdfReader({ bookId }: { bookId: number }) {
+	const [documentUrl, setDocumentUrl] = useState<string | null>(null);
+	const [fileError, setFileError] = useState(false);
+	const [initialPage, setInitialPage] = useState<number | null>(null);
 	const { engine, isLoading } = usePdfiumEngine();
 
-	if (isLoading || !engine) {
+	useEffect(() => {
+		let objectUrl: string | undefined;
+		setDocumentUrl(null);
+		setFileError(false);
+		setInitialPage(null);
+
+		void fetchBookFile(bookId)
+			.then((blob) => {
+				objectUrl = URL.createObjectURL(blob);
+				setDocumentUrl(objectUrl);
+			})
+			.catch(() => setFileError(true));
+
+		void fetchReadingInfo(bookId)
+			.then((readingInfo) => setInitialPage(readingInfo.currentPage))
+			.catch(() => setInitialPage(1));
+
+		return () => {
+			if (objectUrl) {
+				URL.revokeObjectURL(objectUrl);
+			}
+		};
+	}, [bookId]);
+
+	const plugins = useMemo(() => (documentUrl ? createPlugins(documentUrl) : []), [documentUrl]);
+
+	if (fileError) {
+		return <p>PDFファイルを取得できませんでした。</p>;
+	}
+
+	if (isLoading || !engine || !documentUrl || initialPage === null) {
 		return (
 			<div className='overflow-hidden rounded-lg border border-gray-300 bg-white dark:border-gray-700 dark:bg-gray-900'>
 				<div className='flex h-[400px] items-center justify-center'>
@@ -153,7 +223,7 @@ function PdfReader() {
 										<div style={{ display: 'flex', height: '100%', flexDirection: 'column' }}>
 											<div className='mb-2 flex items-center gap-4 justify-evenly'>
 												<ZoomToolbar documentId={activeDocumentId} />
-												<PageNavigation documentId={activeDocumentId} />
+																											<PageNavigation bookId={bookId} documentId={activeDocumentId} initialPage={initialPage} />
 											</div>
 											<div style={{ flex: 1, overflow: 'hidden' }}>
 												<Viewport documentId={activeDocumentId}>

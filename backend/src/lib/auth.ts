@@ -1,4 +1,4 @@
-import { betterAuth } from 'better-auth';
+import { APIError, betterAuth } from 'better-auth';
 import { prismaAdapter } from 'better-auth/adapters/prisma';
 import { prisma } from './prisma.js';
 
@@ -49,6 +49,31 @@ export const auth = betterAuth({
 							roleId: defaultRole.id,
 						},
 					};
+				},
+			},
+		},
+		session: {
+			create: {
+				before: async (session) => {
+					const userId = Number(session.userId);
+					if (!Number.isInteger(userId)) {
+						throw APIError.from('UNAUTHORIZED', {
+							code: 'INVALID_EMAIL_OR_PASSWORD',
+							message: 'Invalid email or password',
+						});
+					}
+
+					const user = await prisma.user.findUnique({
+						where: { id: userId },
+						select: { deletedAt: true },
+					});
+
+					if (user?.deletedAt) {
+						throw APIError.from('UNAUTHORIZED', {
+							code: 'INVALID_EMAIL_OR_PASSWORD',
+							message: 'Invalid email or password',
+						});
+					}
 				},
 			},
 		},
