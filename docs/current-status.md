@@ -163,13 +163,12 @@ Important constraints:
 - `ReadingInfo.readStatus` defaults to `unread`
 - `Book.pageTurnDirection` defaults to `ltr`
 
-Known migration issue from the latest verification record:
+Migration reproducibility status:
 
-- current schema includes `book_files.file_hash`
-- fresh isolated E2E required temporary schema synchronization because committed migrations did not fully reproduce the current schema
-- migration/schema drift remains a Phase 6 completion item
-
-Use a forward migration; do not rewrite an old committed migration just to erase the historical gap.
+- `backend/prisma/migrations/20260816140000_add_book_file_hash/migration.sql` adds the required `book_files.file_hash` column and unique index without rewriting historical migrations
+- fresh PostgreSQL verification applies all four migrations from zero, checks `VARCHAR(64) NOT NULL`, and verifies Prisma read/write plus duplicate rejection
+- `backend/scripts/verify-file-hash-migration.ts` provides the repeatable contract check
+- an existing non-empty `book_files` table requires an explicit real-content hash backfill policy before applying; production/shared DBs were not modified by this work
 
 ## Verification evidence
 

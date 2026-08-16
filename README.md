@@ -32,8 +32,7 @@ BeLib は、認証・ロール別閲覧権限・読書進捗を備えた個人�
 - ユーザー管理
 - 論理削除・復元・完全削除
 - ファイル差し替え
-- PostgreSQL migration/schema driftの解消
-- fresh環境でREADME手順を再現する最終確認
+- 既存DBのfile hash backfill方針の確定
 
 詳細は `docs/current-status.md` と `docs/requirements.md` を参照してください。
 
@@ -101,7 +100,7 @@ cd backend
 npx prisma validate
 ```
 
-新規環境をmigrationだけで再現できることの最終確認はPhase 6の残作業です。
+新規環境はcommitted migrationだけで再現できます。`backend` の `verify:file-hash-migration` は列契約、Prisma read/write、重複hash拒否を確認します。非空の既存DBへ適用する場合は、実ファイル内容からのhash backfill方針を先に確定してください。
 
 ## テスト / Build
 

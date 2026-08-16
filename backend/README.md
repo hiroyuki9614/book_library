@@ -74,7 +74,14 @@ DB構造の正本は `prisma/schema.prisma` です。
 npx prisma validate
 ```
 
-`BookFile.fileHash` を含む現在schemaとcommitted migrationの再現性には既知のdriftがあります。新規環境のmigration再現を正式完了条件として扱い、古いmigrationを黙って書き換えないでください。
+`BookFile.fileHash` は `20260816140000_add_book_file_hash` のforward migrationで追加されます。既存migrationは書き換えず、新規環境では次の順でmigrationと契約を確認できます。
+
+```bash
+npx prisma migrate deploy
+MIGRATION_TEST_DATABASE_URL="$DATABASE_URL" npm run verify:file-hash-migration
+```
+
+既に `book_files` の行があるDBへ適用する場合、実ファイル内容からのhash backfill方針を先に確定してください。このmigrationはそのbackfillやproduction/shared DBへのwriteを行わないため、方針未確定の非空DBへそのまま適用してはいけません。
 
 ## 初期管理者
 
