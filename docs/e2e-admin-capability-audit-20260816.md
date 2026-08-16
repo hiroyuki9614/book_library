@@ -7,7 +7,7 @@ Scope: browser user capability audit only; no product feature implementation
 
 ## Method
 
-The audit uses `frontend/e2e/admin-capability-audit.spec.ts` with the existing real-runtime Playwright setup. Upload files are generated in test runtime and are not committed. A book-management capability is `PASS` only when the browser UI reaches the API and the result is persisted in the database/storage boundary. Navigation and authorization boundary checks are reported separately as PASS when their stated browser/API boundary is observed. The matrix `failure_class` column uses the audit enum (`PRODUCT_FAILURE`, `TEST_FAILURE`, `ENVIRONMENT_FAILURE`, `FLAKY`, `NOT_RUN`); `NOT_RUN` means the requested browser capability was not exercised because no browser-capable path exists. The separate `surface` column distinguishes `E2E成立`, `UIのみ`, `backend APIのみ`, and `未実装`.
+The audit uses `frontend/e2e/admin-capability-audit.spec.ts` with the existing real-runtime Playwright setup. Upload files are generated in test runtime and are not committed. A book-management capability is `PASS` only when the browser UI reaches the API and the result is persisted in the database/storage boundary. Navigation and authorization boundary checks are reported separately as PASS when their stated browser/API boundary is observed. The matrix `failure_class` column uses the audit enum (`PRODUCT_FAILURE`, `TEST_FAILURE`, `ENVIRONMENT_FAILURE`, `FLAKY`, `NOT_RUN`); `NOT_RUN` means the requested browser capability was not exercised because no browser-capable path exists. The separate `surface` column distinguishes `E2E成立`, `UIのみ`, `backend APIのみ`, `UI + backend API`, and `未実装`.
 
 The baseline documentation states that the admin screen is still local state, while the backend exposes only minimal metadata and PDF registration endpoints. This audit keeps those states separate:
 
@@ -110,6 +110,8 @@ INDEPENDENT_REVIEW_RUN_ID = belib-luna-independent-review-lane-c-admin-20260816
 INDEPENDENT_REVIEW_VERDICT = REQUEST_CHANGES
 FOCUSED_REVIEW_1_RUN_ID = belib-luna-focused-review-1-lane-c-admin-20260816
 FOCUSED_REVIEW_1_VERDICT = REQUEST_CHANGES
+FOCUSED_REVIEW_2_RUN_ID = belib-luna-focused-review-2-lane-c-admin-20260816
+FOCUSED_REVIEW_2_VERDICT = REQUEST_CHANGES
 FOCUSED_REVIEW_STATUS = pending
 E2E_COMMAND = npm --prefix frontend run test:e2e -- admin-capability-audit.spec.ts
 E2E_RESULT = 13 passed (corrected run)
