@@ -29,13 +29,13 @@ describe('reading-info API client', () => {
 			}),
 		);
 
-		await expect(saveReadingInfo(7, 4)).resolves.toEqual({ bookId: 7, currentPage: 4, readStatus: 'reading' });
+		await expect(saveReadingInfo(7, 4, 10)).resolves.toEqual({ bookId: 7, currentPage: 4, readStatus: 'reading' });
 		expect(fetch).toHaveBeenCalledWith(
 			'http://localhost:3000/api/v1/books/7/reading-info',
 			expect.objectContaining({
 				method: 'PATCH',
 				credentials: 'include',
-				body: JSON.stringify({ currentPage: 4 }),
+				body: JSON.stringify({ currentPage: 4, totalPages: 10 }),
 			}),
 		);
 	});

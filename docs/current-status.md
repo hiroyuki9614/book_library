@@ -41,7 +41,7 @@ per-user readStatus in book list                 implemented
 Cloudflare R2 / formal file delivery             not implemented
 EPUB protected backend path                      not implemented
 formal publication-scope selection               not implemented
-completed auto transition                        not implemented
+completed auto transition                        implemented for PDF final-page saves
 full MVP management functions                    not implemented
 ```
 
@@ -83,15 +83,14 @@ The list and detail APIs therefore use the same current-user isolation boundary 
 Current request contract:
 
 ```json
-{ "currentPage": 2 }
+{ "currentPage": 2, "totalPages": 10 }
 ```
 
-The backend stores the page as `ReadingInfo.currentPosition` and upserts per `userId + bookId`.
+The backend stores the page as `ReadingInfo.currentPosition`, computes the monotonic `readStatus` transition from page information and the existing status, and upserts per `userId + bookId`.
 
 Current limitations:
 
-- PATCH currently stores `readStatus = reading`
-- automatic `completed` transition is not implemented
+- PDF final-page saves transition to `completed`; later backward page saves keep `completed`
 - EPUB position persistence is not connected
 - progress percentage is not stored in DB, consistent with the requirement
 
@@ -212,7 +211,7 @@ See `docs/requirements.md` for the full target.
 2. Make README setup reproducible on a fresh environment.
 3. Wire Admin UI to existing admin APIs.
 4. Implement explicit publication scope.
-5. Implement PDF `completed` transition.
+5. Extend PDF `completed` transition verification and remaining reader acceptance.
 6. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
 7. Connect EPUB to the same authorization/storage/progress boundary.
 8. Continue remaining management requirements.

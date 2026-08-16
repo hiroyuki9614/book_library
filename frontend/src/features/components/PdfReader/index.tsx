@@ -123,7 +123,7 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 		}
 
 		lastPersistedPage.current = state.currentPage;
-		void saveReadingInfo(bookId, state.currentPage).catch(() => undefined);
+		void saveReadingInfo(bookId, state.currentPage, state.totalPages).catch(() => undefined);
 	}, [bookId, isReadyToPersist, state.currentPage, targetPage]);
 
 	const handleGoToPage = (e: React.FormEvent<HTMLFormElement>) => {

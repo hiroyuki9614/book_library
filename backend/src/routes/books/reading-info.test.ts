@@ -84,7 +84,7 @@ describe('reading-info API', () => {
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ currentPage: 3 }),
+			body: JSON.stringify({ currentPage: 3, totalPages: 10 }),
 		});
 
 		expect(response.status).toBe(200);
@@ -96,16 +96,104 @@ describe('reading-info API', () => {
 		});
 	});
 
+	test('PATCHは最終ページでcompletedへ遷移する', async () => {
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '5', readStatus: 'reading' });
+		mocks.readingInfoUpsert.mockResolvedValue({ currentPosition: '10', readStatus: 'completed' });
+
+		const response = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ currentPage: 10, totalPages: 10 }),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ bookId: 1, currentPage: 10, readStatus: 'completed' });
+		expect(mocks.readingInfoUpsert).toHaveBeenCalledWith({
+			where: { userId_bookId: { userId: 7, bookId: 1 } },
+			create: { userId: 7, bookId: 1, currentPosition: '10', readStatus: 'completed' },
+			update: { currentPosition: '10', readStatus: 'completed' },
+		});
+	});
+
+	test('PATCHはcompleted後に前ページへ戻ってもcompletedを維持する', async () => {
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '10', readStatus: 'completed' });
+		mocks.readingInfoUpsert.mockResolvedValue({ currentPosition: '3', readStatus: 'completed' });
+
+		const response = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ currentPage: 3, totalPages: 10 }),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ bookId: 1, currentPage: 3, readStatus: 'completed' });
+		expect(mocks.readingInfoUpsert).toHaveBeenCalledWith(expect.objectContaining({
+			update: { currentPosition: '3', readStatus: 'completed' },
+		}));
+	});
+
+	test('PATCHは1ページPDFの1ページ目をcompletedとして保存する', async () => {
+		mocks.readingInfoUpsert.mockResolvedValue({ currentPosition: '1', readStatus: 'completed' });
+
+		const response = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ currentPage: 1, totalPages: 1 }),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ bookId: 1, currentPage: 1, readStatus: 'completed' });
+	});
+
 	test('PATCHは正の整数でないcurrentPageを400で拒否する', async () => {
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ currentPage: 0 }),
+			body: JSON.stringify({ currentPage: 0, totalPages: 10 }),
 		});
 
 		expect(response.status).toBe(400);
 		expect(await response.json()).toMatchObject({ code: 'INVALID_CURRENT_PAGE' });
 		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
+	});
+
+	test('PATCHはcurrentPageがtotalPagesを超える組み合わせをDB書き込み前に拒否する', async () => {
+		const response = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ currentPage: 11, totalPages: 10 }),
+		});
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toMatchObject({ code: 'INVALID_PAGE_RANGE' });
+		expect(mocks.readingInfoFindUnique).not.toHaveBeenCalled();
+		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
+	});
+
+	test('PATCHはユーザーごとにReadingInfoを分離する', async () => {
+		mocks.readingInfoFindUnique.mockResolvedValueOnce({ currentPosition: '10', readStatus: 'completed' }).mockResolvedValueOnce(null);
+		mocks.readingInfoUpsert
+			.mockResolvedValueOnce({ currentPosition: '3', readStatus: 'completed' })
+			.mockResolvedValueOnce({ currentPosition: '3', readStatus: 'reading' });
+
+		const firstResponse = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ currentPage: 3, totalPages: 10 }),
+		});
+		mocks.getSession.mockResolvedValue({ user: { id: '8' } });
+		mocks.userFindFirst.mockResolvedValue({ id: 8, roleId: 2 });
+		const secondResponse = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ currentPage: 3, totalPages: 10 }),
+		});
+
+		expect((await firstResponse.json()).readStatus).toBe('completed');
+		expect((await secondResponse.json()).readStatus).toBe('reading');
+		expect(mocks.readingInfoUpsert).toHaveBeenNthCalledWith(2, expect.objectContaining({
+			where: { userId_bookId: { userId: 8, bookId: 1 } },
+		}));
 	});
 
 	test('未認証ユーザーはreading-infoを401で拒否される', async () => {

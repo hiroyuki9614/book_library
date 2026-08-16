@@ -144,8 +144,8 @@ paths:
     patch:
       summary: PDFの現在ページを保存
       description: |
-        現実装はcurrentPageだけを受け取り、ReadingInfoをupsertする。
-        readStatusはbackend側でreadingとして保存する。completedの自動遷移は未実装。
+        currentPageとPDFのtotalPagesを受け取り、ReadingInfoをupsertする。
+        最終ページ到達時はbackend側でcompletedへ遷移し、completed後の保存ではcompletedを維持する。
       requestBody:
         required: true
         content:
@@ -393,10 +393,13 @@ components:
 
     ReadingInfoUpdateRequest:
       type: object
-      required: [currentPage]
+      required: [currentPage, totalPages]
       additionalProperties: false
       properties:
         currentPage:
+          type: integer
+          minimum: 1
+        totalPages:
           type: integer
           minimum: 1
 
