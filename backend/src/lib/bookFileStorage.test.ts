@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -57,6 +57,18 @@ describe('book file storage adapters', () => {
 		const storage = createBookFileStorage({ BOOK_FILE_STORAGE_ROOT: storageRoot });
 
 		await expect(storage.get('../outside.pdf')).rejects.toThrow('relative storage keys');
+	});
+
+	test('local adapter refuses delete through a symlinked parent outside the root', async () => {
+		storageRoot = await mkdtemp(join(tmpdir(), 'belib-storage-'));
+		const outsideRoot = await mkdtemp(join(tmpdir(), 'belib-storage-outside-'));
+		await writeFile(join(outsideRoot, 'file.pdf'), 'outside');
+		await symlink(outsideRoot, join(storageRoot, 'linked'));
+		const storage = createBookFileStorage({ BOOK_FILE_STORAGE_ROOT: storageRoot });
+
+		await expect(storage.delete('linked/file.pdf')).rejects.toThrow('storage root');
+		expect(await readFile(join(outsideRoot, 'file.pdf'), 'utf8')).toBe('outside');
+		await rm(outsideRoot, { recursive: true, force: true });
 	});
 
 	test('R2 adapter requires all server-side configuration', () => {

@@ -398,4 +398,18 @@ describe('Admin book registration', () => {
 		expect(response.status).toBe(500);
 		expect(await readdir(storageRoot)).toEqual(before);
 	});
+
+	test('同時重複のDB unique競合は409を返し保存 objectをcleanupする', async () => {
+		mocks.bookFindUnique.mockResolvedValue({ id: 42, deletedAt: null });
+		mocks.bookFileCreate.mockRejectedValue({ code: 'P2002' });
+		const before = await readdir(storageRoot);
+		const formData = new FormData();
+		formData.append('file', new Blob(['%PDF-1.7'], { type: 'application/pdf' }), 'race.pdf');
+
+		const response = await app.request('/api/v1/admin/books/42/files', { method: 'POST', body: formData });
+
+		expect(response.status).toBe(409);
+		expect(await response.json()).toMatchObject({ code: 'DUPLICATE_FILE' });
+		expect(await readdir(storageRoot)).toEqual(before);
+	});
 });

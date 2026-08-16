@@ -55,6 +55,14 @@ function localStorage(environment: StorageEnvironment): BookFileStorage {
 		return resolved;
 	}
 
+	async function resolveDeleteKey(key: string) {
+		const rootPath = await ensureRoot();
+		const candidate = resolveKey(rootPath, key);
+		const parent = await realpath(resolve(candidate, '..'));
+		assertWithinRoot(rootPath, parent);
+		return candidate;
+	}
+
 	return {
 		async put(key, body) {
 			const rootPath = await ensureRoot();
@@ -68,8 +76,7 @@ function localStorage(environment: StorageEnvironment): BookFileStorage {
 			return createReadStream(await resolveExistingKey(key));
 		},
 		async delete(key) {
-			const rootPath = await ensureRoot();
-			await rm(resolveKey(rootPath, key), { force: true });
+			await rm(await resolveDeleteKey(key), { force: true });
 		},
 	};
 }
