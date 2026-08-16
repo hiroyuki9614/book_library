@@ -51,6 +51,25 @@ The baseline documentation states that the admin screen is still local state, wh
 | REPLACE-01 | 登録済みfileを差し替え | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no replacement control/endpoint |
 | ACCESS-01 | 一般ユーザーはAdmin操作を実行できない | PASS | — | UI + backend API | `/admin` redirects to `/`; admin POST returns 403 |
 
+## Requirements and test traceability
+
+The matrix IDs are mapped below to the requirement sections and the concrete E2E evidence. Grouped IDs are intentional only where one browser assertion covers the same missing capability boundary; `NOT_RUN` remains the matrix failure class when no browser-capable path exists.
+
+| Capability IDs | Requirements | E2E evidence | Coverage note |
+| --- | --- | --- | --- |
+| BOOK-01 | 3.1, 5.1, 11 | `frontend/e2e/admin-capability-audit.spec.ts` BOOK-01 | browser navigation/sheet opening only |
+| BOOK-02, BOOK-03 | 4.1, 5.1, 6.3, 11 | spec BOOK-02, BOOK-03 | UI-only file selection; no admin API request |
+| BOOK-04, BOOK-05, BOOK-06 | 6.3, 8 | spec BOOK-05, BOOK-06; BOOK-04 backend validator observation | BOOK-04 has no browser-capable upload path; direct backend observations are supporting evidence |
+| BOOK-07, BOOK-08 | 5.1, 6.4, 6.10 | spec BOOK-07/BOOK-08 | local state only; API list absence is supporting evidence |
+| BOOK-09 | 5.1 step 7, 6.10 | matrix observation; no dedicated browser path | no unset-category handling path |
+| BOOK-10, BOOK-11, BOOK-12 | 3.1, 5.1 step 8, 6.5 | spec BOOK-10/BOOK-11/BOOK-12 | publication-scope UI/API is absent |
+| BOOK-13 | 5.1 | matrix observation; no dedicated browser path | no persisted registration/list reflection path |
+| BOOK-14 | 3.1, 6.4 | spec BOOK-14 | edit control/API is absent |
+| CATEGORY-01, CATEGORY-02, CATEGORY-03 | 3.1, 6.10 | spec CATEGORY-01/CATEGORY-02/CATEGORY-03 | category-management UI/API is absent |
+| USER-01, USER-02, USER-03, USER-04 | 3.1, 6.2 | spec USER-01/USER-02/USER-03/USER-04 | user-management UI/API is absent |
+| DELETE-01, DELETE-02, DELETE-03, DELETE-04, DELETE-05, DELETE-06 | 3.1, 5.3, 6.12, 6.13 | spec DELETE-01〜DELETE-06 | delete/restore/permanent-delete UI/API is absent |
+| REPLACE-01 | 3.1, 6.11 | spec REPLACE-01 | replacement UI/API is absent |
+| ACCESS-01 | 3.2, 6.6, 9.2 | spec ACCESS-01 | browser redirect and direct API 403 are separate observations |
 ## Summary
 
 ```text
@@ -95,7 +114,7 @@ CORRECTION_HEAD = d3089e77b25bfa9c2818d2713f9125462d4db000
 IMPLEMENTATION_FINAL_HEAD = d3089e77b25bfa9c2818d2713f9125462d4db000
 FORMAL_REVIEWED_HEAD = 290ac31d4e9b389de0ff235daaebada9afa007fb
 FOCUSED_REVIEWED_HEAD = 5b895988dcc32bb1541359757c507c48a711cd31
-FINAL_HEAD = 5b895988dcc32bb1541359757c507c48a711cd31
+FINAL_HEAD = 56fa72850eda1a0084883d467e1f792d5ebe3dca
 BRANCH = test/e2e-admin-capability-audit-20260816
 WAVE_ID = BELIB-E2E-W1-20260816
 LANE = C
@@ -112,6 +131,8 @@ FOCUSED_REVIEW_1_RUN_ID = belib-luna-focused-review-1-lane-c-admin-20260816
 FOCUSED_REVIEW_1_VERDICT = REQUEST_CHANGES
 FOCUSED_REVIEW_2_RUN_ID = belib-luna-focused-review-2-lane-c-admin-20260816
 FOCUSED_REVIEW_2_VERDICT = REQUEST_CHANGES
+FINAL_REMOTE_REVIEW_RUN_ID = belib-luna-final-review-remote-worktree-lane-c-admin-20260816
+FINAL_REMOTE_REVIEW_VERDICT = REQUEST_CHANGES
 FOCUSED_REVIEW_STATUS = pending
 E2E_COMMAND = npm --prefix frontend run test:e2e -- admin-capability-audit.spec.ts
 E2E_RESULT = 13 passed (corrected run)
