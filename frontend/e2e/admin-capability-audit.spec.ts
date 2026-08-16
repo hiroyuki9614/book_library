@@ -11,7 +11,7 @@ if (!adminEmail || !adminPassword || !password || !metadataPath) {
 	throw new Error('E2E_ADMIN_EMAIL, E2E_ADMIN_PASSWORD, E2E_MVP_PASSWORD, and E2E_MVP_METADATA_PATH are required');
 }
 
-const { bookId } = JSON.parse(readFileSync(metadataPath, 'utf8')) as { bookId: number };
+let bookId: number;
 
 type ApiResult = {
 	status: number;
@@ -53,6 +53,9 @@ async function postAdminBookFile(page: Page, fileName: string, mimeType: string,
 }
 
 test.describe('BeLib MVP Wave 1C administrator capability audit', () => {
+	test.beforeAll(() => {
+		({ bookId } = JSON.parse(readFileSync(metadataPath, 'utf8')) as { bookId: number });
+	});
 	test('BOOK-01 管理者が書籍登録画面を開ける', async ({ page }) => {
 		await openAdmin(page);
 		await page.getByRole('button', { name: '新しい書籍を登録' }).click();
@@ -103,8 +106,9 @@ test.describe('BeLib MVP Wave 1C administrator capability audit', () => {
 
 	test('BOOK-06 backend-only duplicate hash rejection is observable', async ({ page }) => {
 		await loginAdmin(page);
-		const first = await postAdminBookFile(page, 'duplicate-audit.pdf', 'application/pdf', '%PDF-1.4 wave-1c-duplicate');
-		const second = await postAdminBookFile(page, 'duplicate-audit-again.pdf', 'application/pdf', '%PDF-1.4 wave-1c-duplicate');
+		const duplicateContent = `%PDF-1.4 wave-1c-duplicate-${test.info().testId}`;
+		const first = await postAdminBookFile(page, 'duplicate-audit.pdf', 'application/pdf', duplicateContent);
+		const second = await postAdminBookFile(page, 'duplicate-audit-again.pdf', 'application/pdf', duplicateContent);
 
 		expect(first.status).toBe(201);
 		expect(second.status).toBe(500);
