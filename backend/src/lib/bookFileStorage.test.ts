@@ -65,6 +65,10 @@ describe('book file storage adapters', () => {
 		);
 	});
 
+	test('unknown storage drivers fail closed instead of falling back to local', () => {
+		expect(() => createBookFileStorage({ BOOK_FILE_STORAGE_DRIVER: 'public' })).toThrow('Unsupported book file storage driver');
+	});
+
 	test('R2 adapter sends put/get/delete commands without exposing a public URL', async () => {
 		const { Readable } = await import('node:stream');
 		mocks.send.mockResolvedValueOnce({}).mockResolvedValueOnce({ Body: Readable.from([Buffer.from('%PDF-1.7')]) }).mockResolvedValueOnce({});

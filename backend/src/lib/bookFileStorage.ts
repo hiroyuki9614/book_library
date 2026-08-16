@@ -28,37 +28,48 @@ function assertSafeKey(key: string) {
 function localStorage(environment: StorageEnvironment): BookFileStorage {
 	const root = resolve(environment.BOOK_FILE_STORAGE_ROOT ?? resolve(process.cwd(), 'storage'));
 
-	function resolveKey(key: string) {
-		assertSafeKey(key);
-		const candidate = resolve(root, key);
-		const pathFromRoot = relative(root, candidate);
+	function assertWithinRoot(rootPath: string, candidate: string) {
+		const pathFromRoot = relative(rootPath, candidate);
 		if (pathFromRoot.startsWith('..') || isAbsolute(pathFromRoot)) {
 			throw new Error('Storage key escapes storage root');
 		}
+	}
+
+	async function ensureRoot() {
+		await mkdir(root, { recursive: true });
+		return realpath(root);
+	}
+
+	function resolveKey(rootPath: string, key: string) {
+		assertSafeKey(key);
+		const candidate = resolve(rootPath, key);
+		assertWithinRoot(rootPath, candidate);
 		return candidate;
 	}
 
 	async function resolveExistingKey(key: string) {
-		const candidate = resolveKey(key);
+		const rootPath = await ensureRoot();
+		const candidate = resolveKey(rootPath, key);
 		const resolved = await realpath(candidate);
-		const pathFromRoot = relative(root, resolved);
-		if (pathFromRoot.startsWith('..') || isAbsolute(pathFromRoot)) {
-			throw new Error('Resolved storage key escapes storage root');
-		}
+		assertWithinRoot(rootPath, resolved);
 		return resolved;
 	}
 
 	return {
 		async put(key, body) {
-			const path = resolveKey(key);
+			const rootPath = await ensureRoot();
+			const path = resolveKey(rootPath, key);
 			await mkdir(resolve(path, '..'), { recursive: true });
+			const parent = await realpath(resolve(path, '..'));
+			assertWithinRoot(rootPath, parent);
 			await writeFile(path, body, { flag: 'wx' });
 		},
 		async get(key) {
 			return createReadStream(await resolveExistingKey(key));
 		},
 		async delete(key) {
-			await rm(resolveKey(key), { force: true });
+			const rootPath = await ensureRoot();
+			await rm(resolveKey(rootPath, key), { force: true });
 		},
 	};
 }
@@ -105,8 +116,12 @@ function r2Storage(environment: StorageEnvironment): BookFileStorage {
 }
 
 export function createBookFileStorage(environment: StorageEnvironment = process.env): BookFileStorage {
-	if ((environment.BOOK_FILE_STORAGE_DRIVER ?? 'local').toLowerCase() === 'r2') {
+	const driver = (environment.BOOK_FILE_STORAGE_DRIVER ?? 'local').toLowerCase();
+	if (driver === 'r2') {
 		return r2Storage(environment);
 	}
-	return localStorage(environment);
+	if (driver === 'local') {
+		return localStorage(environment);
+	}
+	throw new Error(`Unsupported book file storage driver: ${environment.BOOK_FILE_STORAGE_DRIVER}`);
 }

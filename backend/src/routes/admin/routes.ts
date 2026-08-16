@@ -231,7 +231,7 @@ app.post('/books', async (c) => {
 app.post('/books/:bookId/files', async (c) => {
 	let storedKey: string | undefined;
 	let storage: ReturnType<typeof createBookFileStorage> | undefined;
-	let storageWritten = false;
+	let storageAttempted = false;
 	try {
 		const admin = await getAdminUser(c);
 		if ('response' in admin) {
@@ -279,8 +279,8 @@ app.post('/books/:bookId/files', async (c) => {
 		const storedFileName = `${randomUUID()}.pdf`;
 		storedKey = storedFileName;
 		storage = createBookFileStorage();
+		storageAttempted = true;
 		await storage.put(storedKey, bytes, PDF_MIME_TYPE);
-		storageWritten = true;
 		const record = await c.get('prisma').bookFile.create({
 			data: {
 				extension: 'pdf',
@@ -295,7 +295,7 @@ app.post('/books/:bookId/files', async (c) => {
 		});
 		return c.json(record, 201);
 	} catch (error) {
-		if (storageWritten && storage && storedKey) {
+		if (storageAttempted && storage && storedKey) {
 			try {
 				await storage.delete(storedKey);
 			} catch (cleanupError) {
@@ -303,6 +303,9 @@ app.post('/books/:bookId/files', async (c) => {
 			}
 		}
 		console.error(error);
+		if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002') {
+			return jsonError(c, 409, 'The same PDF file is already registered', 'DUPLICATE_FILE');
+		}
 		return c.json({ error: 'Failed to register PDF file' }, 500);
 	}
 });
