@@ -7,7 +7,7 @@ Scope: browser user capability audit only; no product feature implementation
 
 ## Method
 
-The audit uses `frontend/e2e/admin-capability-audit.spec.ts` with the existing real-runtime Playwright setup. Upload files are generated in test runtime and are not committed. A capability is `PASS` only when the browser UI reaches the API and the result is persisted in the database/storage boundary.
+The audit uses `frontend/e2e/admin-capability-audit.spec.ts` with the existing real-runtime Playwright setup. Upload files are generated in test runtime and are not committed. A capability is `PASS` only when the browser UI reaches the API and the result is persisted in the database/storage boundary. The matrix `failure_class` column uses the audit enum (`PRODUCT_FAILURE`, `TEST_FAILURE`, `ENVIRONMENT_FAILURE`, `FLAKY`, `NOT_RUN`); `NOT_RUN` means the requested browser capability was not exercised because no browser-capable path exists. The separate `surface` column distinguishes `E2E成立`, `UIのみ`, `backend APIのみ`, and `未実装`.
 
 The baseline documentation states that the admin screen is still local state, while the backend exposes only minimal metadata and PDF registration endpoints. This audit keeps those states separate:
 
@@ -18,37 +18,37 @@ The baseline documentation states that the admin screen is still local state, wh
 
 ## Capability matrix
 
-| ID | Capability | Status | Failure class | Evidence / classification |
+| ID | Capability | Status | Failure class | Surface | Evidence / classification |
 | --- | --- | --- | --- | --- |
-| BOOK-01 | 管理者が書籍登録画面を開く | PASS | — | `/admin` and registration sheet opened in browser |
-| BOOK-02 | PDFを選択し登録 | NOT_IMPLEMENTED | NOT_RUN | UI shows local filename only; no admin API request |
-| BOOK-03 | EPUBを選択し登録 | NOT_IMPLEMENTED | NOT_RUN | UI accepts EPUB locally; protected EPUB registration is not implemented |
-| BOOK-04 | 200MB上限 | NOT_IMPLEMENTED | NOT_RUN | backend validator exists, but UI has no upload API path |
-| BOOK-05 | 不正MIME / 内容を拒否 | NOT_IMPLEMENTED | NOT_RUN | backend rejects direct invalid uploads; UI cannot invoke it |
-| BOOK-06 | 同一file hash重複を拒否 | NOT_IMPLEMENTED | NOT_RUN | direct API second upload returns 500; no UI path and no clear 409 contract |
-| BOOK-07 | タイトルを登録 | NOT_IMPLEMENTED | NOT_RUN | title appears in local table only; DB list does not contain it |
-| BOOK-08 | カテゴリを選択 | NOT_IMPLEMENTED | NOT_RUN | category appears in local table only; no category API/UI management |
-| BOOK-09 | カテゴリ未選択時の正式処理 | NOT_IMPLEMENTED | NOT_RUN | no unset state; no browser-to-API registration path |
-| BOOK-10 | publication scopeを必須選択 | NOT_IMPLEMENTED | NOT_RUN | no publication-scope field in registration UI or API |
-| BOOK-11 | all-usersを設定 | NOT_IMPLEMENTED | NOT_RUN | no publication-scope field or API contract |
-| BOOK-12 | admin-onlyを設定 | NOT_IMPLEMENTED | NOT_RUN | no publication-scope field or API contract |
-| BOOK-13 | 登録後に対象ユーザー一覧へ反映 | NOT_IMPLEMENTED | NOT_RUN | local row is not persisted or reflected by backend list |
-| BOOK-14 | metadataを編集 | NOT_IMPLEMENTED | NOT_RUN | no edit control or admin edit endpoint |
-| CATEGORY-01 | カテゴリ一覧を管理 | NOT_IMPLEMENTED | NOT_RUN | no category management screen/endpoint |
-| CATEGORY-02 | カテゴリを追加 | NOT_IMPLEMENTED | NOT_RUN | no category management screen/endpoint |
-| CATEGORY-03 | 必要な編集操作 | NOT_IMPLEMENTED | NOT_RUN | no category management screen/endpoint |
-| USER-01 | 一般ユーザーを登録 | NOT_IMPLEMENTED | NOT_RUN | no user management screen/endpoint |
-| USER-02 | 一般ユーザーを利用停止 | NOT_IMPLEMENTED | NOT_RUN | no user management screen/endpoint |
-| USER-03 | 一般ユーザーを再開 | NOT_IMPLEMENTED | NOT_RUN | no user management screen/endpoint |
-| USER-04 | 仮passwordを再設定 | NOT_IMPLEMENTED | NOT_RUN | no user management screen/endpoint |
-| DELETE-01 | 書籍を論理削除 | NOT_IMPLEMENTED | NOT_RUN | no delete control/endpoint |
-| DELETE-02 | 通常一覧から消える | NOT_IMPLEMENTED | NOT_RUN | no delete flow |
-| DELETE-03 | 削除済み一覧へ出る | NOT_IMPLEMENTED | NOT_RUN | no deleted-books screen/endpoint |
-| DELETE-04 | 復元 | NOT_IMPLEMENTED | NOT_RUN | no restore control/endpoint |
-| DELETE-05 | 復元後に再閲覧 | NOT_IMPLEMENTED | NOT_RUN | no restore flow |
-| DELETE-06 | 完全削除 | NOT_IMPLEMENTED | NOT_RUN | no permanent-delete control/endpoint |
-| REPLACE-01 | 登録済みfileを差し替え | NOT_IMPLEMENTED | NOT_RUN | no replacement control/endpoint |
-| ACCESS-01 | 一般ユーザーはAdmin操作を実行できない | PASS | — | `/admin` redirects to `/`; admin POST returns 403 |
+| BOOK-01 | 管理者が書籍登録画面を開く | PASS | — | E2E成立 | `/admin` and registration sheet opened in browser |
+| BOOK-02 | PDFを選択し登録 | NOT_IMPLEMENTED | NOT_RUN | UIのみ | UI shows local filename only; no admin API request |
+| BOOK-03 | EPUBを選択し登録 | NOT_IMPLEMENTED | NOT_RUN | UIのみ | UI accepts EPUB locally; protected EPUB registration is not implemented |
+| BOOK-04 | 200MB上限 | NOT_IMPLEMENTED | NOT_RUN | backend APIのみ | backend validator exists, but UI has no upload API path |
+| BOOK-05 | 不正MIME / 内容を拒否 | NOT_IMPLEMENTED | NOT_RUN | backend APIのみ | backend rejects direct invalid uploads; UI cannot invoke it |
+| BOOK-06 | 同一file hash重複を拒否 | NOT_IMPLEMENTED | NOT_RUN | backend APIのみ | direct API second upload returns 500; no UI path and no clear 409 contract |
+| BOOK-07 | タイトルを登録 | NOT_IMPLEMENTED | NOT_RUN | UIのみ | title appears in local table only; DB list check is only supporting evidence because the admin fixture list may be empty; request absence and local-only behavior are primary evidence |
+| BOOK-08 | カテゴリを選択 | NOT_IMPLEMENTED | NOT_RUN | UIのみ | category appears in local table only; no category API/UI management |
+| BOOK-09 | カテゴリ未選択時の正式処理 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no unset state; no browser-to-API registration path |
+| BOOK-10 | publication scopeを必須選択 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no publication-scope field in registration UI or API |
+| BOOK-11 | all-usersを設定 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no publication-scope field or API contract |
+| BOOK-12 | admin-onlyを設定 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no publication-scope field or API contract |
+| BOOK-13 | 登録後に対象ユーザー一覧へ反映 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | local row is not persisted or reflected by backend list |
+| BOOK-14 | metadataを編集 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no edit control or admin edit endpoint |
+| CATEGORY-01 | カテゴリ一覧を管理 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no category management screen/endpoint |
+| CATEGORY-02 | カテゴリを追加 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no category management screen/endpoint |
+| CATEGORY-03 | 必要な編集操作 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no category management screen/endpoint |
+| USER-01 | 一般ユーザーを登録 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no user management screen/endpoint |
+| USER-02 | 一般ユーザーを利用停止 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no user management screen/endpoint |
+| USER-03 | 一般ユーザーを再開 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no user management screen/endpoint |
+| USER-04 | 仮passwordを再設定 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no user management screen/endpoint |
+| DELETE-01 | 書籍を論理削除 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no delete control/endpoint |
+| DELETE-02 | 通常一覧から消える | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no delete flow |
+| DELETE-03 | 削除済み一覧へ出る | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no deleted-books screen/endpoint |
+| DELETE-04 | 復元 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no restore control/endpoint |
+| DELETE-05 | 復元後に再閲覧 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no restore flow |
+| DELETE-06 | 完全削除 | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no permanent-delete control/endpoint |
+| REPLACE-01 | 登録済みfileを差し替え | NOT_IMPLEMENTED | NOT_RUN | 未実装 | no replacement control/endpoint |
+| ACCESS-01 | 一般ユーザーはAdmin操作を実行できない | PASS | — | E2E成立 | `/admin` redirects to `/`; admin POST returns 403 |
 
 ## Summary
 
@@ -89,7 +89,9 @@ The two `PASS` results are limited to opening the existing admin screen and enfo
 
 ```text
 BASELINE_HEAD = c20180e4887164a3dfcc78b977553eb78f655e04
-FINAL_HEAD = reported in task completion after final report commit
+REVIEWED_HEAD = f13512ef658faf63a10a93a54d8b0c619b7ccb18
+CORRECTION_HEAD = d3089e77b25bfa9c2818d2713f9125462d4db000
+FINAL_HEAD = d3089e77b25bfa9c2818d2713f9125462d4db000
 BRANCH = test/e2e-admin-capability-audit-20260816
 WAVE_ID = BELIB-E2E-W1-20260816
 LANE = C
@@ -97,6 +99,11 @@ ROLE = implementation
 MODEL = gpt-5.6-luna
 REASONING = high
 METRICS_RUN_ID = belib-e2e-w1-20260816-lane-c-admin-implementation
+JUNIOR_REVIEW_RUN_ID = belib-deepseek-junior-trial-v1-lane-c-admin-20260816
+JUNIOR_REVIEW_VERDICT = REQUEST_CHANGES
+CORRECTION_APPLIED = true
+E2E_COMMAND = npm --prefix frontend run test:e2e -- admin-capability-audit.spec.ts
+E2E_RESULT = 13 passed (corrected run)
 METRICS_SAVE = saved
 CREDIT_MEASUREMENT_STATUS = pending_external_snapshot
 CREDITS_CONSUMED = null
