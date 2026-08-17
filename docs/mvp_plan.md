@@ -1,6 +1,6 @@
 # BeLib MVP 計画
 
-- Updated: 2026-08-14
+- Updated: 2026-08-18
 - Target requirements: `docs/requirements.md` v2.0.0
 - Current implementation status: `docs/current-status.md`
 
@@ -32,6 +32,8 @@ login
 さらに、最小admin APIで書籍メタデータとPDFを登録できます。
 
 ただし、これは正式MVP全体の完了ではありません。現在のストレージは保護ローカル方式で、R2、EPUB、公開範囲選択、completed自動遷移、管理UI接続などが残っています。
+
+`book_files.file_hash` のmigration/schema driftは、Fedora上のtask-owned PostgreSQL 16.14によるfresh DB runtime検証で解消済みです。これはPhase CのDB再現性に関する完了項目ですが、README/demoのfresh環境再現やMVP E2Eの再検証が残るため、正式なPhase C完了とは扱いません。
 
 ## 3. フェーズ
 
@@ -74,15 +76,27 @@ Backend完了済み:
 
 ### Phase C: Reproducible MVP environment
 
-Status: **IN PROGRESS**
+Status: **IN PROGRESS / FRESH DB MIGRATION VERIFIED**
 
 完了条件:
 
-- committed migrationsだけでfresh DBをcurrent schemaへ到達させられる
-- `book_files.file_hash` migration/schema driftがない
-- READMEの手順でfresh環境を起動できる
-- backend build/testとMVP E2Eがfresh環境でも再現する
-- 実ファイルや環境固有値をGitへ含めない
+- committed migrationsだけでfresh DBをcurrent schemaへ到達させられる（完了）
+- `book_files.file_hash` migration/schema driftがない（fresh runtimeで完了）
+- READMEの手順でfresh環境を起動できる（未確認）
+- backend build/testとMVP E2Eがfresh環境でも再現する（backend build/testは完了、MVP E2Eは未確認）
+- 実ファイルや環境固有値をGitへ含めない（継続確認）
+
+Fresh DB検証の記録:
+
+- `prisma migrate deploy` は4 migrationを正常適用し、2回目は pendingなし
+- `prisma migrate status` はDatabase schema is up to date
+- `book_files.file_hash` は `VARCHAR(64) NOT NULL`
+- `book_files_file_hash_key` はunique index
+- `20260816140000_add_book_file_hash` はfinished / not rolled back
+- Prisma validate、backend build、backend testはPASS（63 passed / 11 skipped）
+- 正しいmigrationは `20260816140000_add_book_file_hash` のみ。`20260817120000_add_book_file_hash` は作成しない
+
+frontendの既存build/typeエラーはこのbackend migration検証とは分離した既知課題であり、本フェーズのfresh DB検証成功・失敗には含めません。README/demo等の残条件も、この検証結果だけでは完了扱いにしません。
 
 ### Phase D: Formal storage boundary
 
@@ -151,15 +165,14 @@ Status: **NOT STARTED / PARTIAL UI EXISTS**
 
 現在は次の順を推奨します。
 
-1. migration/schema drift解消
-2. fresh環境README再現
-3. Admin UI -> existing admin API接続
-4. publication scope正式化
-5. PDF `completed` 自動遷移
-6. R2へのstorage cutover
-7. EPUB vertical slice
-8. search/category/user/delete/replace等の管理機能
-9. backup/restore・PC/Android最終受け入れ
+1. fresh環境README/demo再現（file-hash migration検証後の残作業）
+2. Admin UI -> existing admin API接続
+3. publication scope正式化
+4. PDF `completed` 自動遷移
+5. R2へのstorage cutover
+6. EPUB vertical slice
+7. search/category/user/delete/replace等の管理機能
+8. backup/restore・PC/Android最終受け入れ
 
 理由:
 

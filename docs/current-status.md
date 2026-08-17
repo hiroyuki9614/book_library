@@ -1,8 +1,8 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-08-14
+- Updated: 2026-08-18
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
-- Current implementation checkpoint reviewed: `checkpoint/belib-mvp-phase6-20260812` at `a64fd12dd53b2f090d913fc71f6dded5b0c2883a`
+- Current implementation checkpoint reviewed: `fix/file-hash-fresh-db-20260816` at `d7311d0c2c3ad8c8955498fb610983834a55e57d`
 - Default `main` is older than this checkpoint and must not be used alone to judge current MVP progress
 
 ## Source-of-truth boundary
@@ -33,6 +33,8 @@ protected PDF delivery                           implemented with local ignored 
 reading-info GET/PATCH                           implemented
 reading position persistence to PostgreSQL       implemented
 frontend book/detail/PDF integration             implemented
+file_hash migration/schema drift on fresh DB      resolved and runtime-verified
+backend Prisma validation/build/tests             passing (63 passed / 11 skipped)
 real browser + PostgreSQL E2E                    implemented
 minimal admin book metadata API                  implemented
 minimal admin PDF upload API                     implemented
@@ -46,6 +48,10 @@ full MVP management functions                    not implemented
 ```
 
 The core path is verified, but the formal requirements are not all complete.
+
+The frontend's existing build/type errors remain a separate known issue; they are
+not evidence of a backend file-hash migration failure and are not changed by this
+verification.
 
 ## Backend
 
@@ -166,7 +172,10 @@ Important constraints:
 Migration reproducibility status:
 
 - `backend/prisma/migrations/20260816140000_add_book_file_hash/migration.sql` adds the required `book_files.file_hash` column and unique index without rewriting historical migrations
-- fresh PostgreSQL verification applies all four migrations from zero, checks `VARCHAR(64) NOT NULL`, and verifies Prisma read/write plus duplicate rejection
+- fresh PostgreSQL 16.14 verification on Fedora applies all four migrations from zero with `prisma migrate deploy`; a second deploy reports no pending migrations and `prisma migrate status` reports the schema is up to date
+- fresh runtime confirms `book_files.file_hash` is `VARCHAR(64) NOT NULL` and `book_files_file_hash_key` is a unique index; migration `20260816140000_add_book_file_hash` is finished and not rolled back
+- Prisma validation, backend build, and backend tests pass (63 passed / 11 skipped)
+- this is the only required file-hash migration; `20260817120000_add_book_file_hash` must not be created
 - `backend/scripts/verify-file-hash-migration.ts` provides the repeatable contract check
 - an existing non-empty `book_files` table requires an explicit real-content hash backfill policy before applying; production/shared DBs were not modified by this work
 
@@ -214,15 +223,14 @@ See `docs/requirements.md` for the full target.
 
 ## Current priority
 
-1. Resolve `book_files.file_hash` migration/schema drift and prove fresh-DB reproducibility.
-2. Make README setup reproducible on a fresh environment.
-3. Correct per-user `readStatus` on the book list before treating list summary/filter as complete.
-4. Wire Admin UI to existing admin APIs.
-5. Implement explicit publication scope.
-6. Implement PDF `completed` transition.
-7. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
-8. Connect EPUB to the same authorization/storage/progress boundary.
-9. Continue remaining management requirements.
+1. Make README/demo setup reproducible on a fresh environment; this remains open after the file-hash verification.
+2. Correct per-user `readStatus` on the book list before treating list summary/filter as complete.
+3. Wire Admin UI to existing admin APIs.
+4. Implement explicit publication scope.
+5. Implement PDF `completed` transition.
+6. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
+7. Connect EPUB to the same authorization/storage/progress boundary.
+8. Continue remaining management requirements.
 
 ## Documentation responsibilities
 
