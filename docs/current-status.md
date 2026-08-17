@@ -194,7 +194,8 @@ Migration reproducibility status:
 - README setup now documents env preparation, PostgreSQL startup, dependency installation, Prisma generate/migration/seed, optional initial-admin bootstrap, and the PDF demo command
 - fresh runtime startup: backend and frontend both ready
 - MVP Playwright E2E: 4 passed; it covers login, permissioned list, protected PDF, page move, reading-info persistence/reload, and forbidden access
-- `README.md` and `.env.example` are synchronized with the reproducible path; secrets and generated PDF files remain outside Git
+- `README.md` and `.env.example` are synchronized with the reproducible path; the seed password variables required by README are present and secrets/generated PDF files remain outside Git
+- the fixture is reproducible from a fresh E2E DB/storage; rerunning against the same task-owned DB/storage requires the documented cleanup because fixture roles use unique names and the PDF write is exclusive
 
 ## Verification evidence
 

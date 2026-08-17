@@ -97,6 +97,8 @@ Fresh DB検証の記録:
 - 正しいmigrationは `20260816140000_add_book_file_hash` のみ。`20260817120000_add_book_file_hash` は作成しない
 - README fresh setupとMVP browser demoをclean checkoutで再現し、backend/frontend startupはPASS
 - MVP Playwright E2Eは4 passed（login、permissioned list、protected PDF、page move、reading-info save/reload、forbidden access）
+- READMEのseed password変数不足（`ENV_EXAMPLE_GAP`）を`.env.example`へ補正済み
+- E2E fixtureの再実行にはtask-owned DB/storage cleanupが必要であることをREADMEへ明記済み。これはfresh一回目のruntime failureではなく、再実行時のfixture状態条件
 
 frontendの既存build/typeエラーはこのbackend migration検証とは分離した既知課題であり、本フェーズのfresh DB検証成功・失敗には含めません。README/demo等の残条件も、この検証結果だけでは完了扱いにしません。
 

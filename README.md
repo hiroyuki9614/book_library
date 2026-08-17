@@ -177,6 +177,17 @@ npm --prefix frontend run test:e2e
 
 このdemoは、ログイン、閲覧可能な書籍一覧、保護PDF、ページ移動、読書位置保存、reload後の復元、権限なしユーザーの拒否を確認します。
 
+同じtask-owned E2E DBとstorageでdemoを再実行する場合は、fixtureが既存roleとPDFを再利用しないため、先に次を実行します。
+
+```bash
+docker compose --env-file .env.development -f docker-compose.dev.yml exec -T db \
+  psql -U "$POSTGRES_USER" -d postgres \
+  -c 'DROP DATABASE IF EXISTS booklib_demo_e2e WITH (FORCE);' \
+  -c "CREATE DATABASE booklib_demo_e2e OWNER $POSTGRES_USER;"
+find .tmp/e2e-book-files -type f -delete
+rm -f .tmp/e2e-metadata.json
+```
+
 ## 現在のMVP完了判定
 
 現在の「MVPコア VERIFIED」は次の縦切りを意味します。
