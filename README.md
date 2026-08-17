@@ -93,6 +93,40 @@ npm run dev
 
 環境変数は各 `.env.example` を参照し、実値をGitへコミットしないでください。現在のローカルPDF縦切りでは `BOOK_FILE_STORAGE_ROOT` を使用します。
 
+## Fresh環境のセットアップ
+
+READMEだけを入口にfresh環境を作る場合は、task-ownedのPostgreSQLを起動し、committed migration、Prisma Client、開発用seedを順に適用します。seed用パスワードはローカルで設定し、Gitへ保存しないでください。
+
+```bash
+cp .env.example .env.development
+# .env.development の POSTGRES_PASSWORD、DATABASE_URL、BETTER_AUTH_SECRET、
+# SEED_USER_PASSWORD、SEED_ADMIN_PASSWORD をローカル値へ設定する
+docker compose --env-file .env.development -f docker-compose.dev.yml up -d db
+
+npm install
+npm install --prefix backend
+npm install --prefix frontend
+
+set -a
+. ./.env.development
+set +a
+
+(cd backend && npx prisma generate && npx prisma migrate deploy && npx prisma db seed)
+npm run dev
+```
+
+seedを使わず初期管理者だけを作る場合は、`INITIAL_ADMIN_EMAIL`、`INITIAL_ADMIN_NAME`、`INITIAL_ADMIN_PASSWORD` を設定して次を実行します。
+
+```bash
+npm --prefix backend run create:initial-admin
+```
+
+DBを破棄して再現する場合は、同じCompose projectで起動したtask-ownedリソースに対してだけ次を実行します。
+
+```bash
+docker compose --env-file .env.development -f docker-compose.dev.yml down -v
+```
+
 Prismaの現在schema確認:
 
 ```bash
@@ -119,6 +153,29 @@ npm --prefix frontend run test:e2e
 ```
 
 `build:frontend` にはMVP外の既知TypeScriptエラーが残る可能性があります。失敗時は今回変更起因か既存課題かを分離して扱ってください。
+
+## MVP PDF demo / browser E2E
+
+seedのサンプル書籍はメタデータ中心のため、保護PDFを含む最短のdemoは既存のtask-owned E2E fixtureを使用します。`E2E_DATABASE_URL` は必ず `_e2e` で終わるDB名にし、実値は環境変数だけに設定してください。
+
+```bash
+mkdir -p .tmp/e2e-book-files
+docker compose --env-file .env.development -f docker-compose.dev.yml exec -T db \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "CREATE DATABASE booklib_demo_e2e OWNER $POSTGRES_USER;"
+
+export E2E_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/booklib_demo_e2e"
+export E2E_ADMIN_EMAIL="phase-c-admin@example.test"
+export E2E_ADMIN_NAME="Phase C Admin"
+export E2E_ADMIN_PASSWORD="replace-with-a-local-password"
+export E2E_MVP_PASSWORD="replace-with-a-local-password"
+export E2E_BOOK_FILE_STORAGE_ROOT="$(pwd)/.tmp/e2e-book-files"
+export E2E_MVP_METADATA_PATH="$(pwd)/.tmp/e2e-metadata.json"
+
+npm --prefix frontend run test:e2e
+```
+
+このdemoは、ログイン、閲覧可能な書籍一覧、保護PDF、ページ移動、読書位置保存、reload後の復元、権限なしユーザーの拒否を確認します。
 
 ## 現在のMVP完了判定
 

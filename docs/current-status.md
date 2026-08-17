@@ -35,6 +35,7 @@ reading position persistence to PostgreSQL       implemented
 frontend book/detail/PDF integration             implemented
 file_hash migration/schema drift on fresh DB      resolved and runtime-verified
 backend Prisma validation/build/tests             passing (63 passed / 11 skipped)
+README fresh setup and MVP browser demo           verified on task-owned environment
 real browser + PostgreSQL E2E                    implemented
 minimal admin book metadata API                  implemented
 minimal admin PDF upload API                     implemented
@@ -52,6 +53,14 @@ The core path is verified, but the formal requirements are not all complete.
 The frontend's existing build/type errors remain a separate known issue; they are
 not evidence of a backend file-hash migration failure and are not changed by this
 verification.
+
+Phase C fresh-environment reproduction is now verified separately from the
+frontend full-build issue. The fresh run used a clean checkout, fresh npm
+installation, task-owned PostgreSQL, committed migrations, Prisma generate,
+development seed, backend/frontend startup, and the existing MVP Playwright
+fixture. Frontend full build still has known TypeScript errors, and the full
+frontend Vitest run had one Chromium dynamic-import failure (44 passed); the MVP
+browser E2E passed independently.
 
 ## Backend
 
@@ -179,6 +188,14 @@ Migration reproducibility status:
 - `backend/scripts/verify-file-hash-migration.ts` provides the repeatable contract check
 - an existing non-empty `book_files` table requires an explicit real-content hash backfill policy before applying; production/shared DBs were not modified by this work
 
+### Phase C fresh-environment reproduction
+
+- source checkout: `fix/file-hash-fresh-db-20260816` at `da282b168a711e4cd43aff21986b4826a88f538b`
+- README setup now documents env preparation, PostgreSQL startup, dependency installation, Prisma generate/migration/seed, optional initial-admin bootstrap, and the PDF demo command
+- fresh runtime startup: backend and frontend both ready
+- MVP Playwright E2E: 4 passed; it covers login, permissioned list, protected PDF, page move, reading-info persistence/reload, and forbidden access
+- `README.md` and `.env.example` are synchronized with the reproducible path; secrets and generated PDF files remain outside Git
+
 ## Verification evidence
 
 The checkpoint contains a Playwright real-runtime path covering:
@@ -223,14 +240,13 @@ See `docs/requirements.md` for the full target.
 
 ## Current priority
 
-1. Make README/demo setup reproducible on a fresh environment; this remains open after the file-hash verification.
-2. Correct per-user `readStatus` on the book list before treating list summary/filter as complete.
-3. Wire Admin UI to existing admin APIs.
-4. Implement explicit publication scope.
-5. Implement PDF `completed` transition.
-6. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
-7. Connect EPUB to the same authorization/storage/progress boundary.
-8. Continue remaining management requirements.
+1. Correct per-user `readStatus` on the book list before treating list summary/filter as complete.
+2. Wire Admin UI to existing admin APIs.
+3. Implement explicit publication scope.
+4. Implement PDF `completed` transition.
+5. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
+6. Connect EPUB to the same authorization/storage/progress boundary.
+7. Continue remaining management requirements.
 
 ## Documentation responsibilities
 

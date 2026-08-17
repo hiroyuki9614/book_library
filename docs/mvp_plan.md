@@ -76,15 +76,15 @@ Backend完了済み:
 
 ### Phase C: Reproducible MVP environment
 
-Status: **IN PROGRESS / FRESH DB MIGRATION VERIFIED**
+Status: **VERIFIED**
 
 完了条件:
 
 - committed migrationsだけでfresh DBをcurrent schemaへ到達させられる（完了）
 - `book_files.file_hash` migration/schema driftがない（fresh runtimeで完了）
-- READMEの手順でfresh環境を起動できる（未確認）
-- backend build/testとMVP E2Eがfresh環境でも再現する（backend build/testは完了、MVP E2Eは未確認）
-- 実ファイルや環境固有値をGitへ含めない（継続確認）
+- READMEの手順でfresh環境を起動できる（完了）
+- backend build/testとMVP E2Eがfresh環境でも再現する（完了）
+- 実ファイルや環境固有値をGitへ含めない（完了）
 
 Fresh DB検証の記録:
 
@@ -95,8 +95,12 @@ Fresh DB検証の記録:
 - `20260816140000_add_book_file_hash` はfinished / not rolled back
 - Prisma validate、backend build、backend testはPASS（63 passed / 11 skipped）
 - 正しいmigrationは `20260816140000_add_book_file_hash` のみ。`20260817120000_add_book_file_hash` は作成しない
+- README fresh setupとMVP browser demoをclean checkoutで再現し、backend/frontend startupはPASS
+- MVP Playwright E2Eは4 passed（login、permissioned list、protected PDF、page move、reading-info save/reload、forbidden access）
 
 frontendの既存build/typeエラーはこのbackend migration検証とは分離した既知課題であり、本フェーズのfresh DB検証成功・失敗には含めません。README/demo等の残条件も、この検証結果だけでは完了扱いにしません。
+
+Phase Cのfresh runではfrontend full buildに既知TypeScriptエラー、frontend全testにChromium dynamic-importの1 failure（44 passed）が残りました。MVP browser E2Eは独立して4 passedしており、runtime reproductionとは分離して記録します。
 
 ### Phase D: Formal storage boundary
 
@@ -165,14 +169,13 @@ Status: **NOT STARTED / PARTIAL UI EXISTS**
 
 現在は次の順を推奨します。
 
-1. fresh環境README/demo再現（file-hash migration検証後の残作業）
-2. Admin UI -> existing admin API接続
-3. publication scope正式化
-4. PDF `completed` 自動遷移
-5. R2へのstorage cutover
-6. EPUB vertical slice
-7. search/category/user/delete/replace等の管理機能
-8. backup/restore・PC/Android最終受け入れ
+1. Admin UI -> existing admin API接続
+2. publication scope正式化
+3. PDF `completed` 自動遷移
+4. R2へのstorage cutover
+5. EPUB vertical slice
+6. search/category/user/delete/replace等の管理機能
+7. backup/restore・PC/Android最終受け入れ
 
 理由:
 
