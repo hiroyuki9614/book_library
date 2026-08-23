@@ -201,11 +201,12 @@ export function validateBookFileUploadMetadata(value: unknown): FileValidationRe
 	const file = value as BookFileUpload;
 	const lowerName = file.name.toLowerCase();
 	const mimeType = file.type.split(';', 1)[0].trim().toLowerCase();
-	const fileType: SupportedBookFileType | null = lowerName.endsWith('.pdf') && mimeType === BOOK_FILE_MIME_TYPES.pdf
-		? 'pdf'
-		: lowerName.endsWith('.epub') && mimeType === BOOK_FILE_MIME_TYPES.epub
-			? 'epub'
-			: null;
+	const fileType: SupportedBookFileType | null =
+		lowerName.endsWith('.pdf') && mimeType === BOOK_FILE_MIME_TYPES.pdf
+			? 'pdf'
+			: lowerName.endsWith('.epub') && mimeType === BOOK_FILE_MIME_TYPES.epub
+				? 'epub'
+				: null;
 
 	if (!fileType) {
 		return { valid: false, status: 400, message: 'Only EPUB or PDF files are supported', code: 'UNSUPPORTED_BOOK_FILE' };
@@ -264,17 +265,22 @@ async function prepareBookFile(value: unknown): Promise<PreparedBookFileResult> 
 
 	const bytes = Buffer.from(await validation.file.arrayBuffer());
 	if (bytes.length > MAX_BOOK_FILE_SIZE) {
-		return { valid: false as const, status: 413 as const, message: 'Book file exceeds the 200MB limit', code: 'FILE_TOO_LARGE' };
+		return { valid: false, status: 413, message: 'Book file exceeds the 200MB limit', code: 'FILE_TOO_LARGE' };
 	}
 	if (bytes.length !== validation.file.size) {
-		return { valid: false as const, status: 400 as const, message: 'Book file size does not match upload metadata', code: 'INVALID_FILE_SIZE' };
+		return { valid: false, status: 400, message: 'Book file size does not match upload metadata', code: 'INVALID_FILE_SIZE' };
 	}
 	if (!validateBookFileContents(validation.fileType, bytes)) {
-		return { valid: false as const, status: 400 as const, message: `Uploaded file is not a valid ${validation.fileType.toUpperCase()}`, code: 'INVALID_BOOK_FILE' };
+		return {
+			valid: false,
+			status: 400,
+			message: `Uploaded file is not a valid ${validation.fileType.toUpperCase()}`,
+			code: 'INVALID_BOOK_FILE',
+		};
 	}
 
 	return {
-		valid: true as const,
+		valid: true,
 		file: validation.file,
 		fileType: validation.fileType,
 		mimeType: validation.mimeType,
@@ -312,9 +318,7 @@ async function findActiveCategory(c: AdminContext, categoryId: number) {
 app.get('/categories', async (c) => {
 	try {
 		const admin = await getAdminUser(c);
-		if ('response' in admin) {
-			return admin.response;
-		}
+		if ('response' in admin) return admin.response;
 
 		const categories = await c.get('prisma').category.findMany({
 			where: { isActive: true },
@@ -332,9 +336,7 @@ app.get('/categories', async (c) => {
 app.post('/books', async (c) => {
 	try {
 		const admin = await getAdminUser(c);
-		if ('response' in admin) {
-			return admin.response;
-		}
+		if ('response' in admin) return admin.response;
 
 		let body: unknown;
 		try {
@@ -364,7 +366,7 @@ app.post('/books', async (c) => {
 				pageTurnDirection: input.pageTurnDirection,
 				description: input.description,
 				category: { connect: { id: input.categoryId } },
-				roleBookPermissions: { create: permissionCreatesForScope(input.publicationScope) },
+				roleBookPermissions: { create: [{ role: { connect: { name: 'user' } } }] },
 			},
 			select: {
 				id: true,
@@ -389,20 +391,19 @@ app.post('/book-registrations', async (c) => {
 	let storedPath: string | undefined;
 	try {
 		const admin = await getAdminUser(c);
-		if ('response' in admin) {
-			return admin.response;
-		}
+		if ('response' in admin) return admin.response;
 
 		let body: Record<string, unknown>;
 		try {
-			body = await c.req.parseBody();
+			body = (await c.req.parseBody()) as Record<string, unknown>;
 		} catch {
 			return jsonError(c, 400, 'Request body must be multipart form data', 'INVALID_REQUEST');
 		}
 
+		const { file, ...metadataBody } = body;
 		let input: ParsedBookMetadata;
 		try {
-			input = parseAdminBookCreateBody(body);
+			input = parseAdminBookCreateBody(metadataBody);
 		} catch {
 			return jsonError(c, 400, 'Book metadata is invalid', 'INVALID_BOOK');
 		}
@@ -412,7 +413,7 @@ app.post('/book-registrations', async (c) => {
 			return jsonError(c, 400, 'Active category is required', 'INVALID_CATEGORY');
 		}
 
-		const preparedFile = await prepareBookFile(body.file);
+		const preparedFile = await prepareBookFile(file);
 		if (preparedFile.valid === false) {
 			return jsonError(c, preparedFile.status, preparedFile.message, preparedFile.code);
 		}
@@ -439,15 +440,17 @@ app.post('/book-registrations', async (c) => {
 				category: { connect: { id: input.categoryId } },
 				roleBookPermissions: { create: permissionCreatesForScope(input.publicationScope) },
 				bookFiles: {
-					create: [{
-						extension: preparedFile.fileType,
-						mimeType: preparedFile.mimeType,
-						fileUrl: stored.storedFileName,
-						originalFileName: preparedFile.file.name,
-						storedFileName: stored.storedFileName,
-						fileSize: preparedFile.bytes.length,
-						fileHash: preparedFile.fileHash,
-					}],
+					create: [
+						{
+							extension: preparedFile.fileType,
+							mimeType: preparedFile.mimeType,
+							fileUrl: stored.storedFileName,
+							originalFileName: preparedFile.file.name,
+							storedFileName: stored.storedFileName,
+							fileSize: preparedFile.bytes.length,
+							fileHash: preparedFile.fileHash,
+						},
+					],
 				},
 			},
 			select: {
@@ -461,23 +464,16 @@ app.post('/book-registrations', async (c) => {
 				description: true,
 				category: { select: { id: true, name: true } },
 				bookFiles: {
-					select: {
-						id: true,
-						extension: true,
-						mimeType: true,
-						originalFileName: true,
-						fileSize: true,
-					},
+					select: { id: true, extension: true, mimeType: true, originalFileName: true, fileSize: true },
 					take: 1,
 				},
 			},
 		});
+
 		const { bookFiles, ...bookMetadata } = book;
 		return c.json({ ...bookMetadata, file: bookFiles[0], publicationScope: input.publicationScope }, 201);
 	} catch (error) {
-		if (storedPath) {
-			await rm(storedPath, { force: true });
-		}
+		if (storedPath) await rm(storedPath, { force: true });
 		if (isUniqueConstraintError(error)) {
 			return jsonError(c, 409, 'The same book file is already registered', 'DUPLICATE_FILE');
 		}
@@ -490,9 +486,7 @@ app.post('/books/:bookId/files', async (c) => {
 	let storedPath: string | undefined;
 	try {
 		const admin = await getAdminUser(c);
-		if ('response' in admin) {
-			return admin.response;
-		}
+		if ('response' in admin) return admin.response;
 
 		const bookId = Number(c.req.param('bookId'));
 		if (!Number.isSafeInteger(bookId) || bookId < 1) {
@@ -517,7 +511,7 @@ app.post('/books/:bookId/files', async (c) => {
 
 		let body: Record<string, unknown>;
 		try {
-			body = await c.req.parseBody();
+			body = (await c.req.parseBody()) as Record<string, unknown>;
 		} catch {
 			return jsonError(c, 400, 'Request body must be multipart form data', 'INVALID_REQUEST');
 		}
@@ -552,9 +546,7 @@ app.post('/books/:bookId/files', async (c) => {
 		});
 		return c.json(record, 201);
 	} catch (error) {
-		if (storedPath) {
-			await rm(storedPath, { force: true });
-		}
+		if (storedPath) await rm(storedPath, { force: true });
 		if (isUniqueConstraintError(error)) {
 			return jsonError(c, 409, 'The same book file is already registered', 'DUPLICATE_FILE');
 		}
