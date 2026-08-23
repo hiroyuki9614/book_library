@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.admin-registration.tsbuildinfo"
+  },
+  "include": [
+    "src/api/admin.ts",
+    "src/components/forms/BookRegistar/index.tsx",
+    "src/pages/Admin/index.tsx"
+  ]
+}

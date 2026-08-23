@@ -1,0 +1,61 @@
+name: Admin EPUB/PDF registration CI
+
+on:
+  pull_request:
+    paths:
+      - 'backend/src/routes/admin/**'
+      - 'frontend/src/api/admin*'
+      - 'frontend/src/components/forms/BookRegistar/**'
+      - 'frontend/src/pages/Admin/**'
+      - 'frontend/tsconfig.admin-registration.json'
+      - 'docs/api.yaml'
+      - 'docs/current-status.md'
+      - 'docs/design.md'
+      - '.github/workflows/admin-registration-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  admin-registration:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Backend install
+        working-directory: backend
+        run: npm ci
+
+      - name: Backend admin registration tests
+        working-directory: backend
+        run: npm run test -- src/routes/admin/registration.test.ts
+
+      - name: Backend build
+        working-directory: backend
+        run: npm run build
+
+      - name: Frontend install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Frontend admin registration tests
+        working-directory: frontend
+        run: npm run test -- src/api/admin.test.ts src/pages/Admin/index.test.tsx
+
+      - name: Focused Admin registration typecheck
+        working-directory: frontend
+        run: npx tsc -p tsconfig.admin-registration.json --noEmit
+
+      - name: Frontend bundle build
+        working-directory: frontend
+        run: npx vite build

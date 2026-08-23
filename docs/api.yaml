@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: BeLib Implemented API
-  version: 0.7.0
+  version: 0.8.0
   description: |
     BeLibで現在実装されている /api/v1 HTTP contract を記録する。
     将来の正式要件や未実装endpointは docs/requirements.md と docs/mvp_plan.md を参照する。
@@ -31,7 +31,7 @@ paths:
       description: |
         RoleBookPermissionで現在ユーザーのroleに許可された、論理削除されていない書籍だけを返す。
         現実装ではpage/limitのみbackend queryとして有効。検索、category、readStatus filterは未実装。
-        また一覧のreadStatusはまだユーザー別ReadingInfoをjoinしておらず、現時点では既定値unreadになる。
+        一覧のreadStatusはまだユーザー別ReadingInfoをjoinしておらず、現時点では既定値unreadになる。
         EPUBとPDFの両方が存在する場合、閲覧対象fileTypeはEPUBを優先する。
       parameters:
         - name: page
@@ -176,12 +176,35 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /admin/categories:
+    get:
+      summary: 管理者が登録フォーム用のactiveカテゴリを取得
+      responses:
+        '200':
+          description: Active categories
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [categories]
+                properties:
+                  categories:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CategorySummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /admin/books:
     post:
-      summary: 管理者が最小書籍メタデータを登録
+      summary: 管理者がメタデータだけを登録する互換endpoint
       description: |
-        現在のvertical sliceではtitleとactive categoryIdを受け取る。
-        現実装はuser role向けRoleBookPermissionも作成するため、正式な公開範囲選択要件とはまだ一致していない。
+        既存vertical-slice caller互換のため維持する。
+        新しいAdmin UIの完全登録は /admin/book-registrations を使用する。
       requestBody:
         required: true
         content:
@@ -204,14 +227,50 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /admin/book-registrations:
+    post:
+      summary: 管理者が書籍情報とEPUB/PDFを一括登録
+      description: |
+        title、active categoryId、publicationScope、EPUB/PDF fileを必須とする。
+        ファイルは最大200MBで、拡張子・MIME・内容を検証し、SHA-256 hashで重複を拒否する。
+        現在はprotected local storageへ保存し、Book + BookFile + RoleBookPermissionをnested createする。
+        DB create失敗時は直前に保存したlocal fileを削除する。
+        Cloudflare R2への正式cutoverは未実装。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AdminBookRegistrationRequest'
+      responses:
+        '201':
+          description: Created book, file, and publication scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminBookRegistrationResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/FileTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /admin/books/{bookId}/files:
     parameters:
       - $ref: '#/components/parameters/BookId'
     post:
-      summary: 管理者がPDFを登録
+      summary: 管理者が既存書籍へEPUB/PDFを登録
       description: |
-        現在はPDFのみ、最大200MB。metadataとPDF headerを検証し、保護local storageへ保存後にBookFileを作成する。
-        EPUB閲覧は実装済みだが、このadmin upload endpointのEPUB対応はまだ未実装。
+        EPUB/PDF、最大200MB。拡張子・MIME・内容とSHA-256 hashを検証する。
+        MVPでは1冊1fileを強制し、既存fileまたは重複hashは409を返す。
+        protected local storageへ保存後にBookFileを作成し、DB失敗時は新規local fileを削除する。
       requestBody:
         required: true
         content:
@@ -238,12 +297,10 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/BookNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '413':
-          description: File too large
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+          $ref: '#/components/responses/FileTooLarge'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -284,6 +341,18 @@ components:
             $ref: '#/components/schemas/Error'
     FileNotFound:
       description: Supported book file not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Duplicate file content or one-file-per-book conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    FileTooLarge:
+      description: File exceeds the 200MB limit
       content:
         application/json:
           schema:
@@ -415,9 +484,30 @@ components:
         title:
           type: string
           minLength: 1
+          maxLength: 255
+        authorName:
+          type: string
+          nullable: true
+        publisher:
+          type: string
+          nullable: true
+        publishedAt:
+          type: string
+          format: date
+          nullable: true
         categoryId:
           type: integer
           minimum: 1
+        pageTurnDirection:
+          type: string
+          enum: [ltr, rtl]
+        description:
+          type: string
+          nullable: true
+        publicationScope:
+          type: string
+          enum: [all_users, admin_only]
+          description: Optional only for the legacy metadata-only endpoint.
 
     AdminBookCreateResponse:
       type: object
@@ -430,7 +520,84 @@ components:
         authorName:
           type: string
           nullable: true
+        publisher:
+          type: string
+          nullable: true
+        publishedAt:
+          type: string
+          format: date-time
+          nullable: true
         categoryId:
+          type: integer
+        pageTurnDirection:
+          type: string
+          enum: [ltr, rtl]
+        description:
+          type: string
+          nullable: true
+        category:
+          $ref: '#/components/schemas/CategorySummary'
+
+    AdminBookRegistrationRequest:
+      type: object
+      required: [title, categoryId, publicationScope, file]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+        authorName:
+          type: string
+        publisher:
+          type: string
+        publishedAt:
+          type: string
+          format: date
+        categoryId:
+          type: integer
+          minimum: 1
+        pageTurnDirection:
+          type: string
+          enum: [ltr, rtl]
+          default: ltr
+        description:
+          type: string
+        publicationScope:
+          type: string
+          enum: [all_users, admin_only]
+          description: Required; no default.
+        file:
+          type: string
+          format: binary
+          description: EPUB or PDF, maximum 200MB.
+
+    AdminBookRegistrationResponse:
+      allOf:
+        - $ref: '#/components/schemas/AdminBookCreateResponse'
+        - type: object
+          required: [publicationScope, file]
+          properties:
+            publicationScope:
+              type: string
+              enum: [all_users, admin_only]
+            file:
+              $ref: '#/components/schemas/AdminBookFileSummary'
+
+    AdminBookFileSummary:
+      type: object
+      required: [id, extension, mimeType, originalFileName, fileSize]
+      properties:
+        id:
+          type: integer
+        extension:
+          type: string
+          enum: [pdf, epub]
+        mimeType:
+          type: string
+          enum: [application/pdf, application/epub+zip]
+        originalFileName:
+          type: string
+        fileSize:
           type: integer
 
     BookFile:
@@ -452,10 +619,10 @@ components:
           type: integer
         extension:
           type: string
-          enum: [pdf]
+          enum: [pdf, epub]
         mimeType:
           type: string
-          enum: [application/pdf]
+          enum: [application/pdf, application/epub+zip]
         fileUrl:
           type: string
           description: Current implementation stores a protected local relative key, not a public URL.
@@ -467,6 +634,7 @@ components:
           type: integer
         fileHash:
           type: string
+          pattern: '^[0-9a-f]{64}$'
         bookId:
           type: integer
         createdAt:
