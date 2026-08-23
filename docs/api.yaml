@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: BeLib Implemented API
-  version: 0.6.0
+  version: 0.7.0
   description: |
     BeLibで現在実装されている /api/v1 HTTP contract を記録する。
     将来の正式要件や未実装endpointは docs/requirements.md と docs/mvp_plan.md を参照する。
@@ -32,6 +32,7 @@ paths:
         RoleBookPermissionで現在ユーザーのroleに許可された、論理削除されていない書籍だけを返す。
         現実装ではpage/limitのみbackend queryとして有効。検索、category、readStatus filterは未実装。
         また一覧のreadStatusはまだユーザー別ReadingInfoをjoinしておらず、現時点では既定値unreadになる。
+        EPUBとPDFの両方が存在する場合、閲覧対象fileTypeはEPUBを優先する。
       parameters:
         - name: page
           in: query
@@ -95,19 +96,24 @@ paths:
     parameters:
       - $ref: '#/components/parameters/BookId'
     get:
-      summary: 認可済みPDFを取得
+      summary: 認可済みEPUB/PDFを取得
       description: |
-        現在の実装はPDF専用。保護local storageからbackend経由でstreamする。
-        EPUBおよびR2 signed URLは正式要件には存在するが、このendpointのcurrent implementationには未接続。
+        保護local storageからbackend経由でstreamする。
+        EPUBとPDFが両方存在する場合はEPUBを優先し、EPUBがない場合にPDFを返す。
+        Cloudflare R2 / signed URLへの正式cutoverは未実装。
       responses:
         '200':
-          description: PDF stream
+          description: Protected EPUB or PDF stream
           headers:
             Cache-Control:
               schema:
                 type: string
               example: private, no-store
           content:
+            application/epub+zip:
+              schema:
+                type: string
+                format: binary
             application/pdf:
               schema:
                 type: string
@@ -145,7 +151,7 @@ paths:
       summary: PDFの現在ページを保存
       description: |
         現実装はcurrentPageだけを受け取り、ReadingInfoをupsertする。
-        readStatusはbackend側でreadingとして保存する。completedの自動遷移は未実装。
+        readStatusはbackend側でreadingとして保存する。EPUB CFI/location persistenceは未接続。
       requestBody:
         required: true
         content:
@@ -205,6 +211,7 @@ paths:
       summary: 管理者がPDFを登録
       description: |
         現在はPDFのみ、最大200MB。metadataとPDF headerを検証し、保護local storageへ保存後にBookFileを作成する。
+        EPUB閲覧は実装済みだが、このadmin upload endpointのEPUB対応はまだ未実装。
       requestBody:
         required: true
         content:
@@ -276,7 +283,7 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     FileNotFound:
-      description: PDF file not found
+      description: Supported book file not found
       content:
         application/json:
           schema:
@@ -365,6 +372,7 @@ components:
           type: string
           enum: [pdf, epub]
           nullable: true
+          description: EPUB is preferred when both EPUB and PDF are present.
         fileSize:
           type: integer
           nullable: true
