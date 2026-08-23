@@ -1,6 +1,6 @@
 # 画面定義書
 
-- 最終更新: 2026-08-14
+- 最終更新: 2026-08-23
 - 実routeの正本: `frontend/src/routes/AppRoutes.tsx`
 
 この文書は画面の役割と共通デザイン方針を説明します。route自体はfrontend実装を優先します。
@@ -23,13 +23,33 @@
 | --- | --- | --- |
 | `/login` | guest only | ログイン |
 | `/` | authenticated | Home。書籍一覧の入口 |
-| `/reader/:id` | authenticated | EPUB/PDF Reader。現在の実API縦切りはPDF中心 |
-| `/admin` | authenticated + admin | 書籍管理UI。現在は登録処理の一部がlocal state |
+| `/reader/:id` | authenticated | 保護されたEPUB/PDF Reader |
+| `/admin` | authenticated + admin | 書籍管理UI。activeカテゴリ・公開範囲・EPUB/PDFを選択し、backendのfull registration APIへ実登録 |
 | `/about` | authenticated | About |
 | `/contact` | authenticated | Contact |
 | `*` | authenticated layout内 | 404 |
 
 旧文書にあった「ダッシュボード」「書籍一覧画面」「マイページ」という独立画面前提は、現在のrouterと一致しないため削除します。
+
+### Admin registration
+
+`/admin` の新規書籍登録sheetでは次を扱う。
+
+- タイトル
+- 著者
+- backendから取得したactiveカテゴリ
+- ページ方向
+- 出版社
+- 出版日
+- 説明
+- 公開範囲（全ユーザー公開 / 管理者のみ。初期値なし）
+- EPUB/PDFファイル（最大200MB）
+
+送信成功はbackendのfull registration APIがBook・BookFile・RoleBookPermissionの登録を返した後だけ表示する。
+
+現在の書籍一覧表示は、そのページを開いている間に登録成功した書籍を表示するfocused実装であり、reload後にDB上の全管理書籍を再取得する管理一覧は残タスク。
+
+正式storage targetはCloudflare R2だが、現在の登録経路はprotected local storageを使用する。frontendはstorage pathへ依存しない。
 
 ## 主なUI部品
 

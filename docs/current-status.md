@@ -40,14 +40,14 @@ file_hash migration/schema drift on fresh DB      resolved and runtime-verified
 backend Prisma validation/build/tests             passing on verified checkpoints
 README fresh setup and MVP browser demo           verified on task-owned environment
 real browser + PostgreSQL E2E                    implemented for the PDF vertical slice
-minimal admin book metadata API                  implemented
-minimal admin PDF upload API                     implemented
-admin UI -> admin API wiring                     not implemented
-admin EPUB upload API                            not implemented
+admin category API                               implemented
+admin metadata compatibility API                 implemented
+admin EPUB/PDF full registration API             implemented
+admin UI -> real admin API wiring                implemented
+explicit publication-scope selection             implemented for full registration
 per-user readStatus in book list                 not implemented correctly yet
 Cloudflare R2 / formal file delivery             not implemented
 EPUB ReadingInfo/CFI persistence                 not implemented; per-book localStorage is used
-formal publication-scope selection               not implemented
 completed auto transition                        not implemented on the current Phase C line
 full MVP management functions                    not implemented
 ```
@@ -114,23 +114,35 @@ Current limitations:
 - EpubReader currently keeps a per-book CFI under `reader-location:<bookId>` in browser localStorage
 - progress percentage is not stored in DB, consistent with the requirement
 
-### Minimal admin registration
+### Admin registration
 
 Implemented:
 
 ```text
+GET  /api/v1/admin/categories
 POST /api/v1/admin/books
+POST /api/v1/admin/book-registrations
 POST /api/v1/admin/books/:bookId/files
 ```
 
-Current file upload is backend-admin-only, PDF-only, maximum 200 MB, validates metadata and actual PDF header, stores SHA-256 hash, uses a generated relative storage key, and removes the newly written file if the DB create fails.
+Current full registration behavior:
 
-Current requirement drift:
+- Admin UI uses `POST /api/v1/admin/book-registrations` rather than local-state-only registration
+- EPUB and PDF are supported, with a 200 MB maximum
+- extension, MIME type, and file content are checked before registration
+- EPUB validation checks the ZIP container's required uncompressed `mimetype` entry; PDF validation checks the `%PDF-` header
+- SHA-256 `BookFile.fileHash` rejects duplicate content, including content attached to logically deleted books
+- the MVP full-registration path creates exactly one `BookFile` for a new book
+- publication scope is explicitly required with no UI default
+- `all_users` creates `admin` and `user` role permissions; `admin_only` creates only `admin`
+- the protected local file is written before the nested DB create; if DB creation fails, the newly written local file is removed
+- `POST /api/v1/admin/books/:bookId/files` also accepts EPUB/PDF and rejects a second file for the same book
+- the formal Cloudflare R2 storage/signed-URL cutover remains open
 
-- EPUB viewing is now connected for EPUB records/files already present in protected storage, but the admin file-upload endpoint is still PDF-only
-- metadata registration currently creates `user` role permission automatically
-- confirmed requirements require explicit publication-scope selection with no default
-- current admin API is therefore a vertical-slice implementation rather than final publication behavior
+Compatibility note:
+
+- `POST /api/v1/admin/books` remains as the earlier metadata-only vertical-slice endpoint
+- the current Admin UI does not use that legacy endpoint for new full registrations
 
 ## Frontend
 
@@ -146,14 +158,29 @@ Current requirement drift:
 - authenticated Reader route
 - EPUB/PDF Reader dispatch based on the protected book detail
 - admin route guard
+- active Admin category loading
+- EPUB/PDF full Admin registration
+- explicit publication-scope selection
 
-### Admin screen remains prototype
+### Admin registration
 
-`frontend/src/pages/Admin/index.tsx` still starts from `booksData` and local component state. `BookRegistar` submission updates local state only and does not call the implemented admin registration endpoints.
+`frontend/src/pages/Admin/index.tsx` now submits the registration form through the real Admin API.
+
+Current behavior:
+
+- categories come from `GET /api/v1/admin/categories`
+- title, category, publication scope, and EPUB/PDF file are required by the full registration form
+- the form sends multipart data to `POST /api/v1/admin/book-registrations`
+- the success sheet closes only after the backend returns a successful persisted registration
+- the page shows successful registrations from the current page session, including file type/name and publication scope
+
+Current limitation:
+
+- reloading `/admin` does not yet fetch and render the complete persisted administrative book list; that remains a separate management feature
 
 ### EPUB
 
-The existing EpubReader UI is now connected to the protected book-file API.
+The existing EpubReader UI is connected to the protected book-file API.
 
 Current verified behavior:
 
@@ -163,11 +190,11 @@ Current verified behavior:
 - TOC, spread selection, keyboard/page navigation, and back-history logic remain in the existing reader
 - saved CFI is namespaced per book in localStorage
 - PDF remains supported through the same Reader route
+- EPUB can now be registered through the Admin full-registration path into the same protected `BookFile` model
 
 Current EPUB limitations:
 
 - CFI/location persistence is localStorage-only and is not yet synchronized to `ReadingInfo`
-- EPUB admin upload is not wired to the backend admin API
 - R2 cutover remains open
 
 ## Database / Prisma
@@ -254,16 +281,17 @@ focused EPUB production-path TypeScript check: PASS
 Vite production bundle build: PASS
 ```
 
-The repository-wide frontend `npm run build` still reports pre-existing TypeScript errors in unrelated legacy/prototype files; those are tracked as separate baseline debt rather than being hidden or weakened by the EPUB feature check.
+The Admin EPUB/PDF registration feature has a dedicated focused CI covering backend registration tests/build plus frontend Admin API/UI tests and lint. Its final result must be read from the feature PR/checks rather than inferred from this status document.
+
+The repository-wide frontend `npm run build` still reports pre-existing TypeScript errors in unrelated legacy/prototype files; those are tracked as separate baseline debt rather than being hidden or weakened by focused feature checks.
 
 ## Confirmed requirements still open
 
 - Cloudflare R2 storage and formal file-delivery behavior
-- EPUB upload through the protected admin server path
 - EPUB CFI/location persistence through `ReadingInfo`
-- explicit publication scope (`all users` / `admin only`) with no default
 - automatic `unread -> reading -> completed` completion across the final intended reading flows
 - correct per-user readStatus in book list
+- persisted Admin book-list retrieval after reload
 - search and category filtering
 - category management
 - general-user administration
@@ -277,12 +305,11 @@ See `docs/requirements.md` for the full target.
 ## Current priority
 
 1. Correct per-user `readStatus` on the book list before treating list summary/filter as complete.
-2. Wire Admin UI to existing admin APIs.
-3. Implement explicit publication scope.
+2. Cut protected local storage over to the confirmed Cloudflare R2 design while preserving the Admin registration and protected-reader contracts.
+3. Connect EPUB CFI/location persistence to `ReadingInfo`.
 4. Close the confirmed PDF/auth state-transition findings on their dedicated implementation paths.
-5. Cut protected local storage over to the confirmed formal storage design while preserving authorization.
-6. Connect EPUB CFI/location persistence to `ReadingInfo` and add protected EPUB upload support.
-7. Continue remaining management requirements.
+5. Add persisted Admin list retrieval and continue the remaining management requirements.
+6. Continue search/category/user/delete/restore/replacement/backup/acceptance work.
 
 ## Documentation responsibilities
 
