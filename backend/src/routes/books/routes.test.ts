@@ -126,6 +126,20 @@ describe('protected book viewing APIs', () => {
 		});
 	});
 
+	test('利用停止後でも既存sessionは書籍詳細とファイルを利用できる', async () => {
+		mocks.userFindFirst.mockResolvedValue({ id: 7, roleId: 2, deletedAt: new Date('2026-08-24T00:00:00.000Z') });
+
+		const detailResponse = await app.request('/1');
+		const fileResponse = await app.request('/1/file');
+
+		expect(detailResponse.status).toBe(200);
+		expect(fileResponse.status).toBe(200);
+		expect(mocks.userFindFirst).toHaveBeenCalledWith({
+			where: { id: 7 },
+			select: { id: true, roleId: true },
+		});
+	});
+
 	test('未認証ユーザーは書籍詳細とファイルを401で拒否される', async () => {
 		mocks.getSession.mockResolvedValue(null);
 
