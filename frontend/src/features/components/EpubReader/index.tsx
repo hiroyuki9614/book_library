@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import ePub from 'epubjs';
 import { fetchBookFile } from '@/api/books';
+import { fetchReadingInfo, saveReadingInfo } from '@/api/readingInfo';
 import { Field, FieldLabel } from '@/components/ui/field';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -58,6 +59,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 	const [isLoading, setIsLoading] = useState(true);
 	const [fileError, setFileError] = useState(false);
 	const [epubUrl, setEpubUrl] = useState<string | null>(null);
+	const [readingInfoReady, setReadingInfoReady] = useState(false);
 	const [navigation, setNavigation] = useState<{ toc: TocItem[] } | null>(null);
 	const [history, setHistory] = useState<string[]>([]);
 	const storageKey = `reader-location:${bookId}`;
@@ -91,7 +93,28 @@ function EpubReader({ bookId }: { bookId: number }) {
 	}, [bookId]);
 
 	useEffect(() => {
-		if (!viewerRef.current || !epubUrl) return;
+		let active = true;
+		setReadingInfoReady(false);
+
+		void fetchReadingInfo(bookId)
+			.then((readingInfo) => {
+				if (!active) return;
+				if (readingInfo.currentPosition?.startsWith('epubcfi(')) {
+					localStorage.setItem(storageKey, readingInfo.currentPosition);
+				}
+			})
+			.catch(() => undefined)
+			.finally(() => {
+				if (active) setReadingInfoReady(true);
+			});
+
+		return () => {
+			active = false;
+		};
+	}, [bookId, storageKey]);
+
+	useEffect(() => {
+		if (!viewerRef.current || !epubUrl || !readingInfoReady) return;
 		setIsLoading(true);
 		setFileError(false);
 		viewerRef.current.innerHTML = '';
@@ -112,12 +135,15 @@ function EpubReader({ bookId }: { bookId: number }) {
 
 			const page = book.locations.locationFromCfi(cfi);
 			const total = book.locations.total;
-			const progress = total > 0 ? Math.round((page / total) * 100) : 0;
+			const lastLocation = Math.max(0, total - 1);
+			const progress = total <= 1 ? 100 : Math.round((page / lastLocation) * 100);
+			const readStatus = total > 0 && page >= lastLocation ? 'completed' : 'reading';
 
-			setPercentage(progress);
+			setPercentage(Math.max(0, Math.min(100, progress)));
 			setTotalPage(total);
 			setCurrentPage(page);
 			localStorage.setItem(storageKey, cfi);
+			void saveReadingInfo(bookId, cfi, readStatus).catch(() => undefined);
 		};
 
 		const handleKeyUp = (event: KeyboardEvent) => {
@@ -172,7 +198,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 				renditionRef.current = null;
 			}
 		};
-	}, [epubUrl, spread, storageKey]);
+	}, [bookId, epubUrl, readingInfoReady, spread, storageKey]);
 
 	const handlePrev = () => {
 		const book = renditionRef.current?.book;
@@ -211,10 +237,10 @@ function EpubReader({ bookId }: { bookId: number }) {
 
 	if (fileError) {
 		return (
-		<div className='p-4'>
-			<Link to='/' className='text-sm text-primary'>本棚に戻る</Link>
-			<p>EPUBファイルを取得または読み込みできませんでした。</p>
-		</div>
+			<div className='p-4'>
+				<Link to='/' className='text-sm text-primary'>本棚に戻る</Link>
+				<p>EPUBファイルを取得または読み込みできませんでした。</p>
+			</div>
 		);
 	}
 
