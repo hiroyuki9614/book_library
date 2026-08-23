@@ -7,7 +7,9 @@ import { pathToFileURL } from 'node:url';
 import { auth } from './lib/auth.js';
 import withPrisma from './lib/prisma.js';
 import { createOpenApiHandler } from './routes/openApi/route.js';
+import adminListRoutes from './routes/admin/listRoutes.js';
 import adminRoutes from './routes/admin/routes.js';
+import bookStateRoutes from './routes/books/stateRoutes.js';
 import booksRoutes from './routes/books/routes.js';
 import { getMe } from './routes/me/route.js';
 
@@ -64,10 +66,12 @@ app.get('/api/v1/me', getMe);
 
 app.use('/api/v1/books', withPrisma);
 app.use('/api/v1/books/*', withPrisma);
+app.route('/api/v1/books', bookStateRoutes);
 app.route('/api/v1/books', booksRoutes);
 
 app.use('/api/v1/admin', withPrisma);
 app.use('/api/v1/admin/*', withPrisma);
+app.route('/api/v1/admin', adminListRoutes);
 app.route('/api/v1/admin', adminRoutes);
 
 app.get('/doc', createOpenApiHandler(app));
