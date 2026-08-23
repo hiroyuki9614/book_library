@@ -1,0 +1,31 @@
+name: Test-Last auth existing session
+
+on:
+  push:
+    branches:
+      - test/test-last-auth-existing-session-20260823
+  pull_request:
+    branches:
+      - fix/auth10-suspended-signin-20260816
+  workflow_dispatch:
+
+jobs:
+  focused-test-last-auth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout exact test evidence head
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Run auth and existing-session Test-Last cases
+        run: npm run test -- src/lib/auth.test.ts src/routes/me/route.test.ts
