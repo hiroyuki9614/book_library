@@ -8,7 +8,6 @@ import { ZoomToolbar } from './ZoomToolbar';
 import CommandButton from './Command';
 import { useCommand } from '@embedpdf/plugin-commands/react';
 
-// Import the essential plugins
 import { Viewport, ViewportPluginPackage } from '@embedpdf/plugin-viewport/react';
 import { Scroller, ScrollPluginPackage, ScrollStrategy, useScroll } from '@embedpdf/plugin-scroll/react';
 import { DocumentContent, DocumentManagerPluginPackage } from '@embedpdf/plugin-document-manager/react';
@@ -28,7 +27,6 @@ import { fetchReadingInfo, saveReadingInfo } from '@/api/readingInfo';
 
 export type AppState = GlobalStoreState<{
 	[SCROLL_PLUGIN_ID]: ScrollState;
-	// [ZOOM_PLUGIN_ID]: ZoomState;
 }>;
 
 const myCommands: Record<string, Command<AppState>> = {
@@ -123,8 +121,9 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 		}
 
 		lastPersistedPage.current = state.currentPage;
-		void saveReadingInfo(bookId, state.currentPage).catch(() => undefined);
-	}, [bookId, isReadyToPersist, state.currentPage, targetPage]);
+		const readStatus = state.currentPage >= state.totalPages ? 'completed' : 'reading';
+		void saveReadingInfo(bookId, state.currentPage, readStatus).catch(() => undefined);
+	}, [bookId, isReadyToPersist, state.currentPage, state.totalPages, targetPage]);
 
 	const handleGoToPage = (e: React.FormEvent<HTMLFormElement>) => {
 		e.preventDefault();
@@ -134,11 +133,7 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 		}
 	};
 
-	return (
-		<>
-			<CommandButton prevResolved={previousCommand} nextResolved={nextCommand} state={state} pageInput={pageInput} setPageInput={setPageInput} handleGoToPage={handleGoToPage} />
-		</>
-	);
+	return <CommandButton prevResolved={previousCommand} nextResolved={nextCommand} state={state} pageInput={pageInput} setPageInput={setPageInput} handleGoToPage={handleGoToPage} />;
 };
 
 function PdfReader({ bookId }: { bookId: number }) {
@@ -165,17 +160,13 @@ function PdfReader({ bookId }: { bookId: number }) {
 			.catch(() => setInitialPage(1));
 
 		return () => {
-			if (objectUrl) {
-				URL.revokeObjectURL(objectUrl);
-			}
+			if (objectUrl) URL.revokeObjectURL(objectUrl);
 		};
 	}, [bookId]);
 
 	const plugins = useMemo(() => (documentUrl ? createPlugins(documentUrl) : []), [documentUrl]);
 
-	if (fileError) {
-		return <p>PDFファイルを取得できませんでした。</p>;
-	}
+	if (fileError) return <p>PDFファイルを取得できませんでした。</p>;
 
 	if (isLoading || !engine || !documentUrl || initialPage === null) {
 		return (
@@ -193,21 +184,15 @@ function PdfReader({ bookId }: { bookId: number }) {
 		<div className='flex h-screen flex-col bg-background text-foreground'>
 			<header className='flex items-center justify-between p-3'>
 				<div>
-					<Link to='/' className='text-sm text-primary'>
-						本棚に戻る
-					</Link>
+					<Link to='/' className='text-sm text-primary'>本棚に戻る</Link>
 				</div>
 				<div>
 					<Sheet>
 						<SheetTrigger asChild>
-							<Button variant='outline' className='bg-white active:bg-white focus:bg-white data-[state=open]:bg-white'>
-								目次
-							</Button>
+							<Button variant='outline' className='bg-white active:bg-white focus:bg-white data-[state=open]:bg-white'>目次</Button>
 						</SheetTrigger>
 						<SheetContent side='right' className='data-[side=bottom]:max-h-[50vh] data-[side=top]:max-h-[50vh]'>
-							<SheetHeader>
-								<SheetTitle>この書籍の目次</SheetTitle>
-							</SheetHeader>
+							<SheetHeader><SheetTitle>この書籍の目次</SheetTitle></SheetHeader>
 							<div className='no-scrollbar overflow-y-auto px-4'></div>
 						</SheetContent>
 					</Sheet>
@@ -223,7 +208,7 @@ function PdfReader({ bookId }: { bookId: number }) {
 										<div style={{ display: 'flex', height: '100%', flexDirection: 'column' }}>
 											<div className='mb-2 flex items-center gap-4 justify-evenly'>
 												<ZoomToolbar documentId={activeDocumentId} />
-																											<PageNavigation bookId={bookId} documentId={activeDocumentId} initialPage={initialPage} />
+												<PageNavigation bookId={bookId} documentId={activeDocumentId} initialPage={initialPage} />
 											</div>
 											<div style={{ flex: 1, overflow: 'hidden' }}>
 												<Viewport documentId={activeDocumentId}>

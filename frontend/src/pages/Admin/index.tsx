@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { BookOpen, Library, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { fetchAdminCategories, registerAdminBook, type AdminBook, type AdminCategory } from '@/api/admin';
+import { fetchAdminBooks, fetchAdminCategories, registerAdminBook, type AdminBook, type AdminCategory } from '@/api/admin';
 import BookRegistar, { type BookRegistrationValues } from '@/components/forms/BookRegistar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -23,6 +23,8 @@ function formatFileSize(bytes: number) {
 
 function Admin() {
 	const [books, setBooks] = useState<AdminBook[]>([]);
+	const [booksLoading, setBooksLoading] = useState(true);
+	const [booksError, setBooksError] = useState<string | null>(null);
 	const [categories, setCategories] = useState<AdminCategory[]>([]);
 	const [categoriesLoading, setCategoriesLoading] = useState(true);
 	const [categoriesError, setCategoriesError] = useState<string | null>(null);
@@ -31,6 +33,8 @@ function Admin() {
 	useEffect(() => {
 		let isMounted = true;
 		setCategoriesLoading(true);
+		setBooksLoading(true);
+
 		fetchAdminCategories()
 			.then((loadedCategories) => {
 				if (!isMounted) return;
@@ -43,6 +47,20 @@ function Admin() {
 			})
 			.finally(() => {
 				if (isMounted) setCategoriesLoading(false);
+			});
+
+		fetchAdminBooks()
+			.then((loadedBooks) => {
+				if (!isMounted) return;
+				setBooks(loadedBooks);
+				setBooksError(null);
+			})
+			.catch(() => {
+				if (!isMounted) return;
+				setBooksError('登録済み書籍の取得に失敗しました。再読み込みしてください。');
+			})
+			.finally(() => {
+				if (isMounted) setBooksLoading(false);
 			});
 
 		return () => {
@@ -67,10 +85,12 @@ function Admin() {
 			publicationScope: values.publicationScope,
 			file,
 		});
-		setBooks((currentBooks) => [registeredBook, ...currentBooks]);
+		setBooks((currentBooks) => [registeredBook, ...currentBooks.filter((book) => book.id !== registeredBook.id)]);
 		setIsSheetOpen(false);
 		toast.success('書籍とファイルを登録しました。');
 	};
+
+	const fileCount = books.filter((book) => book.file !== null).length;
 
 	return (
 		<main className='mx-auto w-full max-w-7xl space-y-6 p-4 md:p-8'>
@@ -78,7 +98,7 @@ function Admin() {
 				<div>
 					<p className='mb-1 text-sm font-medium text-muted-foreground'>ADMIN CONSOLE</p>
 					<h1 className='text-3xl font-semibold tracking-tight'>書籍管理</h1>
-					<p className='mt-2 text-sm text-muted-foreground'>EPUB/PDFと書籍情報を実データとして登録します。</p>
+					<p className='mt-2 text-sm text-muted-foreground'>EPUB/PDFと書籍情報を実データとして登録・確認します。</p>
 				</div>
 
 				<Sheet open={isSheetOpen} onOpenChange={setIsSheetOpen}>
@@ -107,7 +127,7 @@ function Admin() {
 				<Card>
 					<CardHeader className='flex-row items-center justify-between'>
 						<div>
-							<CardDescription>この画面で登録した書籍</CardDescription>
+							<CardDescription>登録済み書籍</CardDescription>
 							<CardTitle className='mt-2 text-3xl'>{books.length}</CardTitle>
 						</div>
 						<Library className='size-7 text-muted-foreground' />
@@ -117,7 +137,7 @@ function Admin() {
 					<CardHeader className='flex-row items-center justify-between'>
 						<div>
 							<CardDescription>ファイル登録済み</CardDescription>
-							<CardTitle className='mt-2 text-3xl'>{books.length}</CardTitle>
+							<CardTitle className='mt-2 text-3xl'>{fileCount}</CardTitle>
 						</div>
 						<BookOpen className='size-7 text-muted-foreground' />
 					</CardHeader>
@@ -126,10 +146,12 @@ function Admin() {
 
 			<Card>
 				<CardHeader>
-					<CardTitle>今回登録した書籍</CardTitle>
-					<CardDescription>バックエンドとprotected storageへの登録が成功した書籍を表示します。</CardDescription>
+					<CardTitle>登録済み書籍</CardTitle>
+					<CardDescription>PostgreSQLに保存されている書籍を再読み込み後も表示します。</CardDescription>
 				</CardHeader>
 				<CardContent className='overflow-x-auto'>
+					{booksLoading && <p className='mb-4 text-sm text-muted-foreground'>登録済み書籍を読み込んでいます…</p>}
+					{booksError && <p role='alert' className='mb-4 text-sm text-destructive'>{booksError}</p>}
 					<Table className='min-w-[900px]'>
 						<TableHeader>
 							<TableRow>
@@ -150,11 +172,15 @@ function Admin() {
 									<TableCell>{formatPublishedAt(book.publishedAt)}</TableCell>
 									<TableCell>{book.publicationScope === 'all_users' ? '全ユーザー公開' : '管理者のみ'}</TableCell>
 									<TableCell>
-										<div className='flex items-center gap-2'>
-											<Badge variant='secondary'>{book.file.extension.toUpperCase()}</Badge>
-											<span>{book.file.originalFileName}</span>
-											<span className='text-xs text-muted-foreground'>{formatFileSize(book.file.fileSize)}</span>
-										</div>
+										{book.file ? (
+											<div className='flex items-center gap-2'>
+												<Badge variant='secondary'>{book.file.extension.toUpperCase()}</Badge>
+												<span>{book.file.originalFileName}</span>
+												<span className='text-xs text-muted-foreground'>{formatFileSize(book.file.fileSize)}</span>
+											</div>
+										) : (
+											<Badge variant='outline'>未登録</Badge>
+										)}
 									</TableCell>
 								</TableRow>
 							))}

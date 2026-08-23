@@ -1,66 +1,56 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-08-23
+- Updated: 2026-08-24
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
 - Current implementation line: `fix/belib-phase-c-fresh-env-repro-20260818` plus focused feature integrations
+- Current non-R2 candidate: `feat/non-r2-reading-admin-core-20260824` / PR #20
 - Default `main` is older than this implementation line and must not be used alone to judge current MVP progress
 
 ## Source-of-truth boundary
 
-This is a status snapshot, not a requirements/schema source of truth.
-
 ```text
 current user request
 > AGENTS.md
-> backend/prisma/schema.prisma (database structure)
-> docs/requirements.md (target behavior)
-> current implementation + tests (implementation fact)
-> docs/api.yaml (implemented HTTP contract)
+> backend/prisma/schema.prisma
+> docs/requirements.md
+> current implementation + tests
+> docs/api.yaml
 > this status document
 ```
 
-Temporary implementation does not silently change a confirmed requirement. Protected local PDF/EPUB storage is an implementation step; the R2 requirement remains in `docs/requirements.md`.
+Protected local EPUB/PDF storage is a temporary implementation boundary. It does not replace the confirmed Cloudflare R2 requirement.
 
 ## High-level state
 
-BeLib now has a real protected PDF MVP vertical slice and a protected EPUB viewing path rather than a mock-only frontend.
-
 ```text
-Better Auth session                              implemented
-GET /api/v1/me                                   implemented
-role-authorized book list/detail                 implemented
-protected PDF delivery                           implemented with local ignored storage
-protected EPUB delivery                          implemented with local ignored storage
-EPUB preferred when EPUB and PDF both exist      implemented
-reading-info GET/PATCH                           implemented for numeric PDF page positions
-reading position persistence to PostgreSQL       implemented for PDF page positions
-frontend book/detail/PDF integration             implemented
-frontend protected EPUB integration              implemented
-file_hash migration/schema drift on fresh DB      resolved and runtime-verified
-backend Prisma validation/build/tests             passing on verified checkpoints
-README fresh setup and MVP browser demo           verified on task-owned environment
-real browser + PostgreSQL E2E                    implemented for the PDF vertical slice
-admin category API                               implemented
-admin metadata compatibility API                 implemented
-admin EPUB/PDF full registration API             implemented
-admin UI -> real admin API wiring                implemented
-explicit publication-scope selection             implemented for full registration
-per-user readStatus in book list                 not implemented correctly yet
-Cloudflare R2 / formal file delivery             not implemented
-EPUB ReadingInfo/CFI persistence                 not implemented; per-book localStorage is used
-completed auto transition                        not implemented on the current Phase C line
-full MVP management functions                    not implemented
+Better Auth session                                  implemented
+GET /api/v1/me                                       implemented
+role-authorized book list/detail                     implemented
+protected PDF delivery                               implemented with local ignored storage
+protected EPUB delivery                              implemented with local ignored storage
+EPUB preferred when EPUB and PDF both exist          implemented
+per-user readStatus in authorized book list          implemented
+book title/author backend search                     implemented
+book categoryId backend filtering                    implemented
+PDF page ReadingInfo persistence                     implemented
+EPUB CFI ReadingInfo persistence                     implemented
+PDF final-page -> completed transition               implemented
+EPUB final-location -> completed transition          implemented
+frontend book/detail/PDF integration                 implemented
+frontend protected EPUB integration                  implemented
+Admin EPUB/PDF full registration                     implemented
+Admin explicit publication scope                     implemented
+Admin persisted book list after reload               implemented
+Home/BookTable readStatus source = backend            implemented
+file_hash migration/schema drift                     resolved and runtime-verified
+README fresh setup / PDF browser demo                 verified on Phase C checkpoint
+Cloudflare R2 / formal file delivery                 not implemented
+full MVP management functions                        not implemented
 ```
 
-The core paths are usable, but the formal requirements are not all complete.
+## Book list and authorization
 
-The frontend's existing full-project TypeScript errors remain a separate known issue. The EPUB protected-reader work uses a focused TypeScript check for the changed production path plus a Vite production bundle build; unrelated existing errors in About/MiniCard/Home/BookTable remain outside that feature boundary.
-
-Phase C fresh-environment reproduction is verified separately from the frontend full-build issue. The fresh run used a clean checkout, fresh npm installation, task-owned PostgreSQL, committed migrations, Prisma generate, development seed, backend/frontend startup, and the existing MVP Playwright fixture. The MVP browser E2E passed independently.
-
-## Backend
-
-### Implemented book endpoints
+Implemented endpoints:
 
 ```text
 GET   /api/v1/books
@@ -72,244 +62,203 @@ PATCH /api/v1/books/:bookId/reading-info
 
 Current behavior:
 
-- session user is resolved through Better Auth
-- deleted users are rejected on the current Phase C authorization path
-- list is filtered by `role_book_permissions`
-- detail/file/reading-info require the same role permission
-- logically deleted books are excluded
-- list supports `page` and `limit`
-- protected file endpoint supports PDF and EPUB
-- when both supported files exist, EPUB is selected before PDF, matching the confirmed requirement
-- EPUB responses use `application/epub+zip`; PDF responses use `application/pdf`
-- file keys are resolved below `BOOK_FILE_STORAGE_ROOT`
-- storage-root escape patterns are rejected
-- protected file responses use private no-store caching
+- Better Auth session identifies the current user.
+- books are filtered by `RoleBookPermission` and logical deletion state.
+- list/detail/file/reading-info use the same role-based authorization boundary.
+- list joins only the current user's `ReadingInfo` and returns the persisted `readStatus`.
+- list supports `page`, `limit`, `q`, and `categoryId`.
+- `q` searches title and author name case-insensitively and is limited to 100 characters.
+- `categoryId` must be a positive integer.
+- EPUB is preferred when both supported file formats exist.
+- protected file responses remain backend-mediated and `private, no-store`.
 
-### Known list drift
+Known authorization requirement drift:
 
-`GET /api/v1/books` currently calls `toBookResponse(book)` without loading the current user's `ReadingInfo` for each list item. Because the response helper defaults `readStatus` to `unread`, the list does not yet return the real per-user status.
+- current book access still resolves only non-deleted users.
+- the confirmed requirement says disabling a user should block new login while an already-established session remains valid until session expiry.
+- this session/disabled-user semantic remains a separate non-R2 item.
 
-This means:
+## ReadingInfo
 
-- detail API can return the current user's stored status
-- list-level status filters/summary cannot be considered complete
-- frontend summary values based on list `readStatus` may be inaccurate until the list joins reading info
+`ReadingInfo.currentPosition VARCHAR(255)` is used without a schema migration for both formats.
 
-This is implementation drift, not a requirement change.
-
-### Reading info
-
-Current request contract:
+PDF request example:
 
 ```json
-{ "currentPage": 2 }
+{
+  "currentPage": 12,
+  "readStatus": "completed"
+}
 ```
 
-The backend stores the page as `ReadingInfo.currentPosition` and upserts per `userId + bookId`.
+EPUB request example:
 
-Current limitations:
+```json
+{
+  "currentPosition": "epubcfi(/6/4!/4/2/8:0)",
+  "readStatus": "reading"
+}
+```
 
-- the current Phase C PATCH contract stores numeric page positions and `readStatus = reading`
-- EPUB CFI/location persistence is not connected to this API yet
-- EpubReader currently keeps a per-book CFI under `reader-location:<bookId>` in browser localStorage
-- progress percentage is not stored in DB, consistent with the requirement
+Rules:
 
-### Admin registration
+- exactly one of `currentPage` or `currentPosition` is accepted.
+- omitted `readStatus` defaults to `reading` for backward compatibility.
+- explicit status may be `reading` or `completed`.
+- GET returns both `currentPosition` and a numeric compatibility `currentPage`.
+- a numeric position restores the PDF page.
+- an EPUB CFI restores through `currentPosition`; `currentPage` remains the compatibility value `1` for non-numeric positions.
+- EpubReader reads the DB CFI first and keeps `reader-location:<bookId>` localStorage only as a fallback/cache.
+- PDF Reader saves `completed` when the final page is displayed.
+- EPUB Reader saves `completed` when the generated final location is displayed.
 
-Implemented:
+Progress percentage is still a separate concern. The DB intentionally does not store percentage. Home's status counts now use backend `readStatus`, while the existing average-progress percentage remains on its prior prototype/mock path until final percentage semantics are defined from each reader.
+
+## Admin
+
+Implemented endpoints:
 
 ```text
 GET  /api/v1/admin/categories
+GET  /api/v1/admin/books
 POST /api/v1/admin/books
 POST /api/v1/admin/book-registrations
 POST /api/v1/admin/books/:bookId/files
 ```
 
-Current full registration behavior:
+Full registration behavior:
 
-- Admin UI uses `POST /api/v1/admin/book-registrations` rather than local-state-only registration
-- EPUB and PDF are supported, with a 200 MB maximum
-- extension, MIME type, and file content are checked before registration
-- EPUB validation checks the ZIP container's required uncompressed `mimetype` entry; PDF validation checks the `%PDF-` header
-- SHA-256 `BookFile.fileHash` rejects duplicate content, including content attached to logically deleted books
-- the MVP full-registration path creates exactly one `BookFile` for a new book
-- publication scope is explicitly required with no UI default
-- `all_users` creates `admin` and `user` role permissions; `admin_only` creates only `admin`
-- the protected local file is written before the nested DB create; if DB creation fails, the newly written local file is removed
-- `POST /api/v1/admin/books/:bookId/files` also accepts EPUB/PDF and rejects a second file for the same book
-- the formal Cloudflare R2 storage/signed-URL cutover remains open
+- Admin UI uses `POST /api/v1/admin/book-registrations`.
+- EPUB/PDF, maximum 200 MB.
+- extension, MIME type, and actual file content are validated.
+- EPUB validation checks the required uncompressed `mimetype` ZIP entry.
+- PDF validation checks the `%PDF-` header.
+- SHA-256 `BookFile.fileHash` rejects duplicate content, including files belonging to logically deleted books.
+- full registration requires explicit `all_users` or `admin_only`; there is no UI default.
+- `all_users` creates admin + user role permissions; `admin_only` creates admin permission only.
+- DB creation failure removes the just-written protected local file.
+- one file per book is enforced on the current MVP registration path.
 
-Compatibility note:
+Persisted Admin list:
 
-- `POST /api/v1/admin/books` remains as the earlier metadata-only vertical-slice endpoint
-- the current Admin UI does not use that legacy endpoint for new full registrations
+- `/admin` loads `GET /api/v1/admin/books` on mount.
+- reload no longer loses the visible administrative book list.
+- the response includes category, publication scope, and the current file summary.
+- legacy metadata-only books remain visible with `file = null`.
+
+Compatibility:
+
+- `POST /api/v1/admin/books` remains as the earlier metadata-only compatibility endpoint.
+- the current Admin UI does not use it for new full registrations.
 
 ## Frontend
 
-### Connected to real API
+Connected to real backend paths:
 
-- session-based authentication
-- current user / role
-- book list
-- book detail
-- protected PDF fetch
-- protected EPUB fetch
-- PDF reading-info fetch/save/restore
-- authenticated Reader route
-- EPUB/PDF Reader dispatch based on the protected book detail
-- admin route guard
-- active Admin category loading
-- EPUB/PDF full Admin registration
-- explicit publication-scope selection
+- session/current user
+- authorized book list/detail
+- protected PDF/EPUB
+- PDF ReadingInfo restore/save
+- EPUB CFI restore/save
+- Reader PDF/EPUB dispatch
+- Admin categories
+- Admin EPUB/PDF full registration
+- Admin persisted list reload
+- Home/BookTable read status
 
-### Admin registration
+The shelf status filter and read-status summary now use the backend-derived book state rather than the old reading-status mock. The old reading-progress mock remains only for percentage display.
 
-`frontend/src/pages/Admin/index.tsx` now submits the registration form through the real Admin API.
+## Storage
 
-Current behavior:
+Current protected file path:
 
-- categories come from `GET /api/v1/admin/categories`
-- title, category, publication scope, and EPUB/PDF file are required by the full registration form
-- the form sends multipart data to `POST /api/v1/admin/book-registrations`
-- the success sheet closes only after the backend returns a successful persisted registration
-- the page shows successful registrations from the current page session, including file type/name and publication scope
+```text
+Admin upload
+  -> backend validation
+  -> protected local storage below BOOK_FILE_STORAGE_ROOT
+  -> BookFile metadata/hash in PostgreSQL
+  -> authorized backend file delivery
+```
 
-Current limitation:
+Formal target remains:
 
-- reloading `/admin` does not yet fetch and render the complete persisted administrative book list; that remains a separate management feature
+```text
+protected local storage
+  -> Cloudflare R2
+```
 
-### EPUB
-
-The existing EpubReader UI is connected to the protected book-file API.
-
-Current verified behavior:
-
-- `ReaderPage` routes `fileType = epub` to `EpubReader`
-- `EpubReader` fetches `/api/v1/books/:bookId/file` with the authenticated cookie path rather than a hard-coded public EPUB URL
-- the returned EPUB Blob is exposed to `epubjs` through a temporary object URL and revoked during cleanup
-- TOC, spread selection, keyboard/page navigation, and back-history logic remain in the existing reader
-- saved CFI is namespaced per book in localStorage
-- PDF remains supported through the same Reader route
-- EPUB can now be registered through the Admin full-registration path into the same protected `BookFile` model
-
-Current EPUB limitations:
-
-- CFI/location persistence is localStorage-only and is not yet synchronized to `ReadingInfo`
-- R2 cutover remains open
+R2 upload, object lifecycle, signed delivery behavior, and production cutover are intentionally untouched by the current non-R2 implementation.
 
 ## Database / Prisma
 
 DB structure source of truth: `backend/prisma/schema.prisma`.
 
-Current models:
+Important constraints already present:
+
+- `BookFile.fileHash` unique.
+- `ReadingInfo` unique by `userId + bookId`.
+- `RoleBookPermission` unique by `roleId + bookId`.
+- `ReadingInfo.currentPosition` is nullable `VARCHAR(255)` and can contain a PDF page string or EPUB CFI.
+- no schema migration is required for the non-R2 ReadingInfo expansion.
+
+The earlier fresh PostgreSQL verification for `book_files.file_hash` remains valid and is not modified by this work.
+
+## Verification
+
+The non-R2 focused CI covers:
 
 ```text
-Authentication infrastructure:
-User, Session, Account, Verification, Role
+backend:
+  per-user list readStatus
+  title/author + categoryId query contract
+  EPUB CFI save/restore
+  PDF completed persistence
+  Admin persisted list + authorization
+  existing book authorization/file tests
+  existing EPUB protected delivery tests
+  existing Admin registration tests
+  TypeScript build
 
-BeLib domain:
-Book, Category, BookFile, ReadingInfo, RoleBookPermission
+frontend:
+  Admin API + persisted list
+  ReadingInfo PDF/EPUB payloads
+  Admin page reload + registration
+  EPUB DB CFI restore/save/completed
+  focused production-path TypeScript check
+  Vite production bundle
 ```
 
-Important constraints:
-
-- `BookFile.fileHash` unique
-- `ReadingInfo` unique by `userId + bookId`
-- `RoleBookPermission` unique by `roleId + bookId`
-- `Book.categoryId` required
-- `ReadingInfo.currentPosition` nullable
-- `ReadingInfo.readStatus` defaults to `unread`
-- `Book.pageTurnDirection` defaults to `ltr`
-
-Migration reproducibility status:
-
-- `backend/prisma/migrations/20260816140000_add_book_file_hash/migration.sql` adds the required `book_files.file_hash` column and unique index without rewriting historical migrations
-- fresh PostgreSQL 16.14 verification on Fedora applies all four migrations from zero with `prisma migrate deploy`; a second deploy reports no pending migrations and `prisma migrate status` reports the schema is up to date
-- fresh runtime confirms `book_files.file_hash` is `VARCHAR(64) NOT NULL` and `book_files_file_hash_key` is a unique index; migration `20260816140000_add_book_file_hash` is finished and not rolled back
-- Prisma validation, backend build, and backend tests pass on the recorded Phase C verification
-- this is the only required file-hash migration; `20260817120000_add_book_file_hash` must not be created
-- `backend/scripts/verify-file-hash-migration.ts` provides the repeatable contract check
-- an existing non-empty `book_files` table requires an explicit real-content hash backfill policy before applying; production/shared DBs were not modified by that migration verification work
-
-### Phase C fresh-environment reproduction
-
-- implementation line: `fix/belib-phase-c-fresh-env-repro-20260818`
-- README setup documents env preparation, PostgreSQL startup, dependency installation, Prisma generate/migration/seed, optional initial-admin bootstrap, and the PDF demo command
-- fresh runtime startup: backend and frontend both ready on the recorded Phase C verification
-- MVP Playwright E2E: 4 passed on the recorded PDF vertical-slice verification; it covers login, permissioned list, protected PDF, page move, reading-info persistence/reload, and forbidden access
-- `README.md` and `.env.example` are synchronized with the reproducible path; secrets/generated book files remain outside Git
-
-## Verification evidence
-
-The PDF checkpoint contains a Playwright real-runtime path covering:
-
-```text
-permissioned login
-→ current user API
-→ permitted book visible
-→ protected PDF
-→ page 1 -> 2
-→ reading-info save
-→ PostgreSQL read-back
-→ reload
-→ page 2 restore
-```
-
-It also covers:
-
-- unpermissioned user: book hidden, detail/file 403
-- unauthenticated user: protected APIs 401 and Reader redirects to login
-
-The 2026-08-23 protected EPUB feature verification additionally covers:
-
-```text
-protected EPUB file response
-→ application/epub+zip
-→ EPUB preferred over PDF when both exist
-→ frontend accepts protected EPUB Blob
-→ ReaderPage dispatches to EpubReader
-→ EpubReader passes a protected object URL to epubjs
-```
-
-Focused verification result for that feature:
-
-```text
-backend EPUB/PDF route tests: 11 passed
-backend TypeScript build: PASS
-frontend EPUB/PDF focused tests: 6 passed in Chromium
-focused EPUB production-path TypeScript check: PASS
-Vite production bundle build: PASS
-```
-
-The Admin EPUB/PDF registration feature has a dedicated focused CI covering backend registration tests/build plus frontend Admin API/UI tests and lint. Its final result must be read from the feature PR/checks rather than inferred from this status document.
-
-The repository-wide frontend `npm run build` still reports pre-existing TypeScript errors in unrelated legacy/prototype files; those are tracked as separate baseline debt rather than being hidden or weakened by focused feature checks.
+Existing dedicated Admin registration CI and EPUB protected-reader CI are also retained as regression gates.
 
 ## Confirmed requirements still open
 
-- Cloudflare R2 storage and formal file-delivery behavior
-- EPUB CFI/location persistence through `ReadingInfo`
-- automatic `unread -> reading -> completed` completion across the final intended reading flows
-- correct per-user readStatus in book list
-- persisted Admin book-list retrieval after reload
-- search and category filtering
-- category management
-- general-user administration
-- logical delete / restore / permanent delete
-- file replacement and recovery
-- PostgreSQL backup/restore acceptance
-- PC Chrome + Android Chrome formal acceptance
+R2-dependent:
 
-See `docs/requirements.md` for the full target.
+- Cloudflare R2 upload/storage cutover.
+- formal R2 file-delivery / signed-URL behavior.
+- R2 object cleanup/replacement lifecycle.
 
-## Current priority
+Non-R2:
 
-1. Correct per-user `readStatus` on the book list before treating list summary/filter as complete.
-2. Cut protected local storage over to the confirmed Cloudflare R2 design while preserving the Admin registration and protected-reader contracts.
-3. Connect EPUB CFI/location persistence to `ReadingInfo`.
-4. Close the confirmed PDF/auth state-transition findings on their dedicated implementation paths.
-5. Add persisted Admin list retrieval and continue the remaining management requirements.
-6. Continue search/category/user/delete/restore/replacement/backup/acceptance work.
+- disabled-user / existing-session semantic alignment.
+- final reader-derived progress-percentage presentation.
+- category management CRUD and Admin UI.
+- general-user administration and disable/restore flow.
+- logical book delete / restore / permanent delete.
+- file replacement and recovery flow.
+- category filtering UI wiring (backend `categoryId` filter exists).
+- PostgreSQL backup/restore acceptance.
+- PC Chrome + Android Chrome final acceptance.
+
+## Current priority excluding R2
+
+1. Close disabled-user / existing-session semantics without weakening new-login blocking.
+2. Connect remaining shelf filtering/category UX to real backend data.
+3. Implement logical book delete/restore/permanent-delete lifecycle.
+4. Implement category management and user administration.
+5. Implement file replacement/recovery while keeping the storage adapter boundary R2-ready.
+6. Replace the remaining percentage prototype with reader-derived display semantics.
+7. Run final backup/restore and browser/device acceptance after the management surface is complete.
 
 ## Documentation responsibilities
 

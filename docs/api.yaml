@@ -1,12 +1,12 @@
 openapi: 3.0.3
 info:
   title: BeLib Implemented API
-  version: 0.8.0
+  version: 0.9.0
   description: |
     BeLibで現在実装されている /api/v1 HTTP contract を記録する。
     将来の正式要件や未実装endpointは docs/requirements.md と docs/mvp_plan.md を参照する。
-    認証はBetter AuthのCookie sessionを使用し、Bearer/JWTをこの文書の契約として扱わない。
-    Better Auth自身の /api/auth/* はライブラリ管理のため、このversioned API定義には複製しない。
+    認証はBetter AuthのCookie sessionを使用する。
+    Book fileは現在protected local storageで保持し、Cloudflare R2への正式cutoverは未実装。
 servers:
   - url: http://localhost:3000/api/v1
     description: Local backend
@@ -30,9 +30,8 @@ paths:
       summary: 閲覧権限のある書籍一覧を取得
       description: |
         RoleBookPermissionで現在ユーザーのroleに許可された、論理削除されていない書籍だけを返す。
-        現実装ではpage/limitのみbackend queryとして有効。検索、category、readStatus filterは未実装。
-        一覧のreadStatusはまだユーザー別ReadingInfoをjoinしておらず、現時点では既定値unreadになる。
-        EPUBとPDFの両方が存在する場合、閲覧対象fileTypeはEPUBを優先する。
+        一覧のreadStatusは現在ユーザーのReadingInfoから取得する。
+        EPUBとPDFの両方が存在する場合はEPUBを優先する。
       parameters:
         - name: page
           in: query
@@ -47,6 +46,18 @@ paths:
             minimum: 1
             maximum: 100
             default: 20
+        - name: q
+          in: query
+          description: タイトルまたは著者名の部分一致検索。最大100文字。
+          schema:
+            type: string
+            maxLength: 100
+        - name: categoryId
+          in: query
+          description: categoryIdによる絞り込み。
+          schema:
+            type: integer
+            minimum: 1
       responses:
         '200':
           description: Authorized books
@@ -66,6 +77,8 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Book'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
@@ -98,8 +111,8 @@ paths:
     get:
       summary: 認可済みEPUB/PDFを取得
       description: |
-        保護local storageからbackend経由でstreamする。
-        EPUBとPDFが両方存在する場合はEPUBを優先し、EPUBがない場合にPDFを返す。
+        protected local storageからbackend経由でstreamする。
+        EPUBとPDFが両方存在する場合はEPUBを優先する。
         Cloudflare R2 / signed URLへの正式cutoverは未実装。
       responses:
         '200':
@@ -132,6 +145,9 @@ paths:
       - $ref: '#/components/parameters/BookId'
     get:
       summary: 現在ユーザーの読書情報を取得
+      description: |
+        currentPositionはPDFではページ番号文字列、EPUBではCFIを保持できる。
+        numeric currentPositionの場合は互換用currentPageにも復元する。
       responses:
         '200':
           description: Reading info
@@ -148,16 +164,19 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
     patch:
-      summary: PDFの現在ページを保存
+      summary: PDFページまたはEPUB CFIと読書状態を保存
       description: |
-        現実装はcurrentPageだけを受け取り、ReadingInfoをupsertする。
-        readStatusはbackend側でreadingとして保存する。EPUB CFI/location persistenceは未接続。
+        currentPageまたはcurrentPositionのどちらか一方だけを受け取る。
+        currentPageは既存PDF caller互換。
+        readStatusを省略した場合はreading。明示値はreadingまたはcompleted。
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ReadingInfoUpdateRequest'
+              oneOf:
+                - $ref: '#/components/schemas/PdfReadingInfoUpdateRequest'
+                - $ref: '#/components/schemas/EpubReadingInfoUpdateRequest'
       responses:
         '200':
           description: Saved reading info
@@ -200,6 +219,31 @@ paths:
           $ref: '#/components/responses/InternalError'
 
   /admin/books:
+    get:
+      summary: 管理者が保存済み書籍一覧を取得
+      description: |
+        論理削除されていない書籍をcreatedAt降順で返す。
+        category、先頭BookFile、RoleBookPermissionから復元したpublicationScopeを含む。
+        legacy metadata-only書籍はfile=nullで返す。
+      responses:
+        '200':
+          description: Persisted admin books
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [books]
+                properties:
+                  books:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AdminBookSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
     post:
       summary: 管理者がメタデータだけを登録する互換endpoint
       description: |
@@ -232,7 +276,7 @@ paths:
       summary: 管理者が書籍情報とEPUB/PDFを一括登録
       description: |
         title、active categoryId、publicationScope、EPUB/PDF fileを必須とする。
-        ファイルは最大200MBで、拡張子・MIME・内容を検証し、SHA-256 hashで重複を拒否する。
+        最大200MB。拡張子・MIME・内容を検証し、SHA-256 hashで重複を拒否する。
         現在はprotected local storageへ保存し、Book + BookFile + RoleBookPermissionをnested createする。
         DB create失敗時は直前に保存したlocal fileを削除する。
         Cloudflare R2への正式cutoverは未実装。
@@ -400,15 +444,7 @@ components:
 
     Book:
       type: object
-      required:
-        - id
-        - title
-        - category
-        - pageTurnDirection
-        - readStatus
-        - hasFile
-        - createdAt
-        - updatedAt
+      required: [id, title, category, pageTurnDirection, readStatus, hasFile, createdAt, updatedAt]
       properties:
         id:
           type: integer
@@ -435,13 +471,14 @@ components:
         readStatus:
           type: string
           enum: [unread, reading, completed]
+          description: Current user's persisted ReadingInfo state for list/detail responses.
         hasFile:
           type: boolean
         fileType:
           type: string
           enum: [pdf, epub]
           nullable: true
-          description: EPUB is preferred when both EPUB and PDF are present.
+          description: EPUB is preferred when both supported formats are present.
         fileSize:
           type: integer
           nullable: true
@@ -457,18 +494,24 @@ components:
 
     ReadingInfo:
       type: object
-      required: [bookId, currentPage, readStatus]
+      required: [bookId, currentPosition, currentPage, readStatus]
       properties:
         bookId:
           type: integer
+        currentPosition:
+          type: string
+          maxLength: 255
+          nullable: true
+          description: PDF page number string or EPUB CFI.
         currentPage:
           type: integer
           minimum: 1
+          description: Numeric compatibility projection; EPUB CFI returns 1 here.
         readStatus:
           type: string
           enum: [unread, reading, completed]
 
-    ReadingInfoUpdateRequest:
+    PdfReadingInfoUpdateRequest:
       type: object
       required: [currentPage]
       additionalProperties: false
@@ -476,6 +519,25 @@ components:
         currentPage:
           type: integer
           minimum: 1
+        readStatus:
+          type: string
+          enum: [reading, completed]
+          default: reading
+
+    EpubReadingInfoUpdateRequest:
+      type: object
+      required: [currentPosition]
+      additionalProperties: false
+      properties:
+        currentPosition:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: EPUB CFI or another supported textual reading position.
+        readStatus:
+          type: string
+          enum: [reading, completed]
+          default: reading
 
     AdminBookCreateRequest:
       type: object
@@ -504,10 +566,6 @@ components:
         description:
           type: string
           nullable: true
-        publicationScope:
-          type: string
-          enum: [all_users, admin_only]
-          description: Optional only for the legacy metadata-only endpoint.
 
     AdminBookCreateResponse:
       type: object
@@ -537,6 +595,20 @@ components:
           nullable: true
         category:
           $ref: '#/components/schemas/CategorySummary'
+
+    AdminBookSummary:
+      allOf:
+        - $ref: '#/components/schemas/AdminBookCreateResponse'
+        - type: object
+          required: [publicationScope, file]
+          properties:
+            publicationScope:
+              type: string
+              enum: [all_users, admin_only]
+            file:
+              allOf:
+                - $ref: '#/components/schemas/AdminBookFileSummary'
+              nullable: true
 
     AdminBookRegistrationRequest:
       type: object
@@ -602,18 +674,7 @@ components:
 
     BookFile:
       type: object
-      required:
-        - id
-        - extension
-        - mimeType
-        - fileUrl
-        - originalFileName
-        - storedFileName
-        - fileSize
-        - fileHash
-        - bookId
-        - createdAt
-        - updatedAt
+      required: [id, extension, mimeType, fileUrl, originalFileName, storedFileName, fileSize, fileHash, bookId, createdAt, updatedAt]
       properties:
         id:
           type: integer
