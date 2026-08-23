@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { fetchAdminCategories, registerAdminBook } from './admin';
+import { fetchAdminBooks, fetchAdminCategories, registerAdminBook } from './admin';
 
 describe('admin API client', () => {
 	afterEach(() => {
@@ -15,6 +15,32 @@ describe('admin API client', () => {
 
 		await expect(fetchAdminCategories()).resolves.toEqual([{ id: 17, name: '技術書' }]);
 		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/admin/categories', expect.objectContaining({ credentials: 'include' }));
+	});
+
+	test('保存済みadmin書籍一覧をbackendから取得する', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+			new Response(JSON.stringify({
+				books: [{
+					id: 10,
+					title: 'Persisted EPUB',
+					authorName: null,
+					publisher: null,
+					publishedAt: null,
+					categoryId: 17,
+					pageTurnDirection: 'ltr',
+					description: null,
+					category: { id: 17, name: '技術書' },
+					publicationScope: 'all_users',
+					file: { id: 20, extension: 'epub', mimeType: 'application/epub+zip', originalFileName: 'book.epub', fileSize: 1024 },
+				}],
+			}), { status: 200 }),
+		);
+
+		await expect(fetchAdminBooks()).resolves.toEqual([
+			expect.objectContaining({ id: 10, title: 'Persisted EPUB', publicationScope: 'all_users' }),
+		]);
+		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/admin/books', expect.objectContaining({ credentials: 'include' }));
 	});
 
 	test('EPUBとmetadataと公開範囲をmultipartでfull registration APIへ送る', async () => {
