@@ -33,6 +33,9 @@ type BookWithRelations = {
 	}>;
 };
 
+type BookFileRecord = BookWithRelations['bookFiles'][number];
+type SupportedBookFileType = 'epub' | 'pdf';
+
 function jsonError(c: BooksContext, status: 400 | 401 | 403 | 404 | 500, message: string, code: string) {
 	return c.json({ message, code }, status);
 }
@@ -80,8 +83,36 @@ function toReadingInfoResponse(bookId: number, readingInfo: ReadingInfoRecord | 
 	return { bookId, currentPage, readStatus };
 }
 
+function getSupportedBookFileType(file: BookFileRecord): SupportedBookFileType | null {
+	const extension = file.extension.trim().toLowerCase();
+	const mimeType = file.mimeType.split(';', 1)[0].trim().toLowerCase();
+
+	if (extension === 'epub' && mimeType === 'application/epub+zip') {
+		return 'epub';
+	}
+	if (extension === 'pdf' && mimeType === 'application/pdf') {
+		return 'pdf';
+	}
+	return null;
+}
+
+function getPreferredBookFile(book: BookWithRelations) {
+	const epubFile = book.bookFiles.find((file) => getSupportedBookFileType(file) === 'epub');
+	if (epubFile) {
+		return { file: epubFile, fileType: 'epub' as const };
+	}
+
+	const pdfFile = book.bookFiles.find((file) => getSupportedBookFileType(file) === 'pdf');
+	if (pdfFile) {
+		return { file: pdfFile, fileType: 'pdf' as const };
+	}
+
+	return null;
+}
+
 function toBookResponse(book: BookWithRelations, readStatus = 'unread') {
-	const file = book.bookFiles[0];
+	const preferredFile = getPreferredBookFile(book);
+	const file = preferredFile?.file;
 	return {
 		id: book.id,
 		title: book.title,
@@ -93,7 +124,7 @@ function toBookResponse(book: BookWithRelations, readStatus = 'unread') {
 		pageTurnDirection: book.pageTurnDirection,
 		readStatus,
 		hasFile: Boolean(file),
-		fileType: file?.extension.toLowerCase() ?? null,
+		fileType: preferredFile?.fileType ?? null,
 		fileSize: file?.fileSize ?? null,
 		originalFileName: file?.originalFileName ?? null,
 		createdAt: book.createdAt.toISOString(),
@@ -296,25 +327,24 @@ app.get('/:bookId/file', async (c) => {
 			return result.response;
 		}
 
-		const pdfFile = (result.book as BookWithRelations).bookFiles.find(
-			(file) => file.extension.toLowerCase() === 'pdf' && file.mimeType.toLowerCase() === 'application/pdf',
-		);
-		if (!pdfFile) {
-			return jsonError(c, 404, 'PDF file not found', 'FILE_NOT_FOUND');
+		const preferredFile = getPreferredBookFile(result.book as BookWithRelations);
+		if (!preferredFile) {
+			return jsonError(c, 404, 'Book file not found', 'FILE_NOT_FOUND');
 		}
 
-		const filePath = await resolveBookFilePath(pdfFile.fileUrl);
+		const filePath = await resolveBookFilePath(preferredFile.file.fileUrl);
 		const stream = Readable.toWeb(createReadStream(filePath)) as ReadableStream;
+		const contentType = preferredFile.fileType === 'epub' ? 'application/epub+zip' : 'application/pdf';
 		return new Response(stream, {
 			headers: {
-				'Content-Type': 'application/pdf',
-				'Content-Disposition': `inline; filename="${encodeURIComponent(pdfFile.originalFileName)}"`,
+				'Content-Type': contentType,
+				'Content-Disposition': `inline; filename="${encodeURIComponent(preferredFile.file.originalFileName)}"`,
 				'Cache-Control': 'private, no-store',
 			},
 		});
 	} catch (error) {
 		if (error instanceof Error && /ENOENT|not found|escapes|allowed|storage/i.test(error.message)) {
-			return jsonError(c, 404, 'PDF file not found', 'FILE_NOT_FOUND');
+			return jsonError(c, 404, 'Book file not found', 'FILE_NOT_FOUND');
 		}
 		console.error(error);
 		return c.json({ error: 'Failed to fetch book file' }, 500);
