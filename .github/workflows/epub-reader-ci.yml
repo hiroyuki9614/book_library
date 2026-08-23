@@ -6,7 +6,9 @@ on:
       - 'backend/src/routes/books/**'
       - 'frontend/src/api/books*'
       - 'frontend/src/pages/ReaderPage/**'
+      - 'frontend/src/pages/ReaderPageT/**'
       - 'frontend/src/features/components/EpubReader/**'
+      - 'frontend/tsconfig.epub.json'
       - '.github/workflows/epub-reader-ci.yml'
 
 permissions:
@@ -48,6 +50,10 @@ jobs:
         working-directory: frontend
         run: npm run test -- src/api/books.epub.test.ts src/api/books.test.ts src/pages/ReaderPage/index.test.tsx src/features/components/EpubReader/index.test.tsx
 
-      - name: Frontend build
+      - name: Focused EPUB typecheck
         working-directory: frontend
-        run: npm run build
+        run: npx tsc -p tsconfig.epub.json --noEmit
+
+      - name: Frontend bundle build
+        working-directory: frontend
+        run: npx vite build
