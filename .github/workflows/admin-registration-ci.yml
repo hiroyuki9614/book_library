@@ -7,6 +7,7 @@ on:
       - 'frontend/src/api/admin*'
       - 'frontend/src/components/forms/BookRegistar/**'
       - 'frontend/src/pages/Admin/**'
+      - 'frontend/tsconfig.admin-registration.json'
       - 'docs/api.yaml'
       - 'docs/current-status.md'
       - 'docs/design.md'
@@ -51,6 +52,10 @@ jobs:
         working-directory: frontend
         run: npm run test -- src/api/admin.test.ts src/pages/Admin/index.test.tsx
 
-      - name: Lint touched frontend files
+      - name: Focused Admin registration typecheck
         working-directory: frontend
-        run: npx eslint src/api/admin.ts src/api/admin.test.ts src/components/forms/BookRegistar/index.tsx src/pages/Admin/index.tsx src/pages/Admin/index.test.tsx
+        run: npx tsc -p tsconfig.admin-registration.json --noEmit
+
+      - name: Frontend bundle build
+        working-directory: frontend
+        run: npx vite build
