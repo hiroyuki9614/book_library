@@ -55,8 +55,10 @@ export async function fetchBookFile(bookId: number) {
 	if (!response.ok) {
 		throw new Error(`API request failed: ${response.status}`);
 	}
-	if (response.headers.get('content-type')?.split(';', 1)[0].trim() !== 'application/pdf') {
-		throw new Error('API returned a non-PDF response');
+
+	const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+	if (contentType !== 'application/pdf' && contentType !== 'application/epub+zip') {
+		throw new Error('API returned an unsupported book file response');
 	}
 
 	return response.blob();

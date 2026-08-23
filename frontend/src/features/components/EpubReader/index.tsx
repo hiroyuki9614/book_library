@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import ePub from 'epubjs';
+import { fetchBookFile } from '@/api/books';
 import { Field, FieldLabel } from '@/components/ui/field';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -10,63 +11,117 @@ import { Spinner } from '@/components/ui/spinner';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheetCapture';
 
-function EpubReader() {
+type TocItem = {
+	href: string;
+	label: string;
+};
+
+type RelocatedLocation = {
+	start: { cfi: string };
+};
+
+type EpubRenditionRuntime = {
+	on: (event: string, handler: (value: any) => void) => void;
+	off?: (event: string, handler: (value: any) => void) => void;
+	display: (target?: string) => Promise<unknown>;
+	destroy: () => void;
+	prev: () => void;
+	next: () => void;
+	book?: { package?: { metadata?: { direction?: string } } };
+};
+
+type EpubBookRuntime = {
+	renderTo: (
+		element: HTMLElement,
+		options: { width: number; height: number; spread: 'always' | 'none' | 'auto'; flow: 'paginated' },
+	) => EpubRenditionRuntime;
+	ready: Promise<unknown>;
+	locations: {
+		generate: (chars: number) => Promise<unknown>;
+		locationFromCfi: (cfi: string) => number;
+		total: number;
+	};
+	navigation: { toc: TocItem[] };
+	package: { metadata: { direction?: string } };
+	destroy: () => void;
+};
+
+function EpubReader({ bookId }: { bookId: number }) {
 	const mainRef = useRef<HTMLElement | null>(null);
 	const viewerRef = useRef<HTMLDivElement | null>(null);
 	const currentCfiRef = useRef('');
-	const renditionRef = useRef<any>(null);
+	const renditionRef = useRef<EpubRenditionRuntime | null>(null);
 	const [spread, setSpread] = useState<'always' | 'none' | 'auto'>('always');
-	const [percentage, setPercentage] = useState<string>('0');
-	const [totalPage, setTotalPage] = useState<number>(0);
-	const [currentPage, setCurrentPage] = useState<number>(0);
-	const [cfi, setCfi] = useState<string>('');
+	const [percentage, setPercentage] = useState(0);
+	const [totalPage, setTotalPage] = useState(0);
+	const [currentPage, setCurrentPage] = useState(0);
 	const [isLoading, setIsLoading] = useState(true);
-	const [navigation, setNavigation] = useState<any>(null);
+	const [fileError, setFileError] = useState(false);
+	const [epubUrl, setEpubUrl] = useState<string | null>(null);
+	const [navigation, setNavigation] = useState<{ toc: TocItem[] } | null>(null);
 	const [history, setHistory] = useState<string[]>([]);
+	const storageKey = `reader-location:${bookId}`;
 
 	useEffect(() => {
-		if (!viewerRef.current) return;
+		let objectUrl: string | undefined;
+		let active = true;
+
+		setEpubUrl(null);
+		setFileError(false);
 		setIsLoading(true);
 
+		void fetchBookFile(bookId)
+			.then((blob) => {
+				if (!active) return;
+				objectUrl = URL.createObjectURL(blob);
+				setEpubUrl(objectUrl);
+			})
+			.catch(() => {
+				if (!active) return;
+				setFileError(true);
+				setIsLoading(false);
+			});
+
+		return () => {
+			active = false;
+			if (objectUrl) {
+				URL.revokeObjectURL(objectUrl);
+			}
+		};
+	}, [bookId]);
+
+	useEffect(() => {
+		if (!viewerRef.current || !epubUrl) return;
+		setIsLoading(true);
+		setFileError(false);
 		viewerRef.current.innerHTML = '';
 
-		const book = ePub('/見てしまう人びと 幻覚の脳科学.epub');
-
+		const book = ePub(epubUrl) as unknown as EpubBookRuntime;
 		const rendition = book.renderTo(viewerRef.current, {
 			width: viewerRef.current.clientWidth,
 			height: viewerRef.current.clientHeight,
 			spread,
 			flow: 'paginated',
 		});
-
 		renditionRef.current = rendition;
+		let disposed = false;
 
-		const handleRelocated = (location: any) => {
+		const handleRelocated = (location: RelocatedLocation) => {
 			const cfi = location.start.cfi;
+			currentCfiRef.current = cfi;
 
-			const currentPage = book.locations.locationFromCfi(cfi);
-			const totalPage = book.locations.total;
+			const page = book.locations.locationFromCfi(cfi);
+			const total = book.locations.total;
+			const progress = total > 0 ? Math.round((page / total) * 100) : 0;
 
-			setNavigation(book.navigation);
-
-			const percentage = totalPage > 0 ? Math.round((currentPage / totalPage) * 100) : 0;
-
-			setPercentage(percentage);
-			setTotalPage(totalPage);
-			setCurrentPage(currentPage);
-			// ***************************************************************
-			// 暫定 DBから読み込むようにするまでは localStorage に保存しておく
-			// ***************************************************************
-			localStorage.setItem('reader-location', cfi);
-			setCfi(cfi);
+			setPercentage(progress);
+			setTotalPage(total);
+			setCurrentPage(page);
+			localStorage.setItem(storageKey, cfi);
 		};
 
-		rendition.on('relocated', (location) => {
-			currentCfiRef.current = location.start.cfi;
-		});
-
-		const handleKeyUp = (e: KeyboardEvent) => {
-			if (e.key === 'ArrowRight') {
+		const handleKeyUp = (event: KeyboardEvent) => {
+			if (event.key === 'ArrowRight') {
 				if (book.package.metadata.direction === 'rtl') {
 					rendition.prev();
 				} else {
@@ -74,7 +129,7 @@ function EpubReader() {
 				}
 			}
 
-			if (e.key === 'ArrowLeft') {
+			if (event.key === 'ArrowLeft') {
 				if (book.package.metadata.direction === 'rtl') {
 					rendition.next();
 				} else {
@@ -83,34 +138,41 @@ function EpubReader() {
 			}
 		};
 
-		book.ready.then(async () => {
-			await book.locations.generate(100);
+		void book.ready
+			.then(async () => {
+				await book.locations.generate(100);
+				if (disposed) return;
 
-			rendition.on('relocated', handleRelocated);
-			rendition.on('keyup', handleKeyUp);
-			document.addEventListener('keyup', handleKeyUp);
-			// ***************************************************************
-			// 暫定 DBから読み込むようにするまでは localStorage に保存しておく
-			// ***************************************************************
-			const savedCfi = localStorage.getItem('reader-location');
+				setNavigation(book.navigation);
+				rendition.on('relocated', handleRelocated);
+				rendition.on('keyup', handleKeyUp);
+				document.addEventListener('keyup', handleKeyUp);
 
-			if (savedCfi) {
-				await rendition.display(savedCfi);
-			} else {
-				await rendition.display();
-			}
-			setIsLoading(false);
-		});
+				const savedCfi = localStorage.getItem(storageKey);
+				await rendition.display(savedCfi ?? undefined);
+				if (!disposed) {
+					setIsLoading(false);
+				}
+			})
+			.catch(() => {
+				if (!disposed) {
+					setFileError(true);
+					setIsLoading(false);
+				}
+			});
 
 		return () => {
+			disposed = true;
 			rendition.off?.('relocated', handleRelocated);
 			rendition.off?.('keyup', handleKeyUp);
 			document.removeEventListener('keyup', handleKeyUp);
-
 			rendition.destroy();
 			book.destroy();
+			if (renditionRef.current === rendition) {
+				renditionRef.current = null;
+			}
 		};
-	}, [spread]);
+	}, [epubUrl, spread, storageKey]);
 
 	const handlePrev = () => {
 		const book = renditionRef.current?.book;
@@ -132,23 +194,29 @@ function EpubReader() {
 		}
 	};
 
-	// ユーザー操作時に戻る
 	const handleTocJump = (href: string) => {
 		if (currentCfiRef.current) {
 			setHistory((prev) => [...prev, currentCfiRef.current].slice(-20));
 		}
-
-		renditionRef.current?.display(href);
+		void renditionRef.current?.display(href);
 	};
+
 	const handleBack = () => {
 		const prev = history.at(-1);
-
 		if (!prev) return;
 
-		renditionRef.current?.display(prev);
-
+		void renditionRef.current?.display(prev);
 		setHistory((prevHistory) => prevHistory.slice(0, -1));
 	};
+
+	if (fileError) {
+		return (
+		<div className='p-4'>
+			<Link to='/' className='text-sm text-primary'>本棚に戻る</Link>
+			<p>EPUBファイルを取得または読み込みできませんでした。</p>
+		</div>
+		);
+	}
 
 	return (
 		<div className='flex h-screen flex-col bg-background text-foreground'>
@@ -164,7 +232,7 @@ function EpubReader() {
 							読書位置: {currentPage} / {totalPage}
 							<span className='ml-auto'>{percentage}%</span>
 						</FieldLabel>
-						<Progress value={Number(percentage)} id='progress-upload' />
+						<Progress value={percentage} id='progress-upload' />
 					</Field>
 				</div>
 				<div>
@@ -187,15 +255,9 @@ function EpubReader() {
 							</SheetHeader>
 							<div className='no-scrollbar overflow-y-auto px-4'>
 								{navigation?.toc.map((item, index) => (
-									<div key={index}>
+									<div key={`${item.href}-${index}`}>
 										<SheetTrigger asChild>
-											<Button
-												variant='outline'
-												className='bg-white'
-												onClick={() => {
-													handleTocJump(item.href);
-												}}
-											>
+											<Button variant='outline' className='bg-white' onClick={() => handleTocJump(item.href)}>
 												{item.label}
 											</Button>
 										</SheetTrigger>
@@ -228,7 +290,6 @@ function EpubReader() {
 				)}
 				<div ref={viewerRef} tabIndex={1} className='h-full w-full overflow-hidden rounded bg-card shadow' />
 				<button type='button' onClick={handlePrev} aria-label='前のページへ' className='absolute left-0 top-1/2 z-10 h-full w-5 -translate-y-1/2 bg-background/0' />
-
 				<button type='button' onClick={handleNext} aria-label='次のページへ' className='absolute right-0 top-1/2 z-10 h-full w-5 -translate-y-1/2 bg-background/0' />
 			</main>
 		</div>
