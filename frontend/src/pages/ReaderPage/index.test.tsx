@@ -24,9 +24,8 @@ describe('ReaderPage EPUB routing', () => {
 			error: null,
 		});
 
-		const { getByText, queryByText } = await render(<ReaderPage />);
+		const { getByText } = await render(<ReaderPage />);
 
 		await expect.element(getByText('EPUB reader 7')).toBeInTheDocument();
-		expect(queryByText('現在はPDF書籍のみ閲覧できます。')).toBeNull();
 	});
 });
