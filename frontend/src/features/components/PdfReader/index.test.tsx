@@ -43,4 +43,16 @@ describe('PageNavigation persistence guard', () => {
 
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 	});
+
+	test('reading状態で最終ページをrestoreした場合もcompleted保存する', async () => {
+		mocks.useScroll.mockReturnValue({
+			provides: { scrollToPage: vi.fn() },
+			state: { currentPage: 10, totalPages: 10 },
+		});
+		mocks.saveReadingInfo.mockResolvedValue({ bookId: 7, currentPage: 10, readStatus: 'completed' });
+
+		await render(<PageNavigation bookId={7} documentId='document-1' initialPage={10} initialReadStatus='reading' />);
+
+		expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 10, 10);
+	});
 });
