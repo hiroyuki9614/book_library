@@ -95,4 +95,32 @@ describe('GET /me', () => {
 			code: 'UNAUTHORIZED',
 		});
 	});
+
+	test('利用停止後も既存セッションは有効期限まで利用できる', async () => {
+		mocks.getSession.mockResolvedValue({
+			user: { id: '1' },
+		});
+		mocks.findFirst.mockImplementation(async (query: { where?: { deletedAt?: null } }) => {
+			if (query.where?.deletedAt === null) {
+				return null;
+			}
+
+			return {
+				id: 1,
+				name: 'Suspended User',
+				email: 'suspended@example.com',
+				role: { name: 'user' },
+			};
+		});
+
+		const response = await app.request('/me');
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			id: 1,
+			name: 'Suspended User',
+			email: 'suspended@example.com',
+			role: 'user',
+		});
+	});
 });
