@@ -6,6 +6,7 @@ import { describeRoute } from 'hono-openapi';
 import { pathToFileURL } from 'node:url';
 import { auth } from './lib/auth.js';
 import withPrisma from './lib/prisma.js';
+import disabledUserSignIn from './routes/auth/disabledUserSignIn.js';
 import { createOpenApiHandler } from './routes/openApi/route.js';
 import adminListRoutes from './routes/admin/listRoutes.js';
 import adminRoutes from './routes/admin/routes.js';
@@ -58,6 +59,7 @@ app.get(
 	},
 );
 
+app.route('/api/auth', disabledUserSignIn);
 app.on(['GET', 'POST'], '/api/auth/*', (c) => {
 	return auth.handler(c.req.raw);
 });
