@@ -1,3 +1,4 @@
+import EpubReader from '@/features/components/EpubReader';
 import PdfReader from '@/features/components/PdfReader';
 import useBook from '@/hooks/useBook';
 import { useParams } from 'react-router-dom';
@@ -15,9 +16,13 @@ export default function ReaderPage() {
 		return <p>書籍が見つかりません。</p>;
 	}
 
-	if (book.fileType !== 'pdf') {
-		return <p>現在はPDF書籍のみ閲覧できます。</p>;
+	if (book.fileType === 'epub') {
+		return <EpubReader bookId={book.id} />;
 	}
 
-	return <PdfReader bookId={book.id} />;
+	if (book.fileType === 'pdf') {
+		return <PdfReader bookId={book.id} />;
+	}
+
+	return <p>この書籍ファイル形式は閲覧できません。</p>;
 }
