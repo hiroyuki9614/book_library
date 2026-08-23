@@ -38,7 +38,7 @@ export type AdminBook = {
 	description: string | null;
 	category: AdminCategory;
 	publicationScope: PublicationScope;
-	file: AdminBookFile;
+	file: AdminBookFile | null;
 };
 
 export async function fetchAdminCategories(): Promise<AdminCategory[]> {
@@ -46,7 +46,12 @@ export async function fetchAdminCategories(): Promise<AdminCategory[]> {
 	return response.categories;
 }
 
-export function registerAdminBook(input: AdminBookRegistrationInput): Promise<AdminBook> {
+export async function fetchAdminBooks(): Promise<AdminBook[]> {
+	const response = await apiFetch<{ books: AdminBook[] }>('/api/v1/admin/books');
+	return response.books;
+}
+
+export function registerAdminBook(input: AdminBookRegistrationInput): Promise<AdminBook & { file: AdminBookFile }> {
 	const formData = new FormData();
 	formData.append('title', input.title.trim());
 	formData.append('authorName', input.authorName.trim());
@@ -58,7 +63,7 @@ export function registerAdminBook(input: AdminBookRegistrationInput): Promise<Ad
 	formData.append('publicationScope', input.publicationScope);
 	formData.append('file', input.file, input.file.name);
 
-	return apiFetch<AdminBook>('/api/v1/admin/book-registrations', {
+	return apiFetch<AdminBook & { file: AdminBookFile }>('/api/v1/admin/book-registrations', {
 		method: 'POST',
 		body: formData,
 	});
