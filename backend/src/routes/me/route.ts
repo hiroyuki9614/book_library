@@ -39,6 +39,7 @@ export const getMe: Handler = async (c) => {
 					name: true,
 				},
 			},
+		},
 	});
 
 	if (!user) {
