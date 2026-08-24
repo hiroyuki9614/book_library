@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react';
-import { BookOpen, Library, Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { BookOpen, Library, Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import {
+	createAdminCategory,
+	deleteAdminCategory,
 	fetchAdminBooks,
 	fetchAdminCategories,
 	registerAdminBook,
+	renameAdminCategory,
 	restoreAdminBook,
 	softDeleteAdminBook,
 	type AdminBook,
@@ -16,8 +19,11 @@ import BookRegistar, { type BookRegistrationValues } from '@/components/forms/Bo
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+
+const UNCATEGORIZED_NAME = '未分類';
 
 function formatPublishedAt(value: string | null) {
 	return value ? value.slice(0, 10) : '—';
@@ -30,6 +36,10 @@ function formatFileSize(bytes: number) {
 	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function sortCategories(categories: AdminCategory[]) {
+	return [...categories].sort((a, b) => a.displayOrder - b.displayOrder || a.id - b.id);
+}
+
 function Admin() {
 	const [books, setBooks] = useState<AdminBook[]>([]);
 	const [bookState, setBookState] = useState<AdminBookState>('active');
@@ -40,6 +50,10 @@ function Admin() {
 	const [categoriesError, setCategoriesError] = useState<string | null>(null);
 	const [isSheetOpen, setIsSheetOpen] = useState(false);
 	const [mutatingBookId, setMutatingBookId] = useState<number | null>(null);
+	const [newCategoryName, setNewCategoryName] = useState('');
+	const [editingCategoryId, setEditingCategoryId] = useState<number | null>(null);
+	const [editingCategoryName, setEditingCategoryName] = useState('');
+	const [mutatingCategoryId, setMutatingCategoryId] = useState<number | null>(null);
 
 	useEffect(() => {
 		let isMounted = true;
@@ -48,7 +62,7 @@ function Admin() {
 		fetchAdminCategories()
 			.then((loadedCategories) => {
 				if (!isMounted) return;
-				setCategories(loadedCategories);
+				setCategories(sortCategories(loadedCategories));
 				setCategoriesError(null);
 			})
 			.catch(() => {
@@ -92,13 +106,17 @@ function Admin() {
 		if (!file) {
 			throw new Error('Book file is required');
 		}
+		const categoryId = values.categoryId ?? categories.find((category) => category.name === UNCATEGORIZED_NAME)?.id;
+		if (!categoryId) {
+			throw new Error('Uncategorized category is required');
+		}
 
 		const registeredBook = await registerAdminBook({
 			title: values.title,
 			authorName: values.authorName,
 			publisher: values.publisher,
 			publishedAt: values.publishedAt,
-			categoryId: values.categoryId,
+			categoryId,
 			pageTurnDirection: values.pageTurnDirection,
 			description: values.description,
 			publicationScope: values.publicationScope,
@@ -136,6 +154,56 @@ function Admin() {
 		}
 	};
 
+	const handleCreateCategory = async () => {
+		const name = newCategoryName.trim();
+		if (!name) return;
+		setMutatingCategoryId(0);
+		try {
+			const created = await createAdminCategory(name);
+			setCategories((current) => sortCategories([...current, created]));
+			setNewCategoryName('');
+			toast.success('カテゴリを追加しました。');
+		} catch {
+			toast.error('カテゴリの追加に失敗しました。同名カテゴリがないか確認してください。');
+		} finally {
+			setMutatingCategoryId(null);
+		}
+	};
+
+	const handleRenameCategory = async (categoryId: number) => {
+		const name = editingCategoryName.trim();
+		if (!name) return;
+		setMutatingCategoryId(categoryId);
+		try {
+			const updated = await renameAdminCategory(categoryId, name);
+			setCategories((current) => sortCategories(current.map((category) => (category.id === categoryId ? updated : category))));
+			setBooks((current) => current.map((book) => (
+				book.category.id === categoryId ? { ...book, category: { ...book.category, name: updated.name } } : book
+			)));
+			setEditingCategoryId(null);
+			setEditingCategoryName('');
+			toast.success('カテゴリ名を変更しました。');
+		} catch {
+			toast.error('カテゴリ名の変更に失敗しました。');
+		} finally {
+			setMutatingCategoryId(null);
+		}
+	};
+
+	const handleDeleteCategory = async (categoryId: number) => {
+		setMutatingCategoryId(categoryId);
+		try {
+			const result = await deleteAdminCategory(categoryId);
+			setCategories((current) => current.filter((category) => category.id !== categoryId));
+			setBooks(await fetchAdminBooks(bookState));
+			toast.success(`カテゴリを削除し、${result.movedBookCount}冊を未分類へ移動しました。`);
+		} catch {
+			toast.error('カテゴリの削除に失敗しました。');
+		} finally {
+			setMutatingCategoryId(null);
+		}
+	};
+
 	const fileCount = books.filter((book) => book.file !== null).length;
 	const isDeletedView = bookState === 'deleted';
 
@@ -158,7 +226,7 @@ function Admin() {
 					<SheetContent className='w-full sm:max-w-xl'>
 						<SheetHeader className='border-b px-5 py-5'>
 							<SheetTitle className='text-xl'>書籍を登録</SheetTitle>
-							<SheetDescription>タイトル・カテゴリ・公開範囲・EPUB/PDFファイルが必須です。</SheetDescription>
+							<SheetDescription>タイトル・公開範囲・EPUB/PDFファイルが必須です。カテゴリ未選択時は未分類になります。</SheetDescription>
 						</SheetHeader>
 						<BookRegistar
 							categories={categories}
@@ -256,6 +324,81 @@ function Admin() {
 									<TableCell colSpan={7} className='py-8 text-center text-muted-foreground'>該当する書籍はありません。</TableCell>
 								</TableRow>
 							)}
+						</TableBody>
+					</Table>
+				</CardContent>
+			</Card>
+
+			<Card>
+				<CardHeader>
+					<CardTitle>カテゴリ管理</CardTitle>
+					<CardDescription>未分類は固定カテゴリです。使用中カテゴリを削除すると、その書籍は未分類へ移動します。</CardDescription>
+				</CardHeader>
+				<CardContent className='space-y-4'>
+					<div className='flex flex-col gap-2 sm:flex-row'>
+						<Input
+							aria-label='新しいカテゴリ名'
+							placeholder='新しいカテゴリ名'
+							value={newCategoryName}
+							onChange={(event) => setNewCategoryName(event.target.value)}
+							maxLength={255}
+						/>
+						<Button onClick={handleCreateCategory} disabled={!newCategoryName.trim() || mutatingCategoryId !== null}>
+							<Plus />カテゴリ追加
+						</Button>
+					</div>
+					{categoriesLoading && <p className='text-sm text-muted-foreground'>カテゴリを読み込んでいます…</p>}
+					{categoriesError && <p role='alert' className='text-sm text-destructive'>{categoriesError}</p>}
+					<Table>
+						<TableHeader>
+							<TableRow>
+								<TableHead>カテゴリ名</TableHead>
+								<TableHead className='w-24'>順序</TableHead>
+								<TableHead className='w-56'>操作</TableHead>
+							</TableRow>
+						</TableHeader>
+						<TableBody>
+							{categories.map((category) => {
+								const protectedCategory = category.name === UNCATEGORIZED_NAME;
+								const editing = editingCategoryId === category.id;
+								return (
+									<TableRow key={category.id}>
+										<TableCell>
+											{editing ? (
+												<Input
+													aria-label={`${category.name} の新しいカテゴリ名`}
+													value={editingCategoryName}
+													onChange={(event) => setEditingCategoryName(event.target.value)}
+													maxLength={255}
+												/>
+											) : (
+												<div className='flex items-center gap-2'>
+													<span>{category.name}</span>
+													{protectedCategory && <Badge variant='secondary'>固定</Badge>}
+												</div>
+											)}
+										</TableCell>
+										<TableCell>{category.displayOrder}</TableCell>
+										<TableCell>
+											{!protectedCategory && (editing ? (
+												<div className='flex gap-2'>
+													<Button size='sm' disabled={!editingCategoryName.trim() || mutatingCategoryId === category.id} onClick={() => handleRenameCategory(category.id)}>保存</Button>
+													<Button size='sm' variant='outline' onClick={() => { setEditingCategoryId(null); setEditingCategoryName(''); }}>キャンセル</Button>
+												</div>
+											) : (
+												<div className='flex gap-2'>
+													<Button size='sm' variant='outline' onClick={() => { setEditingCategoryId(category.id); setEditingCategoryName(category.name); }}>
+														<Pencil />名称変更
+													</Button>
+													<Button size='sm' variant='outline' disabled={mutatingCategoryId === category.id} onClick={() => handleDeleteCategory(category.id)}>
+														<Trash2 />カテゴリ削除
+													</Button>
+												</div>
+											))}
+										</TableCell>
+									</TableRow>
+								);
+							})}
 						</TableBody>
 					</Table>
 				</CardContent>
