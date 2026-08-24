@@ -31,6 +31,17 @@ export type AdminBookRegistrationInput = {
 	file: File;
 };
 
+export type AdminBookMetadataInput = {
+	title: string;
+	authorName: string;
+	publisher: string;
+	publishedAt: string;
+	categoryId: number;
+	pageTurnDirection: 'ltr' | 'rtl';
+	description: string;
+	publicationScope: PublicationScope;
+};
+
 export type AdminBookFile = {
 	id: number;
 	extension: 'epub' | 'pdf';
@@ -132,6 +143,23 @@ export function resetAdminUserPassword(userId: number, password: string): Promis
 export async function fetchAdminBooks(state: AdminBookState = 'active'): Promise<AdminBook[]> {
 	const response = await apiFetch<{ books: AdminBook[] }>(`/api/v1/admin/books?state=${state}`);
 	return response.books;
+}
+
+export function updateAdminBookMetadata(bookId: number, input: AdminBookMetadataInput): Promise<Omit<AdminBook, 'file'>> {
+	return apiFetch<Omit<AdminBook, 'file'>>(`/api/v1/admin/books/${bookId}`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			title: input.title.trim(),
+			authorName: input.authorName.trim(),
+			publisher: input.publisher.trim(),
+			publishedAt: input.publishedAt,
+			categoryId: input.categoryId,
+			pageTurnDirection: input.pageTurnDirection,
+			description: input.description.trim(),
+			publicationScope: input.publicationScope,
+		}),
+	});
 }
 
 export function softDeleteAdminBook(bookId: number): Promise<AdminBookDeletionResponse> {
