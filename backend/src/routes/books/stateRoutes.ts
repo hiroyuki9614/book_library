@@ -227,9 +227,20 @@ app.patch('/:bookId/reading-info', async (c) => {
 			currentPosition = input.currentPosition;
 		}
 
-		const readStatus = input.readStatus === undefined ? 'reading' : input.readStatus;
-		if (readStatus !== 'reading' && readStatus !== 'completed') {
+		const requestedReadStatus = input.readStatus === undefined ? 'reading' : input.readStatus;
+		if (requestedReadStatus !== 'reading' && requestedReadStatus !== 'completed') {
 			return jsonError(c, 400, 'readStatus must be reading or completed', 'INVALID_READ_STATUS');
+		}
+
+		let readStatus: 'reading' | 'completed' = requestedReadStatus;
+		if (requestedReadStatus === 'reading') {
+			const existingReadingInfo = await result.prisma.readingInfo.findUnique({
+				where: { userId_bookId: { userId: result.userId, bookId } },
+				select: { readStatus: true },
+			});
+			if (existingReadingInfo?.readStatus === 'completed') {
+				readStatus = 'completed';
+			}
 		}
 
 		const readingInfo = await result.prisma.readingInfo.upsert({
