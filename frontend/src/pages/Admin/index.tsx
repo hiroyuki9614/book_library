@@ -11,10 +11,12 @@ import {
 	renameAdminCategory,
 	restoreAdminBook,
 	softDeleteAdminBook,
+	updateAdminBookMetadata,
 	type AdminBook,
 	type AdminBookState,
 	type AdminCategory,
 } from '@/api/admin';
+import BookEditor, { type BookEditorValues } from '@/components/forms/BookEditor';
 import BookRegistar, { type BookRegistrationValues } from '@/components/forms/BookRegistar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -49,6 +51,7 @@ function Admin() {
 	const [categoriesLoading, setCategoriesLoading] = useState(true);
 	const [categoriesError, setCategoriesError] = useState<string | null>(null);
 	const [isSheetOpen, setIsSheetOpen] = useState(false);
+	const [editingBook, setEditingBook] = useState<AdminBook | null>(null);
 	const [mutatingBookId, setMutatingBookId] = useState<number | null>(null);
 	const [newCategoryName, setNewCategoryName] = useState('');
 	const [editingCategoryId, setEditingCategoryId] = useState<number | null>(null);
@@ -126,6 +129,24 @@ function Admin() {
 		setBooks((currentBooks) => [{ ...registeredBook, deletedAt: null }, ...currentBooks.filter((book) => book.id !== registeredBook.id)]);
 		setIsSheetOpen(false);
 		toast.success('書籍とファイルを登録しました。');
+	};
+
+	const handleBookUpdate = async (values: BookEditorValues) => {
+		if (!editingBook) return;
+		if (
+			editingBook.publicationScope === 'admin_only' &&
+			values.publicationScope === 'all_users' &&
+			!window.confirm('この書籍を全ユーザー公開に変更しますか？')
+		) {
+			return;
+		}
+
+		const updated = await updateAdminBookMetadata(editingBook.id, values);
+		setBooks((currentBooks) => currentBooks.map((book) => (
+			book.id === editingBook.id ? { ...book, ...updated, file: book.file } : book
+		)));
+		setEditingBook(null);
+		toast.success('書籍情報を更新しました。読書記録は保持されています。');
 	};
 
 	const handleDelete = async (bookId: number) => {
@@ -238,6 +259,23 @@ function Admin() {
 				</Sheet>
 			</header>
 
+			<Sheet open={editingBook !== null} onOpenChange={(open) => { if (!open) setEditingBook(null); }}>
+				<SheetContent className='w-full sm:max-w-xl'>
+					<SheetHeader className='border-b px-5 py-5'>
+						<SheetTitle className='text-xl'>書籍情報を編集</SheetTitle>
+						<SheetDescription>書籍情報と公開範囲を更新します。書籍ファイルと読書記録は変更しません。</SheetDescription>
+					</SheetHeader>
+					{editingBook && (
+						<BookEditor
+							book={editingBook}
+							categories={categories}
+							onSubmit={handleBookUpdate}
+							onCancel={() => setEditingBook(null)}
+						/>
+					)}
+				</SheetContent>
+			</Sheet>
+
 			<section className='grid gap-4 sm:grid-cols-2'>
 				<Card>
 					<CardHeader className='flex-row items-center justify-between'>
@@ -275,7 +313,7 @@ function Admin() {
 				<CardContent className='overflow-x-auto'>
 					{booksLoading && <p className='mb-4 text-sm text-muted-foreground'>書籍を読み込んでいます…</p>}
 					{booksError && <p role='alert' className='mb-4 text-sm text-destructive'>{booksError}</p>}
-					<Table className='min-w-[980px]'>
+					<Table className='min-w-[1040px]'>
 						<TableHeader>
 							<TableRow>
 								<TableHead>タイトル</TableHead>
@@ -284,7 +322,7 @@ function Admin() {
 								<TableHead>出版日</TableHead>
 								<TableHead>公開範囲</TableHead>
 								<TableHead>ファイル</TableHead>
-								<TableHead className='w-28'>操作</TableHead>
+								<TableHead className='w-48'>操作</TableHead>
 							</TableRow>
 						</TableHeader>
 						<TableBody>
@@ -312,9 +350,14 @@ function Admin() {
 												<RotateCcw />復元
 											</Button>
 										) : (
-											<Button size='sm' variant='outline' disabled={mutatingBookId === book.id} onClick={() => handleDelete(book.id)}>
-												<Trash2 />削除
-											</Button>
+											<div className='flex gap-2'>
+												<Button size='sm' variant='outline' onClick={() => setEditingBook(book)}>
+													<Pencil />編集
+												</Button>
+												<Button size='sm' variant='outline' disabled={mutatingBookId === book.id} onClick={() => handleDelete(book.id)}>
+													<Trash2 />削除
+												</Button>
+											</div>
 										)}
 									</TableCell>
 								</TableRow>
