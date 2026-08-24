@@ -58,6 +58,7 @@ beforeEach(() => {
 	mocks.userFindFirst.mockResolvedValue({ id: 7, roleId: 2 });
 	mocks.bookFindUnique.mockResolvedValue({ id: 1, deletedAt: null });
 	mocks.permissionFindUnique.mockResolvedValue({ id: 1 });
+	mocks.readingInfoFindUnique.mockResolvedValue(null);
 });
 
 describe('book state routes', () => {
@@ -135,5 +136,27 @@ describe('book state routes', () => {
 
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '12', currentPage: 12, readStatus: 'completed' });
+	});
+
+	test('一度completedになった書籍は途中位置を保存してもreadingへ戻らない', async () => {
+		mocks.readingInfoFindUnique.mockResolvedValue({ readStatus: 'completed' });
+		mocks.readingInfoUpsert.mockResolvedValue({ currentPosition: '3', readStatus: 'completed' });
+
+		const response = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ currentPage: 3, readStatus: 'reading' }),
+		});
+
+		expect(response.status).toBe(200);
+		expect(mocks.readingInfoFindUnique).toHaveBeenCalledWith({
+			where: { userId_bookId: { userId: 7, bookId: 1 } },
+			select: { readStatus: true },
+		});
+		expect(mocks.readingInfoUpsert).toHaveBeenCalledWith(expect.objectContaining({
+			create: expect.objectContaining({ currentPosition: '3', readStatus: 'completed' }),
+			update: { currentPosition: '3', readStatus: 'completed' },
+		}));
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, readStatus: 'completed' });
 	});
 });
