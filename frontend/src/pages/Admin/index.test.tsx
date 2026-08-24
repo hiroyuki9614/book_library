@@ -124,14 +124,14 @@ describe('Admin persisted book management', () => {
 		const { getByRole, getByText } = await render(<Admin />);
 
 		await vi.waitFor(() => expect(mocks.fetchAdminBooks).toHaveBeenCalledWith('active'));
-		await getByRole('button', { name: '削除' }).click();
+		await getByRole('button', { name: '削除', exact: true }).click();
 		await vi.waitFor(() => expect(mocks.softDeleteAdminBook).toHaveBeenCalledWith(10));
 		await expect.element(getByText('該当する書籍はありません。')).toBeInTheDocument();
 
 		await getByRole('button', { name: '削除済み' }).click();
 		await vi.waitFor(() => expect(mocks.fetchAdminBooks).toHaveBeenCalledWith('deleted'));
 		await expect.element(getByText('保存済みPDF')).toBeInTheDocument();
-		await getByRole('button', { name: '復元' }).click();
+		await getByRole('button', { name: '復元', exact: true }).click();
 		await vi.waitFor(() => expect(mocks.restoreAdminBook).toHaveBeenCalledWith(10));
 		await expect.element(getByText('該当する書籍はありません。')).toBeInTheDocument();
 	});
