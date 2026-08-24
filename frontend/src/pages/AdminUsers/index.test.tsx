@@ -63,10 +63,10 @@ describe('AdminUsers', () => {
 	});
 
 	test('一般ユーザーを登録して一覧へ反映する', async () => {
-		const { getByRole, getByText } = await render(<AdminUsers />);
+		const { getByRole, getByText, getByLabelText } = await render(<AdminUsers />);
 		await getByRole('textbox', { name: 'メールアドレス' }).fill('new@example.com');
 		await getByRole('textbox', { name: '表示名' }).fill('New User');
-		await getByRole('textbox', { name: '初期パスワード' }).fill('password123');
+		await getByLabelText('初期パスワード').fill('password123');
 		await getByRole('button', { name: '登録', exact: true }).click();
 
 		await vi.waitFor(() => expect(mocks.createAdminUser).toHaveBeenCalledWith({
@@ -89,12 +89,12 @@ describe('AdminUsers', () => {
 	});
 
 	test('仮パスワードを再設定する', async () => {
-		const { getByRole } = await render(<AdminUsers />);
+		const { getByRole, getByLabelText } = await render(<AdminUsers />);
 		await vi.waitFor(() => expect(mocks.fetchAdminUsers).toHaveBeenCalledTimes(1));
 
 		const resetButtons = getByRole('button', { name: '仮パスワード', exact: true });
 		await resetButtons.first().click();
-		await getByRole('textbox', { name: 'Reader の仮パスワード' }).fill('temporary123');
+		await getByLabelText('Reader の仮パスワード').fill('temporary123');
 		await getByRole('button', { name: '設定', exact: true }).click();
 
 		await vi.waitFor(() => expect(mocks.resetAdminUserPassword).toHaveBeenCalledWith(7, 'temporary123'));
