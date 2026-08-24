@@ -16,7 +16,7 @@ const bookRegistrationSchema = z.object({
 	authorName: z.string().trim().max(255),
 	publisher: z.string().trim().max(255),
 	publishedAt: z.string(),
-	categoryId: z.number().int().positive('カテゴリを選択してください。'),
+	categoryId: z.number().int().positive().optional(),
 	pageTurnDirection: z.enum(['ltr', 'rtl']),
 	description: z.string().trim().max(1000, '説明は1000文字以内で入力してください。'),
 	publicationScope: z.enum(['all_users', 'admin_only']),
@@ -94,14 +94,14 @@ export default function BookRegistar({ categories, categoriesLoading, categories
 
 					<div className='grid grid-cols-1 gap-5 sm:grid-cols-2'>
 						<Field data-invalid={Boolean(form.formState.errors.categoryId)}>
-							<FieldLabel>カテゴリ *</FieldLabel>
+							<FieldLabel>カテゴリ</FieldLabel>
 							<Controller
 								name='categoryId'
 								control={form.control}
 								render={({ field }) => (
 									<Select value={field.value ? String(field.value) : undefined} onValueChange={(value) => field.onChange(Number(value))} disabled={!canSubmit}>
 										<SelectTrigger className='w-full' aria-label='カテゴリ'>
-											<SelectValue placeholder={categoriesLoading ? '読み込み中…' : 'カテゴリを選択'} />
+											<SelectValue placeholder={categoriesLoading ? '読み込み中…' : '未選択の場合は未分類'} />
 										</SelectTrigger>
 										<SelectContent>
 											{categories.map((category) => (
