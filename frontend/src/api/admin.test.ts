@@ -1,12 +1,17 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
 	createAdminCategory,
+	createAdminUser,
 	deleteAdminCategory,
+	disableAdminUser,
 	fetchAdminBooks,
 	fetchAdminCategories,
+	fetchAdminUsers,
 	registerAdminBook,
 	renameAdminCategory,
+	resetAdminUserPassword,
 	restoreAdminBook,
+	restoreAdminUser,
 	softDeleteAdminBook,
 } from './admin';
 
@@ -45,6 +50,41 @@ describe('admin API client', () => {
 		}));
 		expect(fetch).toHaveBeenNthCalledWith(3, 'http://localhost:3000/api/v1/admin/categories/8/delete', expect.objectContaining({
 			method: 'PATCH', credentials: 'include',
+		}));
+	});
+
+	test('一般ユーザー一覧を取得する', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({ users: [
+			{ id: 7, email: 'reader@example.com', name: 'Reader', deletedAt: null, createdAt: '2026-08-01T00:00:00.000Z' },
+		] }), { status: 200 }));
+
+		await expect(fetchAdminUsers()).resolves.toEqual([
+			expect.objectContaining({ id: 7, email: 'reader@example.com', deletedAt: null }),
+		]);
+		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/admin/users', expect.objectContaining({ credentials: 'include' }));
+	});
+
+	test('一般ユーザー登録・停止・再開・仮パスワード再設定APIを呼ぶ', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		vi.spyOn(globalThis, 'fetch')
+			.mockResolvedValueOnce(new Response(JSON.stringify({ id: 9, email: 'new@example.com', name: 'New User', deletedAt: null, createdAt: '2026-08-24T00:00:00.000Z' }), { status: 201 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ id: 9, email: 'new@example.com', name: 'New User', deletedAt: '2026-08-24T01:00:00.000Z' }), { status: 200 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ id: 9, email: 'new@example.com', name: 'New User', deletedAt: null }), { status: 200 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ id: 9, passwordReset: true }), { status: 200 }));
+
+		await expect(createAdminUser({ email: ' new@example.com ', name: ' New User ', password: 'password123' })).resolves.toMatchObject({ id: 9 });
+		await expect(disableAdminUser(9)).resolves.toMatchObject({ id: 9, deletedAt: expect.any(String) });
+		await expect(restoreAdminUser(9)).resolves.toMatchObject({ id: 9, deletedAt: null });
+		await expect(resetAdminUserPassword(9, 'temporary123')).resolves.toEqual({ id: 9, passwordReset: true });
+
+		expect(fetch).toHaveBeenNthCalledWith(1, 'http://localhost:3000/api/v1/admin/users', expect.objectContaining({
+			method: 'POST', credentials: 'include', body: JSON.stringify({ email: 'new@example.com', name: 'New User', password: 'password123' }),
+		}));
+		expect(fetch).toHaveBeenNthCalledWith(2, 'http://localhost:3000/api/v1/admin/users/9/disable', expect.objectContaining({ method: 'PATCH', credentials: 'include' }));
+		expect(fetch).toHaveBeenNthCalledWith(3, 'http://localhost:3000/api/v1/admin/users/9/restore', expect.objectContaining({ method: 'PATCH', credentials: 'include' }));
+		expect(fetch).toHaveBeenNthCalledWith(4, 'http://localhost:3000/api/v1/admin/users/9/password', expect.objectContaining({
+			method: 'PATCH', credentials: 'include', body: JSON.stringify({ password: 'temporary123' }),
 		}));
 	});
 
