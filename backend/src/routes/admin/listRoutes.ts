@@ -7,6 +7,7 @@ const app = new Hono<PrismaVariables>();
 type AdminContext = Context<PrismaVariables>;
 
 type PublicationScope = 'all_users' | 'admin_only';
+type AdminBookState = 'active' | 'deleted';
 
 type AdminBookRecord = {
 	id: number;
@@ -17,6 +18,7 @@ type AdminBookRecord = {
 	categoryId: number;
 	pageTurnDirection: string;
 	description: string | null;
+	deletedAt: Date | null;
 	category: { id: number; name: string };
 	bookFiles: Array<{
 		id: number;
@@ -28,7 +30,7 @@ type AdminBookRecord = {
 	roleBookPermissions: Array<{ role: { name: string } }>;
 };
 
-function jsonError(c: AdminContext, status: 401 | 403 | 500, message: string, code: string) {
+function jsonError(c: AdminContext, status: 400 | 401 | 403 | 404 | 500, message: string, code: string) {
 	return c.json({ message, code }, status);
 }
 
@@ -48,6 +50,12 @@ async function requireAdmin(c: AdminContext) {
 	return { user };
 }
 
+function parseBookId(raw: string | undefined) {
+	if (!raw || !/^[1-9]\d*$/.test(raw)) return null;
+	const bookId = Number(raw);
+	return Number.isSafeInteger(bookId) ? bookId : null;
+}
+
 function publicationScopeOf(book: AdminBookRecord): PublicationScope {
 	return book.roleBookPermissions.some(({ role }) => role.name === 'user') ? 'all_users' : 'admin_only';
 }
@@ -63,6 +71,7 @@ function toAdminBook(book: AdminBookRecord) {
 		categoryId: book.categoryId,
 		pageTurnDirection: book.pageTurnDirection,
 		description: book.description,
+		deletedAt: book.deletedAt?.toISOString() ?? null,
 		category: book.category,
 		publicationScope: publicationScopeOf(book),
 		file,
@@ -74,8 +83,14 @@ app.get('/books', async (c) => {
 		const admin = await requireAdmin(c);
 		if ('response' in admin) return admin.response;
 
+		const rawState = c.req.query('state') ?? 'active';
+		if (rawState !== 'active' && rawState !== 'deleted') {
+			return jsonError(c, 400, 'state must be active or deleted', 'INVALID_BOOK_STATE');
+		}
+		const state: AdminBookState = rawState;
+
 		const books = await c.get('prisma').book.findMany({
-			where: { deletedAt: null },
+			where: state === 'deleted' ? { deletedAt: { not: null } } : { deletedAt: null },
 			orderBy: { createdAt: 'desc' },
 			include: {
 				category: { select: { id: true, name: true } },
@@ -92,6 +107,65 @@ app.get('/books', async (c) => {
 	} catch (error) {
 		console.error(error);
 		return c.json({ error: 'Failed to load admin books' }, 500);
+	}
+});
+
+app.patch('/books/:bookId/delete', async (c) => {
+	try {
+		const admin = await requireAdmin(c);
+		if ('response' in admin) return admin.response;
+
+		const bookId = parseBookId(c.req.param('bookId'));
+		if (!bookId) return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
+
+		const prisma = c.get('prisma');
+		const current = await prisma.book.findUnique({
+			where: { id: bookId },
+			select: { id: true, deletedAt: true },
+		});
+		if (!current) return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
+		if (current.deletedAt) {
+			return c.json({ id: current.id, deletedAt: current.deletedAt.toISOString() });
+		}
+
+		const deletedAt = new Date();
+		const book = await prisma.book.update({
+			where: { id: bookId },
+			data: { deletedAt },
+			select: { id: true, deletedAt: true },
+		});
+		return c.json({ id: book.id, deletedAt: book.deletedAt?.toISOString() ?? deletedAt.toISOString() });
+	} catch (error) {
+		console.error(error);
+		return c.json({ error: 'Failed to delete book' }, 500);
+	}
+});
+
+app.patch('/books/:bookId/restore', async (c) => {
+	try {
+		const admin = await requireAdmin(c);
+		if ('response' in admin) return admin.response;
+
+		const bookId = parseBookId(c.req.param('bookId'));
+		if (!bookId) return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
+
+		const prisma = c.get('prisma');
+		const current = await prisma.book.findUnique({
+			where: { id: bookId },
+			select: { id: true, deletedAt: true },
+		});
+		if (!current) return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
+		if (!current.deletedAt) return c.json({ id: current.id, deletedAt: null });
+
+		const book = await prisma.book.update({
+			where: { id: bookId },
+			data: { deletedAt: null },
+			select: { id: true, deletedAt: true },
+		});
+		return c.json({ id: book.id, deletedAt: book.deletedAt?.toISOString() ?? null });
+	} catch (error) {
+		console.error(error);
+		return c.json({ error: 'Failed to restore book' }, 500);
 	}
 });
 
