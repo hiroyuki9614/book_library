@@ -6,6 +6,7 @@ export type AdminCategory = {
 };
 
 export type PublicationScope = 'all_users' | 'admin_only';
+export type AdminBookState = 'active' | 'deleted';
 
 export type AdminBookRegistrationInput = {
 	title: string;
@@ -36,9 +37,15 @@ export type AdminBook = {
 	categoryId: number;
 	pageTurnDirection: 'ltr' | 'rtl';
 	description: string | null;
+	deletedAt: string | null;
 	category: AdminCategory;
 	publicationScope: PublicationScope;
 	file: AdminBookFile | null;
+};
+
+type AdminBookDeletionResponse = {
+	id: number;
+	deletedAt: string | null;
 };
 
 export async function fetchAdminCategories(): Promise<AdminCategory[]> {
@@ -46,9 +53,17 @@ export async function fetchAdminCategories(): Promise<AdminCategory[]> {
 	return response.categories;
 }
 
-export async function fetchAdminBooks(): Promise<AdminBook[]> {
-	const response = await apiFetch<{ books: AdminBook[] }>('/api/v1/admin/books');
+export async function fetchAdminBooks(state: AdminBookState = 'active'): Promise<AdminBook[]> {
+	const response = await apiFetch<{ books: AdminBook[] }>(`/api/v1/admin/books?state=${state}`);
 	return response.books;
+}
+
+export function softDeleteAdminBook(bookId: number): Promise<AdminBookDeletionResponse> {
+	return apiFetch<AdminBookDeletionResponse>(`/api/v1/admin/books/${bookId}/delete`, { method: 'PATCH' });
+}
+
+export function restoreAdminBook(bookId: number): Promise<AdminBookDeletionResponse> {
+	return apiFetch<AdminBookDeletionResponse>(`/api/v1/admin/books/${bookId}/restore`, { method: 'PATCH' });
 }
 
 export function registerAdminBook(input: AdminBookRegistrationInput): Promise<AdminBook & { file: AdminBookFile }> {
