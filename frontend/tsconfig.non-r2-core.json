@@ -8,11 +8,15 @@
     "src/api/books.ts",
     "src/api/readingInfo.ts",
     "src/components/BookTable/index.tsx",
+    "src/components/SideNav/index.tsx",
+    "src/components/SideNav/navItems.ts",
     "src/features/components/EpubReader/index.tsx",
     "src/features/components/PdfReader/index.tsx",
     "src/hooks/useBooks.ts",
     "src/hooks/useReadingProgresses.ts",
     "src/pages/Admin/index.tsx",
-    "src/pages/Home/index.tsx"
+    "src/pages/AdminUsers/index.tsx",
+    "src/pages/Home/index.tsx",
+    "src/routes/AppRoutes.tsx"
   ]
 }
