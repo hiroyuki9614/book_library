@@ -3,8 +3,11 @@ import { apiFetch } from '@/lib/api-client';
 export type AdminCategory = {
 	id: number;
 	name: string;
+	displayOrder: number;
+	isActive: boolean;
 };
 
+export type AdminCategorySummary = Pick<AdminCategory, 'id' | 'name'>;
 export type PublicationScope = 'all_users' | 'admin_only';
 export type AdminBookState = 'active' | 'deleted';
 
@@ -38,7 +41,7 @@ export type AdminBook = {
 	pageTurnDirection: 'ltr' | 'rtl';
 	description: string | null;
 	deletedAt: string | null;
-	category: AdminCategory;
+	category: AdminCategorySummary;
 	publicationScope: PublicationScope;
 	file: AdminBookFile | null;
 };
@@ -48,9 +51,34 @@ type AdminBookDeletionResponse = {
 	deletedAt: string | null;
 };
 
+export type AdminCategoryDeletionResponse = {
+	movedBookCount: number;
+	category: Pick<AdminCategory, 'id' | 'name' | 'isActive'>;
+};
+
 export async function fetchAdminCategories(): Promise<AdminCategory[]> {
 	const response = await apiFetch<{ categories: AdminCategory[] }>('/api/v1/admin/categories');
 	return response.categories;
+}
+
+export function createAdminCategory(name: string): Promise<AdminCategory> {
+	return apiFetch<AdminCategory>('/api/v1/admin/categories', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ name }),
+	});
+}
+
+export function renameAdminCategory(categoryId: number, name: string): Promise<AdminCategory> {
+	return apiFetch<AdminCategory>(`/api/v1/admin/categories/${categoryId}`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ name }),
+	});
+}
+
+export function deleteAdminCategory(categoryId: number): Promise<AdminCategoryDeletionResponse> {
+	return apiFetch<AdminCategoryDeletionResponse>(`/api/v1/admin/categories/${categoryId}/delete`, { method: 'PATCH' });
 }
 
 export async function fetchAdminBooks(state: AdminBookState = 'active'): Promise<AdminBook[]> {

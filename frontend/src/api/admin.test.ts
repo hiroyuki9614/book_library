@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { fetchAdminBooks, fetchAdminCategories, registerAdminBook, restoreAdminBook, softDeleteAdminBook } from './admin';
+import {
+	createAdminCategory,
+	deleteAdminCategory,
+	fetchAdminBooks,
+	fetchAdminCategories,
+	registerAdminBook,
+	renameAdminCategory,
+	restoreAdminBook,
+	softDeleteAdminBook,
+} from './admin';
 
 describe('admin API client', () => {
 	afterEach(() => {
@@ -10,11 +19,33 @@ describe('admin API client', () => {
 	test('activeカテゴリをbackendから取得する', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-			new Response(JSON.stringify({ categories: [{ id: 17, name: '技術書' }] }), { status: 200 }),
+			new Response(JSON.stringify({ categories: [{ id: 1, name: '未分類', displayOrder: 0, isActive: true }] }), { status: 200 }),
 		);
 
-		await expect(fetchAdminCategories()).resolves.toEqual([{ id: 17, name: '技術書' }]);
+		await expect(fetchAdminCategories()).resolves.toEqual([{ id: 1, name: '未分類', displayOrder: 0, isActive: true }]);
 		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/admin/categories', expect.objectContaining({ credentials: 'include' }));
+	});
+
+	test('カテゴリ追加・名称変更・削除APIを呼び出す', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		vi.spyOn(globalThis, 'fetch')
+			.mockResolvedValueOnce(new Response(JSON.stringify({ id: 8, name: '科学', displayOrder: 6, isActive: true }), { status: 201 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ id: 8, name: '自然科学', displayOrder: 6, isActive: true }), { status: 200 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ movedBookCount: 2, category: { id: 8, name: '自然科学', isActive: false } }), { status: 200 }));
+
+		await expect(createAdminCategory('科学')).resolves.toMatchObject({ id: 8, name: '科学' });
+		await expect(renameAdminCategory(8, '自然科学')).resolves.toMatchObject({ id: 8, name: '自然科学' });
+		await expect(deleteAdminCategory(8)).resolves.toEqual({ movedBookCount: 2, category: { id: 8, name: '自然科学', isActive: false } });
+
+		expect(fetch).toHaveBeenNthCalledWith(1, 'http://localhost:3000/api/v1/admin/categories', expect.objectContaining({
+			method: 'POST', credentials: 'include', body: JSON.stringify({ name: '科学' }),
+		}));
+		expect(fetch).toHaveBeenNthCalledWith(2, 'http://localhost:3000/api/v1/admin/categories/8', expect.objectContaining({
+			method: 'PATCH', credentials: 'include', body: JSON.stringify({ name: '自然科学' }),
+		}));
+		expect(fetch).toHaveBeenNthCalledWith(3, 'http://localhost:3000/api/v1/admin/categories/8/delete', expect.objectContaining({
+			method: 'PATCH', credentials: 'include',
+		}));
 	});
 
 	test('保存済み通常書籍一覧をbackendから取得する', async () => {
