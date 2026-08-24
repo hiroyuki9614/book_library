@@ -3,6 +3,7 @@ name: Non-R2 reading and admin core CI
 on:
   pull_request:
     paths:
+      - 'backend/prisma/migrations/**'
       - 'backend/src/index.ts'
       - 'backend/src/routes/books/**'
       - 'backend/src/routes/admin/**'
@@ -37,7 +38,7 @@ jobs:
 
       - name: Backend focused regression tests
         working-directory: backend
-        run: npm run test -- src/routes/books/stateRoutes.test.ts src/routes/books/routes.test.ts src/routes/books/routes.epub.test.ts src/routes/admin/listRoutes.test.ts src/routes/admin/registration.test.ts
+        run: npm run test -- src/routes/books/stateRoutes.test.ts src/routes/books/routes.test.ts src/routes/books/routes.epub.test.ts src/routes/admin/listRoutes.test.ts src/routes/admin/categoryRoutes.test.ts src/routes/admin/registration.test.ts
 
       - name: Backend build
         working-directory: backend
