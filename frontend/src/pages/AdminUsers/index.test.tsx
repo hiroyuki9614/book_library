@@ -84,7 +84,8 @@ describe('AdminUsers', () => {
 		await getByRole('button', { name: '利用停止', exact: true }).click();
 		await vi.waitFor(() => expect(mocks.disableAdminUser).toHaveBeenCalledWith(7));
 
-		await getByRole('button', { name: '利用再開', exact: true }).click();
+		const restoreButtons = getByRole('button', { name: '利用再開', exact: true });
+		await restoreButtons.nth(1).click();
 		await vi.waitFor(() => expect(mocks.restoreAdminUser).toHaveBeenCalledWith(8));
 	});
 
