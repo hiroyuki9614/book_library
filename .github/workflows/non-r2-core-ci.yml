@@ -10,10 +10,13 @@ on:
       - 'frontend/src/api/admin*'
       - 'frontend/src/api/readingInfo*'
       - 'frontend/src/components/BookTable/**'
+      - 'frontend/src/components/SideNav/**'
       - 'frontend/src/features/components/EpubReader/**'
       - 'frontend/src/features/components/PdfReader/**'
       - 'frontend/src/pages/Admin/**'
+      - 'frontend/src/pages/AdminUsers/**'
       - 'frontend/src/pages/Home/**'
+      - 'frontend/src/routes/AppRoutes.tsx'
       - 'frontend/tsconfig.non-r2-core.json'
       - '.github/workflows/non-r2-core-ci.yml'
 
@@ -38,7 +41,7 @@ jobs:
 
       - name: Backend focused regression tests
         working-directory: backend
-        run: npm run test -- src/routes/books/stateRoutes.test.ts src/routes/books/routes.test.ts src/routes/books/routes.epub.test.ts src/routes/admin/listRoutes.test.ts src/routes/admin/categoryRoutes.test.ts src/routes/admin/registration.test.ts
+        run: npm run test -- src/routes/books/stateRoutes.test.ts src/routes/books/routes.test.ts src/routes/books/routes.epub.test.ts src/routes/admin/listRoutes.test.ts src/routes/admin/categoryRoutes.test.ts src/routes/admin/userRoutes.test.ts src/routes/admin/registration.test.ts
 
       - name: Backend build
         working-directory: backend
@@ -54,7 +57,7 @@ jobs:
 
       - name: Frontend focused tests
         working-directory: frontend
-        run: npm run test -- src/api/admin.test.ts src/api/readingInfo.test.ts src/pages/Admin/index.test.tsx src/features/components/EpubReader/index.test.tsx
+        run: npm run test -- src/api/admin.test.ts src/api/readingInfo.test.ts src/pages/Admin/index.test.tsx src/pages/AdminUsers/index.test.tsx src/features/components/EpubReader/index.test.tsx
 
       - name: Focused non-R2 typecheck
         working-directory: frontend
