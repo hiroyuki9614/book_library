@@ -11,6 +11,7 @@ import { createOpenApiHandler } from './routes/openApi/route.js';
 import adminCategoryRoutes from './routes/admin/categoryRoutes.js';
 import adminListRoutes from './routes/admin/listRoutes.js';
 import adminRoutes from './routes/admin/routes.js';
+import adminUserRoutes from './routes/admin/userRoutes.js';
 import bookStateRoutes from './routes/books/stateRoutes.js';
 import booksRoutes from './routes/books/routes.js';
 import { getMe } from './routes/me/route.js';
@@ -75,6 +76,7 @@ app.route('/api/v1/books', booksRoutes);
 app.use('/api/v1/admin', withPrisma);
 app.use('/api/v1/admin/*', withPrisma);
 app.route('/api/v1/admin', adminCategoryRoutes);
+app.route('/api/v1/admin', adminUserRoutes);
 app.route('/api/v1/admin', adminListRoutes);
 app.route('/api/v1/admin', adminRoutes);
 
