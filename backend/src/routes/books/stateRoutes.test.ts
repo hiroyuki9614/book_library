@@ -76,6 +76,19 @@ describe('book state routes', () => {
 		}));
 	});
 
+	test('利用停止後でも既存sessionは書籍一覧を利用できる', async () => {
+		mocks.userFindFirst.mockResolvedValue({ id: 7, roleId: 2, deletedAt: new Date('2026-08-24T00:00:00.000Z') });
+		mocks.bookCount.mockResolvedValue(1);
+		mocks.bookFindMany.mockResolvedValue([book]);
+
+		const response = await app.request('/');
+		expect(response.status).toBe(200);
+		expect(mocks.userFindFirst).toHaveBeenCalledWith({
+			where: { id: 7 },
+			select: { id: true, roleId: true },
+		});
+	});
+
 	test('タイトル・著者検索とカテゴリ絞り込みをbackend queryへ適用する', async () => {
 		mocks.bookCount.mockResolvedValue(0);
 		mocks.bookFindMany.mockResolvedValue([]);

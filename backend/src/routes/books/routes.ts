@@ -52,7 +52,7 @@ async function getAuthenticatedUser(c: BooksContext) {
 	}
 
 	const user = await c.get('prisma').user.findFirst({
-		where: { id: userId, deletedAt: null },
+		where: { id: userId },
 		select: { id: true, roleId: true },
 	});
 

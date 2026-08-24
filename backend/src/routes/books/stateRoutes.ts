@@ -95,7 +95,7 @@ async function getAuthenticatedUser(c: BooksContext) {
 	if (!Number.isSafeInteger(userId)) return null;
 
 	return c.get('prisma').user.findFirst({
-		where: { id: userId, deletedAt: null },
+		where: { id: userId },
 		select: { id: true, roleId: true },
 	});
 }

@@ -1,0 +1,38 @@
+name: Disabled user session semantics CI
+
+on:
+  pull_request:
+    paths:
+      - 'backend/src/index.ts'
+      - 'backend/src/routes/auth/**'
+      - 'backend/src/routes/me/**'
+      - 'backend/src/routes/books/**'
+      - 'docs/current-status.md'
+      - '.github/workflows/disabled-user-session-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  disabled-user-session:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Backend install
+        working-directory: backend
+        run: npm ci
+
+      - name: Disabled-user session tests
+        working-directory: backend
+        run: npm run test -- src/routes/auth/disabledUserSignIn.test.ts src/routes/me/route.test.ts src/routes/books/stateRoutes.test.ts src/routes/books/routes.test.ts src/routes/books/routes.epub.test.ts
+
+      - name: Backend build
+        working-directory: backend
+        run: npm run build
