@@ -8,6 +8,7 @@ import { auth } from './lib/auth.js';
 import withPrisma from './lib/prisma.js';
 import disabledUserSignIn from './routes/auth/disabledUserSignIn.js';
 import { createOpenApiHandler } from './routes/openApi/route.js';
+import adminBookMetadataRoutes from './routes/admin/bookMetadataRoutes.js';
 import adminCategoryRoutes from './routes/admin/categoryRoutes.js';
 import adminListRoutes from './routes/admin/listRoutes.js';
 import adminRoutes from './routes/admin/routes.js';
@@ -75,6 +76,7 @@ app.route('/api/v1/books', booksRoutes);
 
 app.use('/api/v1/admin', withPrisma);
 app.use('/api/v1/admin/*', withPrisma);
+app.route('/api/v1/admin', adminBookMetadataRoutes);
 app.route('/api/v1/admin', adminCategoryRoutes);
 app.route('/api/v1/admin', adminUserRoutes);
 app.route('/api/v1/admin', adminListRoutes);
