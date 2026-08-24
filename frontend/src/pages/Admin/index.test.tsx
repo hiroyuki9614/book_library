@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
 	renameAdminCategory: vi.fn(),
 	softDeleteAdminBook: vi.fn(),
 	restoreAdminBook: vi.fn(),
+	updateAdminBookMetadata: vi.fn(),
 }));
 
 vi.mock('@/api/admin', () => ({
@@ -21,6 +22,7 @@ vi.mock('@/api/admin', () => ({
 	renameAdminCategory: mocks.renameAdminCategory,
 	softDeleteAdminBook: mocks.softDeleteAdminBook,
 	restoreAdminBook: mocks.restoreAdminBook,
+	updateAdminBookMetadata: mocks.updateAdminBookMetadata,
 }));
 
 vi.mock('@/components/forms/BookRegistar', () => ({
@@ -62,6 +64,43 @@ vi.mock('@/components/forms/BookRegistar', () => ({
 	),
 }));
 
+vi.mock('@/components/forms/BookEditor', () => ({
+	default: ({ book, onSubmit }: { book: any; onSubmit: (values: any) => Promise<void> }) => (
+		<div>
+			<button
+				type='button'
+				onClick={() => onSubmit({
+					title: '更新済みPDF',
+					authorName: 'Updated Author',
+					publisher: '',
+					publishedAt: '',
+					categoryId: book.categoryId,
+					pageTurnDirection: book.pageTurnDirection,
+					description: '',
+					publicationScope: book.publicationScope,
+				})}
+			>
+				テスト編集
+			</button>
+			<button
+				type='button'
+				onClick={() => onSubmit({
+					title: book.title,
+					authorName: book.authorName ?? '',
+					publisher: book.publisher ?? '',
+					publishedAt: '',
+					categoryId: book.categoryId,
+					pageTurnDirection: book.pageTurnDirection,
+					description: book.description ?? '',
+					publicationScope: 'all_users',
+				})}
+			>
+				全ユーザー公開テスト
+			</button>
+		</div>
+	),
+}));
+
 import Admin from './index';
 
 const uncategorized = { id: 1, name: '未分類', displayOrder: 0, isActive: true };
@@ -96,6 +135,19 @@ describe('Admin persisted book management', () => {
 		mocks.deleteAdminCategory.mockResolvedValue({ movedBookCount: 1, category: { id: 17, name: '技術書', isActive: false } });
 		mocks.softDeleteAdminBook.mockResolvedValue({ id: 10, deletedAt: '2026-08-24T10:00:00.000Z' });
 		mocks.restoreAdminBook.mockResolvedValue({ id: 10, deletedAt: null });
+		mocks.updateAdminBookMetadata.mockImplementation(async (_bookId: number, input: any) => ({
+			id: 10,
+			title: input.title,
+			authorName: input.authorName || null,
+			publisher: input.publisher || null,
+			publishedAt: input.publishedAt || null,
+			categoryId: input.categoryId,
+			pageTurnDirection: input.pageTurnDirection,
+			description: input.description || null,
+			deletedAt: null,
+			category: { id: input.categoryId, name: input.categoryId === 1 ? '未分類' : '技術書' },
+			publicationScope: input.publicationScope,
+		}));
 		mocks.registerAdminBook.mockImplementation(async (input: { title: string; categoryId: number; file: File; publicationScope: string }) => ({
 			id: 21,
 			title: input.title,
@@ -155,6 +207,34 @@ describe('Admin persisted book management', () => {
 			title: '未分類登録',
 			categoryId: 1,
 		}));
+	});
+
+	test('書籍情報を編集してファイル表示を保持する', async () => {
+		mocks.fetchAdminBooks.mockResolvedValue([activeBook]);
+		const { getByRole, getByText } = await render(<Admin />);
+		await vi.waitFor(() => expect(mocks.fetchAdminBooks).toHaveBeenCalledWith('active'));
+
+		await getByRole('button', { name: '編集', exact: true }).click();
+		await getByRole('button', { name: 'テスト編集', exact: true }).click();
+		await vi.waitFor(() => expect(mocks.updateAdminBookMetadata).toHaveBeenCalledWith(10, expect.objectContaining({ title: '更新済みPDF' })));
+		await expect.element(getByText('更新済みPDF')).toBeInTheDocument();
+		await expect.element(getByText('saved.pdf')).toBeInTheDocument();
+	});
+
+	test('管理者限定から全ユーザー公開への変更は確認後だけ実行する', async () => {
+		mocks.fetchAdminBooks.mockResolvedValue([activeBook]);
+		const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
+		const { getByRole, getByText } = await render(<Admin />);
+		await vi.waitFor(() => expect(mocks.fetchAdminBooks).toHaveBeenCalledWith('active'));
+
+		await getByRole('button', { name: '編集', exact: true }).click();
+		await getByRole('button', { name: '全ユーザー公開テスト', exact: true }).click();
+		expect(confirm).toHaveBeenCalledTimes(1);
+		expect(mocks.updateAdminBookMetadata).not.toHaveBeenCalled();
+
+		await getByRole('button', { name: '全ユーザー公開テスト', exact: true }).click();
+		await vi.waitFor(() => expect(mocks.updateAdminBookMetadata).toHaveBeenCalledWith(10, expect.objectContaining({ publicationScope: 'all_users' })));
+		await expect.element(getByText('全ユーザー公開')).toBeInTheDocument();
 	});
 
 	test('通常書籍を論理削除し、削除済み一覧から復元できる', async () => {
