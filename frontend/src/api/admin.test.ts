@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { fetchAdminBooks, fetchAdminCategories, registerAdminBook } from './admin';
+import { fetchAdminBooks, fetchAdminCategories, registerAdminBook, restoreAdminBook, softDeleteAdminBook } from './admin';
 
 describe('admin API client', () => {
 	afterEach(() => {
@@ -17,7 +17,7 @@ describe('admin API client', () => {
 		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/admin/categories', expect.objectContaining({ credentials: 'include' }));
 	});
 
-	test('保存済みadmin書籍一覧をbackendから取得する', async () => {
+	test('保存済み通常書籍一覧をbackendから取得する', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
 			new Response(JSON.stringify({
@@ -30,6 +30,7 @@ describe('admin API client', () => {
 					categoryId: 17,
 					pageTurnDirection: 'ltr',
 					description: null,
+					deletedAt: null,
 					category: { id: 17, name: '技術書' },
 					publicationScope: 'all_users',
 					file: { id: 20, extension: 'epub', mimeType: 'application/epub+zip', originalFileName: 'book.epub', fileSize: 1024 },
@@ -38,9 +39,29 @@ describe('admin API client', () => {
 		);
 
 		await expect(fetchAdminBooks()).resolves.toEqual([
-			expect.objectContaining({ id: 10, title: 'Persisted EPUB', publicationScope: 'all_users' }),
+			expect.objectContaining({ id: 10, title: 'Persisted EPUB', deletedAt: null, publicationScope: 'all_users' }),
 		]);
-		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/admin/books', expect.objectContaining({ credentials: 'include' }));
+		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/admin/books?state=active', expect.objectContaining({ credentials: 'include' }));
+	});
+
+	test('削除済み一覧をstate=deletedで取得する', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({ books: [] }), { status: 200 }));
+
+		await expect(fetchAdminBooks('deleted')).resolves.toEqual([]);
+		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/admin/books?state=deleted', expect.objectContaining({ credentials: 'include' }));
+	});
+
+	test('書籍をPATCHで論理削除・復元する', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		vi.spyOn(globalThis, 'fetch')
+			.mockResolvedValueOnce(new Response(JSON.stringify({ id: 10, deletedAt: '2026-08-24T10:00:00.000Z' }), { status: 200 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ id: 10, deletedAt: null }), { status: 200 }));
+
+		await expect(softDeleteAdminBook(10)).resolves.toMatchObject({ id: 10, deletedAt: expect.any(String) });
+		await expect(restoreAdminBook(10)).resolves.toEqual({ id: 10, deletedAt: null });
+		expect(fetch).toHaveBeenNthCalledWith(1, 'http://localhost:3000/api/v1/admin/books/10/delete', expect.objectContaining({ method: 'PATCH', credentials: 'include' }));
+		expect(fetch).toHaveBeenNthCalledWith(2, 'http://localhost:3000/api/v1/admin/books/10/restore', expect.objectContaining({ method: 'PATCH', credentials: 'include' }));
 	});
 
 	test('EPUBとmetadataと公開範囲をmultipartでfull registration APIへ送る', async () => {
