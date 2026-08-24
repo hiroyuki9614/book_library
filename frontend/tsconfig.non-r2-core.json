@@ -16,7 +16,6 @@
     "src/hooks/useReadingProgresses.ts",
     "src/pages/Admin/index.tsx",
     "src/pages/AdminUsers/index.tsx",
-    "src/pages/Home/index.tsx",
-    "src/routes/AppRoutes.tsx"
+    "src/pages/Home/index.tsx"
   ]
 }
