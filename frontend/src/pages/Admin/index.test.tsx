@@ -197,12 +197,12 @@ describe('Admin persisted book management', () => {
 
 	test('カテゴリ削除後にカテゴリ一覧と書籍一覧を再取得する', async () => {
 		mocks.fetchAdminBooks.mockResolvedValueOnce([activeBook]).mockResolvedValueOnce([{ ...activeBook, categoryId: 1, category: { id: 1, name: '未分類' } }]);
-		const { getByRole, getByText } = await render(<Admin />);
+		const { getByRole } = await render(<Admin />);
 		await vi.waitFor(() => expect(mocks.fetchAdminBooks).toHaveBeenCalledWith('active'));
 		await getByRole('button', { name: 'カテゴリ削除' }).click();
 
 		await vi.waitFor(() => expect(mocks.deleteAdminCategory).toHaveBeenCalledWith(17));
 		await vi.waitFor(() => expect(mocks.fetchAdminBooks).toHaveBeenCalledTimes(2));
-		await expect.element(getByText('未分類', { exact: true })).toBeInTheDocument();
+		await expect.element(getByRole('cell', { name: '未分類', exact: true })).toBeInTheDocument();
 	});
 });
