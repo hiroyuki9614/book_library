@@ -7,6 +7,7 @@ export type AdminCategory = {
 	isActive: boolean;
 };
 
+export type AdminCategorySummary = Pick<AdminCategory, 'id' | 'name'>;
 export type PublicationScope = 'all_users' | 'admin_only';
 export type AdminBookState = 'active' | 'deleted';
 
@@ -40,7 +41,7 @@ export type AdminBook = {
 	pageTurnDirection: 'ltr' | 'rtl';
 	description: string | null;
 	deletedAt: string | null;
-	category: AdminCategory;
+	category: AdminCategorySummary;
 	publicationScope: PublicationScope;
 	file: AdminBookFile | null;
 };
