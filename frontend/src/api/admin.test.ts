@@ -13,6 +13,7 @@ import {
 	restoreAdminBook,
 	restoreAdminUser,
 	softDeleteAdminBook,
+	updateAdminBookMetadata,
 } from './admin';
 
 describe('admin API client', () => {
@@ -113,6 +114,49 @@ describe('admin API client', () => {
 			expect.objectContaining({ id: 10, title: 'Persisted EPUB', deletedAt: null, publicationScope: 'all_users' }),
 		]);
 		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/admin/books?state=active', expect.objectContaining({ credentials: 'include' }));
+	});
+
+	test('書籍情報と公開範囲をPATCHで更新する', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({
+			id: 10,
+			title: 'Updated Book',
+			authorName: 'Author',
+			publisher: null,
+			publishedAt: null,
+			categoryId: 17,
+			pageTurnDirection: 'ltr',
+			description: null,
+			deletedAt: null,
+			category: { id: 17, name: '技術書' },
+			publicationScope: 'all_users',
+		}), { status: 200 }));
+
+		await expect(updateAdminBookMetadata(10, {
+			title: ' Updated Book ',
+			authorName: ' Author ',
+			publisher: '',
+			publishedAt: '',
+			categoryId: 17,
+			pageTurnDirection: 'ltr',
+			description: '',
+			publicationScope: 'all_users',
+		})).resolves.toMatchObject({ id: 10, title: 'Updated Book', publicationScope: 'all_users' });
+
+		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/admin/books/10', expect.objectContaining({
+			method: 'PATCH',
+			credentials: 'include',
+			body: JSON.stringify({
+				title: 'Updated Book',
+				authorName: 'Author',
+				publisher: '',
+				publishedAt: '',
+				categoryId: 17,
+				pageTurnDirection: 'ltr',
+				description: '',
+				publicationScope: 'all_users',
+			}),
+		}));
 	});
 
 	test('削除済み一覧をstate=deletedで取得する', async () => {
