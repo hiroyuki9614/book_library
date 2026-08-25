@@ -11,6 +11,7 @@ on:
       - 'frontend/src/api/readingInfo*'
       - 'frontend/src/components/BookTable/**'
       - 'frontend/src/components/SideNav/**'
+      - 'frontend/src/components/forms/BookEditor/**'
       - 'frontend/src/features/components/EpubReader/**'
       - 'frontend/src/features/components/PdfReader/**'
       - 'frontend/src/pages/Admin/**'
@@ -41,7 +42,7 @@ jobs:
 
       - name: Backend focused regression tests
         working-directory: backend
-        run: npm run test -- src/routes/books/stateRoutes.test.ts src/routes/books/routes.test.ts src/routes/books/routes.epub.test.ts src/routes/admin/listRoutes.test.ts src/routes/admin/categoryRoutes.test.ts src/routes/admin/userRoutes.test.ts src/routes/admin/registration.test.ts
+        run: npm run test -- src/routes/books/stateRoutes.test.ts src/routes/books/routes.test.ts src/routes/books/routes.epub.test.ts src/routes/admin/listRoutes.test.ts src/routes/admin/categoryRoutes.test.ts src/routes/admin/userRoutes.test.ts src/routes/admin/bookMetadataRoutes.test.ts src/routes/admin/registration.test.ts
 
       - name: Backend build
         working-directory: backend

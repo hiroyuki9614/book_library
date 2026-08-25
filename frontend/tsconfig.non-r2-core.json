@@ -10,6 +10,7 @@
     "src/components/BookTable/index.tsx",
     "src/components/SideNav/index.tsx",
     "src/components/SideNav/navItems.ts",
+    "src/components/forms/BookEditor/index.tsx",
     "src/features/components/EpubReader/index.tsx",
     "src/features/components/PdfReader/index.tsx",
     "src/hooks/useBooks.ts",
