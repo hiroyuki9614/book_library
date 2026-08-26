@@ -1,41 +1,43 @@
-# ガイドライン
+# 開発ガイドライン
 
-## 命名規則
+- 最終更新: 2026-08-14
+- プロジェクトルールの正本: `../AGENTS.md`
 
-原則、[Naming cheatsheet](https://github.com/kettanaito/naming-cheatsheet)
-に従うこと。
+この文書は日常的に参照する命名規則の要約です。`AGENTS.md` と矛盾する場合は `AGENTS.md` を優先します。
 
-また、Typescriptの命名規則については、[TypeScript Deep Dive](https://typescript-jp.gitbook.io/deep-dive/styleguide)に従うこと。
+## TypeScript / React
 
-Reactの命名規則については、[Airbnb React/JSX Style Guide](https://github.com/airbnb/javascript/tree/master/react)に従うこと。
+- 変数・関数: `camelCase`
+- React component: `PascalCase`
+- 型: `PascalCase`
+- 定数: `UPPER_SNAKE_CASE` を基本とする
 
-### ファイル名
+## ファイル名
 
-PascalCaseで命名すること。
+役割と既存構成へ合わせます。
 
-### 変数名
+- React component: `PascalCase` を優先
+- 通常module: 既存のcamelCaseまたは小文字命名を維持
+- 規約統一だけを目的に既存fileを大量renameしない
 
-camelCaseで命名すること。
+旧文書の「全ファイルをPascalCase」と読める規則は、現在の `api-client.ts`、`readingInfo.ts`、`routes.ts` などの構成と一致しないため廃止します。
 
-### 定数名
+## Database
 
-全て大文字で命名すること。単語の区切りはアンダースコアとすること。
+- Prisma model: PascalCase単数形
+- DB table / column: snake_case
+- DB構造は `backend/prisma/schema.prisma` を正本とする
 
-### 関数名
+## Tooling
 
-camelCaseで命名すること。
+各packageの `package.json` に存在するscriptを使用します。存在しないformat/typecheck scriptを推測で実行しません。
 
-### ファイル名
+## Documentation
 
-コンポーネントはPascalCaseで命名すること。
-その他関数を定義するファイルはcamelCaseで命名すること。
+- 正式要件: `requirements.md`
+- 現在状態: `current-status.md`
+- 現在実装済みAPI: `api.yaml`
+- DB説明: `database.md`
+- 実行計画: `mvp_plan.md`
 
-### コンポーネント名
-
-PascalCaseで命名すること。
-また、ファイル名と同じ名前にすること。
-
-### フォーマット
-
-コードフォーマットは
-ESLint / Prettier に従うこと。
+暫定実装を正式要件として書き換えず、要件・実装・現在状態を分離して管理します。

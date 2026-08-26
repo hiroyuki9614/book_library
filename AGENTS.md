@@ -4,8 +4,7 @@
 
 BeLib is a personal web application for managing and reading EPUB/PDF files in the browser.
 
-The project prioritizes a small, working MVP over broad feature coverage.
-Implement only what is necessary for the requested task, and avoid adding speculative features.
+Prioritize a small working MVP over broad feature coverage. Implement only what is needed for the requested task and avoid speculative features.
 
 ## Tech Stack
 
@@ -24,242 +23,211 @@ Implement only what is necessary for the requested task, and avoid adding specul
 - Hono
 - Prisma
 - PostgreSQL
+- Better Auth
 
-## Core Domain
+## Current domain boundary
 
-The MVP focuses on these features:
+BeLib MVP focuses on:
 
-- User authentication
-- Book management
-- Category selection from predefined categories
-- EPUB/PDF file metadata management
-- Role-based book viewing permissions
-- Reading progress management
+- user authentication
+- book management
+- predefined category selection
+- EPUB/PDF file metadata
+- role-based book viewing permissions
+- reading progress
 
-The current MVP database models are:
+Current Prisma models include:
+
+### Authentication infrastructure
 
 - User
+- Session
+- Account
+- Verification
 - Role
+
+### BeLib domain
+
 - Book
 - Category
 - BookFile
 - ReadingInfo
 - RoleBookPermission
 
-Do not introduce second-phase tables unless explicitly requested.
-Examples of second-phase features are tags, bookmarks, notes, reviews, reading history, authors table, shared URLs, and access logs.
+Do not introduce second-phase tables unless explicitly requested. Examples include tags, bookmarks, notes, reviews, reading history, a separate authors table, shared URLs, and access logs.
 
-## Source of Truth
+## Source of truth
 
-Use `schema.prisma` as the source of truth for database structure.
+Use `backend/prisma/schema.prisma` as the source of truth for database structure.
 
-When changing database-related code, keep these in sync when relevant:
+When database structure changes, keep relevant artifacts in sync:
 
 - `schema.prisma`
-- Prisma migrations
-- database definition documentation
-- ER diagram
-- related TypeScript types
+- new Prisma migrations
+- generated client when required
+- `docs/database.md`
+- `docs/ER図.svg`
+- related TypeScript/API definitions and tests
 
-Do not keep old columns or duplicate permission logic.
+Important current rules:
 
-In particular:
+- use `users.role_id`, not `users.role`
+- do not add `books.role_id`
+- use `role_book_permissions` for role-based book viewing permission
+- use `book_files.book_id`
+- use `reading_infos`
+- `reading_infos.current_position` stays nullable text so PDF pages and future EPUB positions can share the model
+- `reading_infos.read_status` defaults to `unread`
+- `books.page_turn_direction` defaults to `ltr`
+- credential storage is owned by the current Better Auth model; do not add a duplicate user credential column
 
-- Use `users.role_id`, not `users.role`.
-- Do not add `books.role_id`.
-- Use `role_book_permissions` for role-based book viewing permissions.
-- Use `book_files.book_id`, not `book_files.book_file_id`.
-- Use `reading_infos`, not `reading_statuses`.
-- `reading_infos.current_position` must be nullable text because EPUB CFI may be stored.
-- `reading_infos.read_status` defaults to `unread`.
-- `books.page_turn_direction` defaults to `ltr`.
+## Documentation responsibilities
 
-## Documentation Reading Policy
+Read only the documents relevant to the task.
 
-Before starting an implementation task, inspect the `docs` directory and read only the documentation relevant to the requested change.
+- target behavior / requirements: `docs/requirements.md`
+- current implementation status and known drift: `docs/current-status.md`
+- implemented `/api/v1` HTTP contract: `docs/api.yaml`
+- execution order / completion gates: `docs/mvp_plan.md`
+- UI/design: `docs/design.md`
+- DB explanation: `docs/database.md`
+- Japanese project-rule summary: `docs/AGENTS_ja.md`
+- development naming/conventions: `docs/guidline.md`
+- generated relations: `docs/ER図.svg`
 
-Do not read every document by default.
-Select documents based on the task scope.
+For database structure, `schema.prisma` wins over prose documentation.
 
-Use the following guide:
+Do not rewrite a confirmed requirement merely because the current implementation is temporary or incomplete. Record implementation drift in `docs/current-status.md` and keep the requirement intact unless the user explicitly changes it.
 
-- Requirements or feature behavior changes: read `docs/requirements.md`
-- UI, layout, or design changes: read `docs/design.md`
-- Database, Prisma, model, relation, or permission changes: read `docs/database.md` and `docs/ER図.svg`
-- Project rules or Japanese notes: read `docs/AGENTS_ja.md`
-- Development conventions or workflow notes: read `docs/guidline.md`
+`docs/old/` is historical material and should not be refreshed to look current.
 
-Use these documents as supporting context.
-For database structure, `schema.prisma` remains the source of truth.
+## Development policy
 
-If the relevant documentation conflicts with `schema.prisma`, prefer `schema.prisma` for database structure and mention the inconsistency in the final response.
+### One feature, one meaningful verification
 
-If a change affects behavior, database structure, UI design, or requirements, update the relevant documentation when appropriate.
+For feature implementations and bug fixes, add or update at least one relevant automated test when a meaningful test can be written.
 
-## Development Policy
+A task is not complete until the behavior and its test or verification procedure are both addressed. Do not create meaningless tests merely to satisfy this rule.
 
-### One feature, one test
+Documentation-only, formatting-only, and simple text changes do not require automated tests unless they affect behavior.
 
-For every feature implementation or bug fix, add or update at least one relevant test when a meaningful automated test can be written.
+### Implementation rules
 
-A task is not complete unless the feature and its corresponding test or verification procedure are both addressed.
-If a meaningful automated test cannot be added, explain the reason in the final response and provide a manual verification procedure.
+- keep changes small and focused
+- do not rewrite unrelated code
+- do not rename files, models, routes, or components unless necessary
+- do not change public behavior unless the task asks for it
+- prefer readable code over clever code
+- avoid premature abstraction
+- preserve existing UI structure unless the task is about UI
+- do not add libraries without a clear reason
+- do not change the authentication strategy unless explicitly requested
+- do not install a new test framework automatically
 
-Examples:
+## Naming rules
 
-- Adding a category API requires a category API test.
-- Adding book list filtering requires a filtering test.
-- Adding reading progress update logic requires a reading progress test.
-- Fixing a permission bug requires a permission regression test.
+- Prisma models: PascalCase singular
+- DB tables: snake_case plural via `@@map`
+- DB columns: snake_case via `@map` where needed
+- TypeScript variables/functions: camelCase
+- React components/types: PascalCase
+- constants: UPPER_SNAKE_CASE when appropriate
+- ordinary file names follow the existing local convention; do not force every file to PascalCase
 
-Do not batch many unrelated features into one test.
-Prefer small tests that verify one behavior clearly.
+## Database rules
 
-Do not create meaningless tests only to satisfy the rule.
-Documentation-only changes, formatting-only changes, and simple text changes do not require automated tests unless they affect behavior.
+- use foreign keys for relations
+- use compound unique constraints where duplicate relationships must be prevented
+- `ReadingInfo` is unique by `userId + bookId`
+- `RoleBookPermission` is unique by `roleId + bookId`
+- keep credential handling within the current authentication library/model boundary
+- use existing logical deletion fields where already defined
+- do not add user-specific book permissions unless explicitly requested; MVP uses role-based permissions
+- do not modify an existing committed migration merely to make history match a later schema
+- when schema changes are required, change schema first, create a forward migration, then validate fresh-DB reproducibility
 
-## Implementation Rules
+## Reading status values
 
-- Keep changes small and focused.
-- Do not rewrite unrelated code.
-- Do not rename files, models, routes, or components unless necessary.
-- Do not change public behavior unless the task asks for it.
-- Prefer readable code over clever code.
-- Avoid premature abstraction.
-- Preserve existing UI structure unless the task is about UI changes.
-- Do not add new libraries without a clear reason.
-- When adding a library, explain why it is necessary.
-- Do not introduce or change the authentication strategy unless explicitly requested.
-- Do not install a new test framework automatically. If no test command exists, explain it and provide manual verification steps.
-
-## Naming Rules
-
-- Prisma model names use PascalCase singular names.
-- Database table names use snake_case plural names via `@@map`.
-- Database column names use snake_case via `@map` where needed.
-- TypeScript variables and functions use camelCase.
-- React components use PascalCase.
-- Constants use UPPER_SNAKE_CASE.
-
-Examples:
-
-- Prisma model: `RoleBookPermission`
-- Database table: `role_book_permissions`
-- TypeScript variable: `roleBookPermission`
-
-## Database Rules
-
-- Use foreign keys for relations.
-- Use compound unique constraints where duplicate relationships must be prevented.
-- `ReadingInfo` must be unique by `userId` and `bookId`.
-- `RoleBookPermission` must be unique by `roleId` and `bookId`.
-- Do not store plain text passwords. Use `password_hash`.
-- Use logical deletion with `deleted_at` where already defined.
-- Do not add user-specific book permissions unless explicitly requested. The MVP uses role-based permissions.
-- Do not modify existing migration files after they have been committed unless explicitly requested.
-- If a schema change is required, update the schema first, then validate it.
-
-## Reading Status Values
-
-Use only these values for `read_status`:
+Use only:
 
 - `unread`
 - `reading`
 - `completed`
 
-Do not introduce new status values without updating the documentation, frontend filters, backend validation, and tests.
+Do not introduce a new status without synchronizing requirements, frontend, backend validation, API documentation, and tests.
 
-## Page Turn Direction Values
+## Page-turn direction values
 
-Use only these values for `page_turn_direction`:
+Use only:
 
-- `ltr`: left to right
-- `rtl`: right to left
+- `ltr`
+- `rtl`
 
-Do not use `left`, `right`, `horizontal`, or other ambiguous values.
+## Frontend rules
 
-## Frontend Rules
+- keep components small and readable
+- prefer explicit props over hidden global assumptions
+- use existing loading/skeleton components when practical
+- keep list/table behavior predictable
+- use existing shadcn/ui components where practical
+- avoid global state unless clearly needed
+- do not change routing behavior unless requested
+- distinguish production API paths from remaining mock/local-state screens
 
-- Keep components small and readable.
-- Prefer explicit props over hidden global assumptions.
-- Loading states should use existing skeleton components when available.
-- Keep table/list behavior predictable.
-- Avoid changing layout tokens or design rules unless the task asks for design changes.
-- Use existing shadcn/ui components where practical.
-- Avoid introducing global state unless the task clearly requires it.
-- Do not change routing behavior unless the task asks for it.
+## Backend rules
 
-## Backend Rules
+- validate request input before database writes
+- return clear errors for invalid input, missing records, and permission failures
+- keep route handlers focused
+- extract reusable logic only when reuse is real
+- do not expose uploaded book files from a public directory without backend checks
+- do not commit uploaded EPUB/PDF files
+- protected local storage is acceptable for the current development vertical slice, but it does not cancel the formal storage requirements in `docs/requirements.md`
 
-- Validate request input before database writes.
-- Return clear error responses for invalid input, missing records, and permission failures.
-- Keep route handlers small.
-- Put reusable logic into service/helper functions only when reuse is real.
-- Do not expose uploaded files directly from a public directory without authentication and permission checks.
-- Uploaded EPUB/PDF files must not be committed to the repository.
-- Use local ignored storage for development files unless the task explicitly asks for test fixtures.
+## Permission rules
 
-## Permission Rules
+Admin users may manage books/files through protected backend operations.
+General users may view only books allowed by their role.
 
-Admin users may manage books and files.
-General users may only view books allowed by their role.
+Book access must be enforced through `role_book_permissions` unless the permission model is explicitly changed. Frontend-only checks are insufficient.
 
-Book access must be checked through `role_book_permissions` unless the task explicitly changes the permission model.
+## Testing rules
 
-Do not rely on frontend-only permission checks.
-Backend permission checks are required for protected operations.
+Before completing a behavior-changing task, run the smallest relevant available checks, then expand when needed.
 
-## Testing Rules
+Use scripts that actually exist in `package.json`. Do not invent commands.
 
-Before completing a task, run the most relevant available checks.
-Prefer the smallest command that verifies the change.
+Common available checks include backend/frontend tests, backend/frontend builds, frontend lint, Playwright E2E, and Prisma validation.
 
-Common checks may include:
+When schema changes are made, validate/format Prisma and verify migration consistency as appropriate.
 
-- `npm run test`
-- `npm run lint`
-- `npm run typecheck`
-- `npx prisma validate`
-- `npx prisma format`
+If an automated test is not meaningful or cannot run, explain why and provide a manual verification procedure.
 
-If a command does not exist, do not invent it.
-Inspect `package.json` and use the available scripts.
+## Documentation rules
 
-If no test framework exists for the touched area, do not install one automatically.
-Instead, explain that no automated test command exists and provide a manual verification procedure.
+Update documentation when behavior, schema, setup, API, or accepted execution order changes.
 
-When database schema changes are made, run:
+Keep responsibilities separated:
 
-- `npx prisma format`
-- `npx prisma validate`
+- requirements = what must be true
+- current-status = what is true now
+- API = currently implemented contract
+- schema = current DB structure
+- MVP plan = completion order and gates
+- records/Git history = dated execution evidence
 
-After running `prisma format`, include any formatting changes in the diff.
+Avoid copying volatile SHAs, PR states, and long test logs into enduring design/requirements documents. A status document may reference a checkpoint when needed to identify the inspected implementation.
 
-If migrations are required, create them only when the task explicitly asks or when schema changes are part of the task.
+## Git / change management
 
-## Documentation Rules
+- keep diffs focused
+- preserve unrelated existing changes
+- inspect the relevant diff before saving
+- do not include environment-specific values, local DB dumps, or uploaded book files
+- summarize changes and verification honestly
+- do not hide failing checks
 
-Update documentation when behavior, schema, or setup changes.
-
-For database changes, update:
-
-- Database definition document
-- ER diagram if generated documentation is used
-- Any seed data notes if relevant
-
-Prefer generating documentation from `schema.prisma` where possible.
-
-## Git / Change Management
-
-- Keep diffs focused.
-- Summarize what changed.
-- Mention tests run and their results.
-- Mention tests not run and why.
-- Do not hide failing tests.
-- Do not commit secrets, `.env` files, local database dumps, or uploaded book files.
-- Do not include generated files in the diff unless they are expected project artifacts.
-
-## Final Response Format
+## Final response format
 
 When finishing a task, respond with:
 
@@ -268,33 +236,3 @@ When finishing a task, respond with:
 3. Notes or follow-up items
 
 If something could not be completed, state it clearly.
-
-## Required Documentation Reading
-
-Before starting any implementation task, inspect the `docs` directory and read the relevant project documentation when it exists.
-
-At minimum, check these files before making changes:
-
-- `docs/requirements.md`
-- `docs/design.md`
-- `docs/database.md`
-- `docs/AGENTS_ja.md`
-- `docs/guidline.md`
-- `docs/ER図.svg` when database structure or relationships are involved
-
-Use these documents as supporting context, but keep `schema.prisma` as the source of truth for the actual database structure.
-
-When implementing or modifying a feature, follow this priority order:
-
-1. The user's current request
-2. `AGENTS.md`
-3. `schema.prisma` for database structure
-4. Relevant documents in `docs/`
-5. Existing code behavior
-
-If the documents and `schema.prisma` conflict, do not guess.
-Prefer `schema.prisma` for database structure, and mention the inconsistency in the final response.
-
-If a task affects behavior, database structure, UI design, or requirements, update the relevant documentation in `docs/` when appropriate.
-
-Do not ignore the documentation simply because the requested change appears small.

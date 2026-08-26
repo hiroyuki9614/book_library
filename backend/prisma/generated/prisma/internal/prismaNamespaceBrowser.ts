@@ -188,6 +188,7 @@ export const BookFileScalarFieldEnum = {
   originalFileName: 'originalFileName',
   storedFileName: 'storedFileName',
   fileSize: 'fileSize',
+  fileHash: 'fileHash',
   bookId: 'bookId'
 } as const
 

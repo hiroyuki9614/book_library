@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.epub.tsbuildinfo"
+  },
+  "include": [
+    "src/api/books.ts",
+    "src/pages/ReaderPage/index.tsx",
+    "src/pages/ReaderPageT/index.tsx",
+    "src/features/components/EpubReader/index.tsx"
+  ]
+}

@@ -55,7 +55,7 @@ function RenderInput<T extends FieldValues>({ form, formItem }: RenderInputProps
 					<Field data-invalid={fieldState.invalid}>
 						<FieldLabel htmlFor={formItem.name}>{formItem.label}</FieldLabel>
 						{formItemType({ field, fieldState, formItem })}
-						<p>{fieldState.invalid && <FieldError errors={[fieldState.error]} />}</p>
+						{fieldState.invalid && <FieldError errors={[fieldState.error]} />}
 					</Field>
 				)}
 			/>

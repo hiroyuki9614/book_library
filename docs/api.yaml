@@ -1,1131 +1,706 @@
 openapi: 3.0.3
 info:
-    title: 書籍閲覧・管理API
-    version: 0.5.0
-    description: |
-        このAPIは、epub 及び、pdf形式の書籍を閲覧・管理するソフトウエアのバックエンドAPIです。
-
+  title: BeLib Implemented API
+  version: 0.9.0
+  description: |
+    BeLibで現在実装されている /api/v1 HTTP contract を記録する。
+    将来の正式要件や未実装endpointは docs/requirements.md と docs/mvp_plan.md を参照する。
+    認証はBetter AuthのCookie sessionを使用する。
+    Book fileは現在protected local storageで保持し、Cloudflare R2への正式cutoverは未実装。
 servers:
-    - url: https://app.hiroyuki9614.com/api/v1
-      description: Production
-    - url: http://localhost:3000/api/v1
-      description: Local development
+  - url: http://localhost:3000/api/v1
+    description: Local backend
 
 paths:
-    /me:
-        get:
-            summary: 自分のユーザー情報を取得
-            responses:
-                '200':
-                    description: ユーザー情報の取得に成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/User'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-    /admin/users:
-        get:
-            summary: ユーザー一覧を取得
-            parameters:
-                - name: page
-                  in: query
-                  schema:
-                      type: integer
-                      default: 1
-                      minimum: 1
-                - name: limit
-                  in: query
-                  schema:
-                      type: integer
-                      default: 20
-                      minimum: 1
-                      maximum: 100
-            responses:
-                '200':
-                    description: ユーザー一覧の取得に成功
-                    content:
-                        application/json:
-                            schema:
-                                type: object
-                                properties:
-                                    total:
-                                        type: integer
-                                    page:
-                                        type: integer
-                                        default: 1
-                                        minimum: 1
-                                    limit:
-                                        type: integer
-                                        default: 20
-                                        minimum: 1
-                                        maximum: 100
-                                    users:
-                                        type: array
-                                        items:
-                                            $ref: '#/components/schemas/User'
-                                required:
-                                    - total
-                                    - page
-                                    - limit
-                                    - users
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-        post:
-            summary: ユーザーを作成
-            requestBody:
-                required: true
-                content:
-                    application/json:
-                        schema:
-                            $ref: '#/components/schemas/UserCreateRequest'
-            responses:
-                '201':
-                    description: ユーザーの作成に成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/User'
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
+  /me:
+    get:
+      summary: 認証中のユーザーを取得
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
-    /admin/users/{userId}:
-        get:
-            summary: ユーザー情報を取得
-            parameters:
-                - name: userId
-                  in: path
-                  required: true
-                  description: 取得するユーザーのID
-                  schema:
-                      type: integer
-            responses:
-                '200':
-                    description: ユーザー情報の取得に成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/User'
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: ユーザーが見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-        patch:
-            summary: ユーザー情報を更新
-            parameters:
-                - name: userId
-                  in: path
-                  required: true
-                  description: 更新するユーザーのID
-                  schema:
-                      type: integer
-            requestBody:
-                required: true
-                content:
-                    application/json:
-                        schema:
-                            $ref: '#/components/schemas/UserUpdateRequest'
-            responses:
-                '200':
-                    description: ユーザー情報の更新に成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/User'
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: ユーザーが見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-        delete:
-            summary: ユーザー情報を削除
-            parameters:
-                - name: userId
-                  in: path
-                  required: true
-                  description: 削除するユーザーのID
-                  schema:
-                      type: integer
-            responses:
-                '204':
-                    description: ユーザー情報の削除に成功
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: ユーザーが見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-    /books:
-        get:
-            summary: 書籍一覧を取得
-            responses:
-                '200':
-                    description: 書籍一覧の取得に成功
-                    content:
-                        application/json:
-                            schema:
-                                type: object
-                                properties:
-                                    total:
-                                        type: integer
-                                        description: 書籍の総件数
-                                    page:
-                                        type: integer
-                                        description: 現在のページ番号
-                                        default: 1
-                                        minimum: 1
-                                    limit:
-                                        type: integer
-                                        description: 1ページあたりの件数
-                                        default: 20
-                                        minimum: 1
-                                        maximum: 100
-                                    books:
-                                        type: array
-                                        items:
-                                            $ref: '#/components/schemas/Book'
-                                required:
-                                    - total
-                                    - page
-                                    - limit
-                                    - books
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-            parameters:
-                - name: page
-                  in: query
-                  description: ページ番号
-                  schema:
-                      type: integer
-                      default: 1
-                - name: limit
-                  in: query
-                  description: 1ページあたりの件数
-                  schema:
-                      type: integer
-                      default: 20
-                - name: q
-                  in: query
-                  description: 検索キーワード
-                  schema:
-                      type: string
-                - name: categoryId
-                  in: query
-                  description: カテゴリIDでフィルタリング
-                  schema:
-                      type: integer
-                - name: readStatus
-                  in: query
-                  description: 読書状況
-                  schema:
-                      type: string
-                      enum:
-                          - unread
-                          - reading
-                          - finished
-    /admin/books:
-        post:
-            summary: 書籍を登録
-            requestBody:
-                required: true
-                content:
-                    application/json:
-                        schema:
-                            $ref: '#/components/schemas/BookCreateRequest'
-            responses:
-                '201':
-                    description: 書籍の登録に成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Book'
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-    /admin/books/{bookId}:
-        patch:
-            summary: 書籍情報を更新
-            parameters:
-                - name: bookId
-                  in: path
-                  required: true
-                  description: 更新する書籍のID
-                  schema:
-                      type: integer
-            requestBody:
-                required: true
-                content:
-                    application/json:
-                        schema:
-                            $ref: '#/components/schemas/BookUpdateRequest'
-            responses:
-                '200':
-                    description: 書籍情報の更新に成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Book'
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: 書籍が見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-        delete:
-            summary: 書籍情報を削除
-            parameters:
-                - name: bookId
-                  in: path
-                  required: true
-                  description: 削除する書籍のID
-                  schema:
-                      type: integer
-            responses:
-                '204':
-                    description: 書籍情報の削除に成功
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: 書籍が見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-    /admin/books/{bookId}/files:
-        get:
-            summary: 書籍ファイルの情報を取得
-            parameters:
-                - name: bookId
-                  in: path
-                  required: true
-                  description: 取得する書籍のID
-                  schema:
-                      type: integer
-            responses:
-                '200':
-                    description: 書籍ファイル情報の取得に成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/BookFile'
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: 書籍が見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-        post:
-            summary: 書籍ファイルをアップロード
-            parameters:
-                - name: bookId
-                  in: path
-                  required: true
-                  description: アップロードする書籍のID
-                  schema:
-                      type: integer
-            requestBody:
-                required: true
-                content:
-                    multipart/form-data:
-                        schema:
-                            type: object
-                            properties:
-                                file:
-                                    type: string
-                                    format: binary
-                                fileType:
-                                    type: string
-                                    enum:
-                                        - epub
-                                        - pdf
-                            required:
-                                - file
-            responses:
-                '200':
-                    description: 既存の書籍ファイルの差し替えに成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/BookFile'
-                '201':
-                    description: 初回の書籍ファイルアップロードに成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/BookFile'
-                '400':
-                    description: 既にファイルが登録されています
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: 書籍が見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-        delete:
-            summary: 書籍ファイルを削除
-            parameters:
-                - name: bookId
-                  in: path
-                  required: true
-                  description: 削除する書籍のID
-                  schema:
-                      type: integer
-            responses:
-                '204':
-                    description: 書籍ファイルの削除に成功
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: 書籍が見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-    /admin/books/{bookId}/files/download:
-        get:
-            summary: 書籍ファイルをダウンロード
-            parameters:
-                - name: bookId
-                  in: path
-                  required: true
-                  description: ダウンロードする書籍のID
-                  schema:
-                      type: integer
-            responses:
-                '200':
-                    description: 書籍ファイルのダウンロードに成功
-                    content:
-                        application/pdf:
-                            schema:
-                                type: string
-                                format: binary
-                        application/epub+zip:
-                            schema:
-                                type: string
-                                format: binary
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: 書籍が見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-    /books/{bookId}:
-        get:
-            summary: 書籍情報を取得
-            parameters:
-                - name: bookId
-                  in: path
-                  required: true
-                  description: 取得する書籍のID
-                  schema:
-                      type: integer
-            responses:
-                '200':
-                    description: 書籍情報の取得に成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Book'
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: 書籍が見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-    /books/{bookId}/reading-info:
-        get:
-            summary: 読書情報を取得
-            responses:
-                '200':
-                    description: 読書情報の取得に成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/ReadingInfo'
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: 書籍が見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-            parameters:
-                - name: bookId
-                  in: path
-                  required: true
-                  description: 読書情報を取得する書籍のID
-                  schema:
-                      type: integer
-        patch:
-            summary: 読書情報を更新または作成
-            parameters:
-                - name: bookId
-                  in: path
-                  required: true
-                  description: 更新する読書情報の書籍ID
-                  schema:
-                      type: integer
-            requestBody:
-                required: true
-                content:
-                    application/json:
-                        schema:
-                            $ref: '#/components/schemas/ReadingInfoUpdateRequest'
-            responses:
-                '200':
-                    description: 読書情報の更新に成功
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/ReadingInfo'
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: 書籍が見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-    /books/{bookId}/file:
-        get:
-            summary: 書籍ファイルを取得
-            parameters:
-                - name: bookId
-                  in: path
-                  required: true
-                  schema:
-                      type: integer
-            responses:
-                '200':
-                    description: 書籍ファイルの取得に成功
-                    content:
-                        application/pdf:
-                            schema:
-                                type: string
-                                format: binary
-                        application/epub+zip:
-                            schema:
-                                type: string
-                                format: binary
-                '400':
-                    description: リクエストが不正
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '401':
-                    description: 認証エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '403':
-                    description: 認可エラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '404':
-                    description: 書籍またはファイルが見つからない
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-                '500':
-                    description: サーバーエラー
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/Error'
-components:
-    securitySchemes:
-        bearerAuth:
-            type: http
-            scheme: bearer
-            bearerFormat: JWT
-
-    schemas:
-        Error:
-            type: object
-            properties:
-                message:
-                    type: string
-                    example: 入力内容に誤りがあります
-                code:
-                    type: string
-                    example: VALIDATION_ERROR
-                details:
+  /books:
+    get:
+      summary: 閲覧権限のある書籍一覧を取得
+      description: |
+        RoleBookPermissionで現在ユーザーのroleに許可された、論理削除されていない書籍だけを返す。
+        一覧のreadStatusは現在ユーザーのReadingInfoから取得する。
+        EPUBとPDFの両方が存在する場合はEPUBを優先する。
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: q
+          in: query
+          description: タイトルまたは著者名の部分一致検索。最大100文字。
+          schema:
+            type: string
+            maxLength: 100
+        - name: categoryId
+          in: query
+          description: categoryIdによる絞り込み。
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Authorized books
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, page, limit, books]
+                properties:
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  limit:
+                    type: integer
+                  books:
                     type: array
                     items:
-                        type: object
-                        properties:
-                            field:
-                                type: string
-                            message:
-                                type: string
-            required:
-                - message
-                - code
+                      $ref: '#/components/schemas/Book'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
-        User:
-            type: object
-            properties:
-                id:
-                    type: integer
-                name:
-                    type: string
-                email:
-                    type: string
-                    format: email
-                role:
-                    type: string
-            required:
-                - id
-                - name
-                - email
-                - role
-        UserCreateRequest:
-            type: object
-            properties:
-                name:
-                    type: string
-                email:
-                    type: string
-                    format: email
-                password:
-                    type: string
-                    format: password
-                roleId:
-                    type: integer
-            required:
-                - name
-                - email
-                - password
-                - roleId
-        UserUpdateRequest:
-            type: object
-            properties:
-                name:
-                    type: string
-                email:
-                    type: string
-                    format: email
-                roleId:
-                    type: integer
-        Book:
-            type: object
-            properties:
-                createdAt:
-                    type: string
-                    format: date-time
-                updatedAt:
-                    type: string
-                    format: date-time
-                id:
-                    type: integer
-                title:
-                    type: string
-                author:
-                    type: string
-                    nullable: true
-                categoryId:
-                    type: integer
-                    nullable: true
-                readStatus:
-                    type: string
-                    enum:
-                        - unread
-                        - reading
-                        - finished
-                fileType:
-                    type: string
-                    nullable: true
-                    enum:
-                        - epub
-                        - pdf
-                hasFile:
-                    type: boolean
-            required:
-                - id
-                - title
-                - readStatus
-                - hasFile
-                - createdAt
-                - updatedAt
-        BookFile:
-            type: object
-            properties:
-                id:
-                    type: integer
-                bookId:
-                    type: integer
-                fileUrl:
-                    type: string
-                    format: uri
-                fileSize:
-                    type: integer
-                fileType:
-                    type: string
-                    enum:
-                        - epub
-                        - pdf
-                mimeType:
-                    type: string
-            required:
-                - id
-                - bookId
-                - fileUrl
-                - fileSize
-                - fileType
-                - mimeType
-        BookUpdateRequest:
-            type: object
-            properties:
-                title:
-                    type: string
-                author:
-                    type: string
-                    nullable: true
-                categoryId:
-                    type: integer
-                    nullable: true
-        BookCreateRequest:
-            type: object
-            properties:
-                title:
-                    type: string
-                author:
-                    type: string
-                    nullable: true
-                categoryId:
-                    type: integer
-                    nullable: true
-            required:
-                - title
-        ReadingInfo:
-            type: object
-            properties:
-                bookId:
-                    type: integer
-                readStatus:
-                    type: string
-                    enum:
-                        - unread
-                        - reading
-                        - finished
-                currentPosition:
-                    type: string
-                    nullable: true
-                progress:
-                    type: number
-                    format: float
-                    minimum: 0
-                    maximum: 100
-            required:
-                - bookId
-                - readStatus
-        ReadingInfoUpdateRequest:
-            type: object
-            properties:
-                readStatus:
-                    type: string
-                    enum:
-                        - unread
-                        - reading
-                        - finished
-                currentPosition:
-                    type: string
-                    nullable: true
-                progress:
-                    type: number
-                    format: float
-                    minimum: 0
-                    maximum: 100
+  /books/{bookId}:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    get:
+      summary: 閲覧権限のある書籍詳細を取得
+      responses:
+        '200':
+          description: Book detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/BookNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
-security:
-    - bearerAuth: []
+  /books/{bookId}/file:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    get:
+      summary: 認可済みEPUB/PDFを取得
+      description: |
+        protected local storageからbackend経由でstreamする。
+        EPUBとPDFが両方存在する場合はEPUBを優先する。
+        Cloudflare R2 / signed URLへの正式cutoverは未実装。
+      responses:
+        '200':
+          description: Protected EPUB or PDF stream
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              example: private, no-store
+          content:
+            application/epub+zip:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/FileNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /books/{bookId}/reading-info:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    get:
+      summary: 現在ユーザーの読書情報を取得
+      description: |
+        currentPositionはPDFではページ番号文字列、EPUBではCFIを保持できる。
+        numeric currentPositionの場合は互換用currentPageにも復元する。
+      responses:
+        '200':
+          description: Reading info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadingInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/BookNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      summary: PDFページまたはEPUB CFIと読書状態を保存
+      description: |
+        currentPageまたはcurrentPositionのどちらか一方だけを受け取る。
+        currentPageは既存PDF caller互換。
+        readStatusを省略した場合はreading。明示値はreadingまたはcompleted。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/PdfReadingInfoUpdateRequest'
+                - $ref: '#/components/schemas/EpubReadingInfoUpdateRequest'
+      responses:
+        '200':
+          description: Saved reading info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadingInfo'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/BookNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/categories:
+    get:
+      summary: 管理者が登録フォーム用のactiveカテゴリを取得
+      responses:
+        '200':
+          description: Active categories
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [categories]
+                properties:
+                  categories:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CategorySummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/books:
+    get:
+      summary: 管理者が保存済み書籍一覧を取得
+      description: |
+        論理削除されていない書籍をcreatedAt降順で返す。
+        category、先頭BookFile、RoleBookPermissionから復元したpublicationScopeを含む。
+        legacy metadata-only書籍はfile=nullで返す。
+      responses:
+        '200':
+          description: Persisted admin books
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [books]
+                properties:
+                  books:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AdminBookSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      summary: 管理者がメタデータだけを登録する互換endpoint
+      description: |
+        既存vertical-slice caller互換のため維持する。
+        新しいAdmin UIの完全登録は /admin/book-registrations を使用する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminBookCreateRequest'
+      responses:
+        '201':
+          description: Created book metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminBookCreateResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/book-registrations:
+    post:
+      summary: 管理者が書籍情報とEPUB/PDFを一括登録
+      description: |
+        title、active categoryId、publicationScope、EPUB/PDF fileを必須とする。
+        最大200MB。拡張子・MIME・内容を検証し、SHA-256 hashで重複を拒否する。
+        現在はprotected local storageへ保存し、Book + BookFile + RoleBookPermissionをnested createする。
+        DB create失敗時は直前に保存したlocal fileを削除する。
+        Cloudflare R2への正式cutoverは未実装。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AdminBookRegistrationRequest'
+      responses:
+        '201':
+          description: Created book, file, and publication scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminBookRegistrationResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/FileTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/books/{bookId}/files:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    post:
+      summary: 管理者が既存書籍へEPUB/PDFを登録
+      description: |
+        EPUB/PDF、最大200MB。拡張子・MIME・内容とSHA-256 hashを検証する。
+        MVPでは1冊1fileを強制し、既存fileまたは重複hashは409を返す。
+        protected local storageへ保存後にBookFileを作成し、DB失敗時は新規local fileを削除する。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Created BookFile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookFile'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/BookNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/FileTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  parameters:
+    BookId:
+      name: bookId
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+
+  responses:
+    InvalidRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Permission denied
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BookNotFound:
+      description: Book not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    FileNotFound:
+      description: Supported book file not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Duplicate file content or one-file-per-book conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    FileTooLarge:
+      description: File exceeds the 200MB limit
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
+
+  schemas:
+    Error:
+      type: object
+      required: [message, code]
+      properties:
+        message:
+          type: string
+        code:
+          type: string
+
+    CurrentUser:
+      type: object
+      required: [id, name, email, role]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+
+    CategorySummary:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+
+    Book:
+      type: object
+      required: [id, title, category, pageTurnDirection, readStatus, hasFile, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        authorName:
+          type: string
+          nullable: true
+        publishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        publisher:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        category:
+          $ref: '#/components/schemas/CategorySummary'
+        pageTurnDirection:
+          type: string
+          enum: [ltr, rtl]
+        readStatus:
+          type: string
+          enum: [unread, reading, completed]
+          description: Current user's persisted ReadingInfo state for list/detail responses.
+        hasFile:
+          type: boolean
+        fileType:
+          type: string
+          enum: [pdf, epub]
+          nullable: true
+          description: EPUB is preferred when both supported formats are present.
+        fileSize:
+          type: integer
+          nullable: true
+        originalFileName:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ReadingInfo:
+      type: object
+      required: [bookId, currentPosition, currentPage, readStatus]
+      properties:
+        bookId:
+          type: integer
+        currentPosition:
+          type: string
+          maxLength: 255
+          nullable: true
+          description: PDF page number string or EPUB CFI.
+        currentPage:
+          type: integer
+          minimum: 1
+          description: Numeric compatibility projection; EPUB CFI returns 1 here.
+        readStatus:
+          type: string
+          enum: [unread, reading, completed]
+
+    PdfReadingInfoUpdateRequest:
+      type: object
+      required: [currentPage]
+      additionalProperties: false
+      properties:
+        currentPage:
+          type: integer
+          minimum: 1
+        readStatus:
+          type: string
+          enum: [reading, completed]
+          default: reading
+
+    EpubReadingInfoUpdateRequest:
+      type: object
+      required: [currentPosition]
+      additionalProperties: false
+      properties:
+        currentPosition:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: EPUB CFI or another supported textual reading position.
+        readStatus:
+          type: string
+          enum: [reading, completed]
+          default: reading
+
+    AdminBookCreateRequest:
+      type: object
+      required: [title, categoryId]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+        authorName:
+          type: string
+          nullable: true
+        publisher:
+          type: string
+          nullable: true
+        publishedAt:
+          type: string
+          format: date
+          nullable: true
+        categoryId:
+          type: integer
+          minimum: 1
+        pageTurnDirection:
+          type: string
+          enum: [ltr, rtl]
+        description:
+          type: string
+          nullable: true
+
+    AdminBookCreateResponse:
+      type: object
+      required: [id, title, categoryId]
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        authorName:
+          type: string
+          nullable: true
+        publisher:
+          type: string
+          nullable: true
+        publishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        categoryId:
+          type: integer
+        pageTurnDirection:
+          type: string
+          enum: [ltr, rtl]
+        description:
+          type: string
+          nullable: true
+        category:
+          $ref: '#/components/schemas/CategorySummary'
+
+    AdminBookSummary:
+      allOf:
+        - $ref: '#/components/schemas/AdminBookCreateResponse'
+        - type: object
+          required: [publicationScope, file]
+          properties:
+            publicationScope:
+              type: string
+              enum: [all_users, admin_only]
+            file:
+              allOf:
+                - $ref: '#/components/schemas/AdminBookFileSummary'
+              nullable: true
+
+    AdminBookRegistrationRequest:
+      type: object
+      required: [title, categoryId, publicationScope, file]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+        authorName:
+          type: string
+        publisher:
+          type: string
+        publishedAt:
+          type: string
+          format: date
+        categoryId:
+          type: integer
+          minimum: 1
+        pageTurnDirection:
+          type: string
+          enum: [ltr, rtl]
+          default: ltr
+        description:
+          type: string
+        publicationScope:
+          type: string
+          enum: [all_users, admin_only]
+          description: Required; no default.
+        file:
+          type: string
+          format: binary
+          description: EPUB or PDF, maximum 200MB.
+
+    AdminBookRegistrationResponse:
+      allOf:
+        - $ref: '#/components/schemas/AdminBookCreateResponse'
+        - type: object
+          required: [publicationScope, file]
+          properties:
+            publicationScope:
+              type: string
+              enum: [all_users, admin_only]
+            file:
+              $ref: '#/components/schemas/AdminBookFileSummary'
+
+    AdminBookFileSummary:
+      type: object
+      required: [id, extension, mimeType, originalFileName, fileSize]
+      properties:
+        id:
+          type: integer
+        extension:
+          type: string
+          enum: [pdf, epub]
+        mimeType:
+          type: string
+          enum: [application/pdf, application/epub+zip]
+        originalFileName:
+          type: string
+        fileSize:
+          type: integer
+
+    BookFile:
+      type: object
+      required: [id, extension, mimeType, fileUrl, originalFileName, storedFileName, fileSize, fileHash, bookId, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        extension:
+          type: string
+          enum: [pdf, epub]
+        mimeType:
+          type: string
+          enum: [application/pdf, application/epub+zip]
+        fileUrl:
+          type: string
+          description: Current implementation stores a protected local relative key, not a public URL.
+        originalFileName:
+          type: string
+        storedFileName:
+          type: string
+        fileSize:
+          type: integer
+        fileHash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        bookId:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time

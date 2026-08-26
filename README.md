@@ -1,192 +1,79 @@
-# 1. プロジェクト名
+# BeLib
 
-BeLib
+BeLib は、認証・ロール別閲覧権限・読書進捗を備えた個人向け EPUB / PDF ライブラリを目指すフルスタックWebアプリです。
 
-## 2. アプリ概要
+現在は **PDFのMVPコア縦切りを実装・実runtime検証済み** で、正式MVPに向けてストレージ、公開範囲、EPUB、管理機能を仕上げている段階です。
 
-BeLib は、電子書籍の閲覧体験と書籍メタデータ管理を同じ画面遷移上で扱うことを目的にしたアプリです。  
-現状は MVP 段階で、フロントエンド中心に読書画面と管理画面の基盤を実装しています。
+## 現在できること
 
-## 3. 制作背景・目的
+実装checkpoint `checkpoint/belib-mvp-phase6-20260812` では、次が成立しています。
 
-- EPUB/PDF の閲覧と管理が別アプリに分かれがちな課題を、単一アプリで扱いたかった
-- 読書位置保存やカテゴリ管理を含む「自分用ライブラリ」の体験を検証したかった
-- React + Hono + Prisma を使ったフルスタック構成の設計力を示すポートフォリオを作りたかった
+- Better Auth のCookieセッションでログイン
+- `GET /api/v1/me` によるユーザー/ロール取得
+- `RoleBookPermission` に基づく書籍一覧・詳細の認可
+- 認可済みPDFの保護配信
+- PDFページ移動
+- 読書位置のPostgreSQL保存・復元
+- 未認証401 / 権限なし403
+- 管理者向け最小書籍メタデータ登録API
+- 管理者向け最小PDF登録API
+- 実PostgreSQL + Better Auth Cookie + Playwrightによる主要経路E2E
 
-## 4. 主な機能（実装済み）
+現在の保護ファイル保存はGit管理外のローカルストレージです。これはMVP縦切りの暫定実装であり、正式要件のCloudflare R2を置き換える決定ではありません。
 
-- ログイン画面とルートガード
-  - `GuestRoute` / `RequireAuth` を実装
-  - better-authのCookieセッションと`GET /api/v1/me`から認証ユーザーとロールを取得
-- 書籍一覧画面
-  - 検索、ステータス絞り込み、並び替え UI
-  - 読書サマリー表示（総冊数、読書中、読了、未読、平均進捗）
-- EPUB リーダー
-  - ページ移動、目次ジャンプ、進捗表示
-  - 読書位置を localStorage に保存（仮実装）
-- PDF リーダー
-  - ページ移動、ズーム、表示制御
-- 管理画面
-  - 書籍登録フォーム（React Hook Form + Zod）
-  - 画面内状態への登録反映（仮実装）
-- バックエンド基盤
-  - Hono API (`/health`, `/test`, `/api/auth/*`)
-  - OpenAPI/Scalar (`/doc`, `/scalar`)
-  - Prisma スキーマ（ユーザー、ロール、書籍、書籍ファイル、読書情報など）
+## まだ未完成の主な項目
 
-## 5. スクリーンショット
+- Cloudflare R2保存と正式な署名URL運用
+- EPUBの保護配信・サーバー進捗連携
+- 管理画面UIから実admin APIへの登録接続
+- 書籍ごとの公開範囲選択（全ユーザー / 管理者のみ）
+- `completed` の自動遷移
+- 検索・カテゴリ絞り込み
+- ユーザー管理
+- 論理削除・復元・完全削除
+- ファイル差し替え
+- 既存DBのfile hash backfill方針の確定
 
-現時点では README 掲載用に整理した画面キャプチャが未配置のため、追加予定です。
+詳細は `docs/current-status.md` と `docs/requirements.md` を参照してください。
 
-- ログイン画面
-- 書籍一覧画面
-- EPUB/PDF リーダー画面
-- 管理画面
+## 技術スタック
 
-## 6. 使用技術
+### Frontend
 
-### フロントエンド
-
-- React 19
-- TypeScript
-- Vite
-- React Router
-- Tailwind CSS
-- shadcn/ui
-- React Hook Form
-- Zod
+- React 19 / TypeScript / Vite / React Router
+- Tailwind CSS / shadcn/ui
 - TanStack Query
-- epubjs
-- @embedpdf 系プラグイン
+- React Hook Form / Zod
+- EmbedPDF / React Reader
 
-### バックエンド
+### Backend
 
-- Node.js
-- Hono
-- TypeScript
-- Prisma
-- PostgreSQL
-- better-auth
+- Node.js / Hono / TypeScript
+- Better Auth
+- Prisma / PostgreSQL
+- OpenAPI / Scalar
 
-### 開発・インフラ
+### Test / Development
 
-- Docker
-- Docker Compose
-- pgAdmin4
-- Vitest
+- Vitest / Playwright
+- Docker / Docker Compose / pgAdmin4
 
-## 7. システム構成
+## Source of truth
 
-```mermaid
-flowchart LR
- Browser[Browser]
- FE[Frontend: Vite React]
- BE[Backend: Hono API]
- DB[(PostgreSQL)]
- PGA[pgAdmin4]
+- プロジェクトルール: `AGENTS.md`
+- 正式要件: `docs/requirements.md`
+- 現在状態: `docs/current-status.md`
+- 実装済みHTTP契約: `docs/api.yaml`
+- DB構造: `backend/prisma/schema.prisma`
+- DB説明: `docs/database.md`
+- MVP実行計画: `docs/mvp_plan.md`
+- 画面方針: `docs/design.md`
 
- Browser --> FE
- FE --> BE
- BE --> DB
- PGA --> DB
-```
+DB構造は常に `schema.prisma` を優先します。
 
-開発時の主なポート:
+## ローカル開発
 
-- Frontend: `5173` (Vite デフォルト)
-- Backend API: `3000` (ローカル) / `3001` (Docker)
-- PostgreSQL: `5432`
-- pgAdmin: `8080`
-
-参照仕様書:
-
-- 要件定義: `docs/requirements.md`
-- 画面設計: `docs/design.md`
-- データベース定義: `docs/database.md`
-- API 仕様: `docs/api.yaml`
-- 開発ガイドライン: `docs/guidline.md`
-- プロジェクト運用ルール: `AGENTS.md`
-
-## 8. 技術的に工夫した点
-
-- フロントエンド/バックエンドを別パッケージで分離し、責務を明確化
-- Hono + OpenAPI で API 仕様をコードから確認しやすい構成にした
-- Prisma スキーマで権限や読書状態のリレーションを先に定義し、DB設計を先行
-- `BookFile.fileUrl` を採用し、ローカルパス依存を避けたストレージ抽象化を意識
-- React Hook Form + Zod によりフォーム入力の型安全性とバリデーションを両立
-- Docker Compose で API / DB / pgAdmin を一括起動できる開発環境を用意
-
-## 9. 苦労した点・課題
-
-- 認証基盤（better-auth）導入と既存ロール設計の整合
-- EPUB と PDF でライブラリが異なるため、操作体験の統一設計に工夫が必要
-- 現在は UI 先行のため、一部がモックデータやローカル状態に依存している
-
-## 10. ローカル環境での起動方法
-
-必要ソフトウェア:
-
-- Node.js 22 以上
-- npm
-- Docker / Docker Compose
-
-手順:
-
-1. 環境変数ファイルを作成（リポジトリルート: `.env.development`）
-
-```env
-POSTGRES_USER=user
-POSTGRES_PASSWORD=your_password
-POSTGRES_DB=app_db
-DATABASE_URL=postgresql://user:your_password@localhost:5432/app_db?schema=public
-NODE_ENV=development
-```
-
-バックエンドとフロントエンドの環境変数ファイルを作成する。
-
-```bash
-cp .env.example .env.development
-cp backend/.env.example backend/.env
-cp frontend/.env.example frontend/.env
-```
-
-- `.env.example` の `BETTER_AUTH_SECRET` は意図的に空になっています。DockerCompose（`.env.development`）を利用する場合、`BETTER_AUTH_SECRET` の設定が必須です（未設定・空値の場合はエラーで起動が停止します）。
-- `.env.development` へコピー後、ランダムな値を生成して `BETTER_AUTH_SECRET` 行を置換してください（重複定義を避けるため追記ではなく置換します）。
-  ```bash
-  umask 077
-  secret="$(openssl rand -hex 32)"
-  sed -i "s/^BETTER_AUTH_SECRET=.*/BETTER_AUTH_SECRET=${secret}/" .env.development
-  unset secret
-  ```
-- `VITE_API_BASE_URL` はブラウザから接続するバックエンドURLで、ローカル開発の既定値は `http://localhost:3000`。Docker版バックエンドを使う場合は `http://localhost:3001` に変更する
-- フロントエンドの標準ポートは `5173`、ローカルバックエンドは `3000`、Docker版バックエンドは `3001`
-- Cookieセッションを使用する認証リクエストでは、Fetch APIの`credentials`を有効にする必要がある
-- `frontend/.env` はローカル設定のためGit管理せず、設定例の`frontend/.env.example`だけをコミットする
-
-1. DB と pgAdmin を起動
-
-```bash
-docker compose -f docker-compose.dev.yml --env-file .env.development up -d db pgadmin4 app
-```
-
-Docker Compose の `app`、`db`、`pgadmin4` には `restart: unless-stopped` を設定しています。
-Docker デーモンが起動すると、明示的に停止していないコンテナは自動的に起動します。
-ホスト再起動後も Docker デーモンが自動起動することを確認してください。
-
-```bash
-systemctl is-enabled docker
-docker compose -f docker-compose.dev.yml --env-file .env.development ps
-```
-
-`docker compose stop` または `docker compose down` で明示的に停止した場合は、自動再起動の対象外になるため、次のコマンドで復旧します。
-
-```bash
-docker compose -f docker-compose.dev.yml --env-file .env.development up -d app
-```
-
-Docker の `app` はホスト側の `3001` 番ポートで公開されるため、ローカルで `npm run dev` を起動したままでもポート競合しません。Docker版バックエンドを使う場合は `frontend/.env` の `VITE_API_BASE_URL` を `http://localhost:3001` に変更してください。
-
-1. 依存関係をインストール
+依存関係:
 
 ```bash
 npm install
@@ -194,37 +81,129 @@ npm install --prefix backend
 npm install --prefix frontend
 ```
 
-1. Prisma マイグレーションを適用
-
-```bash
-cd backend
-npx prisma migrate dev
-```
-
-1. 開発サーバーを起動（リポジトリルート）
+開発サーバー:
 
 ```bash
 npm run dev
 ```
 
-アクセス先:
-
 - Frontend: `http://localhost:5173`
-- Backend (ローカル): `http://localhost:3000`
-- Backend (Docker): `http://localhost:3001`
-- OpenAPI (Docker): `http://localhost:3001/doc`
-- Scalar (Docker): `http://localhost:3001/scalar`
-- pgAdmin: `http://localhost:8080`
+- Backend local: `http://localhost:3000`
+- Backend Docker: `http://localhost:3001`
 
-## 11. 今後の予定
+環境変数は各 `.env.example` を参照し、実値をGitへコミットしないでください。現在のローカルPDF縦切りでは `BOOK_FILE_STORAGE_ROOT` を使用します。
 
-- 書籍・カテゴリ・ユーザー管理 API の本実装
-- 管理画面登録処理の DB 永続化
-- 読書位置保存のサーバー連携（localStorage 仮実装から移行）
-- ロールベース権限管理のエンドツーエンド実装
-- オブジェクトストレージ連携（Cloudflare R2 への実アップロード）
-- README 向けスクリーンショット整備
+## Fresh環境のセットアップ
 
-## 12. ライセンス
+READMEだけを入口にfresh環境を作る場合は、task-ownedのPostgreSQLを起動し、committed migration、Prisma Client、開発用seedを順に適用します。seed用パスワードはローカルで設定し、Gitへ保存しないでください。
+
+```bash
+cp .env.example .env.development
+# .env.development の POSTGRES_PASSWORD、DATABASE_URL、BETTER_AUTH_SECRET、
+# SEED_USER_PASSWORD、SEED_ADMIN_PASSWORD をローカル値へ設定する
+docker compose --env-file .env.development -f docker-compose.dev.yml up -d db
+
+npm install
+npm install --prefix backend
+npm install --prefix frontend
+
+set -a
+. ./.env.development
+set +a
+
+(cd backend && npx prisma generate && npx prisma migrate deploy && npx prisma db seed)
+npm run dev
+```
+
+seedを使わず初期管理者だけを作る場合は、`INITIAL_ADMIN_EMAIL`、`INITIAL_ADMIN_NAME`、`INITIAL_ADMIN_PASSWORD` を設定して次を実行します。
+
+```bash
+npm --prefix backend run create:initial-admin
+```
+
+DBを破棄して再現する場合は、同じCompose projectで起動したtask-ownedリソースに対してだけ次を実行します。
+
+```bash
+docker compose --env-file .env.development -f docker-compose.dev.yml down -v
+```
+
+Prismaの現在schema確認:
+
+```bash
+cd backend
+npx prisma validate
+```
+
+新規環境はcommitted migrationだけで再現できます。`backend` の `verify:file-hash-migration` は列契約、Prisma read/write、重複hash拒否を確認します。非空の既存DBへ適用する場合は、実ファイル内容からのhash backfill方針を先に確定してください。
+
+## テスト / Build
+
+```bash
+npm test
+npm run build:backend
+npm run build:frontend
+```
+
+個別:
+
+```bash
+npm --prefix backend test
+npm --prefix frontend test
+npm --prefix frontend run test:e2e
+```
+
+`build:frontend` にはMVP外の既知TypeScriptエラーが残る可能性があります。失敗時は今回変更起因か既存課題かを分離して扱ってください。
+
+## MVP PDF demo / browser E2E
+
+seedのサンプル書籍はメタデータ中心のため、保護PDFを含む最短のdemoは既存のtask-owned E2E fixtureを使用します。`E2E_DATABASE_URL` は必ず `_e2e` で終わるDB名にし、実値は環境変数だけに設定してください。
+
+```bash
+mkdir -p .tmp/e2e-book-files
+docker compose --env-file .env.development -f docker-compose.dev.yml exec -T db \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "CREATE DATABASE booklib_demo_e2e OWNER $POSTGRES_USER;"
+
+export E2E_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/booklib_demo_e2e"
+export E2E_ADMIN_EMAIL="phase-c-admin@example.test"
+export E2E_ADMIN_NAME="Phase C Admin"
+export E2E_ADMIN_PASSWORD="replace-with-a-local-password"
+export E2E_MVP_PASSWORD="replace-with-a-local-password"
+export E2E_BOOK_FILE_STORAGE_ROOT="$(pwd)/.tmp/e2e-book-files"
+export E2E_MVP_METADATA_PATH="$(pwd)/.tmp/e2e-metadata.json"
+
+npm --prefix frontend run test:e2e
+```
+
+このdemoは、ログイン、閲覧可能な書籍一覧、保護PDF、ページ移動、読書位置保存、reload後の復元、権限なしユーザーの拒否を確認します。
+
+同じtask-owned E2E DBとstorageでdemoを再実行する場合は、fixtureが既存roleとPDFを再利用しないため、先に次を実行します。
+
+```bash
+docker compose --env-file .env.development -f docker-compose.dev.yml exec -T db \
+  psql -U "$POSTGRES_USER" -d postgres \
+  -c 'DROP DATABASE IF EXISTS booklib_demo_e2e WITH (FORCE);' \
+  -c "CREATE DATABASE booklib_demo_e2e OWNER $POSTGRES_USER;"
+find .tmp/e2e-book-files -type f -delete
+rm -f .tmp/e2e-metadata.json
+```
+
+## 現在のMVP完了判定
+
+現在の「MVPコア VERIFIED」は次の縦切りを意味します。
+
+```text
+login
+→ permissioned book list
+→ protected PDF
+→ page move
+→ PostgreSQL save
+→ reload
+→ restore
+```
+
+これは `docs/requirements.md` の正式MVP全項目完了を意味しません。正式MVPは、残るストレージ・公開範囲・管理・EPUB等の受け入れ条件を満たした時点で完了とします。
+
+## License
 
 ISC

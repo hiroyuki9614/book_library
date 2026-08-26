@@ -1,0 +1,69 @@
+name: Non-R2 reading and admin core CI
+
+on:
+  pull_request:
+    paths:
+      - 'backend/prisma/migrations/**'
+      - 'backend/src/index.ts'
+      - 'backend/src/routes/books/**'
+      - 'backend/src/routes/admin/**'
+      - 'frontend/src/api/admin*'
+      - 'frontend/src/api/readingInfo*'
+      - 'frontend/src/components/BookTable/**'
+      - 'frontend/src/components/SideNav/**'
+      - 'frontend/src/components/forms/BookEditor/**'
+      - 'frontend/src/features/components/EpubReader/**'
+      - 'frontend/src/features/components/PdfReader/**'
+      - 'frontend/src/pages/Admin/**'
+      - 'frontend/src/pages/AdminUsers/**'
+      - 'frontend/src/pages/Home/**'
+      - 'frontend/src/routes/AppRoutes.tsx'
+      - 'frontend/tsconfig.non-r2-core.json'
+      - '.github/workflows/non-r2-core-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  non-r2-core:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Backend install
+        working-directory: backend
+        run: npm ci
+
+      - name: Backend focused regression tests
+        working-directory: backend
+        run: npm run test -- src/routes/books/stateRoutes.test.ts src/routes/books/routes.test.ts src/routes/books/routes.epub.test.ts src/routes/admin/listRoutes.test.ts src/routes/admin/categoryRoutes.test.ts src/routes/admin/userRoutes.test.ts src/routes/admin/bookMetadataRoutes.test.ts src/routes/admin/registration.test.ts
+
+      - name: Backend build
+        working-directory: backend
+        run: npm run build
+
+      - name: Frontend install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Frontend focused tests
+        working-directory: frontend
+        run: npm run test -- src/api/admin.test.ts src/api/readingInfo.test.ts src/pages/Admin/index.test.tsx src/pages/AdminUsers/index.test.tsx src/features/components/EpubReader/index.test.tsx
+
+      - name: Focused non-R2 typecheck
+        working-directory: frontend
+        run: npx tsc -p tsconfig.non-r2-core.json --noEmit
+
+      - name: Frontend bundle build
+        working-directory: frontend
+        run: npx vite build

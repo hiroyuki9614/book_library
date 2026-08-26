@@ -37,8 +37,14 @@ export const navItems: {
 			className: 'mt-auto',
 			items: [
 				{
-					title: '管理画面',
+					title: '書籍管理',
 					url: '/admin',
+					role: 'admin',
+				},
+				{
+					title: 'ユーザー管理',
+					url: '/admin/users',
+					role: 'admin',
 				},
 				{
 					title: 'ログアウト',
