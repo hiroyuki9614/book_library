@@ -1,10 +1,8 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-08-24
-- Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
-- Current implementation line: `fix/belib-phase-c-fresh-env-repro-20260818` plus focused feature integrations
-- Current non-R2 candidate: `feat/non-r2-reading-admin-core-20260824` / PR #20
-- Default `main` is older than this implementation line and must not be used alone to judge current MVP progress
+- Updated: 2026-08-26
+- Inspected main: `075b9d4118f89f598c13104cf61f013ad48a9521`
+- Purpose: 現在の実装事実、部分実装、正式要件との差分、次の作業境界を記録する
 
 ## Source-of-truth boundary
 
@@ -18,253 +16,94 @@ current user request
 > this status document
 ```
 
-Protected local EPUB/PDF storage is a temporary implementation boundary. It does not replace the confirmed Cloudflare R2 requirement.
+`docs/requirements.md` は正式要件、`backend/prisma/schema.prisma` は現在のDB構造です。保護ローカル保存は暫定実装であり、Cloudflare R2要件を置き換えません。
 
-## High-level state
+## Implemented
 
-```text
-Better Auth session                                  implemented
-GET /api/v1/me                                       implemented
-role-authorized book list/detail                     implemented
-protected PDF delivery                               implemented with local ignored storage
-protected EPUB delivery                              implemented with local ignored storage
-EPUB preferred when EPUB and PDF both exist          implemented
-per-user readStatus in authorized book list          implemented
-book title/author backend search                     implemented
-book categoryId backend filtering                    implemented
-PDF page ReadingInfo persistence                     implemented
-EPUB CFI ReadingInfo persistence                     implemented
-PDF final-page -> completed transition               implemented
-EPUB final-location -> completed transition          implemented
-frontend book/detail/PDF integration                 implemented
-frontend protected EPUB integration                  implemented
-Admin EPUB/PDF full registration                     implemented
-Admin explicit publication scope                     implemented
-Admin persisted book list after reload               implemented
-Home/BookTable readStatus source = backend            implemented
-file_hash migration/schema drift                     resolved and runtime-verified
-README fresh setup / PDF browser demo                 verified on Phase C checkpoint
-Cloudflare R2 / formal file delivery                 not implemented
-full MVP management functions                        not implemented
-```
+### Authentication and user/session behavior
 
-## Book list and authorization
+- Better AuthのCookie sessionを使用しています。
+- `GET /api/v1/me` は認証済みユーザーのID、表示名、メールアドレス、ロールを返します。
+- 利用停止ユーザーの新規メールログインは401で拒否します。
+- 既に確立したsessionは、ユーザーの`deletedAt`に関係なく有効期限まで`/me`、書籍閲覧、読書情報を利用できます。
+- 管理者は一般ユーザーを登録、利用停止、利用再開できます。
+- 管理者は一般ユーザーのcredential accountの仮パスワードを再設定できます。既存sessionは削除しません。
 
-Implemented endpoints:
+### Book viewing and reading state
 
-```text
-GET   /api/v1/books
-GET   /api/v1/books/:bookId
-GET   /api/v1/books/:bookId/file
-GET   /api/v1/books/:bookId/reading-info
-PATCH /api/v1/books/:bookId/reading-info
-```
+- `RoleBookPermission` により許可された、論理削除されていない書籍だけを一覧・詳細・ファイル・読書情報の対象にします。
+- 書籍一覧はページング、タイトル/著者の大文字小文字を区別しない検索、`categoryId`絞り込みに対応します。
+- 一覧・詳細の`readStatus`は現在ユーザー自身の`ReadingInfo`から返します。
+- 認可済みPDF/EPUBをbackend経由で保護配信します。EPUBとPDFの両方がある場合はEPUBを優先します。
+- PDFページ位置とEPUB CFIを`ReadingInfo.currentPosition`へ保存・復元できます。
+- PDFの最終ページ、EPUBの最終locationで`completed`を保存します。
+- 一度`completed`になった読書状態は、途中位置の保存で`reading`へ戻しません。
+- Reader画面は書籍のファイル形式に応じてPDF/EPUB readerへ分岐します。
 
-Current behavior:
+### Admin book and category management
 
-- Better Auth session identifies the current user.
-- books are filtered by `RoleBookPermission` and logical deletion state.
-- list/detail/file/reading-info use the same role-based authorization boundary.
-- list joins only the current user's `ReadingInfo` and returns the persisted `readStatus`.
-- list supports `page`, `limit`, `q`, and `categoryId`.
-- `q` searches title and author name case-insensitively and is limited to 100 characters.
-- `categoryId` must be a positive integer.
-- EPUB is preferred when both supported file formats exist.
-- protected file responses remain backend-mediated and `private, no-store`.
+- EPUB/PDFの拡張子、MIME、内容、200MB上限を検証して、メタデータとファイルを一括登録できます。
+- SHA-256の`BookFile.fileHash`で、論理削除済み書籍を含む同一ファイルの重複登録を拒否します。
+- 登録時の公開範囲は`all_users`または`admin_only`から明示選択し、role permissionsへ保存します。
+- `/admin`はDBから保存済み書籍一覧を再取得し、カテゴリ、公開範囲、ファイル概要を表示します。
+- 書籍メタデータと公開範囲の編集、論理削除、削除済み一覧、復元に対応します。メタデータ/公開範囲の更新では`ReadingInfo`を変更しません。
+- 管理者限定から全ユーザー公開へ変更する場合、Admin UIで確認ダイアログを表示します。
+- カテゴリの一覧、追加、名称変更、inactive化に対応します。使用中カテゴリの書籍は固定の「未分類」へ移動します。
+- `docs/api.yaml`に記載する管理API以外にも、旧vertical slice互換としてmetadata-onlyの`POST /api/v1/admin/books`を保持しています。新規Admin UIはfull registrationを使用します。
 
-Known authorization requirement drift:
+## Partially implemented
 
-- current book access still resolves only non-deleted users.
-- the confirmed requirement says disabling a user should block new login while an already-established session remains valid until session expiry.
-- this session/disabled-user semantic remains a separate non-R2 item.
+- ファイルは`BOOK_FILE_STORAGE_ROOT`配下のprotected local storageへ保存し、認可済みbackendがstreamします。Cloudflare R2への保存切替、signed URL、期限更新、production cutoverは未実装です。
+- 現在の登録経路はMVPで1冊1ファイルを強制します。既存ファイルの差し替え、復旧、R2 object lifecycleは未実装です。
+- 書籍のタイトル/著者検索はbackend APIに実装済みですが、Home画面は取得済み一覧を`BookTable`内でローカル絞り込みしています。
+- `categoryId`のbackend絞り込みは実装済みですが、Home画面にカテゴリ選択UIはありません。
+- Homeの読書状態集計とstatus filterはbackendの`readStatus`を使います。一方、平均進捗率は既存prototype/mockデータに依存しており、reader由来の最終的な百分率 semanticsは未確定です。
+- EPUB/PDFの登録、管理、読書情報のfocused testとbuildはCIで確認していますが、PC ChromeとAndroid Chromeの正式な最終受入は未完了です。
 
-## ReadingInfo
+## Still open
 
-`ReadingInfo.currentPosition VARCHAR(255)` is used without a schema migration for both formats.
+### R2 and file lifecycle
 
-PDF request example:
+- Cloudflare R2へのEPUB/PDF保存と正式なstorage adapter切替
+- 1時間のsigned URL、期限前の自動再発行、再発行時の認可境界に関する正式要件の実装
+- R2保存後のDB失敗時補償、完全削除、ファイル差し替え、復旧
 
-```json
-{
-  "currentPage": 12,
-  "readStatus": "completed"
-}
-```
+### Formal MVP acceptance
 
-EPUB request example:
-
-```json
-{
-  "currentPosition": "epubcfi(/6/4!/4/2/8:0)",
-  "readStatus": "reading"
-}
-```
-
-Rules:
-
-- exactly one of `currentPage` or `currentPosition` is accepted.
-- omitted `readStatus` defaults to `reading` for backward compatibility.
-- explicit status may be `reading` or `completed`.
-- GET returns both `currentPosition` and a numeric compatibility `currentPage`.
-- a numeric position restores the PDF page.
-- an EPUB CFI restores through `currentPosition`; `currentPage` remains the compatibility value `1` for non-numeric positions.
-- EpubReader reads the DB CFI first and keeps `reader-location:<bookId>` localStorage only as a fallback/cache.
-- PDF Reader saves `completed` when the final page is displayed.
-- EPUB Reader saves `completed` when the generated final location is displayed.
-
-Progress percentage is still a separate concern. The DB intentionally does not store percentage. Home's status counts now use backend `readStatus`, while the existing average-progress percentage remains on its prior prototype/mock path until final percentage semantics are defined from each reader.
-
-## Admin
-
-Implemented endpoints:
-
-```text
-GET  /api/v1/admin/categories
-GET  /api/v1/admin/books
-POST /api/v1/admin/books
-POST /api/v1/admin/book-registrations
-POST /api/v1/admin/books/:bookId/files
-```
-
-Full registration behavior:
-
-- Admin UI uses `POST /api/v1/admin/book-registrations`.
-- EPUB/PDF, maximum 200 MB.
-- extension, MIME type, and actual file content are validated.
-- EPUB validation checks the required uncompressed `mimetype` ZIP entry.
-- PDF validation checks the `%PDF-` header.
-- SHA-256 `BookFile.fileHash` rejects duplicate content, including files belonging to logically deleted books.
-- full registration requires explicit `all_users` or `admin_only`; there is no UI default.
-- `all_users` creates admin + user role permissions; `admin_only` creates admin permission only.
-- DB creation failure removes the just-written protected local file.
-- one file per book is enforced on the current MVP registration path.
-
-Persisted Admin list:
-
-- `/admin` loads `GET /api/v1/admin/books` on mount.
-- reload no longer loses the visible administrative book list.
-- the response includes category, publication scope, and the current file summary.
-- legacy metadata-only books remain visible with `file = null`.
-
-Compatibility:
-
-- `POST /api/v1/admin/books` remains as the earlier metadata-only compatibility endpoint.
-- the current Admin UI does not use it for new full registrations.
-
-## Frontend
-
-Connected to real backend paths:
-
-- session/current user
-- authorized book list/detail
-- protected PDF/EPUB
-- PDF ReadingInfo restore/save
-- EPUB CFI restore/save
-- Reader PDF/EPUB dispatch
-- Admin categories
-- Admin EPUB/PDF full registration
-- Admin persisted list reload
-- Home/BookTable read status
-
-The shelf status filter and read-status summary now use the backend-derived book state rather than the old reading-status mock. The old reading-progress mock remains only for percentage display.
-
-## Storage
-
-Current protected file path:
-
-```text
-Admin upload
-  -> backend validation
-  -> protected local storage below BOOK_FILE_STORAGE_ROOT
-  -> BookFile metadata/hash in PostgreSQL
-  -> authorized backend file delivery
-```
-
-Formal target remains:
-
-```text
-protected local storage
-  -> Cloudflare R2
-```
-
-R2 upload, object lifecycle, signed delivery behavior, and production cutover are intentionally untouched by the current non-R2 implementation.
+- 完全削除と、それに伴うR2ファイル・DBの整合性受入
+- readerの位置から算出する最終的な進捗率表示 semantics
+- PostgreSQL backup/restore acceptance
+- PC ChromeおよびAndroid Chromeの正式な正常系受入
 
 ## Database / Prisma
 
-DB structure source of truth: `backend/prisma/schema.prisma`.
+DB構造の正本は`backend/prisma/schema.prisma`です。現在の主要制約は次のとおりです。
 
-Important constraints already present:
+- `BookFile.fileHash`はuniqueです。
+- `ReadingInfo`は`userId + bookId`でuniqueです。
+- `RoleBookPermission`は`roleId + bookId`でuniqueです。
+- `ReadingInfo.currentPosition`はnullableな`VARCHAR(255)`で、PDFページ文字列またはEPUB CFIを保持できます。
+- `ReadingInfo.readStatus`のdefaultは`unread`です。
+- `Book.pageTurnDirection`のdefaultは`ltr`です。
 
-- `BookFile.fileHash` unique.
-- `ReadingInfo` unique by `userId + bookId`.
-- `RoleBookPermission` unique by `roleId + bookId`.
-- `ReadingInfo.currentPosition` is nullable `VARCHAR(255)` and can contain a PDF page string or EPUB CFI.
-- no schema migration is required for the non-R2 ReadingInfo expansion.
+`docs/database.md`はこのschemaの説明であり、型・nullable・default・relationはschemaを優先します。今回の実装確認では文書とschemaのmaterialな矛盾は確認されませんでした。
 
-The earlier fresh PostgreSQL verification for `book_files.file_hash` remains valid and is not modified by this work.
+## Verification basis
 
-## Verification
+関連テストは、認証/session、書籍認可・保護配信、EPUB優先、検索/カテゴリ、ReadingInfo、管理書籍、カテゴリ、一般ユーザー、frontend Admin/Readerを対象にしています。対応するCI workflowは次の4つです。
 
-The non-R2 focused CI covers:
+- `.github/workflows/non-r2-core-ci.yml`
+- `.github/workflows/disabled-user-session-ci.yml`
+- `.github/workflows/admin-registration-ci.yml`
+- `.github/workflows/epub-reader-ci.yml`
 
-```text
-backend:
-  per-user list readStatus
-  title/author + categoryId query contract
-  EPUB CFI save/restore
-  PDF completed persistence
-  Admin persisted list + authorization
-  existing book authorization/file tests
-  existing EPUB protected delivery tests
-  existing Admin registration tests
-  TypeScript build
-
-frontend:
-  Admin API + persisted list
-  ReadingInfo PDF/EPUB payloads
-  Admin page reload + registration
-  EPUB DB CFI restore/save/completed
-  focused production-path TypeScript check
-  Vite production bundle
-```
-
-Existing dedicated Admin registration CI and EPUB protected-reader CI are also retained as regression gates.
-
-## Confirmed requirements still open
-
-R2-dependent:
-
-- Cloudflare R2 upload/storage cutover.
-- formal R2 file-delivery / signed-URL behavior.
-- R2 object cleanup/replacement lifecycle.
-
-Non-R2:
-
-- disabled-user / existing-session semantic alignment.
-- final reader-derived progress-percentage presentation.
-- category management CRUD and Admin UI.
-- general-user administration and disable/restore flow.
-- logical book delete / restore / permanent delete.
-- file replacement and recovery flow.
-- category filtering UI wiring (backend `categoryId` filter exists).
-- PostgreSQL backup/restore acceptance.
-- PC Chrome + Android Chrome final acceptance.
-
-## Current priority excluding R2
-
-1. Close disabled-user / existing-session semantics without weakening new-login blocking.
-2. Connect remaining shelf filtering/category UX to real backend data.
-3. Implement logical book delete/restore/permanent-delete lifecycle.
-4. Implement category management and user administration.
-5. Implement file replacement/recovery while keeping the storage adapter boundary R2-ready.
-6. Replace the remaining percentage prototype with reader-derived display semantics.
-7. Run final backup/restore and browser/device acceptance after the management surface is complete.
+これらは実装範囲の回帰ゲートであり、R2切替、完全削除、backup/restore、PC/Android最終受入の完了を意味しません。
 
 ## Documentation responsibilities
 
-- `docs/requirements.md`: target behavior
-- `backend/prisma/schema.prisma`: current DB structure
-- `docs/api.yaml`: implemented versioned HTTP contract
-- `docs/current-status.md`: current implementation and known drift
-- `docs/mvp_plan.md`: execution order and completion gates
-- Git history / Personal Vault records: dated execution evidence
+- `docs/requirements.md`: 正式なtarget behavior。実装未完了を理由に書き換えない
+- `backend/prisma/schema.prisma`: 現在のDB構造
+- `docs/api.yaml`: 現在実装済みのversioned HTTP contract
+- `docs/current-status.md`: 現在の実装とdrift
+- `docs/mvp_plan.md`: 実行順と完了gate
+- Git履歴: 同期・検証の実行証跡

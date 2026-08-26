@@ -210,11 +210,91 @@ paths:
                   categories:
                     type: array
                     items:
-                      $ref: '#/components/schemas/CategorySummary'
+                      $ref: '#/components/schemas/AdminCategory'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      summary: 管理者がカテゴリを追加
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminCategoryMutationRequest'
+      responses:
+        '201':
+          description: Created category
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminCategory'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/categories/{categoryId}:
+    parameters:
+      - $ref: '#/components/parameters/CategoryId'
+    patch:
+      summary: 管理者がカテゴリ名を変更
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminCategoryMutationRequest'
+      responses:
+        '200':
+          description: Updated category
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminCategory'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CategoryNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/categories/{categoryId}/delete:
+    parameters:
+      - $ref: '#/components/parameters/CategoryId'
+    patch:
+      summary: 管理者がカテゴリをinactive化
+      description: 使用中の書籍は固定の未分類カテゴリへ移動する。
+      responses:
+        '200':
+          description: Deactivated category
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminCategoryDeletionResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CategoryNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -222,9 +302,16 @@ paths:
     get:
       summary: 管理者が保存済み書籍一覧を取得
       description: |
-        論理削除されていない書籍をcreatedAt降順で返す。
+        state=active（既定）またはstate=deletedの書籍をcreatedAt降順で返す。
         category、先頭BookFile、RoleBookPermissionから復元したpublicationScopeを含む。
         legacy metadata-only書籍はfile=nullで返す。
+      parameters:
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [active, deleted]
+            default: active
       responses:
         '200':
           description: Persisted admin books
@@ -306,6 +393,81 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /admin/books/{bookId}:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    patch:
+      summary: 管理者が書籍情報と公開範囲を更新
+      description: 書籍ファイルとReadingInfoは変更しない。削除済み書籍は編集できない。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminBookMetadataUpdateRequest'
+      responses:
+        '200':
+          description: Updated book metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminBookMetadataUpdateResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/BookNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/books/{bookId}/delete:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    patch:
+      summary: 管理者が書籍を論理削除
+      description: deletedAtだけを更新し、ファイルとReadingInfoは保持する。
+      responses:
+        '200':
+          description: Deleted book state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminBookDeletionResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/BookNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/books/{bookId}/restore:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    patch:
+      summary: 管理者が論理削除した書籍を復元
+      responses:
+        '200':
+          description: Restored book state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminBookDeletionResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/BookNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /admin/books/{bookId}/files:
     parameters:
       - $ref: '#/components/parameters/BookId'
@@ -348,10 +510,146 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /admin/users:
+    get:
+      summary: 管理者が一般ユーザー一覧を取得
+      responses:
+        '200':
+          description: General users including disabled users
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AdminUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      summary: 管理者が一般ユーザーを登録
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminUserCreateRequest'
+      responses:
+        '201':
+          description: Created general user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/users/{userId}/disable:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    patch:
+      summary: 管理者が一般ユーザーを利用停止
+      description: deletedAtを設定し、既存sessionとReadingInfoは保持する。
+      responses:
+        '200':
+          description: Disabled user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserStateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/UserNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/users/{userId}/restore:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    patch:
+      summary: 管理者が利用停止中の一般ユーザーを再開
+      responses:
+        '200':
+          description: Restored user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserStateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/UserNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/users/{userId}/password:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    patch:
+      summary: 管理者が一般ユーザーの仮パスワードを再設定
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminPasswordResetRequest'
+      responses:
+        '200':
+          description: Password reset result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminPasswordResetResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/UserNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   parameters:
     BookId:
       name: bookId
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+
+    CategoryId:
+      name: categoryId
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+
+    UserId:
+      name: userId
       in: path
       required: true
       schema:
@@ -385,6 +683,18 @@ components:
             $ref: '#/components/schemas/Error'
     FileNotFound:
       description: Supported book file not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    CategoryNotFound:
+      description: Category not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UserNotFound:
+      description: User not found
       content:
         application/json:
           schema:
@@ -433,6 +743,77 @@ components:
         role:
           type: string
 
+    AdminUser:
+      type: object
+      required: [id, email, name, deletedAt, createdAt]
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        deletedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    AdminUserCreateRequest:
+      type: object
+      required: [email, name, password]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        password:
+          type: string
+          minLength: 8
+
+    AdminUserStateResponse:
+      type: object
+      required: [id, email, name, deletedAt]
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        deletedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    AdminPasswordResetRequest:
+      type: object
+      required: [password]
+      additionalProperties: false
+      properties:
+        password:
+          type: string
+          minLength: 8
+
+    AdminPasswordResetResponse:
+      type: object
+      required: [id, passwordReset]
+      properties:
+        id:
+          type: integer
+        passwordReset:
+          type: boolean
+          enum: [true]
+
     CategorySummary:
       type: object
       required: [id, name]
@@ -441,6 +822,47 @@ components:
           type: integer
         name:
           type: string
+
+    AdminCategory:
+      type: object
+      required: [id, name, displayOrder, isActive]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        displayOrder:
+          type: integer
+        isActive:
+          type: boolean
+
+    AdminCategoryMutationRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+
+    AdminCategoryDeletionResponse:
+      type: object
+      required: [movedBookCount, category]
+      properties:
+        movedBookCount:
+          type: integer
+          minimum: 0
+        category:
+          type: object
+          required: [id, name, isActive]
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+            isActive:
+              type: boolean
 
     Book:
       type: object
@@ -600,8 +1022,12 @@ components:
       allOf:
         - $ref: '#/components/schemas/AdminBookCreateResponse'
         - type: object
-          required: [publicationScope, file]
+          required: [deletedAt, publicationScope, file]
           properties:
+            deletedAt:
+              type: string
+              format: date-time
+              nullable: true
             publicationScope:
               type: string
               enum: [all_users, admin_only]
@@ -609,6 +1035,63 @@ components:
               allOf:
                 - $ref: '#/components/schemas/AdminBookFileSummary'
               nullable: true
+
+    AdminBookMetadataUpdateRequest:
+      type: object
+      required: [title, categoryId, pageTurnDirection, publicationScope]
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+        authorName:
+          type: string
+          nullable: true
+        publisher:
+          type: string
+          nullable: true
+        publishedAt:
+          type: string
+          format: date
+          nullable: true
+        categoryId:
+          type: integer
+          minimum: 1
+        pageTurnDirection:
+          type: string
+          enum: [ltr, rtl]
+        description:
+          type: string
+          nullable: true
+        publicationScope:
+          type: string
+          enum: [all_users, admin_only]
+
+    AdminBookMetadataUpdateResponse:
+      allOf:
+        - $ref: '#/components/schemas/AdminBookCreateResponse'
+        - type: object
+          required: [deletedAt, publicationScope]
+          properties:
+            deletedAt:
+              type: string
+              format: date-time
+              nullable: true
+            publicationScope:
+              type: string
+              enum: [all_users, admin_only]
+
+    AdminBookDeletionResponse:
+      type: object
+      required: [id, deletedAt]
+      properties:
+        id:
+          type: integer
+        deletedAt:
+          type: string
+          format: date-time
+          nullable: true
 
     AdminBookRegistrationRequest:
       type: object

@@ -1,6 +1,6 @@
 # BeLib MVP 計画
 
-- Updated: 2026-08-18
+- Updated: 2026-08-26
 - Target requirements: `docs/requirements.md` v2.0.0
 - Current implementation status: `docs/current-status.md`
 
@@ -17,23 +17,23 @@
 
 ## 2. 現在地
 
-2026-08-14時点の実装checkpointでは、PDFのMVPコア縦切りが成立しています。
+現在のmainでは、PDF/EPUB閲覧、読書情報、管理API、管理UIの主要なnon-R2経路が実装されています。
 
 ```text
 login
 → role-authorized book list
-→ protected PDF
-→ page move
+→ protected PDF/EPUB
+→ page/location move
 → reading-info save to PostgreSQL
 → reload
-→ saved page restore
+→ saved position restore
 ```
 
-さらに、最小admin APIで書籍メタデータとPDFを登録できます。
+さらに、Admin UIから公開範囲を指定してEPUB/PDFとメタデータを登録し、保存済み書籍、カテゴリ、一般ユーザーを管理できます。
 
-ただし、これは正式MVP全体の完了ではありません。現在のストレージは保護ローカル方式で、R2、EPUB、公開範囲選択、completed自動遷移、管理UI接続などが残っています。
+ただし、これは正式MVP全体の完了ではありません。現在のストレージは保護ローカル方式で、R2、signed URL、完全削除、ファイル差し替え、進捗率の最終仕様、backup/restore、PC/Android最終受入が残っています。
 
-`book_files.file_hash` のmigration/schema driftは、Fedora上のtask-owned PostgreSQL 16.14によるfresh DB runtime検証で解消済みです。これはPhase CのDB再現性に関する完了項目ですが、README/demoのfresh環境再現やMVP E2Eの再検証が残るため、正式なPhase C完了とは扱いません。
+`book_files.file_hash` のmigration/schema driftは、committed migrationと現在schemaの検証対象として解消済みです。fresh環境での実行結果はコマンド実行時の検証記録として扱い、未実行の受入を完了扱いにしません。
 
 ## 3. フェーズ
 
@@ -57,52 +57,32 @@ Status: **VERIFIED**
 
 ### Phase B: Minimal admin registration
 
-Status: **BACKEND COMPLETE / UI NOT CONNECTED**
+Status: **VERIFIED FOR CURRENT NON-R2 PATH**
 
-Backend完了済み:
+完了済み:
 
-- metadata registration API
-- PDF upload API
-- admin role check
-- PDF metadata/header/size validation
-- file hash保存
-- DB失敗時の新規local file cleanup
+- Admin UIからfull registration APIへ接続
+- active category一覧の取得と選択
+- EPUB/PDFの拡張子、MIME、内容、200MB上限の検証
+- 明示的な`all_users` / `admin_only`選択とRoleBookPermission保存
+- SHA-256 file hashによる重複拒否
+- DB失敗時のprotected local file cleanup
+- reload後の保存済みAdmin book list表示
 
-未完了:
-
-- Admin画面から実APIへ接続
-- category一覧を実データから選択する経路
-- 公開範囲を明示選択するUI/API契約
+formal storageとして残るものはPhase Dで扱います。
 
 ### Phase C: Reproducible MVP environment
 
 Status: **VERIFIED**
 
-完了条件:
+実装・migration確認済み:
 
 - committed migrationsだけでfresh DBをcurrent schemaへ到達させられる（完了）
 - `book_files.file_hash` migration/schema driftがない（fresh runtimeで完了）
-- READMEの手順でfresh環境を起動できる（完了）
-- backend build/testとMVP E2Eがfresh環境でも再現する（完了）
-- 実ファイルや環境固有値をGitへ含めない（完了）
-
-Fresh DB検証の記録:
-
-- `prisma migrate deploy` は4 migrationを正常適用し、2回目は pendingなし
-- `prisma migrate status` はDatabase schema is up to date
-- `book_files.file_hash` は `VARCHAR(64) NOT NULL`
-- `book_files_file_hash_key` はunique index
-- `20260816140000_add_book_file_hash` はfinished / not rolled back
 - Prisma validate、backend build、backend testはPASS（63 passed / 11 skipped）
-- 正しいmigrationは `20260816140000_add_book_file_hash` のみ。`20260817120000_add_book_file_hash` は作成しない
-- README fresh setupとMVP browser demoをclean checkoutで再現し、backend/frontend startupはPASS
-- MVP Playwright E2Eは4 passed（login、permissioned list、protected PDF、page move、reading-info save/reload、forbidden access）
-- READMEのseed password変数不足（`ENV_EXAMPLE_GAP`）を`.env.example`へ補正済み
-- E2E fixtureの再実行にはtask-owned DB/storage cleanupが必要であることをREADMEへ明記済み。これはfresh一回目のruntime failureではなく、再実行時のfixture状態条件
-
-frontendの既存build/typeエラーはこのbackend migration検証とは分離した既知課題であり、本フェーズのfresh DB検証成功・失敗には含めません。README/demo等の残条件も、この検証結果だけでは完了扱いにしません。
-
-Phase Cのfresh runではfrontend full buildに既知TypeScriptエラー、frontend全testにChromium dynamic-importの1 failure（44 passed）が残りました。MVP browser E2Eは独立して4 passedしており、runtime reproductionとは分離して記録します。
+- READMEのfresh setup手順と、実ファイル・環境固有値をGitへ含めない運用は文書化済み
+- fresh DBでのmigration適用、backend build/test、MVP E2Eの再実行は環境依存の検証として、各コマンドの実行結果を別途確認する
+- frontend全体build/testには既知課題があり、focused CIの成功と正式MVP受入は分離して判定する
 
 ### Phase D: Formal storage boundary
 
@@ -121,23 +101,26 @@ Status: **NOT STARTED**
 
 ### Phase E: Publication scope and reading state
 
-Status: **NOT STARTED**
+Status: **PARTIAL: NON-R2 IMPLEMENTATION VERIFIED**
 
-完了条件:
+実装済み:
 
-- 書籍登録時に公開範囲を必ず選択する
+- 公開範囲をAdmin UI/APIで明示選択
 - `all users` / `admin only` を表現できる
 - default公開範囲を置かない
-- 管理者限定書籍を一般ユーザーが取得できない
-- 初回閲覧で `reading`
-- PDF最終ページで `completed`
-- completed後に戻っても状態を維持する
+- 管理者限定書籍の一般ユーザー閲覧拒否
+- 初回閲覧で`reading`
+- PDF最終ページ/EPUB最終locationで`completed`
+- completed後の途中位置保存でもcompletedを維持
 
-現在のadmin APIが自動でuser role permissionを作る動作は、このフェーズで正式要件へ合わせます。
+残るformal条件:
+
+- R2上の公開とsigned URL semantics
+- 非公開化・論理削除中の既存画面を含む正式なURL lifecycle受入
 
 ### Phase F: EPUB vertical slice
 
-Status: **NOT STARTED**
+Status: **PARTIAL: IMPLEMENTED, FINAL DEVICE ACCEPTANCE OPEN**
 
 完了条件:
 
@@ -145,25 +128,30 @@ Status: **NOT STARTED**
 - protected EPUB取得
 - Reader表示
 - 位置保存・復元
-- PC Chrome正常系
-- Android Chrome主要正常系
+- PC Chrome正常系の最終受入
+- Android Chrome主要正常系の最終受入
 - PDFと同じ認可境界を通る
 
 ### Phase G: Formal MVP management features
 
-Status: **NOT STARTED / PARTIAL UI EXISTS**
+Status: **PARTIAL: CORE MANAGEMENT FLOWS IMPLEMENTED**
 
 対象:
 
-- title/author search
-- category filter / category management
-- user management
-- book metadata edit
+- title/author search（backendとHomeの一覧内filter）
+- category management（backend/Admin UI）
+- user management（backend/Admin Users UI）
+- book metadata edit / publication scope edit（backend/Admin UI）
 - duplicate detection
 - logical delete / restore
+
+未完了:
+
+- Homeのcategory filter UI
 - permanent delete and recovery
 - file replacement
 - backup / restore acceptance
+- reader-derived progress percentage
 
 詳細な受け入れ条件は `requirements.md` を参照します。
 
@@ -171,20 +159,19 @@ Status: **NOT STARTED / PARTIAL UI EXISTS**
 
 現在は次の順を推奨します。
 
-1. Admin UI -> existing admin API接続
-2. publication scope正式化
-3. PDF `completed` 自動遷移
-4. R2へのstorage cutover
-5. EPUB vertical slice
-6. search/category/user/delete/replace等の管理機能
-7. backup/restore・PC/Android最終受け入れ
+1. Cloudflare R2 storage adapterとsigned URL lifecycle
+2. R2を前提とした完全削除・ファイル差し替え・復旧
+3. Homeのcategory filter UIとreader-derived progress percentage
+4. PostgreSQL backup/restore acceptance
+5. PC Chrome / Android Chromeの最終受入
 
 理由:
 
 - すでに成立したPDF coreを基準線として維持できる
 - DB再現性を先に直すことで後続test環境の信頼性が上がる
-- UI接続と公開範囲をR2前に整理し、storage移行とpermission変更を同時に抱えない
-- R2とEPUBを別の検証単位に分け、失敗原因を局所化する
+- non-R2の管理・公開範囲・読書状態を基準線として、storage移行の影響を分離できる
+- R2 object lifecycleと既存の論理削除/読書記録保持を同時に受入できる
+- UIの未接続部分と正式なbackup/device受入を残タスクとして明示できる
 
 ## 5. Task slicing rule
 
