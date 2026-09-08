@@ -5,7 +5,7 @@ RUN npm ci
 COPY prisma ./prisma
 COPY tsconfig.json ./tsconfig.json
 COPY src ./src
-RUN npx prisma generate
+RUN npx prisma generate --generator client
 RUN npm run build
 
 FROM build AS migration
