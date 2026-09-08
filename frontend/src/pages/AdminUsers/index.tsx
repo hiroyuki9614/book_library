@@ -30,7 +30,6 @@ function AdminUsers() {
 
 	useEffect(() => {
 		let mounted = true;
-		setLoading(true);
 		fetchAdminUsers()
 			.then((loadedUsers) => {
 				if (!mounted) return;
