@@ -3,6 +3,8 @@
 !.env.example
 
 # Build and generated output
+/node_modules/
+/release-artifacts/
 backend/dist/
 backend/prisma/generated/
 backend/storage/
