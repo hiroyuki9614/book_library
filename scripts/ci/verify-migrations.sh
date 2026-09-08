@@ -54,7 +54,7 @@ fi
 cd "$root_dir/backend"
 export DATABASE_URL="$database_url"
 npx prisma validate --schema prisma/schema.prisma
-npm run verify:file-hash-migration
+MIGRATION_TEST_DATABASE_URL="$database_url" npm run verify:file-hash-migration
 first_output="$(npx prisma migrate deploy 2>&1)" || { printf '%s\n' "$first_output"; exit 1; }
 printf '%s\n' "$first_output"
 second_output="$(npx prisma migrate deploy 2>&1)" || { printf '%s\n' "$second_output"; exit 1; }
