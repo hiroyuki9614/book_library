@@ -54,9 +54,9 @@ fi
 cd "$root_dir/backend"
 export DATABASE_URL="$database_url"
 npx prisma validate --schema prisma/schema.prisma
-MIGRATION_TEST_DATABASE_URL="$database_url" npm run verify:file-hash-migration
 first_output="$(npx prisma migrate deploy 2>&1)" || { printf '%s\n' "$first_output"; exit 1; }
 printf '%s\n' "$first_output"
+MIGRATION_TEST_DATABASE_URL="$database_url" npm run verify:file-hash-migration
 second_output="$(npx prisma migrate deploy 2>&1)" || { printf '%s\n' "$second_output"; exit 1; }
 printf '%s\n' "$second_output"
 if ! grep -Eiq 'no pending migrations to apply|database is already up to date' <<<"$second_output"; then
