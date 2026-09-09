@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import type { AdminBook, AdminBookMetadataInput } from '@/api/admin';
+import type { BookEditorValues } from '@/components/forms/BookEditor';
+import type { BookRegistrationValues } from '@/components/forms/BookRegistar';
+type MockBookRegistrationValues = Omit<BookRegistrationValues, 'file'> & { file: File[] };
 import { render } from 'vitest-browser-react';
 
 const mocks = vi.hoisted(() => ({
@@ -26,7 +30,7 @@ vi.mock('@/api/admin', () => ({
 }));
 
 vi.mock('@/components/forms/BookRegistar', () => ({
-	default: ({ onSubmit }: { onSubmit: (values: any) => Promise<void> }) => (
+	default: ({ onSubmit }: { onSubmit: (values: MockBookRegistrationValues) => Promise<void> }) => (
 		<div>
 			<button
 				type='button'
@@ -65,7 +69,7 @@ vi.mock('@/components/forms/BookRegistar', () => ({
 }));
 
 vi.mock('@/components/forms/BookEditor', () => ({
-	default: ({ book, onSubmit }: { book: any; onSubmit: (values: any) => Promise<void> }) => (
+	default: ({ book, onSubmit }: { book: AdminBook; onSubmit: (values: BookEditorValues) => Promise<void> }) => (
 		<div>
 			<button
 				type='button'
@@ -135,7 +139,7 @@ describe('Admin persisted book management', () => {
 		mocks.deleteAdminCategory.mockResolvedValue({ movedBookCount: 1, category: { id: 17, name: '技術書', isActive: false } });
 		mocks.softDeleteAdminBook.mockResolvedValue({ id: 10, deletedAt: '2026-08-24T10:00:00.000Z' });
 		mocks.restoreAdminBook.mockResolvedValue({ id: 10, deletedAt: null });
-		mocks.updateAdminBookMetadata.mockImplementation(async (_bookId: number, input: any) => ({
+		mocks.updateAdminBookMetadata.mockImplementation(async (_bookId: number, input: AdminBookMetadataInput) => ({
 			id: 10,
 			title: input.title,
 			authorName: input.authorName || null,

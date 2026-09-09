@@ -21,9 +21,14 @@ type RelocatedLocation = {
 	start: { cfi: string };
 };
 
+type EpubRenditionEventHandler = {
+	(event: 'relocated', handler: (value: RelocatedLocation) => void): void;
+	(event: 'keyup', handler: (value: KeyboardEvent) => void): void;
+};
+
 type EpubRenditionRuntime = {
-	on: (event: string, handler: (value: any) => void) => void;
-	off?: (event: string, handler: (value: any) => void) => void;
+	on: EpubRenditionEventHandler;
+	off?: EpubRenditionEventHandler;
 	display: (target?: string) => Promise<unknown>;
 	destroy: () => void;
 	prev: () => void;
@@ -68,9 +73,6 @@ function EpubReader({ bookId }: { bookId: number }) {
 		let objectUrl: string | undefined;
 		let active = true;
 
-		setEpubUrl(null);
-		setFileError(false);
-		setIsLoading(true);
 
 		void fetchBookFile(bookId)
 			.then((blob) => {
@@ -94,7 +96,6 @@ function EpubReader({ bookId }: { bookId: number }) {
 
 	useEffect(() => {
 		let active = true;
-		setReadingInfoReady(false);
 
 		void fetchReadingInfo(bookId)
 			.then((readingInfo) => {

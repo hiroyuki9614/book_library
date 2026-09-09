@@ -54,6 +54,7 @@ vi.mock('./lib/prisma.js', () => ({
 						updatedAt: new Date(),
 						category: { id: 1, name: '技術書' },
 						bookFiles: [],
+						readingInfos: [],
 					},
 				]),
 				findUnique: vi.fn(({ where }: { where: { id: number } }) =>
@@ -247,10 +248,10 @@ describe('MVP API contract RED tests based on docs/api.yaml', () => {
 			});
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
-			expect(body).toEqual({ bookId: 1, currentPage: 3, readStatus: 'reading' });
+			expect(body).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, readStatus: 'reading' });
 		});
 
-		test('PATCH /api/v1/books/{bookId}/reading-info はclient指定のreadStatusを無視してreadingを返す', async () => {
+		test('PATCH /api/v1/books/{bookId}/reading-info はcompletedを明示保存できる', async () => {
 			const response = await app.request('/api/v1/books/1/reading-info', {
 				method: 'PATCH',
 				headers: JSON_HEADERS,
@@ -258,7 +259,7 @@ describe('MVP API contract RED tests based on docs/api.yaml', () => {
 			});
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
-			expect(body).toEqual({ bookId: 1, currentPage: 4, readStatus: 'reading' });
+			expect(body).toEqual({ bookId: 1, currentPosition: '4', currentPage: 4, readStatus: 'completed' });
 		});
 
 		test('PATCH /api/v1/books/{bookId}/reading-info はapi.yaml上のfinishedをDB正規値ではないため400で拒否する', async () => {

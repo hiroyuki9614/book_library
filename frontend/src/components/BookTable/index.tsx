@@ -25,11 +25,13 @@ export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery,
 	const columns = ['', 'タイトル', '著者', 'ジャンル', 'ステータス', '進捗'];
 	const [currentPage, setCurrentPage] = useState<number>(1);
 
+	const getReadingProgress = (bookId: number) => readingProgresses.find((progress) => progress.id === bookId);
+	const getBookStatus = (bookId: number): Exclude<StatusFilter, 'all'> => getReadingProgress(bookId)?.status ?? 'unread';
+
 	const filteredBooks = books.filter((book) => {
 		const query = searchQuery.toLowerCase();
 		const matchesSearch = book.title.toLowerCase().includes(query) || book.author.toLowerCase().includes(query);
-		const bookStatus = book.status.toLowerCase() as Exclude<StatusFilter, 'all'>;
-		const matchesStatus = status === 'all' || bookStatus === status;
+		const matchesStatus = status === 'all' || getBookStatus(book.id) === status;
 		return matchesSearch && matchesStatus;
 	});
 
@@ -90,9 +92,9 @@ export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery,
 							</TableRow>
 						))
 					: currentBooks.map((book) => {
-							const readingProgress = readingProgresses.find((progress) => progress.id === book.id);
+							const readingProgress = getReadingProgress(book.id);
 							const progress = readingProgress?.progress ?? 0;
-							const bookStatus = book.status.toLowerCase();
+							const bookStatus = getBookStatus(book.id);
 
 							return (
 								<TableRow key={book.id} onClick={() => navigate(`/reader/${book.id}`)} className='cursor-pointer hover:bg-muted'>

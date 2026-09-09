@@ -91,7 +91,7 @@ function createPlugins(documentUrl: string) {
 const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; documentId: string; initialPage: number }) => {
 	const { provides: scroll, state } = useScroll(documentId);
 	const [pageInput, setPageInput] = useState(String(state.currentPage));
-	const [isReadyToPersist, setIsReadyToPersist] = useState(false);
+	const isReadyToPersistRef = useRef(false);
 	const targetPage = Math.min(initialPage, state.totalPages);
 	const lastPersistedPage = useRef<number | null>(null);
 
@@ -104,14 +104,14 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 		}
 
 		lastPersistedPage.current = targetPage;
-		setIsReadyToPersist(false);
+		isReadyToPersistRef.current = false;
 		scroll.scrollToPage({ pageNumber: targetPage });
 	}, [scroll, state.totalPages, targetPage]);
 
 	useEffect(() => {
-		if (!isReadyToPersist) {
+		if (!isReadyToPersistRef.current) {
 			if (state.currentPage === targetPage) {
-				setIsReadyToPersist(true);
+				isReadyToPersistRef.current = true;
 			}
 			return;
 		}
@@ -123,7 +123,7 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 		lastPersistedPage.current = state.currentPage;
 		const readStatus = state.currentPage >= state.totalPages ? 'completed' : 'reading';
 		void saveReadingInfo(bookId, state.currentPage, readStatus).catch(() => undefined);
-	}, [bookId, isReadyToPersist, state.currentPage, state.totalPages, targetPage]);
+	}, [bookId, state.currentPage, state.totalPages, targetPage]);
 
 	const handleGoToPage = (e: React.FormEvent<HTMLFormElement>) => {
 		e.preventDefault();
@@ -144,9 +144,6 @@ function PdfReader({ bookId }: { bookId: number }) {
 
 	useEffect(() => {
 		let objectUrl: string | undefined;
-		setDocumentUrl(null);
-		setFileError(false);
-		setInitialPage(null);
 
 		void fetchBookFile(bookId)
 			.then((blob) => {

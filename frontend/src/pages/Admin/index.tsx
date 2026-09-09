@@ -60,7 +60,6 @@ function Admin() {
 
 	useEffect(() => {
 		let isMounted = true;
-		setCategoriesLoading(true);
 
 		fetchAdminCategories()
 			.then((loadedCategories) => {
@@ -83,8 +82,6 @@ function Admin() {
 
 	useEffect(() => {
 		let isMounted = true;
-		setBooksLoading(true);
-		setBooksError(null);
 
 		fetchAdminBooks(bookState)
 			.then((loadedBooks) => {
@@ -103,6 +100,13 @@ function Admin() {
 			isMounted = false;
 		};
 	}, [bookState]);
+
+	const changeBookState = (nextState: AdminBookState) => {
+		if (nextState === bookState) return;
+		setBooksLoading(true);
+		setBooksError(null);
+		setBookState(nextState);
+	};
 
 	const handleBookRegistration = async (values: BookRegistrationValues) => {
 		const file = values.file[0];
@@ -125,7 +129,7 @@ function Admin() {
 			publicationScope: values.publicationScope,
 			file,
 		});
-		setBookState('active');
+		changeBookState('active');
 		setBooks((currentBooks) => [{ ...registeredBook, deletedAt: null }, ...currentBooks.filter((book) => book.id !== registeredBook.id)]);
 		setIsSheetOpen(false);
 		toast.success('書籍とファイルを登録しました。');
@@ -267,6 +271,7 @@ function Admin() {
 					</SheetHeader>
 					{editingBook && (
 						<BookEditor
+							key={editingBook.id}
 							book={editingBook}
 							categories={categories}
 							onSubmit={handleBookUpdate}
@@ -306,8 +311,8 @@ function Admin() {
 						</CardDescription>
 					</div>
 					<div className='flex gap-2'>
-						<Button variant={bookState === 'active' ? 'default' : 'outline'} onClick={() => setBookState('active')}>通常書籍</Button>
-						<Button variant={bookState === 'deleted' ? 'default' : 'outline'} onClick={() => setBookState('deleted')}>削除済み</Button>
+						<Button variant={bookState === 'active' ? 'default' : 'outline'} onClick={() => changeBookState('active')}>通常書籍</Button>
+						<Button variant={bookState === 'deleted' ? 'default' : 'outline'} onClick={() => changeBookState('deleted')}>削除済み</Button>
 					</div>
 				</CardHeader>
 				<CardContent className='overflow-x-auto'>

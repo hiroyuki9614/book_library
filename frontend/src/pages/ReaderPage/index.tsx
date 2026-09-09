@@ -17,11 +17,11 @@ export default function ReaderPage() {
 	}
 
 	if (book.fileType === 'epub') {
-		return <EpubReader bookId={book.id} />;
+		return <EpubReader key={book.id} bookId={book.id} />;
 	}
 
 	if (book.fileType === 'pdf') {
-		return <PdfReader bookId={book.id} />;
+		return <PdfReader key={book.id} bookId={book.id} />;
 	}
 
 	return <p>この書籍ファイル形式は閲覧できません。</p>;

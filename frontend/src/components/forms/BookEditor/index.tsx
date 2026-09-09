@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 
 import type { AdminBook, AdminBookMetadataInput, AdminCategory, PublicationScope } from '@/api/admin';
 import { Button } from '@/components/ui/button';
@@ -26,17 +26,6 @@ export default function BookEditor({ book, categories, onSubmit, onCancel }: Boo
 	const [submitting, setSubmitting] = useState(false);
 	const [submitError, setSubmitError] = useState<string | null>(null);
 
-	useEffect(() => {
-		setTitle(book.title);
-		setAuthorName(book.authorName ?? '');
-		setPublisher(book.publisher ?? '');
-		setPublishedAt(book.publishedAt?.slice(0, 10) ?? '');
-		setCategoryId(book.categoryId);
-		setPageTurnDirection(book.pageTurnDirection);
-		setDescription(book.description ?? '');
-		setPublicationScope(book.publicationScope);
-		setSubmitError(null);
-	}, [book]);
 
 	const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
 		event.preventDefault();
