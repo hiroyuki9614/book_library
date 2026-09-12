@@ -71,6 +71,7 @@ jobs:
       FRONTEND_URL: http://127.0.0.1:8080
       BETTER_AUTH_URL: http://127.0.0.1:8080
       VITE_API_BASE_URL: http://127.0.0.1:8080
+      BOOK_FILE_STORAGE_DRIVER: local
       BOOK_FILE_STORAGE_ROOT: /tmp/belib-ci-storage
     steps:
       - name: Checkout
