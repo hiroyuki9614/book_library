@@ -5,6 +5,7 @@ import { cors } from 'hono/cors';
 import { describeRoute } from 'hono-openapi';
 import { pathToFileURL } from 'node:url';
 import { auth } from './lib/auth.js';
+import { validateBookStorageConfig } from './lib/bookStorage.js';
 import withPrisma from './lib/prisma.js';
 import disabledUserSignIn from './routes/auth/disabledUserSignIn.js';
 import { createOpenApiHandler } from './routes/openApi/route.js';
@@ -144,6 +145,7 @@ const isEntryPoint = process.argv[1]
 	: false;
 
 if (isEntryPoint) {
+	validateBookStorageConfig();
 	serve({
 		fetch: app.fetch,
 		port,

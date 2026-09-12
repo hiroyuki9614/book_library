@@ -23,7 +23,7 @@ try {
 	storedFileUrl = stored.fileUrl;
 
 	const access = await getBookFileAccess(stored.fileUrl);
-	if (access.kind !== 'redirect') {
+	if (access.kind !== 'signed-url') {
 		throw new Error('R2 storage did not issue a signed URL');
 	}
 

@@ -295,15 +295,9 @@ app.get('/:bookId/file', async (c) => {
 		}
 
 		const access = await getBookFileAccess(preferredFile.file.fileUrl);
-		if (access.kind === 'redirect') {
-			return new Response(null, {
-				status: 302,
-				headers: {
-					Location: access.url,
-					'Cache-Control': 'private, no-store',
-					'X-BeLib-File-Url-Expires-At': access.expiresAt,
-				},
-			});
+		if (access.kind === 'signed-url') {
+			c.header('Cache-Control', 'private, no-store');
+			return c.json({ kind: 'signed-url', url: access.url, expiresAt: access.expiresAt });
 		}
 
 		const stream = Readable.toWeb(createReadStream(access.path)) as ReadableStream;

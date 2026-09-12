@@ -19,7 +19,7 @@ BeLib は、認証・ロール別閲覧権限・読書進捗を備えた個人�
 - 管理者向け最小PDF登録API
 - 実PostgreSQL + Better Auth Cookie + Playwrightによる主要経路E2E
 
-書籍ファイル保存は storage driver 経由です。ローカル開発/E2EではGit管理外のlocal storageを既定とし、productionでは `BOOK_FILE_STORAGE_DRIVER=r2` によりCloudflare R2へ保存できます。R2閲覧はbackendで認証・権限確認後、1時間有効の署名URLへリダイレクトします。live R2 credential/CORS/production cutoverは未検証です。
+書籍ファイル保存は storage driver 経由です。ローカル開発/E2Eでは明示的にlocal storageを使用し、productionでは `BOOK_FILE_STORAGE_DRIVER=r2` によりCloudflare R2へ保存できます。R2閲覧はbackendで認証・権限確認後、1時間有効の署名URL情報を返し、frontendがcredentialsなしで取得します。live R2 credential/CORS/production cutoverは未検証です。
 
 ## まだ未完成の主な項目
 

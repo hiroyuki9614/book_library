@@ -50,12 +50,12 @@ const book = {
 			mimeType: 'application/pdf',
 			fileSize: 10,
 			originalFileName: 'r2.pdf',
-			fileUrl: 'books/example.pdf',
+			fileUrl: 'books/123e4567-e89b-12d3-a456-426614174000.pdf',
 		},
 	],
 };
 
-describe('R2 protected file redirect', () => {
+describe('R2 protected file access response', () => {
 	beforeEach(() => {
 		vi.resetAllMocks();
 		mocks.getSession.mockResolvedValue({ user: { id: '7' } });
@@ -63,21 +63,24 @@ describe('R2 protected file redirect', () => {
 		mocks.bookFindUnique.mockResolvedValue(book);
 		mocks.permissionFindUnique.mockResolvedValue({ id: 1 });
 		mocks.getBookFileAccess.mockResolvedValue({
-			kind: 'redirect',
+			kind: 'signed-url',
 			url: 'https://signed.example/books/example.pdf',
 			expiresAt: '2026-09-12T07:00:00.000Z',
 		});
 	});
 
-	test('認証・権限確認後にR2署名URLへredirectする', async () => {
+	test('認証・権限確認後にR2署名URLをJSONで返す', async () => {
 		const response = await app.request('/1/file');
 
-		expect(response.status).toBe(302);
-		expect(response.headers.get('location')).toBe('https://signed.example/books/example.pdf');
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			kind: 'signed-url',
+			url: 'https://signed.example/books/example.pdf',
+			expiresAt: '2026-09-12T07:00:00.000Z',
+		});
 		expect(response.headers.get('cache-control')).toBe('private, no-store');
-		expect(response.headers.get('x-belib-file-url-expires-at')).toBe('2026-09-12T07:00:00.000Z');
 		expect(mocks.permissionFindUnique).toHaveBeenCalled();
-		expect(mocks.getBookFileAccess).toHaveBeenCalledWith('books/example.pdf');
+		expect(mocks.getBookFileAccess).toHaveBeenCalledWith('books/123e4567-e89b-12d3-a456-426614174000.pdf');
 	});
 
 	test('未認証なら署名URLを発行しない', async () => {

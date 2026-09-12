@@ -6,7 +6,7 @@ info:
     BeLibで現在実装されている /api/v1 HTTP contract を記録する。
     将来の正式要件や未実装endpointは docs/requirements.md と docs/mvp_plan.md を参照する。
     認証はBetter AuthのCookie sessionを使用する。
-    Book fileはstorage driverで保持する。local driverはbackend stream、R2 driverは認可後に1時間有効のGET署名URLへredirectする。
+    Book fileはstorage driverで保持する。local driverはbackend stream、R2 driverは認可後に1時間有効のGET署名URL情報を返す。
 servers:
   - url: http://localhost:3000/api/v1
     description: Local backend
@@ -112,10 +112,10 @@ paths:
       summary: 認可済みEPUB/PDFを取得
       description: |
         EPUBとPDFが両方存在する場合はEPUBを優先する。
-        local driverではbackend経由でstreamする。R2 driverでは認証・RoleBookPermission確認後、1時間有効のGET署名URLへ302 redirectする。
+        local driverではbackend経由でstreamする。R2 driverでは認証・RoleBookPermission確認後、1時間有効のGET署名URL情報をJSONで返す。クライアントはそのURLをcredentialsなしで取得する。
       responses:
         '200':
-          description: Protected EPUB or PDF stream (local driver)
+          description: Protected EPUB or PDF stream (local driver), or authorized R2 signed URL metadata (r2 driver)
           headers:
             Cache-Control:
               schema:
@@ -130,17 +130,9 @@ paths:
               schema:
                 type: string
                 format: binary
-        '302':
-          description: Authorized R2 object redirect using a one-hour presigned GET URL
-          headers:
-            Location:
+            application/json:
               schema:
-                type: string
-                format: uri
-            Cache-Control:
-              schema:
-                type: string
-              example: private, no-store
+                $ref: '#/components/schemas/SignedBookFileAccess'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -681,6 +673,21 @@ components:
         fileSize:
           type: integer
 
+    SignedBookFileAccess:
+      type: object
+      required: [kind, url, expiresAt]
+      properties:
+        kind:
+          type: string
+          enum: [signed-url]
+        url:
+          type: string
+          format: uri
+          description: One-hour R2 presigned GET URL. Do not send BeLib session credentials to this URL.
+        expiresAt:
+          type: string
+          format: date-time
+
     BookFile:
       type: object
       required: [id, extension, mimeType, fileUrl, originalFileName, storedFileName, fileSize, fileHash, bookId, createdAt, updatedAt]
@@ -695,7 +702,7 @@ components:
           enum: [application/pdf, application/epub+zip]
         fileUrl:
           type: string
-          description: Storage key, not a public URL. Local uses a relative filename; R2 uses books/<uuid>.<ext>.
+          description: Storage key, not a public URL. Local uses a relative filename; R2 uses the strict books/<uuid>.(pdf|epub) format.
         originalFileName:
           type: string
         storedFileName:
