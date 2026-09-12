@@ -6,7 +6,7 @@ info:
     BeLibで現在実装されている /api/v1 HTTP contract を記録する。
     将来の正式要件や未実装endpointは docs/requirements.md と docs/mvp_plan.md を参照する。
     認証はBetter AuthのCookie sessionを使用する。
-    Book fileは現在protected local storageで保持し、Cloudflare R2への正式cutoverは未実装。
+    Book fileはstorage driverで保持する。local driverはbackend stream、R2 driverは認可後に1時間有効のGET署名URL情報を返す。
 servers:
   - url: http://localhost:3000/api/v1
     description: Local backend
@@ -111,12 +111,11 @@ paths:
     get:
       summary: 認可済みEPUB/PDFを取得
       description: |
-        protected local storageからbackend経由でstreamする。
         EPUBとPDFが両方存在する場合はEPUBを優先する。
-        Cloudflare R2 / signed URLへの正式cutoverは未実装。
+        local driverではbackend経由でstreamする。R2 driverでは認証・RoleBookPermission確認後、1時間有効のGET署名URL情報をJSONで返す。クライアントはそのURLをcredentialsなしで取得する。
       responses:
         '200':
-          description: Protected EPUB or PDF stream
+          description: Protected EPUB or PDF stream (local driver), or authorized R2 signed URL metadata (r2 driver)
           headers:
             Cache-Control:
               schema:
@@ -131,6 +130,9 @@ paths:
               schema:
                 type: string
                 format: binary
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignedBookFileAccess'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -277,9 +279,8 @@ paths:
       description: |
         title、active categoryId、publicationScope、EPUB/PDF fileを必須とする。
         最大200MB。拡張子・MIME・内容を検証し、SHA-256 hashで重複を拒否する。
-        現在はprotected local storageへ保存し、Book + BookFile + RoleBookPermissionをnested createする。
-        DB create失敗時は直前に保存したlocal fileを削除する。
-        Cloudflare R2への正式cutoverは未実装。
+        active storage driverへ保存し、Book + BookFile + RoleBookPermissionをnested createする。
+        DB create失敗時は直前に保存したlocal fileまたはR2 objectの補償削除を試みる。
       requestBody:
         required: true
         content:
@@ -314,7 +315,7 @@ paths:
       description: |
         EPUB/PDF、最大200MB。拡張子・MIME・内容とSHA-256 hashを検証する。
         MVPでは1冊1fileを強制し、既存fileまたは重複hashは409を返す。
-        protected local storageへ保存後にBookFileを作成し、DB失敗時は新規local fileを削除する。
+        active storage driverへ保存後にBookFileを作成し、DB失敗時は新規local fileまたはR2 objectの補償削除を試みる。
       requestBody:
         required: true
         content:
@@ -672,6 +673,21 @@ components:
         fileSize:
           type: integer
 
+    SignedBookFileAccess:
+      type: object
+      required: [kind, url, expiresAt]
+      properties:
+        kind:
+          type: string
+          enum: [signed-url]
+        url:
+          type: string
+          format: uri
+          description: One-hour R2 presigned GET URL. Do not send BeLib session credentials to this URL.
+        expiresAt:
+          type: string
+          format: date-time
+
     BookFile:
       type: object
       required: [id, extension, mimeType, fileUrl, originalFileName, storedFileName, fileSize, fileHash, bookId, createdAt, updatedAt]
@@ -686,7 +702,7 @@ components:
           enum: [application/pdf, application/epub+zip]
         fileUrl:
           type: string
-          description: Current implementation stores a protected local relative key, not a public URL.
+          description: Storage key, not a public URL. Local uses a relative filename; R2 uses the strict books/<uuid>.(pdf|epub) format.
         originalFileName:
           type: string
         storedFileName:

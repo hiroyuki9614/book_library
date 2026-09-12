@@ -19,11 +19,11 @@ BeLib は、認証・ロール別閲覧権限・読書進捗を備えた個人�
 - 管理者向け最小PDF登録API
 - 実PostgreSQL + Better Auth Cookie + Playwrightによる主要経路E2E
 
-現在の保護ファイル保存はGit管理外のローカルストレージです。これはMVP縦切りの暫定実装であり、正式要件のCloudflare R2を置き換える決定ではありません。
+書籍ファイル保存は storage driver 経由です。ローカル開発/E2Eでは明示的にlocal storageを使用し、productionでは `BOOK_FILE_STORAGE_DRIVER=r2` によりCloudflare R2へ保存できます。R2閲覧はbackendで認証・権限確認後、1時間有効の署名URL情報を返し、frontendがcredentialsなしで取得します。live R2 credential/CORS/production cutoverは未検証です。
 
 ## まだ未完成の主な項目
 
-- Cloudflare R2保存と正式な署名URL運用
+- Cloudflare R2のlive credential/CORS/production cutoverと閲覧中URL自動再発行
 - EPUBの保護配信・サーバー進捗連携
 - 管理画面UIから実admin APIへの登録接続
 - 書籍ごとの公開範囲選択（全ユーザー / 管理者のみ）
@@ -91,7 +91,7 @@ npm run dev
 - Backend local: `http://localhost:3000`
 - Backend Docker: `http://localhost:3001`
 
-環境変数は各 `.env.example` を参照し、実値をGitへコミットしないでください。現在のローカルPDF縦切りでは `BOOK_FILE_STORAGE_ROOT` を使用します。
+環境変数は各 `.env.example` を参照し、実値をGitへコミットしないでください。local driverでは `BOOK_FILE_STORAGE_ROOT`、R2 driverでは `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET_NAME` を使用します。
 
 ## Fresh環境のセットアップ
 

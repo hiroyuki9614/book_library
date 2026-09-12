@@ -1,11 +1,9 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { createReadStream } from 'node:fs';
-import { access, realpath } from 'node:fs/promises';
 import { Readable } from 'node:stream';
-import { resolve, relative, isAbsolute } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { auth } from '../../lib/auth.js';
+import { BookStorageNotFoundError, getBookFileAccess } from '../../lib/bookStorage.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
 
 const app = new Hono<PrismaVariables>();
@@ -153,42 +151,6 @@ async function getBookForAuthorizedUser(c: BooksContext, bookId: number, userId:
 	return { book, prisma, userId };
 }
 
-function isWithinRoot(root: string, candidate: string) {
-	const relativePath = relative(root, candidate);
-	return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath));
-}
-
-async function resolveBookFilePath(fileUrl: string) {
-	const storageRoot = resolve(process.env.BOOK_FILE_STORAGE_ROOT ?? resolve(process.cwd(), 'storage'));
-	const rootPath = await realpath(storageRoot);
-
-	let requestedPath: string;
-	if (fileUrl.startsWith('file://')) {
-		const parsedUrl = new URL(fileUrl);
-		if (parsedUrl.hostname) {
-			throw new Error('Remote file URLs are not allowed');
-		}
-		requestedPath = fileURLToPath(parsedUrl);
-	} else {
-		if (!fileUrl || fileUrl.includes('\0') || isAbsolute(fileUrl) || /^[a-z][a-z\d+.-]*:/i.test(fileUrl)) {
-			throw new Error('Only relative local file keys are allowed');
-		}
-		requestedPath = resolve(rootPath, fileUrl);
-	}
-
-	if (!isWithinRoot(rootPath, requestedPath)) {
-		throw new Error('File path escapes storage root');
-	}
-
-	const resolvedPath = await realpath(requestedPath);
-	if (!isWithinRoot(rootPath, resolvedPath)) {
-		throw new Error('Resolved file path escapes storage root');
-	}
-
-	await access(resolvedPath);
-	return resolvedPath;
-}
-
 async function getAuthorizedBook(c: BooksContext, bookId: number) {
 	const user = await getAuthenticatedUser(c);
 	if (!user) {
@@ -332,8 +294,13 @@ app.get('/:bookId/file', async (c) => {
 			return jsonError(c, 404, 'Book file not found', 'FILE_NOT_FOUND');
 		}
 
-		const filePath = await resolveBookFilePath(preferredFile.file.fileUrl);
-		const stream = Readable.toWeb(createReadStream(filePath)) as ReadableStream;
+		const access = await getBookFileAccess(preferredFile.file.fileUrl);
+		if (access.kind === 'signed-url') {
+			c.header('Cache-Control', 'private, no-store');
+			return c.json({ kind: 'signed-url', url: access.url, expiresAt: access.expiresAt });
+		}
+
+		const stream = Readable.toWeb(createReadStream(access.path)) as ReadableStream;
 		const contentType = preferredFile.fileType === 'epub' ? 'application/epub+zip' : 'application/pdf';
 		return new Response(stream, {
 			headers: {
@@ -343,7 +310,7 @@ app.get('/:bookId/file', async (c) => {
 			},
 		});
 	} catch (error) {
-		if (error instanceof Error && /ENOENT|not found|escapes|allowed|storage/i.test(error.message)) {
+		if (error instanceof BookStorageNotFoundError) {
 			return jsonError(c, 404, 'Book file not found', 'FILE_NOT_FOUND');
 		}
 		console.error(error);

@@ -106,9 +106,9 @@ Phase Cのfresh runではfrontend full buildに既知TypeScriptエラー、front
 
 ### Phase D: Formal storage boundary
 
-Status: **NOT STARTED**
+Status: **IN PROGRESS**
 
-正式要件に従って、保護ローカル保存をCloudflare R2へ切り替えます。
+storage adapter、R2 upload、DB失敗時のR2補償削除、認可後の1時間GET署名URL発行までは実装済みです。local driverは開発/E2E互換として残します。live R2 credential smoke、bucket CORS、production cutover、閲覧中の期限前自動再発行は未完了です。
 
 完了条件:
 

@@ -33,23 +33,28 @@ npm run build
 npm test
 npm run create:initial-admin
 npm run prepare:real-e2e-fixture
+npm run verify:r2
 ```
 
 実行に必要な環境変数は `.env.example` を参照し、実値をGitへコミットしないでください。
 
-## Protected PDF storage
+## Book file storage
 
-現在のMVP縦切りでは `BOOK_FILE_STORAGE_ROOT` 配下のGit管理外ストレージを使用します。
+`BOOK_FILE_STORAGE_DRIVER` で保存先を切り替えます。Production Composeでは明示指定が必須です。起動時に `r2` の必須設定が不足している場合は起動に失敗します。
+
+- `local`: `BOOK_FILE_STORAGE_ROOT` 配下へ保存し、認可後にbackendからstreamする
+- `r2`: Cloudflare R2へ保存し、認可済みAPIから1時間有効のGET署名URL情報を返す。frontendは署名URLへcredentialsなしで取得する
+
+`BookFile.fileUrl` は公開URLではなくstorage keyです。R2では `books/<uuid>.(pdf|epub)`、localでは `<uuid>.<ext>` を保持します。管理登録でR2/local保存後にDB作成が失敗した場合、保存済みobject/fileの補償削除を試み、削除失敗はログへ残します。
 
 重要:
 
-- `BookFile.fileUrl` は現在、storage root配下の相対キーとして扱う
-- ファイルをpublic directoryから直接配信しない
-- file endpointで認証と`RoleBookPermission`を確認する
-- path traversalやstorage root外への解決を拒否する
-- 現在はPDFのみを実経路として扱う
-
-これは正式なR2要件を廃止する設計変更ではありません。R2への移行後も、バックエンドでの認証・認可境界を維持します。
+- ファイルをpublic directoryへ直接配置しない
+- file endpointで認証と`RoleBookPermission`を確認してから取得手段を発行する
+- local driverではpath traversalやstorage root外への解決を拒否する
+- R2のブラウザ取得にはbucket CORSが必要
+- 既存local DBの `fileUrl` を移行せずdriverだけR2へ変更しない
+- live R2 smoke / browser CORS / production cutoverは `docs/runbooks/r2.md` に従う
 
 ## Current versioned routes
 

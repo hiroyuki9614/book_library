@@ -3,6 +3,7 @@ WORKDIR /app
 COPY --chown=node:node package.json package-lock.json ./
 RUN npm ci
 COPY --chown=node:node prisma ./prisma
+COPY --chown=node:node scripts ./scripts
 COPY --chown=node:node prisma.config.ts ./prisma.config.ts
 COPY --chown=node:node tsconfig.json ./tsconfig.json
 COPY --chown=node:node src ./src

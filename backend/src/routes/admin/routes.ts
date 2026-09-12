@@ -1,9 +1,8 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import type { Context } from 'hono';
 import { Hono } from 'hono';
 import { auth } from '../../lib/auth.js';
+import { deleteStoredBookFile, storeBookFile } from '../../lib/bookStorage.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
 
 const app = new Hono<PrismaVariables>();
@@ -289,23 +288,17 @@ async function prepareBookFile(value: unknown): Promise<PreparedBookFileResult> 
 	};
 }
 
-async function storeBookFile(fileType: SupportedBookFileType, bytes: Buffer) {
-	const storageRoot = resolve(process.env.BOOK_FILE_STORAGE_ROOT ?? resolve(process.cwd(), 'storage'));
-	await mkdir(storageRoot, { recursive: true });
-	const storedRoot = await realpath(storageRoot);
-	const storedFileName = `${randomUUID()}.${fileType}`;
-	const storedPath = resolve(storedRoot, storedFileName);
-	const pathFromRoot = relative(storedRoot, storedPath);
-	if (pathFromRoot.startsWith('..') || isAbsolute(pathFromRoot)) {
-		throw new Error('Storage path is invalid');
-	}
-
-	await writeFile(storedPath, bytes, { flag: 'wx' });
-	return { storedPath, storedFileName };
-}
-
 function isUniqueConstraintError(error: unknown) {
 	return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'P2002');
+}
+
+async function cleanupStoredBookFile(fileUrl: string | undefined) {
+	if (!fileUrl) return;
+	try {
+		await deleteStoredBookFile(fileUrl);
+	} catch (cleanupError) {
+		console.error('Failed to clean up stored book file after database failure', cleanupError);
+	}
 }
 
 async function findActiveCategory(c: AdminContext, categoryId: number) {
@@ -388,7 +381,7 @@ app.post('/books', async (c) => {
 });
 
 app.post('/book-registrations', async (c) => {
-	let storedPath: string | undefined;
+	let storedFileUrl: string | undefined;
 	try {
 		const admin = await getAdminUser(c);
 		if ('response' in admin) return admin.response;
@@ -426,8 +419,13 @@ app.post('/book-registrations', async (c) => {
 			return jsonError(c, 409, 'The same book file is already registered', 'DUPLICATE_FILE');
 		}
 
-		const stored = await storeBookFile(preparedFile.fileType, preparedFile.bytes);
-		storedPath = stored.storedPath;
+		const stored = await storeBookFile({
+			fileType: preparedFile.fileType,
+			bytes: preparedFile.bytes,
+			mimeType: preparedFile.mimeType,
+			originalFileName: preparedFile.file.name,
+		});
+		storedFileUrl = stored.fileUrl;
 
 		const book = await c.get('prisma').book.create({
 			data: {
@@ -444,7 +442,7 @@ app.post('/book-registrations', async (c) => {
 						{
 							extension: preparedFile.fileType,
 							mimeType: preparedFile.mimeType,
-							fileUrl: stored.storedFileName,
+							fileUrl: stored.fileUrl,
 							originalFileName: preparedFile.file.name,
 							storedFileName: stored.storedFileName,
 							fileSize: preparedFile.bytes.length,
@@ -470,10 +468,11 @@ app.post('/book-registrations', async (c) => {
 			},
 		});
 
+		storedFileUrl = undefined;
 		const { bookFiles, ...bookMetadata } = book;
 		return c.json({ ...bookMetadata, file: bookFiles[0], publicationScope: input.publicationScope }, 201);
 	} catch (error) {
-		if (storedPath) await rm(storedPath, { force: true });
+		await cleanupStoredBookFile(storedFileUrl);
 		if (isUniqueConstraintError(error)) {
 			return jsonError(c, 409, 'The same book file is already registered', 'DUPLICATE_FILE');
 		}
@@ -483,7 +482,7 @@ app.post('/book-registrations', async (c) => {
 });
 
 app.post('/books/:bookId/files', async (c) => {
-	let storedPath: string | undefined;
+	let storedFileUrl: string | undefined;
 	try {
 		const admin = await getAdminUser(c);
 		if ('response' in admin) return admin.response;
@@ -529,14 +528,19 @@ app.post('/books/:bookId/files', async (c) => {
 			return jsonError(c, 409, 'The same book file is already registered', 'DUPLICATE_FILE');
 		}
 
-		const stored = await storeBookFile(preparedFile.fileType, preparedFile.bytes);
-		storedPath = stored.storedPath;
+		const stored = await storeBookFile({
+			fileType: preparedFile.fileType,
+			bytes: preparedFile.bytes,
+			mimeType: preparedFile.mimeType,
+			originalFileName: preparedFile.file.name,
+		});
+		storedFileUrl = stored.fileUrl;
 
 		const record = await c.get('prisma').bookFile.create({
 			data: {
 				extension: preparedFile.fileType,
 				mimeType: preparedFile.mimeType,
-				fileUrl: stored.storedFileName,
+				fileUrl: stored.fileUrl,
 				originalFileName: preparedFile.file.name,
 				storedFileName: stored.storedFileName,
 				fileSize: preparedFile.bytes.length,
@@ -544,9 +548,10 @@ app.post('/books/:bookId/files', async (c) => {
 				bookId,
 			},
 		});
+		storedFileUrl = undefined;
 		return c.json(record, 201);
 	} catch (error) {
-		if (storedPath) await rm(storedPath, { force: true });
+		await cleanupStoredBookFile(storedFileUrl);
 		if (isUniqueConstraintError(error)) {
 			return jsonError(c, 409, 'The same book file is already registered', 'DUPLICATE_FILE');
 		}

@@ -1,10 +1,10 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-08-24
+- Updated: 2026-09-12
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
-- Current implementation line: `fix/belib-phase-c-fresh-env-repro-20260818` plus focused feature integrations
-- Current non-R2 candidate: `feat/non-r2-reading-admin-core-20260824` / PR #20
-- Default `main` is older than this implementation line and must not be used alone to judge current MVP progress
+- Base checkpoint: `main@719bdb885dffdfe037a717fde9e313f6cd95d4e0`
+- Current R2 implementation branch: `feat/r2-storage-cutover-20260912`
+- This document reflects the R2 branch behavior; live R2/production verification remains pending
 
 ## Source-of-truth boundary
 
@@ -18,7 +18,7 @@ current user request
 > this status document
 ```
 
-Protected local EPUB/PDF storage is a temporary implementation boundary. It does not replace the confirmed Cloudflare R2 requirement.
+Book storage now uses a driver boundary: local storage is explicitly selected for development/E2E, while the R2 driver implements the confirmed Cloudflare R2 target. Live R2 credential/CORS/production cutover is still pending.
 
 ## High-level state
 
@@ -26,8 +26,8 @@ Protected local EPUB/PDF storage is a temporary implementation boundary. It does
 Better Auth session                                  implemented
 GET /api/v1/me                                       implemented
 role-authorized book list/detail                     implemented
-protected PDF delivery                               implemented with local ignored storage
-protected EPUB delivery                              implemented with local ignored storage
+protected PDF delivery                               implemented: local stream / R2 signed URL JSON
+protected EPUB delivery                              implemented: local stream / R2 signed URL JSON
 EPUB preferred when EPUB and PDF both exist          implemented
 per-user readStatus in authorized book list          implemented
 book title/author backend search                     implemented
@@ -44,7 +44,7 @@ Admin persisted book list after reload               implemented
 Home/BookTable readStatus source = backend            implemented
 file_hash migration/schema drift                     resolved and runtime-verified
 README fresh setup / PDF browser demo                 verified on Phase C checkpoint
-Cloudflare R2 / formal file delivery                 not implemented
+Cloudflare R2 adapter + 1h signed URL               implemented; live cutover/auto-renew pending
 full MVP management functions                        not implemented
 ```
 
@@ -136,7 +136,7 @@ Full registration behavior:
 - SHA-256 `BookFile.fileHash` rejects duplicate content, including files belonging to logically deleted books.
 - full registration requires explicit `all_users` or `admin_only`; there is no UI default.
 - `all_users` creates admin + user role permissions; `admin_only` creates admin permission only.
-- DB creation failure removes the just-written protected local file.
+- DB creation failure triggers compensation cleanup for the just-written local file or R2 object; cleanup failure is logged.
 - one file per book is enforced on the current MVP registration path.
 
 Persisted Admin list:
@@ -170,24 +170,25 @@ The shelf status filter and read-status summary now use the backend-derived book
 
 ## Storage
 
-Current protected file path:
+Current storage boundary:
 
 ```text
 Admin upload
   -> backend validation
-  -> protected local storage below BOOK_FILE_STORAGE_ROOT
+  -> storage driver
+       local: BOOK_FILE_STORAGE_ROOT/<uuid>.<ext>
+       r2:    R2 bucket / books/<uuid>.<ext>
   -> BookFile metadata/hash in PostgreSQL
-  -> authorized backend file delivery
+
+Authorized read
+  -> Better Auth + RoleBookPermission check
+  -> local: backend stream
+  -> r2: HEAD existence check -> 1 hour GET presigned URL metadata JSON -> frontend GET without credentials
 ```
 
-Formal target remains:
+R2 upload and DB-failure compensation cleanup are implemented, including cleanup after an ambiguous failed PUT. The runtime token is not stored in Git. Browser access to the presigned URL requires bucket CORS for the deployed frontend origin. `npm run verify:r2` performs an upload -> HEAD/sign -> GET -> delete smoke without printing credentials.
 
-```text
-protected local storage
-  -> Cloudflare R2
-```
-
-R2 upload, object lifecycle, signed delivery behavior, and production cutover are intentionally untouched by the current non-R2 implementation.
+Still open: live credential smoke, bucket CORS verification, production cutover, reader-side automatic URL reissue before the one-hour expiry, and full delete/replace lifecycle. Existing local `BookFile.fileUrl` rows must not be interpreted as R2 keys without an explicit migration.
 
 ## Database / Prisma
 
@@ -234,9 +235,10 @@ Existing dedicated Admin registration CI and EPUB protected-reader CI are also r
 
 R2-dependent:
 
-- Cloudflare R2 upload/storage cutover.
-- formal R2 file-delivery / signed-URL behavior.
-- R2 object cleanup/replacement lifecycle.
+- live R2 credential smoke and production storage cutover.
+- bucket CORS verification for the production frontend origin.
+- reader-side automatic signed-URL reissue before the one-hour expiry.
+- R2 object cleanup/replacement lifecycle beyond DB-failure compensation.
 
 Non-R2:
 

@@ -43,6 +43,18 @@ export async function fetchBook(bookId: number) {
 	return apiFetch<BookDetails>(`/api/v1/books/${bookId}`);
 }
 
+function isSupportedBookFileContentType(response: Response) {
+	const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+	return contentType === 'application/pdf' || contentType === 'application/epub+zip';
+}
+
+async function readBookFileResponse(response: Response) {
+	if (!isSupportedBookFileContentType(response)) {
+		throw new Error('API returned an unsupported book file response');
+	}
+	return response.blob();
+}
+
 export async function fetchBookFile(bookId: number) {
 	const baseUrl = getApiBaseUrl();
 	if (!baseUrl) {
@@ -57,9 +69,22 @@ export async function fetchBookFile(bookId: number) {
 	}
 
 	const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
-	if (contentType !== 'application/pdf' && contentType !== 'application/epub+zip') {
+	if (contentType === 'application/pdf' || contentType === 'application/epub+zip') {
+		return response.blob();
+	}
+
+	if (contentType !== 'application/json') {
 		throw new Error('API returned an unsupported book file response');
 	}
 
-	return response.blob();
+	const access = await response.json() as { kind?: unknown; url?: unknown };
+	if (access.kind !== 'signed-url' || typeof access.url !== 'string' || !access.url) {
+		throw new Error('API returned an invalid signed book file response');
+	}
+
+	const signedResponse = await fetch(access.url, { credentials: 'omit' });
+	if (!signedResponse.ok) {
+		throw new Error(`Signed book file request failed: ${signedResponse.status}`);
+	}
+	return readBookFileResponse(signedResponse);
 }
