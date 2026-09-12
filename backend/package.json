@@ -8,9 +8,12 @@
     "test": "vitest --run",
     "verify:file-hash-migration": "tsx scripts/verify-file-hash-migration.ts",
     "prepare:real-e2e-fixture": "tsx scripts/prepare-real-e2e-fixture.ts",
-    "create:initial-admin": "tsx scripts/create-initial-admin.ts"
+    "create:initial-admin": "tsx scripts/create-initial-admin.ts",
+    "verify:r2": "tsx scripts/verify-r2.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1131.0",
+    "@aws-sdk/s3-request-presigner": "^3.1131.0",
     "@better-auth/prisma-adapter": "^1.6.23",
     "@hono/node-server": "^1.19.6",
     "@hono/standard-validator": "^0.2.3",
