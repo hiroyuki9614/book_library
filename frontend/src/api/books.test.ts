@@ -48,6 +48,22 @@ describe('books API client', () => {
 		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/books/7/file', { credentials: 'include' });
 	});
 
+	test('R2の署名URLは認証APIから取得し、R2 GETではcredentialsを送らない', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.test');
+		const pdf = new Blob(['%PDF-1.7'], { type: 'application/pdf' });
+		vi.spyOn(globalThis, 'fetch')
+			.mockResolvedValueOnce(new Response(JSON.stringify({
+				kind: 'signed-url',
+				url: 'https://signed.example.test/books/file.pdf?X-Amz-Signature=redacted',
+				expiresAt: '2026-09-12T07:00:00.000Z',
+			}), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+			.mockResolvedValueOnce(new Response(pdf, { status: 200 }));
+
+		await expect(fetchBookFile(7)).resolves.toBeInstanceOf(Blob);
+		expect(fetch).toHaveBeenNthCalledWith(1, 'https://api.example.test/api/v1/books/7/file', { credentials: 'include' });
+		expect(fetch).toHaveBeenNthCalledWith(2, 'https://signed.example.test/books/file.pdf?X-Amz-Signature=redacted', { credentials: 'omit' });
+	});
+
 	test('PDF file APIがJSON等を返した場合はReaderへ渡さない', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(

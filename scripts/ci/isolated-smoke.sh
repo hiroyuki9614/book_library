@@ -28,6 +28,7 @@ export ENVIRONMENT="test"
 export FRONTEND_URL="$ui_url"
 export BETTER_AUTH_URL="$api_url"
 export VITE_API_BASE_URL="$api_url"
+export BOOK_FILE_STORAGE_DRIVER="local"
 export BOOK_FILE_STORAGE_ROOT="/tmp/belib-ci-storage"
 
 docker compose --project-name "$project" --file "$compose_file" up --detach db

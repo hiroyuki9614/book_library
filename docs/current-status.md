@@ -18,7 +18,7 @@ current user request
 > this status document
 ```
 
-Book storage now uses a driver boundary: local storage remains the development/E2E default, while the R2 driver implements the confirmed Cloudflare R2 target. Live R2 credential/CORS/production cutover is still pending.
+Book storage now uses a driver boundary: local storage is explicitly selected for development/E2E, while the R2 driver implements the confirmed Cloudflare R2 target. Live R2 credential/CORS/production cutover is still pending.
 
 ## High-level state
 
@@ -26,8 +26,8 @@ Book storage now uses a driver boundary: local storage remains the development/E
 Better Auth session                                  implemented
 GET /api/v1/me                                       implemented
 role-authorized book list/detail                     implemented
-protected PDF delivery                               implemented: local stream / R2 signed redirect
-protected EPUB delivery                              implemented: local stream / R2 signed redirect
+protected PDF delivery                               implemented: local stream / R2 signed URL JSON
+protected EPUB delivery                              implemented: local stream / R2 signed URL JSON
 EPUB preferred when EPUB and PDF both exist          implemented
 per-user readStatus in authorized book list          implemented
 book title/author backend search                     implemented
@@ -183,10 +183,10 @@ Admin upload
 Authorized read
   -> Better Auth + RoleBookPermission check
   -> local: backend stream
-  -> r2: HEAD existence check -> 1 hour GET presigned URL -> 302 redirect
+  -> r2: HEAD existence check -> 1 hour GET presigned URL metadata JSON -> frontend GET without credentials
 ```
 
-R2 upload and DB-failure compensation cleanup are implemented. The runtime token is not stored in Git. Browser access to the presigned URL requires bucket CORS for the deployed frontend origin. `npm run verify:r2` performs an upload -> HEAD/sign -> GET -> delete smoke without printing credentials.
+R2 upload and DB-failure compensation cleanup are implemented, including cleanup after an ambiguous failed PUT. The runtime token is not stored in Git. Browser access to the presigned URL requires bucket CORS for the deployed frontend origin. `npm run verify:r2` performs an upload -> HEAD/sign -> GET -> delete smoke without printing credentials.
 
 Still open: live credential smoke, bucket CORS verification, production cutover, reader-side automatic URL reissue before the one-hour expiry, and full delete/replace lifecycle. Existing local `BookFile.fileUrl` rows must not be interpreted as R2 keys without an explicit migration.
 

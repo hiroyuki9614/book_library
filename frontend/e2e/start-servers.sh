@@ -71,7 +71,7 @@ npm run create:initial-admin >/dev/null 2>&1 || {
   exit 1
 }
 
-BETTER_AUTH_SECRET="$BETTER_AUTH_SECRET" DATABASE_URL="$E2E_DATABASE_URL" BOOK_FILE_STORAGE_ROOT="$E2E_BOOK_FILE_STORAGE_ROOT" node "$SCRIPT_DIR/../../backend/dist/src/index.js" &
+BETTER_AUTH_SECRET="$BETTER_AUTH_SECRET" DATABASE_URL="$E2E_DATABASE_URL" BOOK_FILE_STORAGE_DRIVER=local BOOK_FILE_STORAGE_ROOT="$E2E_BOOK_FILE_STORAGE_ROOT" node "$SCRIPT_DIR/../../backend/dist/src/index.js" &
 BACKEND_PID=$!
 
 wait_for_url 'http://localhost:3000/health' "$BACKEND_PID" 'backend' 60

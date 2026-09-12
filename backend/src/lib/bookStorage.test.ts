@@ -27,6 +27,7 @@ import {
 	deleteStoredBookFile,
 	getBookFileAccess,
 	storeBookFile,
+	validateBookStorageConfig,
 } from './bookStorage.js';
 
 const envBackup = { ...process.env };
@@ -75,7 +76,7 @@ describe('R2 book storage', () => {
 		mocks.getSignedUrl.mockResolvedValueOnce('https://signed.example/object');
 
 		const before = Date.now();
-		const access = await getBookFileAccess('books/example.pdf');
+		const access = await getBookFileAccess('books/123e4567-e89b-12d3-a456-426614174000.pdf');
 		const after = Date.now();
 
 		expect(mocks.send.mock.calls[0]?.[0]).toBeInstanceOf(HeadObjectCommand);
@@ -84,8 +85,8 @@ describe('R2 book storage', () => {
 			expect.anything(),
 			{ expiresIn: BOOK_FILE_SIGNED_URL_EXPIRES_IN_SECONDS },
 		);
-		expect(access.kind).toBe('redirect');
-		if (access.kind === 'redirect') {
+		expect(access.kind).toBe('signed-url');
+		if (access.kind === 'signed-url') {
 			expect(access.url).toBe('https://signed.example/object');
 			const expiresAt = Date.parse(access.expiresAt);
 			expect(expiresAt).toBeGreaterThanOrEqual(before + BOOK_FILE_SIGNED_URL_EXPIRES_IN_SECONDS * 1000);
@@ -96,10 +97,61 @@ describe('R2 book storage', () => {
 	test('deletes the R2 object during compensation cleanup', async () => {
 		mocks.send.mockResolvedValueOnce({});
 
-		await deleteStoredBookFile('books/example.epub');
+		await deleteStoredBookFile('books/123e4567-e89b-12d3-a456-426614174000.epub');
 
 		const command = mocks.send.mock.calls[0]?.[0];
 		expect(command).toBeInstanceOf(DeleteObjectCommand);
-		expect(command.input).toEqual({ Bucket: 'belib-books', Key: 'books/example.epub' });
+		expect(command.input).toEqual({ Bucket: 'belib-books', Key: 'books/123e4567-e89b-12d3-a456-426614174000.epub' });
+	});
+
+	test('rejects non-UUID R2 keys before reading or deleting', async () => {
+		await expect(getBookFileAccess('books/example.pdf')).rejects.toThrow('Book file not found');
+		await expect(deleteStoredBookFile('books/123e4567-e89b-12d3-a456-426614174000.txt')).rejects.toThrow('Book file not found');
+		expect(mocks.send).not.toHaveBeenCalled();
+	});
+
+	test('rejects incomplete R2 configuration during startup validation', () => {
+		delete process.env.R2_SECRET_ACCESS_KEY;
+
+		expect(() => validateBookStorageConfig()).toThrow('R2_SECRET_ACCESS_KEY is required');
+	});
+
+	test('attempts to delete the allocated key when an R2 upload fails', async () => {
+		const uploadError = new Error('put failed');
+		mocks.send.mockRejectedValueOnce(uploadError).mockResolvedValueOnce({});
+
+		await expect(storeBookFile({
+			fileType: 'pdf',
+			bytes: Buffer.from('%PDF-1.7'),
+			mimeType: 'application/pdf',
+			originalFileName: 'sample.pdf',
+		})).rejects.toBe(uploadError);
+
+		const uploadCommand = mocks.send.mock.calls[0]?.[0];
+		const cleanupCommand = mocks.send.mock.calls[1]?.[0];
+		expect(uploadCommand).toBeInstanceOf(PutObjectCommand);
+		expect(cleanupCommand).toBeInstanceOf(DeleteObjectCommand);
+		expect(cleanupCommand.input.Key).toBe(uploadCommand.input.Key);
+	});
+
+	test('logs only safe cleanup metadata when compensation deletion fails', async () => {
+		const uploadError = new Error('put failed');
+		const cleanupError = new Error('cleanup failed with secret-like details');
+		mocks.send.mockRejectedValueOnce(uploadError).mockRejectedValueOnce(cleanupError);
+		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+		await expect(storeBookFile({
+			fileType: 'epub',
+			bytes: Buffer.from('PK'),
+			mimeType: 'application/epub+zip',
+			originalFileName: 'sample.epub',
+		})).rejects.toBe(uploadError);
+
+		expect(consoleError).toHaveBeenCalledWith('R2 upload cleanup failed', expect.objectContaining({
+			key: expect.stringMatching(/^books\/[\da-f-]+\.epub$/),
+			errorName: 'Error',
+		}));
+		expect(consoleError.mock.calls.flat().join(' ')).not.toContain('secret-like details');
+		consoleError.mockRestore();
 	});
 });

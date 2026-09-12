@@ -23,7 +23,9 @@ export type StoredBookFile = {
 
 export type BookFileAccess =
 	| { kind: 'local'; path: string }
-	| { kind: 'redirect'; url: string; expiresAt: string };
+	| { kind: 'signed-url'; url: string; expiresAt: string };
+
+const R2_BOOK_OBJECT_KEY_PATTERN = /^books\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:pdf|epub)$/;
 
 export class BookStorageNotFoundError extends Error {
 	constructor(message = 'Book file not found') {
@@ -66,6 +68,12 @@ function getR2Config() {
 	};
 }
 
+export function validateBookStorageConfig() {
+	if (getBookStorageDriver() === 'r2') {
+		getR2Config();
+	}
+}
+
 let cachedR2Client: { cacheKey: string; client: S3Client } | undefined;
 
 function getR2Client() {
@@ -99,6 +107,13 @@ function assertSafeRelativeStorageKey(key: string) {
 	}
 	const parts = key.split('/');
 	if (parts.some((part) => !part || part === '.' || part === '..')) {
+		throw new BookStorageNotFoundError();
+	}
+	return key;
+}
+
+function assertR2BookObjectKey(key: string) {
+	if (!R2_BOOK_OBJECT_KEY_PATTERN.test(key)) {
 		throw new BookStorageNotFoundError();
 	}
 	return key;
@@ -183,17 +198,29 @@ export async function storeBookFile(input: {
 
 	const objectKey = `books/${storedFileName}`;
 	const { client, bucket } = getR2Client();
-	await client.send(
-		new PutObjectCommand({
-			Bucket: bucket,
-			Key: objectKey,
-			Body: input.bytes,
-			ContentType: input.mimeType,
-			ContentLength: input.bytes.length,
-			ContentDisposition: makeContentDisposition(input.originalFileName),
-			CacheControl: 'private, no-store',
-		}),
-	);
+	try {
+		await client.send(
+			new PutObjectCommand({
+				Bucket: bucket,
+				Key: objectKey,
+				Body: input.bytes,
+				ContentType: input.mimeType,
+				ContentLength: input.bytes.length,
+				ContentDisposition: makeContentDisposition(input.originalFileName),
+				CacheControl: 'private, no-store',
+			}),
+		);
+	} catch (uploadError) {
+		try {
+			await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: objectKey }));
+		} catch (cleanupError) {
+			console.error('R2 upload cleanup failed', {
+				key: objectKey,
+				errorName: cleanupError instanceof Error ? cleanupError.name : 'UnknownError',
+			});
+		}
+		throw uploadError;
+	}
 	return { fileUrl: objectKey, storedFileName };
 }
 
@@ -204,7 +231,7 @@ export async function deleteStoredBookFile(fileUrl: string) {
 		return;
 	}
 
-	const key = assertSafeRelativeStorageKey(fileUrl);
+	const key = assertR2BookObjectKey(assertSafeRelativeStorageKey(fileUrl));
 	const { client, bucket } = getR2Client();
 	await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 }
@@ -214,7 +241,7 @@ export async function getBookFileAccess(fileUrl: string): Promise<BookFileAccess
 		return { kind: 'local', path: await resolveLocalBookFilePath(fileUrl) };
 	}
 
-	const key = assertSafeRelativeStorageKey(fileUrl);
+	const key = assertR2BookObjectKey(assertSafeRelativeStorageKey(fileUrl));
 	const { client, bucket } = getR2Client();
 	try {
 		await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
@@ -229,5 +256,5 @@ export async function getBookFileAccess(fileUrl: string): Promise<BookFileAccess
 	const url = await getSignedUrl(client, new GetObjectCommand({ Bucket: bucket, Key: key }), {
 		expiresIn: BOOK_FILE_SIGNED_URL_EXPIRES_IN_SECONDS,
 	});
-	return { kind: 'redirect', url, expiresAt };
+	return { kind: 'signed-url', url, expiresAt };
 }

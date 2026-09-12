@@ -40,12 +40,12 @@ npm run verify:r2
 
 ## Book file storage
 
-`BOOK_FILE_STORAGE_DRIVER` で保存先を切り替えます。未指定時は `local` です。
+`BOOK_FILE_STORAGE_DRIVER` で保存先を切り替えます。Production Composeでは明示指定が必須です。起動時に `r2` の必須設定が不足している場合は起動に失敗します。
 
 - `local`: `BOOK_FILE_STORAGE_ROOT` 配下へ保存し、認可後にbackendからstreamする
-- `r2`: Cloudflare R2へ保存し、認可後に1時間有効のGET署名URLへ302 redirectする
+- `r2`: Cloudflare R2へ保存し、認可済みAPIから1時間有効のGET署名URL情報を返す。frontendは署名URLへcredentialsなしで取得する
 
-`BookFile.fileUrl` は公開URLではなくstorage keyです。R2では `books/<uuid>.<ext>`、localでは `<uuid>.<ext>` を保持します。管理登録でR2/local保存後にDB作成が失敗した場合、保存済みobject/fileの補償削除を試み、削除失敗はログへ残します。
+`BookFile.fileUrl` は公開URLではなくstorage keyです。R2では `books/<uuid>.(pdf|epub)`、localでは `<uuid>.<ext>` を保持します。管理登録でR2/local保存後にDB作成が失敗した場合、保存済みobject/fileの補償削除を試み、削除失敗はログへ残します。
 
 重要:
 

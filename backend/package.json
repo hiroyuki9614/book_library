@@ -9,7 +9,7 @@
     "verify:file-hash-migration": "tsx scripts/verify-file-hash-migration.ts",
     "prepare:real-e2e-fixture": "tsx scripts/prepare-real-e2e-fixture.ts",
     "create:initial-admin": "tsx scripts/create-initial-admin.ts",
-    "verify:r2": "tsx scripts/verify-r2.ts"
+    "verify:r2": "node dist/scripts/verify-r2.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1131.0",
