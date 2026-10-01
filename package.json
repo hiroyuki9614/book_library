@@ -9,7 +9,8 @@
     "test:frontend": "npm --prefix frontend test",
     "build:backend": "npm --prefix backend run build",
     "build:frontend": "npm --prefix frontend run build",
-    "dev": "concurrently \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\""
+    "dev": "concurrently \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
+    "test:library-import": "python3 scripts/test_belib_personal_library_import.py"
   },
   "repository": {
     "type": "git",
@@ -30,4 +31,4 @@
   "dependencies": {
     "@scalar/hono-api-reference": "^0.11.9"
   }
-}
+}\n
