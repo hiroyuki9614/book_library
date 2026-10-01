@@ -17,6 +17,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Personal library importer tests
+        run: npm run test:library-import
       - name: Backend install
         working-directory: backend
         run: npm ci
