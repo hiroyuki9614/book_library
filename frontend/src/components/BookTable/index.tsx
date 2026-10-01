@@ -5,15 +5,15 @@ import { MoreHorizontal, Star } from 'lucide-react';
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
-import { booksData } from '@/data/booksData';
+import type { Book } from '@/data/booksData';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { ReadingProgress } from '@/data/readingProgress';
 
 type StatusFilter = 'all' | 'unread' | 'reading' | 'completed';
 
 type BookTableProps = {
-	books: typeof booksData;
-	readingProgresses: ReadingProgress[];
+	books: Book[];
+	readingProgresses?: ReadingProgress[];
 	itemsPerPage: number;
 	searchQuery: string;
 	sort: string;
@@ -21,17 +21,17 @@ type BookTableProps = {
 	status: StatusFilter;
 };
 
-export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery, sort, isLoading, status }: BookTableProps) {
+export function BookTable({ books, readingProgresses = [], itemsPerPage, searchQuery, sort, isLoading, status }: BookTableProps) {
 	const columns = ['', 'タイトル', '著者', 'ジャンル', 'ステータス', '進捗'];
 	const [currentPage, setCurrentPage] = useState<number>(1);
 
 	const getReadingProgress = (bookId: number) => readingProgresses.find((progress) => progress.id === bookId);
-	const getBookStatus = (bookId: number): Exclude<StatusFilter, 'all'> => getReadingProgress(bookId)?.status ?? 'unread';
+	const getBookStatus = (book: Book): Exclude<StatusFilter, 'all'> => book.status.toLowerCase() as Exclude<StatusFilter, 'all'>;
 
 	const filteredBooks = books.filter((book) => {
 		const query = searchQuery.toLowerCase();
 		const matchesSearch = book.title.toLowerCase().includes(query) || book.author.toLowerCase().includes(query);
-		const matchesStatus = status === 'all' || getBookStatus(book.id) === status;
+		const matchesStatus = status === 'all' || getBookStatus(book) === status;
 		return matchesSearch && matchesStatus;
 	});
 
@@ -92,9 +92,8 @@ export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery,
 							</TableRow>
 						))
 					: currentBooks.map((book) => {
-							const readingProgress = getReadingProgress(book.id);
-							const progress = readingProgress?.progress ?? 0;
-							const bookStatus = getBookStatus(book.id);
+							const progress = getReadingProgress(book.id)?.progress;
+							const bookStatus = getBookStatus(book);
 
 							return (
 								<TableRow key={book.id} onClick={() => navigate(`/reader/${book.id}`)} className='cursor-pointer hover:bg-muted'>
@@ -105,7 +104,7 @@ export function BookTable({ books, readingProgresses, itemsPerPage, searchQuery,
 									<TableCell className='overflow-hidden text-ellipsis whitespace-nowrap'>{book.author}</TableCell>
 									<TableCell className='overflow-hidden text-ellipsis whitespace-nowrap'>{book.category}</TableCell>
 									<TableCell><Badge variant={getBadgeVariant(bookStatus)}>{bookStatus}</Badge></TableCell>
-									<TableCell><Progress value={progress} className='w-24' /></TableCell>
+									<TableCell>{progress === undefined ? <span className='text-muted-foreground'>未計測</span> : <Progress value={progress} className='w-24' />}</TableCell>
 									<TableCell>
 										<div className='flex items-center gap-2'>
 											<button

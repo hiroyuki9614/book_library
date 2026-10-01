@@ -5,6 +5,7 @@
 - Base checkpoint: `main@719bdb885dffdfe037a717fde9e313f6cd95d4e0`
 - Current R2 implementation branch: `feat/r2-storage-cutover-20260912`
 - This document reflects the R2 branch behavior; live R2/production verification remains pending
+- Scoped update (2026-10-01): Home/BookTable reading-evidence behavior below; this is not a fresh R2 or production acceptance.
 
 ## Source-of-truth boundary
 
@@ -112,7 +113,7 @@ Rules:
 - PDF Reader saves `completed` when the final page is displayed.
 - EPUB Reader saves `completed` when the generated final location is displayed.
 
-Progress percentage is still a separate concern. The DB intentionally does not store percentage. Home's status counts now use backend `readStatus`, while the existing average-progress percentage remains on its prior prototype/mock path until final percentage semantics are defined from each reader.
+Progress percentage is still a separate concern. The DB intentionally does not store percentage. Home's status counts and BookTable's status badges/filter now use backend `readStatus` through `Book.status`. Home's average percentage and any missing per-book percentage are explicitly shown as `未計測`, not zero or prototype values. Defining real reader-derived percentage semantics remains an open requirement; this correction does not mark that feature complete.
 
 ## Admin
 
@@ -166,7 +167,7 @@ Connected to real backend paths:
 - Admin persisted list reload
 - Home/BookTable read status
 
-The shelf status filter and read-status summary now use the backend-derived book state rather than the old reading-status mock. The old reading-progress mock remains only for percentage display.
+The shelf status filter and read-status summary use the backend-derived book state. Production Home no longer imports or calls `useReadingProgresses` or supplies mock percentages to BookTable; the legacy helper/mock remains only for existing tests. Initial loading and API failure are displayed separately from a successful empty library, so failed or pending requests are not presented as valid zero counts.
 
 ## Storage
 
