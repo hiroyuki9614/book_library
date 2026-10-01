@@ -2,14 +2,12 @@ import { BookTable } from '@/components/BookTable';
 import { MiniCard } from '@/components/MiniCard';
 import SectionCard from '@/components/SectionCard';
 import useBooks from '@/hooks/useBooks';
-import useReadingProgresses from '@/hooks/useReadingProgresses';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useState } from 'react';
 
 function Home() {
 	const { books, isLoading, isError } = useBooks();
-	const { readingProgresses } = useReadingProgresses();
 	const [selectedSort, setSelectedSort] = useState('newest');
 	const [searchQuery, setSearchQuery] = useState('');
 	type StatusFilter = 'all' | 'unread' | 'reading' | 'completed';
@@ -24,9 +22,13 @@ function Home() {
 		},
 		{ unread: 0, reading: 0, completed: 0 },
 	);
-	const averageProgress = readingProgresses.length > 0
-		? Math.round(readingProgresses.reduce((acc, progress) => acc + progress.progress, 0) / readingProgresses.length)
-		: 0;
+	const countLabel = (count: number) => {
+		if (isError) return '取得失敗';
+		if (isLoading) return '読み込み中';
+		return `${count}冊`;
+	};
+	// The existing API provides saved statuses, not reader-derived percentages.
+	const progressLabel = '未計測';
 
 	return (
 		<>
@@ -36,22 +38,22 @@ function Home() {
 						<div className='space-y-4'>
 							<h2 className='font-semibold'>読書サマリー</h2>
 							<div className='grid grid-cols-2 gap-3 text-sm'>
-								<div><p className='text-muted-foreground'>総冊数</p><p className='font-semibold'>{books.length}冊</p></div>
-								<div><p className='text-muted-foreground'>読書中</p><p className='font-semibold'>{statusCounts.reading}冊</p></div>
-								<div><p className='text-muted-foreground'>読了</p><p className='font-semibold'>{statusCounts.completed}冊</p></div>
-								<div><p className='text-muted-foreground'>未読</p><p className='font-semibold'>{statusCounts.unread}冊</p></div>
-								<div><p className='text-muted-foreground'>平均進捗</p><p className='font-semibold'>{averageProgress}%</p></div>
+								<div><p className='text-muted-foreground'>総冊数</p><p className='font-semibold'>{countLabel(books.length)}</p></div>
+								<div><p className='text-muted-foreground'>読書中</p><p className='font-semibold'>{countLabel(statusCounts.reading)}</p></div>
+								<div><p className='text-muted-foreground'>読了</p><p className='font-semibold'>{countLabel(statusCounts.completed)}</p></div>
+								<div><p className='text-muted-foreground'>未読</p><p className='font-semibold'>{countLabel(statusCounts.unread)}</p></div>
+								<div><p className='text-muted-foreground'>平均進捗</p><p className='font-semibold'>{progressLabel}</p></div>
 							</div>
 						</div>
 					</SectionCard>
 				</div>
 
 				<div className='hidden gap-4 md:flex'>
-					<MiniCard title='総冊数' color='bg-primary/20'><p>{books.length}冊</p></MiniCard>
-					<MiniCard title='読書中' color='bg-blue-500/20'><p>{statusCounts.reading}冊</p></MiniCard>
-					<MiniCard title='読了' color='bg-red-500/20'><p>{statusCounts.completed}冊</p></MiniCard>
-					<MiniCard title='未読' color='bg-green-500/20'><p>{statusCounts.unread}冊</p></MiniCard>
-					<MiniCard title='平均進捗' color='bg-purple-500/20'><p>{averageProgress}%</p></MiniCard>
+					<MiniCard title='総冊数' color='bg-primary/20'><p>{countLabel(books.length)}</p></MiniCard>
+					<MiniCard title='読書中' color='bg-blue-500/20'><p>{countLabel(statusCounts.reading)}</p></MiniCard>
+					<MiniCard title='読了' color='bg-red-500/20'><p>{countLabel(statusCounts.completed)}</p></MiniCard>
+					<MiniCard title='未読' color='bg-green-500/20'><p>{countLabel(statusCounts.unread)}</p></MiniCard>
+					<MiniCard title='平均進捗' color='bg-purple-500/20'><p>{progressLabel}</p></MiniCard>
 				</div>
 			</div>
 
@@ -86,7 +88,6 @@ function Home() {
 							<BookTable
 								key={`${searchQuery}-${selectedSort}-${selectedStatus}`}
 								books={books}
-								readingProgresses={readingProgresses}
 								itemsPerPage={itemsPerPage}
 								sort={selectedSort}
 								searchQuery={searchQuery}
