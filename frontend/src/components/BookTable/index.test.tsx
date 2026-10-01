@@ -23,6 +23,8 @@ const pickBook = (id: number) => {
 };
 
 const books: Book[] = [pickBook(1), pickBook(2), pickBook(3), pickBook(9)];
+// Keep the conflicting prototype deliberately: book 9 is saved as Completed,
+// while its old progress fixture says unread. Book.status owns the read state.
 const readingProgresses = readingProgressData.filter((progress) => [1, 2, 9].includes(progress.id));
 
 type RenderBookTableOptions = {
@@ -83,21 +85,35 @@ describe('BookTable', () => {
 		await expect.element(getByText('System Design Basics')).not.toBeInTheDocument();
 	});
 
-	test('shows only completed books when status is completed', async () => {
+	test('shows saved completed books even when the prototype status disagrees', async () => {
+		expect(pickBook(9).status).toBe('Completed');
+		expect(readingProgresses.find((progress) => progress.id === 9)?.status).toBe('unread');
 		const { getByText } = await renderBookTable({ status: 'completed' });
 
 		await expect.element(getByText('Learning TypeScript')).toBeInTheDocument();
 		await expect.element(getByText('React Design Patterns')).not.toBeInTheDocument();
-		await expect.element(getByText('System Design Basics')).not.toBeInTheDocument();
+		await expect.element(getByText('System Design Basics')).toBeInTheDocument();
 	});
 
-	test('shows books with unread progress or no progress when status is unread', async () => {
+	test('shows only saved unread books, not completed books with an unread prototype', async () => {
 		const { getByText } = await renderBookTable({ status: 'unread' });
 
-		await expect.element(getByText('System Design Basics')).toBeInTheDocument();
+		await expect.element(getByText('System Design Basics')).not.toBeInTheDocument();
 		await expect.element(getByText('Node.js Architecture')).toBeInTheDocument();
 		await expect.element(getByText('React Design Patterns')).not.toBeInTheDocument();
 		await expect.element(getByText('Learning TypeScript')).not.toBeInTheDocument();
+	});
+
+	test('preserves saved states without percentages and marks missing progress as unmeasured', async () => {
+		const { container } = await render(
+			<BookTable books={books} itemsPerPage={10} searchQuery='' sort='newest' isLoading={false} status='all' />,
+		);
+		expect(getBookRow(container, 'React Design Patterns').textContent).toContain('reading');
+		expect(getBookRow(container, 'System Design Basics').textContent).toContain('completed');
+		for (const book of books) {
+			expect(getBookRow(container, book.title).textContent).toContain('未計測');
+		}
+		expect(container.querySelector('[role="progressbar"]')).toBeNull();
 	});
 
 	test('sorts books by id descending when sort is newest', async () => {
