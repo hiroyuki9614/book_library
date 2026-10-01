@@ -160,6 +160,39 @@ class PersonalLibraryImportTests(unittest.TestCase):
             self.assertEqual(plan.reason, "ambiguous_pdf")
             self.assertIsNone(plan.file_path)
 
+    def test_completed_ledger_entry_does_not_touch_the_hdd_again(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "電子書籍"
+            root.mkdir()
+            row = inventory_row()
+            ledger = {
+                "schema_version": 1,
+                "entries": {
+                    row["logical_book_id"]: {"status": "registered"},
+                },
+            }
+
+            with mock.patch.object(
+                IMPORTER,
+                "select_book_file",
+                side_effect=AssertionError("completed item touched the HDD"),
+            ):
+                plans = IMPORTER.plan_inventory([row], root, ledger, limit=None)
+
+            self.assertEqual(len(plans), 1)
+            self.assertEqual(plans[0].status, "skip")
+            self.assertEqual(plans[0].reason, "ledger_completed")
+
+    def test_plain_http_is_rejected_for_non_loopback_api_hosts(self) -> None:
+        with self.assertRaises(IMPORTER.ExecuteError):
+            IMPORTER.BelibClient("http://belib.example.com")
+
+        loopback = IMPORTER.BelibClient("http://127.0.0.1:3000")
+        self.assertEqual(loopback.scheme, "http")
+
+        secure = IMPORTER.BelibClient("https://belib.example.com")
+        self.assertEqual(secure.scheme, "https")
+
     def test_success_and_duplicate_ledger_entries_are_resumable(self) -> None:
         ledger = {
             "lb_registered": {"status": "registered"},
