@@ -6,6 +6,7 @@ export type DemoUserPrisma = {
 };
 
 type DemoUserOptions = {
+	dryRun?: boolean;
 	hashPassword?: typeof defaultHashPassword;
 	verifyPassword?: typeof defaultVerifyPassword;
 };
@@ -40,6 +41,8 @@ export async function createDemoUser(
 			}
 			return { created: false, userId: existingUser.id };
 		}
+
+		if (options.dryRun) return { created: false };
 
 		const user = await transaction.user.create({
 			data: {

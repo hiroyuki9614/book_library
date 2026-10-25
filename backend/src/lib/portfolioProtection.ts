@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-export const PORTFOLIO_SNAPSHOT_VERSION = 1;
+export const PORTFOLIO_SNAPSHOT_VERSION = 2;
 
 export type PortfolioBookSnapshot = {
 	id: number;
@@ -12,7 +12,10 @@ export type PortfolioSnapshot = {
 	version: typeof PORTFOLIO_SNAPSHOT_VERSION;
 	createdAt: string;
 	gitRevision: string;
+	imageId: string;
+	storageIdentityHash: string;
 	databaseIdentityHash: string;
+	fileInventorySha256: string;
 	storageDriver: 'local' | 'r2';
 	demoAccount: {
 		exists: boolean;
@@ -31,7 +34,14 @@ export type BackupEvidence = {
 	databaseIdentityHash: string;
 	snapshotSha256: string;
 	backupId: string;
-	checksum: string;
+	databaseSha256: string;
+	storageBackupId: string;
+	storageManifestSha256: string;
+	storageIdentityHash: string;
+	restoreReportSha256: string;
+	restoreTarget: string;
+	approvedBy: string;
+	consistencyBoundary: string;
 	completedAt: string;
 	restoreVerified: boolean;
 };
@@ -45,8 +55,8 @@ export function databaseIdentityHash(databaseUrl: string) {
 }
 
 function classifyStorageKey(fileUrl: string) {
-	if (/^books\/[0-9a-f]{8}-[0-9a-f-]{27,}\.((epub)|(pdf))$/i.test(fileUrl)) return 'r2';
-	if (/^[0-9a-f]{8}-[0-9a-f-]{27,}\.((epub)|(pdf))$/i.test(fileUrl)) return 'local';
+	if (/^books\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(epub|pdf)$/.test(fileUrl)) return 'r2';
+	if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(epub|pdf)$/.test(fileUrl)) return 'local';
 	return 'unknown';
 }
 
@@ -55,6 +65,8 @@ export async function createPortfolioSnapshot(
 	input: {
 		databaseUrl: string;
 		gitRevision: string;
+		imageId: string;
+		storageIdentityHash: string;
 		storageDriver: 'local' | 'r2';
 		demoUserEmail?: string;
 		now?: Date;
@@ -70,7 +82,7 @@ export async function createPortfolioSnapshot(
 				roleBookPermissions: { select: { roleId: true } },
 			},
 		}),
-		prisma.bookFile.findMany({ select: { fileUrl: true } }),
+		prisma.bookFile.findMany({ orderBy: { id: 'asc' }, select: { id: true, bookId: true, fileUrl: true, fileSize: true, fileHash: true } }),
 		input.demoUserEmail
 			? prisma.user.findFirst({
 					where: { email: { equals: input.demoUserEmail, mode: 'insensitive' } },
@@ -90,8 +102,11 @@ export async function createPortfolioSnapshot(
 		version: PORTFOLIO_SNAPSHOT_VERSION,
 		createdAt: (input.now ?? new Date()).toISOString(),
 		gitRevision: input.gitRevision,
+		imageId: input.imageId,
+		storageIdentityHash: input.storageIdentityHash,
 		databaseIdentityHash: databaseIdentityHash(input.databaseUrl),
 		storageDriver: input.storageDriver,
+		fileInventorySha256: createHash('sha256').update(JSON.stringify(bookFiles)).digest('hex'),
 		demoAccount: {
 			exists: Boolean(demoUser),
 			activeGeneralUser: Boolean(demoUser && !demoUser.deletedAt && demoUser.role.name === 'user'),
@@ -115,7 +130,10 @@ export function assertPortfolioSnapshot(value: unknown): asserts value is Portfo
 	if (
 		!snapshot || snapshot.version !== PORTFOLIO_SNAPSHOT_VERSION ||
 		typeof snapshot.createdAt !== 'string' || !Number.isFinite(Date.parse(snapshot.createdAt)) ||
-		typeof snapshot.gitRevision !== 'string' || !/^[0-9a-f]{40,64}$/.test(snapshot.gitRevision) ||
+		typeof snapshot.gitRevision !== 'string' || !/^[0-9a-f]{40}$/.test(snapshot.gitRevision) ||
+		typeof snapshot.fileInventorySha256 !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.fileInventorySha256) ||
+		typeof snapshot.imageId !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(snapshot.imageId) ||
+		typeof snapshot.storageIdentityHash !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.storageIdentityHash) ||
 		typeof snapshot.databaseIdentityHash !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.databaseIdentityHash) ||
 		(snapshot.storageDriver !== 'local' && snapshot.storageDriver !== 'r2') ||
 		typeof snapshot.demoAccount?.exists !== 'boolean' || typeof snapshot.demoAccount?.activeGeneralUser !== 'boolean' ||
@@ -137,8 +155,13 @@ export function assertBackupEvidence(value: unknown, snapshot: PortfolioSnapshot
 		!evidence || evidence.databaseIdentityHash !== snapshot.databaseIdentityHash ||
 		evidence.snapshotSha256 !== snapshotSha256 || evidence.restoreVerified !== true ||
 		typeof evidence.backupId !== 'string' || !evidence.backupId.trim() ||
-		typeof evidence.checksum !== 'string' || !evidence.checksum.trim() ||
-		typeof evidence.completedAt !== 'string' || !Number.isFinite(Date.parse(evidence.completedAt))
+		evidence.storageIdentityHash !== snapshot.storageIdentityHash ||
+		!['databaseSha256', 'storageManifestSha256', 'restoreReportSha256'].every((key) =>
+			typeof evidence[key as keyof BackupEvidence] === 'string' && /^[0-9a-f]{64}$/.test(evidence[key as keyof BackupEvidence] as string)) ||
+		!['storageBackupId', 'restoreTarget', 'approvedBy', 'consistencyBoundary'].every((key) =>
+			typeof evidence[key as keyof BackupEvidence] === 'string' && (evidence[key as keyof BackupEvidence] as string).trim()) ||
+		typeof evidence.completedAt !== 'string' || !Number.isFinite(Date.parse(evidence.completedAt)) ||
+		Date.parse(evidence.completedAt) < Date.parse(snapshot.createdAt) || Date.parse(evidence.completedAt) > Date.now()
 	) {
 		throw new Error('backup evidence does not match the snapshot or is incomplete');
 	}
@@ -180,20 +203,10 @@ export async function planExistingBookProtection(prisma: PortfolioPrisma, snapsh
 	};
 }
 
-async function verifyProtectedState(prisma: PortfolioPrisma, snapshot: PortfolioSnapshot) {
+export async function verifyProtectedState(prisma: PortfolioPrisma, snapshot: PortfolioSnapshot) {
 	const state = await readProtectionState(prisma, snapshot);
 	if (state.bookIds.some((id) => !state.adminBookIds.has(id)) || state.userBookIds.size > 0) {
 		throw new Error('post-write authorization verification failed');
-	}
-}
-
-async function verifySnapshotPermissionState(prisma: PortfolioPrisma, snapshot: PortfolioSnapshot) {
-	const state = await readProtectionState(prisma, snapshot);
-	for (const book of snapshot.books) {
-		if (
-			state.adminBookIds.has(book.id) !== book.hadAdminPermission ||
-			state.userBookIds.has(book.id) !== book.hadUserPermission
-		) throw new Error('rollback verification failed');
 	}
 }
 
@@ -215,27 +228,6 @@ export async function applyExistingBookProtection(prisma: PortfolioPrisma, snaps
 	});
 }
 
-export async function rollbackExistingBookProtection(prisma: PortfolioPrisma, snapshot: PortfolioSnapshot) {
-	return prisma.$transaction(async (transaction: PortfolioPrisma) => {
-		const state = await readProtectionState(transaction, snapshot);
-		if (state.bookIds.some((id) => !state.adminBookIds.has(id)) || state.userBookIds.size > 0) {
-			throw new Error('rollback requires the exact protected state; run a new preflight if permissions changed');
-		}
-
-		const restoreUserIds = snapshot.books.filter((book) => book.hadUserPermission).map((book) => book.id);
-		const removeAdminIds = snapshot.books.filter((book) => !book.hadAdminPermission).map((book) => book.id);
-		if (restoreUserIds.length > 0) {
-			await transaction.roleBookPermission.createMany({
-				data: restoreUserIds.map((bookId) => ({ roleId: state.userRoleId, bookId })),
-				skipDuplicates: true,
-			});
-		}
-		if (removeAdminIds.length > 0) {
-			await transaction.roleBookPermission.deleteMany({
-				where: { roleId: state.adminRoleId, bookId: { in: removeAdminIds } },
-			});
-		}
-		await verifySnapshotPermissionState(transaction, snapshot);
-		return { restoredBooks: state.bookIds.length };
-	});
+export async function rollbackExistingBookProtection(_prisma: PortfolioPrisma, _snapshot: PortfolioSnapshot): Promise<never> {
+	throw new Error('Permission rollback is disabled: restoring user permissions exposes private books to all general users, including shared demo credentials. Use a safe forward fix or isolated restore.');
 }

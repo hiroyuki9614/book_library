@@ -13,9 +13,12 @@ const databaseUrl = 'postgresql://portfolio:test@db.example.test:5432/belib';
 
 function snapshot(): PortfolioSnapshot {
 	return {
-		version: 1,
+		version: 2,
 		createdAt: '2026-10-25T00:00:00.000Z',
 		gitRevision: 'a'.repeat(40),
+		imageId: 'sha256:' + 'd'.repeat(64),
+		storageIdentityHash: 'e'.repeat(64),
+		fileInventorySha256: 'f'.repeat(64),
 		databaseIdentityHash: databaseIdentityHash(databaseUrl),
 		storageDriver: 'r2',
 		demoAccount: { exists: false, activeGeneralUser: false },
@@ -76,6 +79,8 @@ describe('existing portfolio book protection', () => {
 		const result = await createPortfolioSnapshot(prisma, {
 			databaseUrl,
 			gitRevision: 'b'.repeat(40),
+			imageId: snapshot().imageId,
+			storageIdentityHash: snapshot().storageIdentityHash,
 			storageDriver: 'r2',
 			demoUserEmail: 'demo@example.com',
 			now: new Date('2026-10-25T00:00:00.000Z'),
@@ -103,11 +108,17 @@ describe('existing portfolio book protection', () => {
 		expect([...permissions].sort()).toEqual(['1:10', '1:11', '2:99']);
 	});
 
-	test('rollbackはスナップショット時点の対象権限だけを復元する', async () => {
+	test('rollback cannot re-expose existing books to active holders of shared demo credentials', async () => {
 		const { client, permissions } = mutablePrisma();
 		await applyExistingBookProtection(client, snapshot());
-		await expect(rollbackExistingBookProtection(client, snapshot())).resolves.toEqual({ restoredBooks: 2 });
-		expect([...permissions].sort()).toEqual(['1:10', '2:10', '2:99']);
+		const before = [...permissions].sort();
+		const snapshotWithPublicDemo = { ...snapshot(), demoAccount: { exists: true, activeGeneralUser: true } };
+		await expect(rollbackExistingBookProtection(client, snapshotWithPublicDemo)).rejects.toThrow('rollback is disabled');
+		expect([...permissions].sort()).toEqual(before);
+		// All general accounts share role 2: only the synthetic demo book remains visible.
+		expect([...permissions].filter((key) => key.startsWith('2:'))).toEqual(['2:99']);
+		await expect(rollbackExistingBookProtection(client, snapshot())).rejects.toThrow('rollback is disabled');
+		expect([...permissions].sort()).toEqual(before);
 	});
 
 	test('書込み用バックアップ証拠はDB・snapshot hash・restore drillを照合する', () => {
@@ -115,11 +126,22 @@ describe('existing portfolio book protection', () => {
 			databaseIdentityHash: snapshot().databaseIdentityHash,
 			snapshotSha256: 'c'.repeat(64),
 			backupId: 'operator-backup-id',
-			checksum: 'sha256:operator-checksum',
+			databaseSha256: '1'.repeat(64),
+			storageBackupId: 'storage-backup',
+			storageManifestSha256: '2'.repeat(64),
+			storageIdentityHash: snapshot().storageIdentityHash,
+			restoreReportSha256: '3'.repeat(64),
+			restoreTarget: 'isolated-target',
+			approvedBy: 'operator',
+			consistencyBoundary: 'write-freeze-1',
 			completedAt: '2026-10-25T01:00:00.000Z',
 			restoreVerified: true,
 		};
 		expect(() => assertBackupEvidence(value, snapshot(), 'c'.repeat(64))).not.toThrow();
-		expect(() => assertBackupEvidence({ ...value, restoreVerified: false }, snapshot(), 'c'.repeat(64))).toThrow();
+		for (const invalid of [
+			{ restoreVerified: false }, { storageBackupId: '' }, { databaseSha256: 'made-up' },
+			{ storageIdentityHash: '0'.repeat(64) }, { restoreReportSha256: '' },
+			{ completedAt: '2026-10-24T00:00:00.000Z' }, { completedAt: '2999-01-01T00:00:00.000Z' },
+		]) expect(() => assertBackupEvidence({ ...value, ...invalid }, snapshot(), 'c'.repeat(64))).toThrow();
 	});
 });

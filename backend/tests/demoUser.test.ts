@@ -54,6 +54,15 @@ describe('portfolio demo user', () => {
 		});
 	});
 
+	test('dry-run never creates an account or hashes a password', async () => {
+		const { prisma, transaction } = createPrisma();
+		const hashPassword = vi.fn();
+		await expect(createDemoUser(prisma, config, { dryRun: true, hashPassword })).resolves.toEqual({ created: false });
+		expect(transaction.user.create).not.toHaveBeenCalled();
+		expect(transaction.account.create).not.toHaveBeenCalled();
+		expect(hashPassword).not.toHaveBeenCalled();
+	});
+
 	test('同じ資格情報なら再実行してもユーザーを増やさない', async () => {
 		const { prisma, transaction } = createPrisma({
 			user: {

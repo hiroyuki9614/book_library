@@ -42,6 +42,8 @@ services:
     build:
       context: ./backend
       target: runtime
+      args:
+        VCS_REF: ${VCS_REF:?VCS_REF must identify the reviewed source commit}
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       APP_PORT: "3000"

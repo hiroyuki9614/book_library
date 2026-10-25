@@ -77,7 +77,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Validate production Compose
-        run: docker compose --file compose.yaml config
+        run: |
+          echo "VCS_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          VCS_REF=$(git rev-parse HEAD) docker compose --file compose.yaml config --quiet
       - name: Build production images
         run: docker compose --file compose.yaml build
       - name: Isolated API and UI smoke

@@ -21,3 +21,7 @@ The smoke test is evidence for a candidate or restore drill; it is not formal MV
 A failed check, missing route evidence, authentication-boundary failure, protected-file integrity mismatch, or unverified browser/device result is a stop condition. Do not retry by weakening authentication or changing shared data. Preserve Draft status and escalate to the release owner.
 
 Release packaging must not add R2 lifecycle cleanup beyond the already-defined DB-failure compensation path, file replacement, logical deletion, permanent deletion, recovery, or storage reconciliation. Any such behavior requires separate product and operational approval.
+
+## Runtime portfolio commands
+
+The disposable Compose CI smoke builds the production runtime with `VCS_REF`, obtains the running backend image ID, and executes all four compiled management commands there. It creates only synthetic roles in the disposable database, verifies preflight/protection/account/registration read-only paths with synthetic manifest files, rejects rollback and writes without backup evidence, and checks no accounts/books/files/permissions were created. The runtime has no Git checkout, source scripts or `tsx`. This smoke does not authenticate real backup evidence, perform a restore, or validate live storage; those remain independent release gates. Invoke `scripts/ci/isolated-smoke.sh` only with the required synthetic environment and `VCS_REF` set to the image's build revision. Docker daemon access is required.

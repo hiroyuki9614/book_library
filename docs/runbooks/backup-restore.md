@@ -4,6 +4,12 @@
 
 The recovery boundary depends on the active storage driver. With `local`, PostgreSQL records and the protected files under `BOOK_FILE_STORAGE_ROOT` are one recovery unit. With `r2`, the MVP does not create a separate R2 backup, but restore acceptance must verify that every restored `BookFile.fileUrl` still resolves to the expected private R2 object. Do not package, clean, replace, reconcile, recover, logically delete, or permanently delete book files as part of release work.
 
+## Public portfolio demo gate
+
+The portfolio operation has a stronger gate than the base MVP R2 inventory check: before permission writes, demo-account creation or demo registration, require a coordinated recoverable backup of PostgreSQL **and all referenced storage bytes**, including R2. An inventory or a live bucket is not a backup. If a private, encrypted, separately approved storage backup mechanism is unavailable, stop; do not create one as a casual release side effect. Restore the actual paired backups to private isolated resources, verify all hashes/sizes/mappings and authorized reads, and obtain independent acceptance. The synthetic smoke does not prove recovery of personal books. Keep restored personal data restricted to named operators and out of public logs.
+
+The evidence JSON in `docs/portfolio-demo.md` is an operator attestation with consistency checks, not authenticated proof of a drill. Independently retrieve the actual artifacts and report, verify their hashes, coverage and consistency boundary, and record approval. Freeze all book/file/permission writes until the operation completes; invalidate evidence if the boundary changes. Never restore pre-demo general-user permissions into a public service.
+
 ## Coordinated backup
 
 1. Record the database identity, application commit/image digest, active storage driver, storage identity (local root or R2 bucket), inventory count, and backup owner.

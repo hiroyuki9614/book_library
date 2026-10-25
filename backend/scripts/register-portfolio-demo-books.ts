@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { loadPortfolioGate, option, verifyLivePortfolioGate } from '../src/lib/portfolioGate.js';
+import { portfolioApiBaseUrl, reportPortfolioFailure } from '../src/lib/portfolioRuntime.js';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -7,11 +9,6 @@ import {
 	demoBookDescription,
 	verifyGeneratedDemoFiles,
 } from '../src/lib/portfolioDemoManifest.js';
-
-function option(args: string[], name: string) {
-	const index = args.indexOf(name);
-	return index >= 0 ? args[index + 1] : undefined;
-}
 
 function sessionCookie(response: Response) {
 	const headers = response.headers as Headers & { getSetCookie?: () => string[] };
@@ -31,6 +28,13 @@ async function responseBody(response: Response) {
 
 async function main() {
 	const args = process.argv.slice(2);
+	const gate = await loadPortfolioGate(args, args.includes('--execute'));
+	const { prisma } = await import('../src/lib/prisma.js');
+	try {
+		await verifyLivePortfolioGate(prisma, gate, true);
+	} finally {
+		await prisma.$disconnect();
+	}
 	const manifestPath = option(args, '--manifest');
 	if (!manifestPath) throw new Error('--manifest <generated manifest path> is required');
 	const bytes = await readFile(resolve(manifestPath));
@@ -48,24 +52,22 @@ async function main() {
 	if (option(args, '--confirm-manifest-sha256') !== manifestSha256) {
 		throw new Error('--confirm-manifest-sha256 must exactly match the dry-run output');
 	}
-	const apiBaseUrl = process.env.PORTFOLIO_API_BASE_URL?.replace(/\/$/, '');
+	const apiBaseUrl = portfolioApiBaseUrl(process.env);
 	const adminEmail = process.env.PORTFOLIO_ADMIN_EMAIL;
 	const adminPassword = process.env.PORTFOLIO_ADMIN_PASSWORD;
 	const categoryId = Number(process.env.PORTFOLIO_DEMO_CATEGORY_ID);
-	if (!apiBaseUrl || (!apiBaseUrl.startsWith('https://') && !/^http:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(apiBaseUrl))) {
-		throw new Error('PORTFOLIO_API_BASE_URL must use HTTPS or localhost');
-	}
 	if (!adminEmail || !adminPassword) throw new Error('PORTFOLIO_ADMIN_EMAIL and PORTFOLIO_ADMIN_PASSWORD are required');
 	if (!Number.isSafeInteger(categoryId) || categoryId < 1) throw new Error('PORTFOLIO_DEMO_CATEGORY_ID must be a positive integer');
 
 	const signIn = await fetch(`${apiBaseUrl}/api/auth/sign-in/email`, {
+		redirect: 'error',
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ email: adminEmail, password: adminPassword }),
 	});
 	if (!signIn.ok) throw new Error(`admin sign-in failed (${signIn.status})`);
 	const cookie = sessionCookie(signIn);
-	const currentBooksResponse = await fetch(`${apiBaseUrl}/api/v1/admin/books`, { headers: { Cookie: cookie } });
+	const currentBooksResponse = await fetch(`${apiBaseUrl}/api/v1/admin/books`, { redirect: 'error', headers: { Cookie: cookie } });
 	if (!currentBooksResponse.ok) throw new Error(`admin preflight failed (${currentBooksResponse.status})`);
 	const currentBooks = await currentBooksResponse.json() as { books?: Array<{ title?: unknown }> };
 	const existingTitles = new Set(currentBooks.books?.map((book) => book.title).filter((title): title is string => typeof title === 'string'));
@@ -85,6 +87,7 @@ async function main() {
 		form.set('publicationScope', 'all_users');
 		form.set('file', new Blob([fileBytes], { type: mimeType }), work.outputFileName);
 		const response = await fetch(`${apiBaseUrl}/api/v1/admin/book-registrations`, {
+			redirect: 'error',
 			method: 'POST',
 			headers: { Cookie: cookie },
 			body: form,
@@ -99,7 +102,4 @@ async function main() {
 	console.log(JSON.stringify({ registered }, null, 2));
 }
 
-main().catch((error) => {
-	console.error(error instanceof Error ? error.message : 'Portfolio demo registration failed');
-	process.exitCode = 1;
-});
+main().catch(reportPortfolioFailure);

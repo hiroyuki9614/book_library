@@ -262,8 +262,9 @@ Implemented on the portfolio branch:
 - public Better Auth email sign-up is disabled;
 - an idempotent `create:demo-user` command creates one active `user` account from secret environment values and refuses role/credential drift;
 - a read-only preflight snapshot records only existing book IDs/counts, role-permission booleans, storage-key format counts, revision, driver, and demo-account state;
-- existing-book protection is dry-run by default and binds writes to the snapshot SHA-256, database identity, backup evidence, and restore verification;
-- the protection transaction adds missing admin permissions, removes user permissions only from the frozen initial ID set, and verifies the result before commit; the same snapshot supports a guarded rollback;
+- all four management commands run compiled JavaScript in the reviewed runtime container; baked revision, externally verified image ID, DB/storage fingerprints and live inventory must match the v2 snapshot;
+- protection, demo-account creation and registration are dry-run by default; execution requires snapshot confirmation and coordinated DB/storage backup plus isolated-restore attestation, whose actual artifacts still require independent operator verification;
+- the protection transaction adds missing admin permissions, removes user permissions only from the frozen initial ID set, and verifies the result before commit; permission rollback is unconditionally disabled to prevent re-exposure through shared/general accounts;
 - an official-source Aozora Bunko catalog and reproducible EPUB/PDF builder preserve source edition, input/proofread credits, ruby/source notes, and conversion history without committing binaries;
 - demo registration verifies generated hashes/sizes/headers and uses Better Auth plus the protected Admin registration API with explicit `all_users` scope;
 - the login screen identifies the portfolio demo and warns that shared-account reading positions are shared;

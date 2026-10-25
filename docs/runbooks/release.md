@@ -22,6 +22,8 @@ For each candidate, record:
 
 Do not place credentials, public Production hostnames, or secret values in this record. Public origin and `VITE_API_BASE_URL` remain operator-supplied.
 
+Backend runtime builds now require `VCS_REF`, the full reviewed source SHA supplied by the build host. Compose passes it to the Dockerfile's immutable revision file and OCI label. Record the source-to-registry-digest-to-image-ID provenance; a self-declared label is insufficient. Management commands run compiled JavaScript through `docker exec` in the approved running backend container, using the same DB network and storage mounts. Follow `docs/portfolio-demo.md` for revision/identity verification and the stronger coordinated DB/storage backup and isolated restore gates before public-demo writes. Never infer the running revision from Git inside a runtime container.
+
 ## Stop/go controls
 
 Stop and preserve Draft status when any frontend or backend gate fails, publication credentials are missing, an artifact checksum or immutable digest is absent, browser/device behavior is unverified, an isolated restore drill is absent, migration compatibility is unclear, the fileHash hold is unresolved, required approvers are absent, or formal MVP requirements are incomplete. Exact status: **Draft status is preserved: failed frontend/backend gates, missing publication credentials, unverified browser/device behavior, absent restore drills, or incomplete formal MVP requirements block release approval.**
