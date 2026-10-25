@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "vitest --run && vitest --run --config vitest.node.config.ts",
+    "test": "vitest --run",
+    "test:node": "vitest --run --config vitest.node.config.ts",
     "coverage": "vitest run --coverage",
     "test:e2e": "playwright test"
   },
