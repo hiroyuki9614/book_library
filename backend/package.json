@@ -9,6 +9,10 @@
     "verify:file-hash-migration": "tsx scripts/verify-file-hash-migration.ts",
     "prepare:real-e2e-fixture": "tsx scripts/prepare-real-e2e-fixture.ts",
     "create:initial-admin": "tsx scripts/create-initial-admin.ts",
+    "create:demo-user": "tsx scripts/create-demo-user.ts",
+    "portfolio:preflight": "tsx scripts/portfolio-preflight.ts",
+    "portfolio:protect-existing": "tsx scripts/protect-existing-books.ts",
+    "portfolio:register-demo-books": "tsx scripts/register-portfolio-demo-books.ts",
     "verify:r2": "node dist/scripts/verify-r2.js"
   },
   "dependencies": {

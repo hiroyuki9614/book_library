@@ -1,38 +1,40 @@
 # BeLib
 
-BeLib は、認証・ロール別閲覧権限・読書進捗を備えた個人向け EPUB / PDF ライブラリを目指すフルスタックWebアプリです。
-
-現在は **PDFのMVPコア縦切りを実装・実runtime検証済み** で、正式MVPに向けてストレージ、公開範囲、EPUB、管理機能を仕上げている段階です。
+BeLib は、認証・ロール別閲覧権限・読書進捗を備えた個人向け EPUB / PDF ライブラリです。管理者の個人蔵書と、一般ユーザーへ公開するデモ書籍を同じライブラリ内で権限分離します。
 
 ## 現在できること
 
-実装checkpoint `checkpoint/belib-mvp-phase6-20260812` では、次が成立しています。
-
 - Better Auth のCookieセッションでログイン
 - `GET /api/v1/me` によるユーザー/ロール取得
-- `RoleBookPermission` に基づく書籍一覧・詳細の認可
-- 認可済みPDFの保護配信
-- PDFページ移動
-- 読書位置のPostgreSQL保存・復元
+- `RoleBookPermission` に基づく一覧・検索・詳細・ファイル・読書位置の認可
+- EPUB/PDFの保護配信（local stream / R2署名URL）
+- PDFページとEPUB CFIのPostgreSQL保存・復元
 - 未認証401 / 権限なし403
-- 管理者向け最小書籍メタデータ登録API
-- 管理者向け最小PDF登録API
-- 実PostgreSQL + Better Auth Cookie + Playwrightによる主要経路E2E
+- 管理者向けEPUB/PDF登録、明示的な全ユーザー公開 / 管理者限定設定
+- 管理者向け書籍・カテゴリ・一般ユーザー管理の主要経路
+- Vitestと実PostgreSQL + Better Auth Cookie + Playwrightによる認証・認可・読書経路E2E
 
-書籍ファイル保存は storage driver 経由です。ローカル開発/E2Eでは明示的にlocal storageを使用し、productionでは `BOOK_FILE_STORAGE_DRIVER=r2` によりCloudflare R2へ保存できます。R2閲覧はbackendで認証・権限確認後、1時間有効の署名URL情報を返し、frontendがcredentialsなしで取得します。live R2 credential/CORS/production cutoverは未検証です。
+書籍ファイル保存はstorage driver経由です。ローカル開発/E2Eでは明示的にlocal storageを使用し、production候補では `BOOK_FILE_STORAGE_DRIVER=r2` によりCloudflare R2へ保存できます。R2閲覧はbackendで認証・権限確認後、1時間有効の署名URL情報を返し、frontendがcredentialsなしで取得します。本番切替とブラウザCORS検証は運用承認が必要です。
+
+## ポートフォリオデモ
+
+ログイン画面を採用面接向けの入口として整え、一般ユーザーには公開デモ作品だけを表示します。公開サインアップは無効です。デモアカウントは秘密管理された環境変数から運用コマンドで作成し、資格情報をGitへ保存しません。共有アカウントでは読書位置も共有されることを画面に明示しています。
+
+既存蔵書のadmin限定化、青空文庫の出典確認・EPUB/PDF生成・保護Admin API登録、本番前の停止条件は [Portfolio demo runbook](docs/portfolio-demo.md) を参照してください。本番DB・本番R2・デプロイを変更せずに、read-only preflightとdry-runまで実施できます。
+
+![BeLib portfolio demo login](docs/images/portfolio-demo-login.jpg)
+
+![General-user shelf containing public demo books](docs/images/portfolio-demo-shelf.jpg)
 
 ## まだ未完成の主な項目
 
 - Cloudflare R2のlive credential/CORS/production cutoverと閲覧中URL自動再発行
-- EPUBの保護配信・サーバー進捗連携
-- 管理画面UIから実admin APIへの登録接続
-- 書籍ごとの公開範囲選択（全ユーザー / 管理者のみ）
-- `completed` の自動遷移
-- 検索・カテゴリ絞り込み
-- ユーザー管理
-- 論理削除・復元・完全削除
+- ポートフォリオデモの本番read-only preflight、バックアップ/復元証拠、承認付き権限切替
+- 青空文庫生成物の目視確認と本番R2への承認付き登録
+- 本番R2 CORSを含むEPUB/PDFブラウザE2E
+- 完全削除
 - ファイル差し替え
-- 既存DBのfile hash backfill方針の確定
+- 閲覧中のR2署名URL自動再発行（現在は読み込み時にBlob化）
 
 詳細は `docs/current-status.md` と `docs/requirements.md` を参照してください。
 
@@ -152,11 +154,9 @@ npm --prefix frontend test
 npm --prefix frontend run test:e2e
 ```
 
-`build:frontend` にはMVP外の既知TypeScriptエラーが残る可能性があります。失敗時は今回変更起因か既存課題かを分離して扱ってください。
+## Portfolio EPUB/PDF demo / browser E2E
 
-## MVP PDF demo / browser E2E
-
-seedのサンプル書籍はメタデータ中心のため、保護PDFを含む最短のdemoは既存のtask-owned E2E fixtureを使用します。`E2E_DATABASE_URL` は必ず `_e2e` で終わるDB名にし、実値は環境変数だけに設定してください。
+E2Eは、一般ユーザーへ公開するEPUB/PDF 2冊とadmin限定の既存蔵書相当1冊をtask-owned DB/storageへ作成します。`E2E_DATABASE_URL` は必ず `_e2e` で終わるDB名にし、実値は環境変数だけに設定してください。
 
 ```bash
 mkdir -p .tmp/e2e-book-files
@@ -171,11 +171,13 @@ export E2E_ADMIN_PASSWORD="replace-with-a-local-password"
 export E2E_MVP_PASSWORD="replace-with-a-local-password"
 export E2E_BOOK_FILE_STORAGE_ROOT="$(pwd)/.tmp/e2e-book-files"
 export E2E_MVP_METADATA_PATH="$(pwd)/.tmp/e2e-metadata.json"
+# 生成済みの青空文庫2冊でreaderも確認する場合のみ指定
+export E2E_AOZORA_MANIFEST_PATH="$(pwd)/.tmp/aozora-demo/manifest.generated.json"
 
 npm --prefix frontend run test:e2e
 ```
 
-このdemoは、ログイン、閲覧可能な書籍一覧、保護PDF、ページ移動、読書位置保存、reload後の復元、権限なしユーザーの拒否を確認します。
+このdemoは、一般ユーザーが公開2冊だけを一覧・検索できること、admin限定本の詳細・ファイル・進捗GET/PATCHと管理APIを拒否されること、adminは全冊を見られること、保護PDFページとEPUB CFIを保存・復元できることを確認します。`E2E_CAPTURE_PORTFOLIO_SCREENSHOTS=true` を指定した実行では、非公開書籍を含まないログイン/本棚画像を `docs/images/` へ更新します。
 
 同じtask-owned E2E DBとstorageでdemoを再実行する場合は、fixtureが既存roleとPDFを再利用しないため、先に次を実行します。
 
@@ -195,8 +197,9 @@ rm -f .tmp/e2e-metadata.json
 ```text
 login
 → permissioned book list
-→ protected PDF
-→ page move
+→ role-filtered EPUB/PDF shelf
+→ protected reader
+→ PDF page / EPUB CFI move
 → PostgreSQL save
 → reload
 → restore

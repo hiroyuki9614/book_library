@@ -47,4 +47,19 @@ describe('OpenAPI', () => {
 		expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
 		expect(res.headers.get('access-control-allow-credentials')).toBe('true');
 	});
+
+	test('公開メールサインアップを拒否する', async () => {
+		const res = await app.request('/api/auth/sign-up/email', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				email: 'public-signup@example.com',
+				name: 'Public Signup',
+				password: 'public-signup-password',
+			}),
+		});
+
+		expect(res.status).toBe(400);
+		expect(await res.json()).toMatchObject({ code: 'EMAIL_PASSWORD_SIGN_UP_DISABLED' });
+	});
 });

@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "usagePolicyUrl": "https://www.aozora.gr.jp/guide/kijyunn.html",
+  "works": [
+    {
+      "id": "wagahai-epub",
+      "format": "epub",
+      "outputFileName": "wagahai-neko-demo.epub",
+      "title": "【デモ】吾輩は猫である（EPUB）",
+      "authorName": "夏目 漱石",
+      "publisher": "青空文庫（BeLib EPUB変換）",
+      "publishedAt": "1905-01-01",
+      "pageTurnDirection": "rtl",
+      "cardUrl": "https://www.aozora.gr.jp/cards/000148/card789.html",
+      "sourceUrl": "https://www.aozora.gr.jp/cards/000148/files/789_14547.html",
+      "sourceLastUpdated": "2018-02-05",
+      "authorDeathDate": "1916-12-09",
+      "basisBook": "夏目漱石全集1（ちくま文庫、筑摩書房、1987年9月29日）",
+      "inputBy": ["柴田卓治"],
+      "proofreadBy": ["田尻幹二", "高橋真也", "しず", "瀬戸さえ子", "おのしげひこ", "渡部峰子"],
+      "conversionNote": "青空文庫XHTML版をUTF-8 EPUB 3へ変換。本文・ルビ・出典注記を保持し、BeLib用の目次と変換履歴を追加。"
+    },
+    {
+      "id": "botchan-pdf",
+      "format": "pdf",
+      "outputFileName": "botchan-demo.pdf",
+      "title": "【デモ】坊っちゃん（PDF）",
+      "authorName": "夏目 漱石",
+      "publisher": "青空文庫（BeLib PDF変換）",
+      "publishedAt": "1906-04-01",
+      "pageTurnDirection": "ltr",
+      "cardUrl": "https://www.aozora.gr.jp/cards/000148/card752.html",
+      "sourceUrl": "https://www.aozora.gr.jp/cards/000148/files/752_14964.html",
+      "sourceLastUpdated": "2011-05-20",
+      "authorDeathDate": "1916-12-09",
+      "basisBook": "ちくま日本文学全集 夏目漱石（筑摩書房、1992年1月20日）",
+      "inputBy": ["真先芳秋"],
+      "proofreadBy": ["柳沢成雄"],
+      "conversionNote": "青空文庫XHTML版をUTF-8 HTMLへ正規化し、ChromiumでPDF化。本文・ルビ・出典注記を保持し、変換履歴を追加。"
+    }
+  ]
+}

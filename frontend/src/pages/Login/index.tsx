@@ -41,10 +41,15 @@ export default function Login() {
 	};
 
 	return (
-		<main className='flex h-screen items-center justify-center p-4'>
-			<SectionCard pageTitle='Login Page' pageDescription='Please enter your credentials to log in.' size='large' className='w-[50%] text-center'>
+		<main className='flex min-h-screen items-center justify-center p-4'>
+			<SectionCard pageTitle='BeLib デモ' pageDescription='EPUB / PDFを安全に読む個人ライブラリ' size='large' className='w-full max-w-2xl text-center'>
+				<div className='mb-6 rounded-lg border bg-muted/40 p-4 text-left text-sm'>
+					<p className='font-semibold'>採用面接向けデモ</p>
+					<p className='mt-1 text-muted-foreground'>共有されたデモ用メールアドレスとパスワードでログインしてください。一般ユーザーには著作権保護期間が満了した公開デモ作品だけが表示されます。</p>
+					<p className='mt-2 text-muted-foreground'>共有アカウントでは読書位置も共有されるため、前の利用者が保存した位置から始まる場合があります。</p>
+				</div>
 				<LoginForm onSubmit={handleLogin} isPending={isPending || isSubmitting} />
-				<p>current role: {role ?? '未ログイン'}</p>
+				<p className='mt-4 text-xs text-muted-foreground'>現在の権限: {role ?? '未ログイン'}</p>
 			</SectionCard>
 		</main>
 	);
