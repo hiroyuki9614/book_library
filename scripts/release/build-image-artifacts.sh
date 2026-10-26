@@ -89,7 +89,7 @@ BACKEND_TAG="belib-backend:$SOURCE_REVISION"
 FRONTEND_TAG="belib-frontend:$SOURCE_REVISION"
 FRONTEND_API_BASE_URL_SHA256=$(printf '%s' "$FRONTEND_API_BASE_URL" | sha256sum | awk '{print $1}')
 
-docker build --file "$BACKEND_DOCKERFILE_REAL" --tag "$BACKEND_TAG" --label "org.opencontainers.image.revision=$SOURCE_REVISION" --label "org.opencontainers.image.created=$BUILD_TIMESTAMP" --label "org.opencontainers.image.source-revision=$SOURCE_REVISION" "$BACKEND_CONTEXT_REAL"
+docker build --file "$BACKEND_DOCKERFILE_REAL" --build-arg "VCS_REF=$SOURCE_REVISION" --tag "$BACKEND_TAG" --label "org.opencontainers.image.revision=$SOURCE_REVISION" --label "org.opencontainers.image.created=$BUILD_TIMESTAMP" --label "org.opencontainers.image.source-revision=$SOURCE_REVISION" "$BACKEND_CONTEXT_REAL"
 docker build --file "$FRONTEND_DOCKERFILE_REAL" --build-arg "VITE_API_BASE_URL=$FRONTEND_API_BASE_URL" --tag "$FRONTEND_TAG" --label "org.opencontainers.image.revision=$SOURCE_REVISION" --label "org.opencontainers.image.created=$BUILD_TIMESTAMP" --label "org.opencontainers.image.source-revision=$SOURCE_REVISION" "$FRONTEND_CONTEXT_REAL"
 docker image inspect "$BACKEND_TAG" >/dev/null
 docker image inspect "$FRONTEND_TAG" >/dev/null
