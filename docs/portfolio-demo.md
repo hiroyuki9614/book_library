@@ -2,6 +2,8 @@
 
 This runbook governs Issue #36. The owner's 2026-10-26 portfolio MVP scope replaces the earlier commercial-operation backup gates. Production execution still requires the approved execution lane, target-specific approval, a verified private database backup, and independent code review. See [roadmap](roadmap.md) for deferred work. Documentation and passing tests alone do not establish production completion.
 
+The 2026-10-26 execution completed. See the [production release record](records/2026-10-26-mvp-production-release.md) for immutable revisions, backup/permission evidence, production browser acceptance, safe screenshots, and remaining work.
+
 ## Safety boundary
 
 - Keep the R2 bucket private. Browser delivery must continue through authenticated `GET /api/v1/books/:bookId/file` signed-URL issuance.

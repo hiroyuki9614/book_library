@@ -1,11 +1,11 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-10-25
+- Updated: 2026-10-26
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
-- Base checkpoint: `main@5f3fbf58181512e5bb95218cc70e577abbd94849`
+- Base checkpoint: `main@a615f8760fb238586ac34d30c9600d8ac26c928b`
 - Current R2 implementation branch: `feat/r2-storage-cutover-20260912`
 - Current portfolio implementation branch: `feat/belib-portfolio-demo-20261025`
-- This document reflects the R2 branch behavior; live R2/production verification remains pending
+- The portfolio MVP is live. The detailed immutable deployment and production-browser evidence is in [the 2026-10-26 production release record](records/2026-10-26-mvp-production-release.md).
 - Scoped update (2026-10-01): Home/BookTable reading-evidence behavior below; this is not a fresh R2 or production acceptance.
 
 ## Source-of-truth boundary
@@ -20,7 +20,16 @@ current user request
 > this status document
 ```
 
-Book storage now uses a driver boundary: local storage is explicitly selected for development/E2E, while the R2 driver implements the confirmed Cloudflare R2 target. Live R2 credential/CORS/production cutover is still pending.
+Book storage uses a driver boundary: local storage is explicitly selected for development/E2E, while production uses the Cloudflare R2 driver. Production signed fetch, origin CORS, object size/hash, and known unsigned-path denial passed on 2026-10-26. Cloudflare control-plane configuration remains unverified and is tracked in the roadmap.
+
+## Production MVP snapshot
+
+- PR #37, the loopback-origin hotfix, and the EPUB ArrayBuffer hotfix are merged.
+- Production runs application revision `0d0a610d7d94ddfbafb979a9dee65c9e68f6e784` from immutable backend/frontend image IDs recorded in the release record.
+- The two pre-existing personal books are admin-only. The general demo user sees exactly the two public-domain demo books.
+- Verified custom-format database backups were taken before permission and registration writes.
+- Production Playwright Chromium acceptance passed for EPUB/PDF rendering and resume, authorization denials, signed R2/CORS, administrator access, and the mobile layout smoke.
+- Post-MVP operational hardening remains in [the roadmap](roadmap.md); it is not retroactively a publication blocker.
 
 ## High-level state
 
@@ -46,9 +55,9 @@ Admin persisted book list after reload               implemented
 Home/BookTable readStatus source = backend            implemented
 file_hash migration/schema drift                     resolved and runtime-verified
 README fresh setup / PDF browser demo                 verified on Phase C checkpoint
-Cloudflare R2 adapter + 1h signed URL               implemented; live cutover/auto-renew pending
+Cloudflare R2 adapter + 1h signed URL               implemented and live; auto-renew pending
 full MVP management functions                        not implemented
-portfolio demo production cutover                    prepared; production writes not executed
+portfolio demo production cutover                    published and production-E2E verified
 ```
 
 ## Book list and authorization
@@ -191,7 +200,7 @@ Authorized read
 
 R2 upload and DB-failure compensation cleanup are implemented, including cleanup after an ambiguous failed PUT. The runtime token is not stored in Git. Browser access to the presigned URL requires bucket CORS for the deployed frontend origin. `npm run verify:r2` performs an upload -> HEAD/sign -> GET -> delete smoke without printing credentials.
 
-Still open: live credential smoke, bucket CORS verification, production cutover, reader-side automatic URL reissue before the one-hour expiry, and full delete/replace lifecycle. Existing local `BookFile.fileUrl` rows must not be interpreted as R2 keys without an explicit migration.
+Still open: Cloudflare control-plane configuration audit, reader-side automatic URL reissue before the one-hour expiry, and the full delete/replace lifecycle. Live signed delivery, production-origin CORS, object size/hash, and known unsigned-path denial passed on 2026-10-26. Existing local `BookFile.fileUrl` rows must not be interpreted as R2 keys without an explicit migration.
 
 ## Database / Prisma
 
@@ -238,8 +247,7 @@ Existing dedicated Admin registration CI and EPUB protected-reader CI are also r
 
 R2-dependent:
 
-- live R2 credential smoke and production storage cutover.
-- bucket CORS verification for the production frontend origin.
+- Cloudflare control-plane audit for bucket exposure, custom domains, and configured CORS. Runtime signed delivery and production-origin CORS have passed.
 - reader-side automatic signed-URL reissue before the one-hour expiry.
 - R2 object cleanup/replacement lifecycle beyond DB-failure compensation.
 
