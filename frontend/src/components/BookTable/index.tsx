@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MoreHorizontal, Star } from 'lucide-react';
+import { BookOpen, MoreHorizontal, Star } from 'lucide-react';
 
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
@@ -98,7 +98,14 @@ export function BookTable({ books, readingProgresses = [], itemsPerPage, searchQ
 							return (
 								<TableRow key={book.id} onClick={() => navigate(`/reader/${book.id}`)} className='cursor-pointer hover:bg-muted'>
 									<TableCell>
-										<img src={book.coverImage} alt={`${book.title} の表紙`} className='h-16 w-12 rounded object-cover' />
+										{book.coverImage ? (
+											<img src={book.coverImage} alt={`${book.title} の表紙`} className='h-16 w-12 rounded object-cover' />
+										) : (
+											<div aria-label={`${book.title} の表紙未設定`} className='flex h-16 w-12 flex-col items-center justify-center rounded bg-primary/10 text-primary'>
+												<BookOpen className='h-5 w-5' />
+												<span className='mt-1 text-[10px] font-semibold uppercase'>{book.fileType}</span>
+											</div>
+										)}
 									</TableCell>
 									<TableCell className='overflow-hidden text-ellipsis whitespace-nowrap'>{book.title}</TableCell>
 									<TableCell className='overflow-hidden text-ellipsis whitespace-nowrap'>{book.author}</TableCell>

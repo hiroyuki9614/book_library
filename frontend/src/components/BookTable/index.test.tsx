@@ -116,6 +116,16 @@ describe('BookTable', () => {
 		expect(container.querySelector('[role="progressbar"]')).toBeNull();
 	});
 
+	test('cover imageがない実API書籍にはファイル形式付きfallbackを表示する', async () => {
+		const book = { ...pickBook(1), coverImage: undefined };
+		const { getByLabelText, getByText } = await render(
+			<BookTable books={[book]} itemsPerPage={10} searchQuery='' sort='newest' isLoading={false} status='all' />,
+		);
+
+		await expect.element(getByLabelText(`${book.title} の表紙未設定`)).toBeInTheDocument();
+		await expect.element(getByText('pdf', { exact: true })).toBeInTheDocument();
+	});
+
 	test('sorts books by id descending when sort is newest', async () => {
 		const { container } = await renderBookTable({ sort: 'newest' });
 

@@ -1,5 +1,9 @@
 # BeLib MVP 計画
 
+## ポートフォリオ公開の優先順（2026-10-26オーナー指定）
+
+Issue #36のR2デモ公開は [portfolio-demo.md](portfolio-demo.md) と [roadmap.md](roadmap.md) の限定ゲートを先行する。個人蔵書隔離、検証済み非公開DB dump、signup遮断、R2基本確認、一般demo/合法サンプル、公開URLのPC Chromium本文・認可・進捗復元E2Eを必須とする。以下の全機能完成、暗号化オフサイト/隔離復元訓練、Android完全E2Eをデモ公開の前提にはしない。既存の本番承認・実行経路・独立レビューは維持し、個人蔵書漏洩/P0/P1/データ消失リスクは先送りしない。
+
 - Updated: 2026-08-18
 - Target requirements: `docs/requirements.md` v2.0.0
 - Current implementation status: `docs/current-status.md`

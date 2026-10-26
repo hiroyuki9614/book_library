@@ -82,4 +82,26 @@ describe('Login flow', () => {
 		});
 		expect(refreshAuth).toHaveBeenCalledOnce();
 	});
+
+	test('デモ入口に公開範囲と共有読書位置の注意を表示する', async () => {
+		const { getByText } = await render(
+			<authContext.Provider
+				value={{
+					user: null,
+					isPending: false,
+					isAuthenticated: false,
+					role: null,
+					refreshAuth: vi.fn(),
+					signOut: vi.fn(),
+					logout: vi.fn(),
+				}}
+			>
+				<MemoryRouter><Login /></MemoryRouter>
+			</authContext.Provider>,
+		);
+
+		await expect.element(getByText('採用面接向けデモ')).toBeInTheDocument();
+		await expect.element(getByText(/公開デモ作品だけ/)).toBeInTheDocument();
+		await expect.element(getByText(/読書位置も共有/)).toBeInTheDocument();
+	});
 });

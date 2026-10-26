@@ -19,3 +19,7 @@ A rollback to a previously recorded image digest is allowed only after schema co
 Do not reset the database, use `prisma db push`, invent a down migration, restore only PostgreSQL without validating active-storage references, delete files to make records fit, replace files, perform R2 lifecycle cleanup, or claim recovery from a database-only result. Logical/permanent deletion and storage reconciliation remain outside release packaging.
 
 A failed frontend or backend gate, missing publication credentials, unverified browser/device behavior, absent restore drills, or incomplete formal MVP requirements preserves Draft status and blocks rollback-based release approval.
+
+## Public portfolio demo restriction
+
+Permission rollback is disabled unconditionally in both the CLI and library. Never restore snapshot `user` permissions to existing private books in a publicly reachable deployment, even if the named demo account was disabled: other general accounts, sessions and outstanding signed URLs may remain usable. A previous image must also preserve this restriction; reverting the binary is not permission recovery. Close public ingress and account for outstanding signed URLs before incident handling. Keep admin-only permissions and prefer a reviewed forward fix. A pre-demo database restore is permitted only into isolated private resources with no public credentials/routes and paired storage verification; bringing it online requires separate review and reapplication/verification of private-book protection.

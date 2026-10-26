@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest --run",
+    "test:node": "vitest --run --config vitest.node.config.ts",
     "coverage": "vitest run --coverage",
     "test:e2e": "playwright test"
   },

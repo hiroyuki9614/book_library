@@ -1,5 +1,7 @@
 # Release control runbook
 
+For the R2 portfolio MVP, the owner-approved scope in [portfolio-demo](../portfolio-demo.md) takes precedence over the broader recovery and device gates below. A verified private DB backup and documented authorized recovery procedure are required; offsite encryption, paired DB/R2 restore drills and exhaustive device coverage are deferred. Branch protection, independent code review, production execution authority and P0/P1 stops remain in force.
+
 ## Status vocabulary
 
 - **Draft review:** the candidate and evidence are available for review; this is the current default state and is not formal MVP completion.
@@ -21,6 +23,8 @@ For each candidate, record:
 - explicit statement that CI performed no live deployment.
 
 Do not place credentials, public Production hostnames, or secret values in this record. Public origin and `VITE_API_BASE_URL` remain operator-supplied.
+
+Backend runtime builds now require `VCS_REF`, the full reviewed source SHA supplied by the build host. Compose passes it to the Dockerfile's immutable revision file and OCI label. Record the source-to-registry-digest-to-image-ID provenance; a self-declared label is insufficient. Management commands run compiled JavaScript through `docker exec` in the approved running backend container, using the same DB network and storage mounts. Follow `docs/portfolio-demo.md` for revision/identity verification and the scoped MVP database backup gate before public-demo writes. Never infer the running revision from Git inside a runtime container.
 
 ## Stop/go controls
 

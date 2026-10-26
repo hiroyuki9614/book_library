@@ -1,9 +1,10 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-09-12
+- Updated: 2026-10-25
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
-- Base checkpoint: `main@719bdb885dffdfe037a717fde9e313f6cd95d4e0`
+- Base checkpoint: `main@5f3fbf58181512e5bb95218cc70e577abbd94849`
 - Current R2 implementation branch: `feat/r2-storage-cutover-20260912`
+- Current portfolio implementation branch: `feat/belib-portfolio-demo-20261025`
 - This document reflects the R2 branch behavior; live R2/production verification remains pending
 - Scoped update (2026-10-01): Home/BookTable reading-evidence behavior below; this is not a fresh R2 or production acceptance.
 
@@ -47,6 +48,7 @@ file_hash migration/schema drift                     resolved and runtime-verifi
 README fresh setup / PDF browser demo                 verified on Phase C checkpoint
 Cloudflare R2 adapter + 1h signed URL               implemented; live cutover/auto-renew pending
 full MVP management functions                        not implemented
+portfolio demo production cutover                    prepared; production writes not executed
 ```
 
 ## Book list and authorization
@@ -252,6 +254,31 @@ Non-R2:
 - category filtering UI wiring (backend `categoryId` filter exists).
 - PostgreSQL backup/restore acceptance.
 - PC Chrome + Android Chrome final acceptance.
+
+## Portfolio demo preparation (Issue #36)
+
+Implemented on the portfolio branch:
+
+- public Better Auth email sign-up is disabled;
+- an idempotent `create:demo-user` command creates one active `user` account from secret environment values and refuses role/credential drift;
+- a read-only preflight snapshot records only existing book IDs/counts, role-permission booleans, storage-key format counts, revision, driver, and demo-account state;
+- all four management commands run compiled JavaScript in the reviewed runtime container; baked revision, externally verified image ID, DB/storage fingerprints and live inventory must match the v2 snapshot;
+- protection, demo-account creation and registration are dry-run by default; execution requires snapshot confirmation and verified backup evidence; the R2-only portfolio MVP evidence policy accepts a private readable PostgreSQL custom dump plus recovery procedure and unchanged R2 verification, while the coordinated backup/restore policy remains supported for local storage;
+- the protection transaction adds missing admin permissions, removes user permissions only from the frozen initial ID set, and verifies the result before commit; permission rollback is unconditionally disabled to prevent re-exposure through shared/general accounts;
+- an official-source Aozora Bunko catalog and reproducible EPUB/PDF builder preserve source edition, input/proofread credits, ruby/source notes, and conversion history without committing binaries;
+- demo registration verifies generated hashes/sizes/headers and uses Better Auth plus the protected Admin registration API with explicit `all_users` scope;
+- the login screen identifies the portfolio demo and warns that shared-account reading positions are shared;
+- isolated Playwright coverage uses the real `user` role to verify demo-only visibility, private-book denial, Admin API denial, PDF page restore, EPUB CFI restore, and admin visibility.
+
+Not performed or claimed by repository changes:
+
+- live deployment revision/Compose/storage/DB inventory preflight;
+- production database permission writes or demo-account creation;
+- production R2 object creation, replacement, deletion, or driver change;
+- production backup/isolated restore acceptance;
+- production browser CORS and EPUB/PDF acceptance.
+
+Production preflight, verified private DB backup, protection, deployment and public-browser acceptance remain operator-controlled gates in `docs/portfolio-demo.md`. The owner deferred paired DB/R2 restore drills, offsite encryption and exhaustive device coverage to `docs/roadmap.md`; they are not added MVP publication gates. Repository changes do not establish that production has completed any of these steps.
 
 ## Current priority excluding R2
 

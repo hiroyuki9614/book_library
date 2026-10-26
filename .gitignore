@@ -5,6 +5,7 @@
 # Build and generated output
 /node_modules/
 /release-artifacts/
+/.tmp/
 backend/dist/
 backend/prisma/generated/
 backend/storage/

@@ -35,6 +35,15 @@ docker compose --project-name "$project" --file "$compose_file" up --detach db
 docker compose --project-name "$project" --file "$compose_file" --profile migration run --rm migrate
 docker compose --project-name "$project" --file "$compose_file" up --detach backend frontend nginx
 
+# Use the running runtime image, its existing DB network and storage mount.
+backend_id="$(docker compose --project-name "$project" --file "$compose_file" ps --quiet backend)"
+image_id="$(docker inspect --format '{{.Image}}' "$backend_id")"
+docker compose --project-name "$project" --file "$compose_file" exec -T \
+  -e PORTFOLIO_EXPECTED_REVISION="${VCS_REF:?VCS_REF is required}" \
+  -e PORTFOLIO_IMAGE_ID="$image_id" \
+  -e PORTFOLIO_ISOLATED_SMOKE=synthetic-disposable-only \
+  backend node dist/scripts/smoke-portfolio-runtime.js
+
 for attempt in {1..60}; do
   health_body="$(mktemp)"
   if curl --silent --show-error --fail --output "$health_body" "$api_url/health" && grep -Eiq '"status"[[:space:]]*:[[:space:]]*"ok"' "$health_body" && grep -Eiq '"service"[[:space:]]*:[[:space:]]*"belib-api"' "$health_body"; then

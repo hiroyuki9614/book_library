@@ -9,10 +9,11 @@ export default defineConfig({
 		include: ['@tanstack/react-query', 'react', 'react-dom', 'react-dom/client', 'react-router-dom', 'lucide-react', 'next-themes', 'vitest-browser-react'],
 	},
 	test: {
-		exclude: ['**/node_modules/**', 'e2e/**', 'src/e2e/**'],
+		exclude: ['**/node_modules/**', 'e2e/**', 'src/e2e/**', 'scripts/**'],
 		browser: {
 			enabled: true,
-			provider: playwright(),
+			headless: true,
+			provider: playwright({ launchOptions: { headless: true } }),
 			// https://vitest.dev/config/browser/playwright
 			instances: [{ browser: 'chromium' }],
 		},
