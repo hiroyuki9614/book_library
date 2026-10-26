@@ -65,8 +65,6 @@ describe('EpubReader protected source and ReadingInfo', () => {
 			readStatus: 'completed',
 		});
 		mocks.ePub.mockReturnValue(runtime.book);
-		vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:protected-epub');
-		vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
 	});
 
 	afterEach(() => {
@@ -82,7 +80,8 @@ describe('EpubReader protected source and ReadingInfo', () => {
 
 		await vi.waitFor(() => expect(mocks.fetchBookFile).toHaveBeenCalledWith(7));
 		await vi.waitFor(() => expect(mocks.fetchReadingInfo).toHaveBeenCalledWith(7));
-		await vi.waitFor(() => expect(mocks.ePub).toHaveBeenCalledWith('blob:protected-epub'));
+		await vi.waitFor(() => expect(mocks.ePub).toHaveBeenCalledWith(expect.any(ArrayBuffer)));
+		expect(runtime.book.locations.generate).toHaveBeenCalledWith(1600);
 		await vi.waitFor(() => expect(runtime.rendition.display).toHaveBeenCalledWith('epubcfi(/6/2!/4/1:0)'));
 	});
 
