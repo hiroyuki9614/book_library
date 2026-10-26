@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { describe, expect, test } from 'vitest';
-import { createEpub, validateCatalog } from './aozoraAssets.js';
+import { describe, expect, test, vi } from 'vitest';
+import { createEpub, fetchAozoraSource, validateCatalog } from './aozoraAssets.js';
 
 describe('Aozora portfolio assets', () => {
 	test('catalogは公式青空文庫sourceだけを許可しEPUB/PDF各1冊を要求する', async () => {
@@ -9,6 +9,24 @@ describe('Aozora portfolio assets', () => {
 		expect(catalog.works.map((work) => work.format).sort()).toEqual(['epub', 'pdf']);
 		expect(catalog.works.every((work) => work.title.startsWith('【デモ】'))).toBe(true);
 		expect(catalog.works.every((work) => new URL(work.sourceUrl).hostname === 'www.aozora.gr.jp')).toBe(true);
+	});
+
+	test('official source and image fetches reject redirects and credential-bearing/external targets', async () => {
+		const request = vi.fn().mockResolvedValue(new Response('source'));
+		vi.stubGlobal('fetch', request);
+		try {
+			await fetchAozoraSource('https://www.aozora.gr.jp/source.html');
+			expect(request).toHaveBeenCalledWith(new URL('https://www.aozora.gr.jp/source.html'), expect.objectContaining({ redirect: 'error' }));
+			for (const url of ['https://external.test/source', 'http://www.aozora.gr.jp/source', 'https://user:pass@www.aozora.gr.jp/source']) {
+				await expect(fetchAozoraSource(url)).rejects.toThrow('official HTTPS origin');
+			}
+			expect(request).toHaveBeenCalledTimes(1);
+			request.mockRejectedValue(new TypeError('redirect rejected'));
+			await expect(fetchAozoraSource('https://www.aozora.gr.jp/redirect')).rejects.toThrow('redirect rejected');
+			expect(request).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.unstubAllGlobals();
+		}
 	});
 
 	test('EPUBは非圧縮mimetypeを先頭に置き、ルビ・目次・出典を保持する', async () => {

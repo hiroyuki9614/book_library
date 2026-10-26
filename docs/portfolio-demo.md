@@ -1,6 +1,6 @@
 # Portfolio demo preparation and production gate
 
-This runbook prepares Issue #36 without changing the production database, deployment, or R2 objects. Production execution remains an operator-approved step after a read-only preflight, coordinated backup, and isolated restore evidence.
+This runbook governs Issue #36. The owner's 2026-10-26 portfolio MVP scope replaces the earlier commercial-operation backup gates. Production execution still requires the approved execution lane, target-specific approval, a verified private database backup, and independent code review. See [roadmap](roadmap.md) for deferred work. Documentation and passing tests alone do not establish production completion.
 
 ## Safety boundary
 
@@ -12,7 +12,7 @@ This runbook prepares Issue #36 without changing the production database, deploy
 
 ## 1. Reviewed runtime and read-only production preflight
 
-Keep public ingress closed and freeze all book/file/permission writes from the initial snapshot through backup, restore acceptance, protection, account creation and registration. Do not share demo credentials until the final acceptance gate. An already shared account/session or previously issued signed URL means permission removal alone is insufficient: close public ingress and block object delivery until outstanding URLs expire (currently up to one hour). Never reopen a pre-demo permission state publicly.
+Keep public ingress closed and freeze all book/file/permission writes from the initial snapshot through backup verification, protection, account creation and registration. Do not share demo credentials until the final acceptance gate. An already shared account/session or previously issued signed URL means permission removal alone is insufficient: close public ingress and block object delivery until outstanding URLs expire (currently up to one hour). Never reopen a pre-demo permission state publicly.
 
 The supported management runner is `docker exec` in the **approved running backend container**. It uses that container's DB network, environment, local volume or R2 configuration, and compiled `dist/scripts/*.js` with production dependencies. Do not use a host checkout's `tsx`, `docker compose run` with possibly different settings, a mutable tag, or an arbitrary remote registration API. Registration targets the API on loopback inside this same container. The application source/build directories must not be bind-mounted or modified at runtime.
 
@@ -54,11 +54,11 @@ The output path must be new; preflight refuses overwrite and write flags. It per
 
 Stop on mixed/unknown formats, driver/key mismatch (including a legacy local path requiring separate inspection), missing roles, unexpected counts, an existing disabled/admin demo email, missing identity/provenance, or drift. Preflight preserves its diagnostic snapshot but exits unsuccessfully on incompatible storage. A successful preflight does **not** verify object bytes or grant write approval. Independently check every existing DB reference against the live local root/private R2 store, with size/hash verification and authorized read-back, before mutation. Missing or incompatible files require a separately reviewed preservation/migration plan; these commands never migrate files or change drivers.
 
-## 2. Coordinated backup, isolated restore, then protection
+## 2. Minimum private DB backup, then protection
 
-Follow [backup/restore](runbooks/backup-restore.md). For this public-demo operation both PostgreSQL and **all referenced storage bytes** need a coordinated, recoverable, encrypted backup under the write freeze. An R2 listing, object HEAD responses, or the continued existence of the live bucket is not a storage backup. If the approved storage backup/retention mechanism is unavailable, stop; obtain separate approval for it before proceeding.
+For the existing R2 deployment, follow the [MVP backup procedure](runbooks/backup-restore.md). Before any production write, find the existing approved private backup location and recovery authority. Create a PostgreSQL custom-format dump under a write freeze; verify owner/access (directory 0700, file 0600 or stricter), nonzero size, SHA-256, readability and `pg_restore --list` success without publishing its contents. Check existing DB-referenced R2 object bytes and known anonymous routes read-only. Existing R2 objects must not be overwritten or deleted.
 
-Restore the paired backups into isolated resources with isolated credentials and no public access. Verify all reference mappings, checksums/sizes and authenticated file delivery with the candidate. A synthetic smoke is useful but cannot substitute for verification of the actual protected recovery set. Keep real restored content restricted to named operators. Record tool versions, boundary times, backup locations/checksums, private restore target, validation logs, and independent acceptance. Do not put that content, titles, keys or credentials in public evidence.
+An encrypted offsite copy, three generations, paired DB/R2 backup, isolated restore drill and independent backup audit are **post-publication roadmap work**, not conditions for this scoped operation. Unknown backup destination/recovery authority or actual data-loss risk still stops production writes. Do not invent an external destination or manufacture evidence.
 
 Dry-run the frozen ID set:
 
@@ -66,27 +66,29 @@ Dry-run the frozen ID set:
 portfolio portfolio:protect-existing -- --snapshot /tmp/belib-portfolio-preflight.json
 ```
 
-After the real drill, an operator prepares an attestation outside Git. Required fields (the `*Sha256` values are actual 64-character lowercase hashes of the indicated artifacts):
+For this R2-only operation the operator records actual verification outside Git:
 
 ```json
 {
+  "policy": "portfolio-mvp-db-v1",
   "databaseIdentityHash": "<snapshot value>",
   "storageIdentityHash": "<snapshot value>",
   "snapshotSha256": "<dry-run hash>",
-  "backupId": "<database backup reference>",
-  "databaseSha256": "<database backup hash>",
-  "storageBackupId": "<recoverable storage backup reference>",
-  "storageManifestSha256": "<backed-up bytes manifest hash>",
-  "consistencyBoundary": "<recorded coordinated write freeze>",
-  "restoreTarget": "<isolated restore reference>",
-  "restoreReportSha256": "<restore validation report hash>",
-  "approvedBy": "<independent acceptance reference>",
-  "completedAt": "<actual restore acceptance ISO timestamp>",
-  "restoreVerified": true
+  "backupId": "<private existing backup reference>",
+  "databaseSha256": "<actual dump SHA-256>",
+  "databaseBytes": 12345,
+  "databaseFormat": "postgres-custom",
+  "privateAccessVerified": true,
+  "archiveReadable": true,
+  "existingR2ObjectsVerified": true,
+  "recoveryProcedureRef": "<approved recovery procedure reference>",
+  "approvedBy": "<production approval reference>",
+  "consistencyBoundary": "<actual write-freeze reference>",
+  "completedAt": "<actual backup verification ISO timestamp>"
 }
 ```
 
-The code checks shape, target/snapshot binding and completion time (after snapshot, not in the future). **Human-written JSON is not proof of backup or restore.** The release owner must independently retrieve and hash the actual backup, manifest and report, verify storage completeness, inspect the drill evidence, and approve the frozen target before any write. Never manufacture values to pass the gate. Changed inventory or reopened writes invalidates acceptance; stop and reassess with the original private-book baseline retained.
+The example size is a placeholder; every field must reflect actual evidence. JSON is an operator attestation, not proof that a backup exists, approval has been granted, or recovery has succeeded. Verify the artifact itself before signing. The code binds the DB/storage/snapshot and rejects absent checks, invalid size/hash/format, and timestamps before the snapshot or in the future. This policy is rejected for local storage, whose bytes still require protection. The prior coordinated backup/restore evidence format remains supported for that path. Keep the original private-book baseline; do not take a new baseline to bypass drift.
 
 Transfer only reviewed non-secret artifacts into the runtime's private temporary directory as its existing `node` user. For example, put `backup-evidence.json` and later the generated asset directory in a dedicated operator directory, then stream that directory (never environment files or backup contents):
 
@@ -104,7 +106,7 @@ portfolio portfolio:protect-existing -- \
   --confirm-snapshot-sha256 '<exact reviewed hash>' --execute
 ```
 
-All write commands require that same snapshot, hash and backup attestation. They re-read the live book/file inventory and reject changed revision, image, DB, storage or inventory. Keep the write freeze throughout: these checks are not a distributed lock against concurrent admins. Protection runs its permission changes in one transaction, adds missing admin access, removes only general-role permissions for the initial IDs, and verifies before commit. No book, file, reading record or storage object is deleted.
+All write commands require that same snapshot, hash and verified backup attestation. They re-read the live book/file inventory and reject changed revision, image, DB, storage or inventory. Keep the write freeze throughout: these checks are not a distributed lock against concurrent admins. Protection runs its permission changes in one transaction, adds missing admin access, removes only general-role permissions for the initial IDs, and verifies before commit. No book, file, reading record or storage object is deleted.
 
 `--rollback` and the library rollback function **always reject**, including when the demo account is absent or disabled. Shared credentials, other general users, sessions and signed URLs cannot be made safe by checking a single account flag. Keep existing books admin-only; use a reviewed forward fix or a fully isolated restore. Never restore old general permissions into the public deployment. See [rollback](runbooks/rollback.md).
 

@@ -153,13 +153,24 @@ function extractBody(xhtml: string) {
 		.replace(/<form\b[^>]*>[\s\S]*?<\/form>/gi, '');
 }
 
+export async function fetchAozoraSource(url: string | URL) {
+	const target = new URL(url);
+	if (target.origin !== AOZORA_ORIGIN || target.username || target.password) {
+		throw new Error('Aozora fetch target must be the official HTTPS origin');
+	}
+	// Fixed catalog URLs need no redirect. Reject before contacting a redirect target.
+	return fetch(target, {
+		redirect: 'error', headers: { 'User-Agent': 'BeLib portfolio demo asset builder' },
+	});
+}
+
 async function inlineImages(body: string, sourceUrl: string) {
 	const matches = [...body.matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi)];
 	let result = body;
 	for (const match of matches) {
 		const imageUrl = new URL(match[1], sourceUrl);
 		if (imageUrl.origin !== AOZORA_ORIGIN) throw new Error('Aozora source referenced an external image');
-		const response = await fetch(imageUrl);
+		const response = await fetchAozoraSource(imageUrl);
 		if (!response.ok) throw new Error(`Failed to fetch Aozora image (${response.status})`);
 		const bytes = Buffer.from(await response.arrayBuffer());
 		const mediaType = response.headers.get('content-type')?.split(';', 1)[0] || 'image/png';
@@ -169,7 +180,7 @@ async function inlineImages(body: string, sourceUrl: string) {
 }
 
 async function fetchWorkBody(work: AozoraWork) {
-	const response = await fetch(work.sourceUrl, { headers: { 'User-Agent': 'BeLib portfolio demo asset builder' } });
+	const response = await fetchAozoraSource(work.sourceUrl);
 	if (!response.ok) throw new Error(`Failed to fetch ${work.id} (${response.status})`);
 	const source = new TextDecoder('shift_jis').decode(await response.arrayBuffer());
 	return inlineImages(extractBody(source), work.sourceUrl);

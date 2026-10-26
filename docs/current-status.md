@@ -263,7 +263,7 @@ Implemented on the portfolio branch:
 - an idempotent `create:demo-user` command creates one active `user` account from secret environment values and refuses role/credential drift;
 - a read-only preflight snapshot records only existing book IDs/counts, role-permission booleans, storage-key format counts, revision, driver, and demo-account state;
 - all four management commands run compiled JavaScript in the reviewed runtime container; baked revision, externally verified image ID, DB/storage fingerprints and live inventory must match the v2 snapshot;
-- protection, demo-account creation and registration are dry-run by default; execution requires snapshot confirmation and coordinated DB/storage backup plus isolated-restore attestation, whose actual artifacts still require independent operator verification;
+- protection, demo-account creation and registration are dry-run by default; execution requires snapshot confirmation and verified backup evidence; the R2-only portfolio MVP evidence policy accepts a private readable PostgreSQL custom dump plus recovery procedure and unchanged R2 verification, while the coordinated backup/restore policy remains supported for local storage;
 - the protection transaction adds missing admin permissions, removes user permissions only from the frozen initial ID set, and verifies the result before commit; permission rollback is unconditionally disabled to prevent re-exposure through shared/general accounts;
 - an official-source Aozora Bunko catalog and reproducible EPUB/PDF builder preserve source edition, input/proofread credits, ruby/source notes, and conversion history without committing binaries;
 - demo registration verifies generated hashes/sizes/headers and uses Better Auth plus the protected Admin registration API with explicit `all_users` scope;
@@ -278,7 +278,7 @@ Not performed or claimed by repository changes:
 - production backup/isolated restore acceptance;
 - production browser CORS and EPUB/PDF acceptance.
 
-These remain operator-controlled gates in `docs/portfolio-demo.md`.
+Production preflight, verified private DB backup, protection, deployment and public-browser acceptance remain operator-controlled gates in `docs/portfolio-demo.md`. The owner deferred paired DB/R2 restore drills, offsite encryption and exhaustive device coverage to `docs/roadmap.md`; they are not added MVP publication gates. Repository changes do not establish that production has completed any of these steps.
 
 ## Current priority excluding R2
 

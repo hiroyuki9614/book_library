@@ -51,6 +51,9 @@ jobs:
       - name: Frontend tests
         working-directory: frontend
         run: npm test
+      - name: Frontend node-side asset and fixture tests
+        working-directory: frontend
+        run: npm run test:node
       - name: Frontend lint
         working-directory: frontend
         run: npm run lint

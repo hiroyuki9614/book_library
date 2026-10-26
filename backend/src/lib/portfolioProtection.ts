@@ -30,7 +30,7 @@ export type PortfolioSnapshot = {
 	};
 };
 
-export type BackupEvidence = {
+type CoordinatedBackupEvidence = {
 	databaseIdentityHash: string;
 	snapshotSha256: string;
 	backupId: string;
@@ -45,6 +45,26 @@ export type BackupEvidence = {
 	completedAt: string;
 	restoreVerified: boolean;
 };
+
+// Scoped to the R2 portfolio operation: existing objects are never rewritten/deleted.
+export type MvpDatabaseBackupEvidence = {
+	policy: 'portfolio-mvp-db-v1';
+	databaseIdentityHash: string;
+	storageIdentityHash: string;
+	snapshotSha256: string;
+	backupId: string;
+	databaseSha256: string;
+	databaseBytes: number;
+	databaseFormat: 'postgres-custom';
+	privateAccessVerified: true;
+	archiveReadable: true;
+	existingR2ObjectsVerified: true;
+	recoveryProcedureRef: string;
+	approvedBy: string;
+	consistencyBoundary: string;
+	completedAt: string;
+};
+export type BackupEvidence = CoordinatedBackupEvidence | MvpDatabaseBackupEvidence;
 
 type PortfolioPrisma = any;
 
@@ -150,16 +170,37 @@ export function assertPortfolioSnapshot(value: unknown): asserts value is Portfo
 }
 
 export function assertBackupEvidence(value: unknown, snapshot: PortfolioSnapshot, snapshotSha256: string): asserts value is BackupEvidence {
-	const evidence = value as Partial<BackupEvidence> | null;
+	const mvp = value as Partial<MvpDatabaseBackupEvidence> | null;
+	if (mvp?.policy === 'portfolio-mvp-db-v1') {
+		if (
+			snapshot.storageDriver !== 'r2' ||
+			mvp.databaseIdentityHash !== snapshot.databaseIdentityHash ||
+			mvp.storageIdentityHash !== snapshot.storageIdentityHash ||
+			mvp.snapshotSha256 !== snapshotSha256 ||
+			typeof mvp.databaseSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(mvp.databaseSha256) ||
+			!Number.isSafeInteger(mvp.databaseBytes) || (mvp.databaseBytes ?? 0) <= 0 ||
+			mvp.databaseFormat !== 'postgres-custom' || mvp.privateAccessVerified !== true ||
+			mvp.archiveReadable !== true || mvp.existingR2ObjectsVerified !== true ||
+			!['backupId', 'recoveryProcedureRef', 'approvedBy', 'consistencyBoundary'].every((key) =>
+				typeof mvp[key as keyof MvpDatabaseBackupEvidence] === 'string' &&
+				(mvp[key as keyof MvpDatabaseBackupEvidence] as string).trim()) ||
+			typeof mvp.completedAt !== 'string' || !Number.isFinite(Date.parse(mvp.completedAt)) ||
+			Date.parse(mvp.completedAt) < Date.parse(snapshot.createdAt) || Date.parse(mvp.completedAt) > Date.now()
+		) throw new Error('MVP database backup evidence does not match the snapshot or is incomplete');
+		return;
+	}
+	// Unknown policy names must not silently fall back to another evidence format.
+	if (mvp && 'policy' in mvp) throw new Error('Unknown portfolio backup policy');
+	const evidence = value as Partial<CoordinatedBackupEvidence> | null;
 	if (
 		!evidence || evidence.databaseIdentityHash !== snapshot.databaseIdentityHash ||
 		evidence.snapshotSha256 !== snapshotSha256 || evidence.restoreVerified !== true ||
 		typeof evidence.backupId !== 'string' || !evidence.backupId.trim() ||
 		evidence.storageIdentityHash !== snapshot.storageIdentityHash ||
 		!['databaseSha256', 'storageManifestSha256', 'restoreReportSha256'].every((key) =>
-			typeof evidence[key as keyof BackupEvidence] === 'string' && /^[0-9a-f]{64}$/.test(evidence[key as keyof BackupEvidence] as string)) ||
+			typeof evidence[key as keyof CoordinatedBackupEvidence] === 'string' && /^[0-9a-f]{64}$/.test(evidence[key as keyof CoordinatedBackupEvidence] as string)) ||
 		!['storageBackupId', 'restoreTarget', 'approvedBy', 'consistencyBoundary'].every((key) =>
-			typeof evidence[key as keyof BackupEvidence] === 'string' && (evidence[key as keyof BackupEvidence] as string).trim()) ||
+			typeof evidence[key as keyof CoordinatedBackupEvidence] === 'string' && (evidence[key as keyof CoordinatedBackupEvidence] as string).trim()) ||
 		typeof evidence.completedAt !== 'string' || !Number.isFinite(Date.parse(evidence.completedAt)) ||
 		Date.parse(evidence.completedAt) < Date.parse(snapshot.createdAt) || Date.parse(evidence.completedAt) > Date.now()
 	) {

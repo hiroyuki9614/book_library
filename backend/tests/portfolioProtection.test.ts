@@ -121,6 +121,37 @@ describe('existing portfolio book protection', () => {
 		expect([...permissions].sort()).toEqual(before);
 	});
 
+	test('MVP R2 path requires a real DB backup attestation without claiming a restore drill', () => {
+		const value = {
+			policy: 'portfolio-mvp-db-v1',
+			databaseIdentityHash: snapshot().databaseIdentityHash,
+			storageIdentityHash: snapshot().storageIdentityHash,
+			snapshotSha256: 'c'.repeat(64), backupId: 'private-operator-reference',
+			databaseSha256: '1'.repeat(64), databaseBytes: 1024,
+			databaseFormat: 'postgres-custom', privateAccessVerified: true,
+			archiveReadable: true, existingR2ObjectsVerified: true,
+			recoveryProcedureRef: 'approved-private-recovery-plan', approvedBy: 'owner',
+			consistencyBoundary: 'freeze-1', completedAt: '2026-10-25T01:00:00.000Z',
+		};
+		expect(() => assertBackupEvidence(value, snapshot(), 'c'.repeat(64))).not.toThrow();
+		for (const invalid of [
+			{ policy: 'unknown' }, { databaseIdentityHash: '0'.repeat(64) },
+			{ storageIdentityHash: '0'.repeat(64) }, { snapshotSha256: '0'.repeat(64) },
+			{ databaseSha256: 'invalid' }, { databaseBytes: 0 }, { databaseBytes: 1.5 },
+			{ databaseFormat: 'plain' }, { privateAccessVerified: false },
+			{ archiveReadable: false }, { existingR2ObjectsVerified: false },
+			{ backupId: '' }, { approvedBy: '' }, { consistencyBoundary: '' },
+			{ recoveryProcedureRef: '' }, { completedAt: 'invalid' },
+			{ completedAt: '2026-10-24T00:00:00.000Z' }, { completedAt: '2999-01-01T00:00:00.000Z' },
+		]) expect(() => assertBackupEvidence({ ...value, ...invalid }, snapshot(), 'c'.repeat(64))).toThrow();
+		for (const key of Object.keys(value)) {
+			const missing = { ...value } as Record<string, unknown>;
+			delete missing[key];
+			expect(() => assertBackupEvidence(missing, snapshot(), 'c'.repeat(64))).toThrow();
+		}
+		expect(() => assertBackupEvidence(value, { ...snapshot(), storageDriver: 'local' }, 'c'.repeat(64))).toThrow();
+	});
+
 	test('書込み用バックアップ証拠はDB・snapshot hash・restore drillを照合する', () => {
 		const value = {
 			databaseIdentityHash: snapshot().databaseIdentityHash,
