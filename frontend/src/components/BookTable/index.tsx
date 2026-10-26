@@ -74,18 +74,18 @@ export function BookTable({ books, readingProgresses = [], itemsPerPage, searchQ
 	}
 
 	return (
-		<Table className='min-w-[720px] table-fixed'>
-			<TableHeader>
+		<Table className='block w-full md:table md:min-w-[720px] md:table-fixed'>
+			<TableHeader className='hidden md:table-header-group'>
 				<TableRow>
 					{columns.map((column, index) => <TableHead key={index}>{column}</TableHead>)}
 					<TableHead />
 				</TableRow>
 			</TableHeader>
 
-			<TableBody>
+			<TableBody className='block space-y-3 md:table-row-group md:space-y-0'>
 				{isLoading
 					? [...Array(itemsPerPage)].map((_, index) => (
-							<TableRow key={index}>
+							<TableRow key={index} className='grid grid-cols-[64px_minmax(0,1fr)] rounded-lg border bg-card p-2 md:table-row md:rounded-none md:p-0'>
 								{[...Array(columns.length + 1)].map((_, cellIndex) => (
 									<TableCell key={cellIndex}><Skeleton className='h-16 w-full' /></TableCell>
 								))}
@@ -96,8 +96,23 @@ export function BookTable({ books, readingProgresses = [], itemsPerPage, searchQ
 							const bookStatus = getBookStatus(book);
 
 							return (
-								<TableRow key={book.id} onClick={() => navigate(`/reader/${book.id}`)} className='cursor-pointer hover:bg-muted'>
-									<TableCell>
+								<TableRow
+									key={book.id}
+									role='link'
+									tabIndex={0}
+									aria-label={`${book.title}を読む`}
+									onClick={() => navigate(`/reader/${book.id}`)}
+									onKeyDown={(event) => {
+										if (event.target !== event.currentTarget) return;
+
+										if (event.key === 'Enter' || event.key === ' ') {
+											event.preventDefault();
+											navigate(`/reader/${book.id}`);
+										}
+									}}
+									className='grid min-h-24 cursor-pointer grid-cols-[64px_minmax(0,1fr)] rounded-lg border bg-card p-2 shadow-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:table-row md:rounded-none md:border-x-0 md:p-0 md:shadow-none'
+								>
+									<TableCell className='row-span-3 p-2 md:table-cell'>
 										{book.coverImage ? (
 											<img src={book.coverImage} alt={`${book.title} の表紙`} className='h-16 w-12 rounded object-cover' />
 										) : (
@@ -107,12 +122,12 @@ export function BookTable({ books, readingProgresses = [], itemsPerPage, searchQ
 											</div>
 										)}
 									</TableCell>
-									<TableCell className='overflow-hidden text-ellipsis whitespace-nowrap'>{book.title}</TableCell>
-									<TableCell className='overflow-hidden text-ellipsis whitespace-nowrap'>{book.author}</TableCell>
-									<TableCell className='overflow-hidden text-ellipsis whitespace-nowrap'>{book.category}</TableCell>
-									<TableCell><Badge variant={getBadgeVariant(bookStatus)}>{bookStatus}</Badge></TableCell>
-									<TableCell>{progress === undefined ? <span className='text-muted-foreground'>未計測</span> : <Progress value={progress} className='w-24' />}</TableCell>
-									<TableCell>
+									<TableCell className='block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap px-2 pb-1 pt-3 text-base font-semibold md:table-cell md:p-2 md:text-sm md:font-normal'>{book.title}</TableCell>
+									<TableCell className='block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap px-2 py-1 text-sm text-muted-foreground md:table-cell md:p-2 md:text-foreground'>{book.author}</TableCell>
+									<TableCell className='hidden overflow-hidden text-ellipsis whitespace-nowrap md:table-cell'>{book.category}</TableCell>
+									<TableCell className='block px-2 pb-3 pt-1 md:table-cell md:p-2'><Badge variant={getBadgeVariant(bookStatus)}>{bookStatus}</Badge></TableCell>
+									<TableCell className='hidden md:table-cell'>{progress === undefined ? <span className='text-muted-foreground'>未計測</span> : <Progress value={progress} className='w-24' />}</TableCell>
+									<TableCell className='hidden md:table-cell'>
 										<div className='flex items-center gap-2'>
 											<button
 												aria-label={`${book.title} のメニューを開く`}
@@ -138,13 +153,13 @@ export function BookTable({ books, readingProgresses = [], itemsPerPage, searchQ
 				)}
 			</TableBody>
 
-			<TableFooter>
-				<TableRow className='bg-card hover:bg-card'>
-					<TableCell colSpan={columns.length + 1} className='text-center'>
+			<TableFooter className='block md:table-footer-group'>
+				<TableRow className='block border-0 bg-card hover:bg-card md:table-row'>
+					<TableCell colSpan={columns.length + 1} className='block text-center md:table-cell'>
 						<div className='flex items-center justify-center gap-4 py-4'>
-							<button className='rounded bg-primary text-white px-3 py-2 disabled:opacity-50 cursor-pointer' disabled={currentPage === 1} onClick={handlePreviousPage}>前へ</button>
+							<button className='min-h-11 min-w-16 cursor-pointer rounded bg-primary px-3 py-2 text-white disabled:opacity-50' disabled={currentPage === 1} onClick={handlePreviousPage}>前へ</button>
 							<span>{currentPage} / {totalPages}</span>
-							<button className='rounded bg-primary text-white px-3 py-2 disabled:opacity-50 cursor-pointer' disabled={currentPage === totalPages} onClick={handleNextPage}>次へ</button>
+							<button className='min-h-11 min-w-16 cursor-pointer rounded bg-primary px-3 py-2 text-white disabled:opacity-50' disabled={currentPage === totalPages} onClick={handleNextPage}>次へ</button>
 						</div>
 					</TableCell>
 				</TableRow>

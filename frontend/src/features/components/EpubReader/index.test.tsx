@@ -85,6 +85,22 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		await vi.waitFor(() => expect(runtime.rendition.display).toHaveBeenCalledWith('epubcfi(/6/2!/4/1:0)'));
 	});
 
+	test('スマホ幅では単ページ表示を初期値にする', async () => {
+		const originalWidth = window.innerWidth;
+		Object.defineProperty(window, 'innerWidth', { configurable: true, value: 393 });
+
+		try {
+			await render(<EpubReader bookId={7} />);
+
+			await vi.waitFor(() => expect(runtime.book.renderTo).toHaveBeenCalledWith(
+				expect.any(HTMLElement),
+				expect.objectContaining({ spread: 'none' }),
+			));
+		} finally {
+			Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+		}
+	});
+
 	test('relocated時にCFIとcompleted状態をReadingInfoへ保存する', async () => {
 		await render(<EpubReader bookId={7} />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));

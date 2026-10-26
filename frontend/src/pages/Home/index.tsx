@@ -32,7 +32,7 @@ function Home() {
 
 	return (
 		<>
-			<div className='m-4'>
+			<div className='m-3 sm:m-4'>
 				<div className='md:hidden'>
 					<SectionCard size='full'>
 						<div className='space-y-4'>
@@ -57,13 +57,13 @@ function Home() {
 				</div>
 			</div>
 
-			<div className='m-4'>
+			<div className='m-3 sm:m-4'>
 				<SectionCard size='full'>
-					<div className='mb-4 flex justify-between'>
-						<Input placeholder='Search books or authors...' className='mb-4 w-sm' value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
-						<div className='flex gap-2'>
+					<div className='mb-4 flex flex-col gap-3 sm:flex-row sm:justify-between'>
+						<Input aria-label='書籍を検索' placeholder='書籍・著者を検索' className='min-h-11 w-full sm:w-sm' value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+						<div className='grid grid-cols-2 gap-2 sm:flex'>
 							<Select value={selectedStatus} onValueChange={(value) => setSelectedStatus(value as StatusFilter)}>
-								<SelectTrigger className='w-full max-w-48'><SelectValue placeholder='ステータス' /></SelectTrigger>
+								<SelectTrigger aria-label='読書状態で絞り込む' className='min-h-11 w-full sm:max-w-48'><SelectValue placeholder='ステータス' /></SelectTrigger>
 								<SelectContent>
 									<SelectItem value='all'>すべて</SelectItem>
 									<SelectItem value='reading'>読書中</SelectItem>
@@ -72,7 +72,7 @@ function Home() {
 								</SelectContent>
 							</Select>
 							<Select value={selectedSort} onValueChange={setSelectedSort}>
-								<SelectTrigger className='w-full max-w-48'><SelectValue placeholder='最新順' /></SelectTrigger>
+								<SelectTrigger aria-label='並び順' className='min-h-11 w-full sm:max-w-48'><SelectValue placeholder='最新順' /></SelectTrigger>
 								<SelectContent>
 									<SelectItem value='newest'>最新順</SelectItem>
 									<SelectItem value='oldest'>古い順</SelectItem>
