@@ -35,7 +35,7 @@ function createEpubRuntime() {
 		ready: Promise.resolve(),
 		locations: {
 			generate: vi.fn().mockResolvedValue(undefined),
-			locationFromCfi: vi.fn((cfi: string) => (cfi.includes('final') ? 2 : 0)),
+			locationFromCfi: vi.fn((cfi: string) => (cfi.includes('final') ? 3 : 0)),
 			total: 3,
 		},
 		navigation: { toc: [] },

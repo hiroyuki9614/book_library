@@ -75,9 +75,9 @@ function EpubReader({ bookId }: { bookId: number }) {
 		let active = true;
 
 		void fetchBookFile(bookId)
-			.then((blob) => blob.arrayBuffer())
+			.then((blob) => active ? blob.arrayBuffer() : null)
 			.then((data) => {
-				if (!active) return;
+				if (!active || !data) return;
 				setEpubData(data);
 			})
 			.catch(() => {
@@ -135,7 +135,8 @@ function EpubReader({ bookId }: { bookId: number }) {
 
 			const page = book.locations.locationFromCfi(cfi);
 			const total = book.locations.total;
-			const lastLocation = Math.max(0, total - 1);
+			// epub.js exposes total as the final zero-based location index, not a count.
+			const lastLocation = Math.max(0, total);
 			const progress = total <= 1 ? 100 : Math.round((page / lastLocation) * 100);
 			const readStatus = total > 0 && page >= lastLocation ? 'completed' : 'reading';
 
