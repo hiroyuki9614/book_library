@@ -12,7 +12,7 @@ describe('CommandButton', () => {
 		const { getByText, getByRole } = await render(
 			<CommandButton
 				state={state}
-				pageInput='2'
+				pageInput='4'
 				setPageInput={vi.fn()}
 				handleGoToPage={vi.fn()}
 				prevResolved={{
@@ -33,7 +33,7 @@ describe('CommandButton', () => {
 		);
 
 		await expect.element(getByText('Page')).toBeInTheDocument();
-		await expect.element(getByRole('spinbutton')).toHaveValue(2);
+		await expect.element(getByRole('spinbutton')).toHaveValue(4);
 		await expect.element(getByText('of 5')).toBeInTheDocument();
 	});
 

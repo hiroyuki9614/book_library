@@ -54,12 +54,16 @@ type EpubBookRuntime = {
 
 const EPUB_LOCATION_BREAK_SIZE = 1600;
 
+function getInitialSpread(): 'always' | 'none' {
+	return typeof window !== 'undefined' && window.innerWidth < 768 ? 'none' : 'always';
+}
+
 function EpubReader({ bookId }: { bookId: number }) {
 	const mainRef = useRef<HTMLElement | null>(null);
 	const viewerRef = useRef<HTMLDivElement | null>(null);
 	const currentCfiRef = useRef('');
 	const renditionRef = useRef<EpubRenditionRuntime | null>(null);
-	const [spread, setSpread] = useState<'always' | 'none' | 'auto'>('always');
+	const [spread, setSpread] = useState<'always' | 'none' | 'auto'>(getInitialSpread);
 	const [percentage, setPercentage] = useState(0);
 	const [totalPage, setTotalPage] = useState(0);
 	const [currentPage, setCurrentPage] = useState(0);
@@ -246,37 +250,23 @@ function EpubReader({ bookId }: { bookId: number }) {
 	}
 
 	return (
-		<div className='flex h-screen flex-col bg-background text-foreground'>
-			<header className='flex items-center justify-between p-3'>
-				<div>
-					<Link to='/' className='text-sm text-primary'>
+		<div className='flex h-[100dvh] flex-col bg-background text-foreground'>
+			<header className='shrink-0 border-b p-2 sm:p-3'>
+				<div className='flex items-center gap-2'>
+					<Link to='/' className='inline-flex min-h-11 shrink-0 items-center rounded-md px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'>
 						本棚に戻る
 					</Link>
-				</div>
-				<div className='flex flex-row items-end gap-1'>
-					<Field className='w-full max-w-sm'>
-						<FieldLabel htmlFor='progress-upload'>
-							読書位置: {currentPage} / {totalPage}
-							<span className='ml-auto'>{percentage}%</span>
-						</FieldLabel>
-						<Progress value={percentage} id='progress-upload' />
-					</Field>
-				</div>
-				<div>
-					{history.length > 0 && (
-						<Button variant='outline' onClick={handleBack}>
-							戻る
-						</Button>
-					)}
-				</div>
-				<div>
-					<Sheet>
-						<SheetTrigger asChild>
-							<Button variant='outline' className='bg-white active:bg-white focus:bg-white data-[state=open]:bg-white'>
-								目次
-							</Button>
-						</SheetTrigger>
-						<SheetContent side='right' className='data-[side=bottom]:max-h-[50vh] data-[side=top]:max-h-[50vh]'>
+					<div className='ml-auto flex items-center gap-2'>
+						{history.length > 0 && (
+							<Button variant='outline' onClick={handleBack} className='min-h-11 px-3'>戻る</Button>
+						)}
+						<Sheet>
+							<SheetTrigger asChild>
+								<Button variant='outline' className='min-h-11 bg-white px-3 active:bg-white focus:bg-white data-[state=open]:bg-white'>
+									目次
+								</Button>
+							</SheetTrigger>
+							<SheetContent side='right' className='w-[calc(100vw-2rem)] max-w-sm data-[side=bottom]:max-h-[50vh] data-[side=top]:max-h-[50vh] [&>button]:size-11'>
 							<SheetHeader>
 								<SheetTitle>この書籍の目次</SheetTitle>
 							</SheetHeader>
@@ -284,41 +274,52 @@ function EpubReader({ bookId }: { bookId: number }) {
 								{navigation?.toc.map((item, index) => (
 									<div key={`${item.href}-${index}`}>
 										<SheetTrigger asChild>
-											<Button variant='outline' className='bg-white' onClick={() => handleTocJump(item.href)}>
+											<Button variant='outline' className='min-h-11 h-auto w-full whitespace-normal bg-white py-2 text-left' onClick={() => handleTocJump(item.href)}>
 												{item.label}
 											</Button>
 										</SheetTrigger>
 									</div>
 								))}
 							</div>
-						</SheetContent>
-					</Sheet>
+							</SheetContent>
+						</Sheet>
+
+						<Select value={spread} onValueChange={(value) => setSpread(value as 'always' | 'none' | 'auto')}>
+							<SelectTrigger aria-label='ページ表示方法' className='min-h-11 w-[132px] bg-reader-background sm:w-[180px]'>
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectGroup>
+									<SelectItem value='always'>常に見開き</SelectItem>
+									<SelectItem value='none'>常に単ページ</SelectItem>
+									<SelectItem value='auto'>自動</SelectItem>
+								</SelectGroup>
+							</SelectContent>
+						</Select>
+					</div>
 				</div>
 
-				<Select value={spread} onValueChange={(value) => setSpread(value as 'always' | 'none' | 'auto')}>
-					<SelectTrigger className='w-[180px] bg-reader-background'>
-						<SelectValue />
-					</SelectTrigger>
-					<SelectContent>
-						<SelectGroup>
-							<SelectItem value='always'>常に見開き</SelectItem>
-							<SelectItem value='none'>常に単ページ</SelectItem>
-							<SelectItem value='auto'>自動</SelectItem>
-						</SelectGroup>
-					</SelectContent>
-				</Select>
+				<Field className='mt-2 w-full'>
+					<FieldLabel htmlFor='reading-progress' className='text-xs sm:text-sm'>
+						読書位置: {currentPage} / {totalPage}
+						<span className='ml-auto'>{percentage}%</span>
+					</FieldLabel>
+					<Progress value={percentage} id='reading-progress' />
+				</Field>
 			</header>
 
-			<main ref={mainRef} tabIndex={0} className='relative h-[calc(100vh-73px)] overflow-hidden outline-none bg-white px-4'>
+			<main ref={mainRef} tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white px-1 outline-none sm:px-4'>
 				{isLoading && (
 					<div className='absolute inset-0 z-50 flex items-center justify-center bg-reader-background'>
 						<Spinner className='size-16' />
 					</div>
 				)}
 				<div ref={viewerRef} tabIndex={1} className='h-full w-full overflow-hidden rounded bg-card shadow' />
-				<button type='button' onClick={handlePrev} aria-label='前のページへ' className='absolute left-0 top-1/2 z-10 h-full w-5 -translate-y-1/2 bg-background/0' />
-				<button type='button' onClick={handleNext} aria-label='次のページへ' className='absolute right-0 top-1/2 z-10 h-full w-5 -translate-y-1/2 bg-background/0' />
 			</main>
+			<footer className='flex shrink-0 justify-center gap-3 border-t bg-background p-2'>
+				<Button type='button' variant='outline' size='icon' onClick={handlePrev} aria-label='前のページへ' className='size-11 rounded-full text-2xl'>‹</Button>
+				<Button type='button' variant='outline' size='icon' onClick={handleNext} aria-label='次のページへ' className='size-11 rounded-full text-2xl'>›</Button>
+			</footer>
 		</div>
 	);
 }

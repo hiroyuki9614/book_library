@@ -193,6 +193,14 @@ describe('BookTable', () => {
 		expect(routerMocks.navigate).toHaveBeenCalledWith('/reader/1');
 	});
 
+	test('opens a mobile book card from the keyboard', async () => {
+		const { container } = await renderBookTable({ sort: 'oldest' });
+
+		getBookRow(container, 'React Design Patterns').dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+
+		expect(routerMocks.navigate).toHaveBeenCalledWith('/reader/1');
+	});
+
 	test('does not navigate when row action buttons are clicked', async () => {
 		const { getByRole } = await renderBookTable({ sort: 'oldest' });
 
