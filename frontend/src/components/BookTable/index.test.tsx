@@ -201,11 +201,15 @@ describe('BookTable', () => {
 		expect(routerMocks.navigate).toHaveBeenCalledWith('/reader/1');
 	});
 
-	test('does not navigate when row action buttons are clicked', async () => {
+	test('does not navigate when row action buttons are clicked or use the keyboard', async () => {
 		const { getByRole } = await renderBookTable({ sort: 'oldest' });
+		const menuButton = getByRole('button', { name: 'React Design Patterns のメニューを開く' });
+		const favoriteButton = getByRole('button', { name: 'React Design Patterns をお気に入りにする' });
 
-		await getByRole('button', { name: 'React Design Patterns のメニューを開く' }).click();
-		await getByRole('button', { name: 'React Design Patterns をお気に入りにする' }).click();
+		await menuButton.click();
+		await favoriteButton.click();
+		menuButton.element().dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+		favoriteButton.element().dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ' ' }));
 
 		expect(routerMocks.navigate).not.toHaveBeenCalled();
 	});

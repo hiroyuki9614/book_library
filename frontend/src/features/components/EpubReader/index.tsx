@@ -252,7 +252,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 	return (
 		<div className='flex h-[100dvh] flex-col bg-background text-foreground'>
 			<header className='shrink-0 border-b p-2 sm:p-3'>
-				<div className='flex items-center gap-2'>
+				<div className='flex flex-wrap items-center gap-2'>
 					<Link to='/' className='inline-flex min-h-11 shrink-0 items-center rounded-md px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'>
 						本棚に戻る
 					</Link>

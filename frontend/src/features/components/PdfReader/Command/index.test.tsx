@@ -61,8 +61,8 @@ describe('CommandButton', () => {
 			/>,
 		);
 
-		await getByRole('button', { name: '<' }).click();
-		await getByRole('button', { name: '>' }).click();
+		await getByRole('button', { name: '前のページへ' }).click();
+		await getByRole('button', { name: '次のページへ' }).click();
 
 		expect(executePrev).toHaveBeenCalledTimes(1);
 		expect(executeNext).toHaveBeenCalledTimes(1);

@@ -43,9 +43,9 @@ describe('ZoomToolbar', () => {
 
 		const { getByRole } = await render(<ZoomToolbar documentId='document-1' />);
 
-		await getByRole('button', { name: '-' }).click();
-		await getByRole('button', { name: '+' }).click();
-		await getByRole('button', { name: 'Reset' }).click();
+		await getByRole('button', { name: '縮小' }).click();
+		await getByRole('button', { name: '拡大' }).click();
+		await getByRole('button', { name: '倍率をリセット' }).click();
 
 		expect(zoomState.zoomOut).toHaveBeenCalledTimes(1);
 		expect(zoomState.zoomIn).toHaveBeenCalledTimes(1);

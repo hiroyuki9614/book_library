@@ -26,6 +26,7 @@ const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageIn
 			<button
 				onClick={prevResolved.execute}
 				disabled={prevResolved.disabled}
+				aria-label='前のページへ'
 				className='inline-flex size-11 shrink-0 items-center justify-center rounded-md bg-white text-lg text-gray-600 shadow-sm ring-1 ring-gray-300 transition-all hover:bg-gray-50 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-700 dark:text-gray-300 dark:ring-gray-600 dark:hover:bg-gray-600 dark:hover:text-gray-100'
 				title={`${prevResolved.label} (${prevResolved.shortcuts?.[0] || ''})`}
 			>
@@ -48,6 +49,7 @@ const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageIn
 			<button
 				onClick={nextResolved?.execute}
 				disabled={nextResolved?.disabled}
+				aria-label='次のページへ'
 				className='inline-flex size-11 shrink-0 items-center justify-center rounded-md bg-white text-lg text-gray-600 shadow-sm ring-1 ring-gray-300 transition-all hover:bg-gray-50 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-700 dark:text-gray-300 dark:ring-gray-600 dark:hover:bg-gray-600 dark:hover:text-gray-100'
 				title={`${nextResolved?.label} (${nextResolved?.shortcuts?.[0] || ''})`}
 			>

@@ -103,6 +103,8 @@ export function BookTable({ books, readingProgresses = [], itemsPerPage, searchQ
 									aria-label={`${book.title}を読む`}
 									onClick={() => navigate(`/reader/${book.id}`)}
 									onKeyDown={(event) => {
+										if (event.target !== event.currentTarget) return;
+
 										if (event.key === 'Enter' || event.key === ' ') {
 											event.preventDefault();
 											navigate(`/reader/${book.id}`);
