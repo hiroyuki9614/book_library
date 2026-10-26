@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { loadPortfolioGate, option, verifyLivePortfolioGate } from '../src/lib/portfolioGate.js';
-import { portfolioApiBaseUrl, reportPortfolioFailure } from '../src/lib/portfolioRuntime.js';
+import { portfolioApiBaseUrl, portfolioFrontendOrigin, reportPortfolioFailure } from '../src/lib/portfolioRuntime.js';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -53,6 +53,7 @@ async function main() {
 		throw new Error('--confirm-manifest-sha256 must exactly match the dry-run output');
 	}
 	const apiBaseUrl = portfolioApiBaseUrl(process.env);
+	const frontendOrigin = portfolioFrontendOrigin(process.env);
 	const adminEmail = process.env.PORTFOLIO_ADMIN_EMAIL;
 	const adminPassword = process.env.PORTFOLIO_ADMIN_PASSWORD;
 	const categoryId = Number(process.env.PORTFOLIO_DEMO_CATEGORY_ID);
@@ -62,7 +63,7 @@ async function main() {
 	const signIn = await fetch(`${apiBaseUrl}/api/auth/sign-in/email`, {
 		redirect: 'error',
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: { 'Content-Type': 'application/json', Origin: frontendOrigin },
 		body: JSON.stringify({ email: adminEmail, password: adminPassword }),
 	});
 	if (!signIn.ok) throw new Error(`admin sign-in failed (${signIn.status})`);

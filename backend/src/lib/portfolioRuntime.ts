@@ -24,6 +24,21 @@ export function portfolioApiBaseUrl(environment: NodeJS.ProcessEnv) {
 	return url;
 }
 
+export function portfolioFrontendOrigin(environment: NodeJS.ProcessEnv) {
+	const configured = environment.FRONTEND_URL?.trim();
+	if (!configured) throw new PortfolioSafetyError('FRONTEND_URL is required for the loopback admin login');
+	let url: URL;
+	try {
+		url = new URL(configured);
+	} catch {
+		throw new PortfolioSafetyError('FRONTEND_URL must be a valid HTTP(S) origin');
+	}
+	if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/') {
+		throw new PortfolioSafetyError('FRONTEND_URL must be a credential-free HTTP(S) origin');
+	}
+	return url.origin;
+}
+
 export async function readPortfolioRuntime(environment = process.env) {
 	// Written by the image build, never inferred from a checkout or an environment override.
 	const revision = (await readFile(new URL('../../../build-revision.txt', import.meta.url), 'utf8')).trim();
