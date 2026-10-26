@@ -52,6 +52,8 @@ type EpubBookRuntime = {
 	destroy: () => void;
 };
 
+const EPUB_LOCATION_BREAK_SIZE = 1600;
+
 function EpubReader({ bookId }: { bookId: number }) {
 	const mainRef = useRef<HTMLElement | null>(null);
 	const viewerRef = useRef<HTMLDivElement | null>(null);
@@ -63,22 +65,20 @@ function EpubReader({ bookId }: { bookId: number }) {
 	const [currentPage, setCurrentPage] = useState(0);
 	const [isLoading, setIsLoading] = useState(true);
 	const [fileError, setFileError] = useState(false);
-	const [epubUrl, setEpubUrl] = useState<string | null>(null);
+	const [epubData, setEpubData] = useState<ArrayBuffer | null>(null);
 	const [readingInfoReady, setReadingInfoReady] = useState(false);
 	const [navigation, setNavigation] = useState<{ toc: TocItem[] } | null>(null);
 	const [history, setHistory] = useState<string[]>([]);
 	const storageKey = `reader-location:${bookId}`;
 
 	useEffect(() => {
-		let objectUrl: string | undefined;
 		let active = true;
 
-
 		void fetchBookFile(bookId)
-			.then((blob) => {
-				if (!active) return;
-				objectUrl = URL.createObjectURL(blob);
-				setEpubUrl(objectUrl);
+			.then((blob) => active ? blob.arrayBuffer() : null)
+			.then((data) => {
+				if (!active || !data) return;
+				setEpubData(data);
 			})
 			.catch(() => {
 				if (!active) return;
@@ -88,9 +88,6 @@ function EpubReader({ bookId }: { bookId: number }) {
 
 		return () => {
 			active = false;
-			if (objectUrl) {
-				URL.revokeObjectURL(objectUrl);
-			}
 		};
 	}, [bookId]);
 
@@ -115,12 +112,14 @@ function EpubReader({ bookId }: { bookId: number }) {
 	}, [bookId, storageKey]);
 
 	useEffect(() => {
-		if (!viewerRef.current || !epubUrl || !readingInfoReady) return;
+		if (!viewerRef.current || !epubData || !readingInfoReady) return;
 		setIsLoading(true);
 		setFileError(false);
 		viewerRef.current.innerHTML = '';
 
-		const book = ePub(epubUrl) as unknown as EpubBookRuntime;
+		// epub.js opens ZIP archives from binary input. A blob: URL is treated as an
+		// unpacked publication URL and leaves book.ready pending for uploaded EPUBs.
+		const book = ePub(epubData) as unknown as EpubBookRuntime;
 		const rendition = book.renderTo(viewerRef.current, {
 			width: viewerRef.current.clientWidth,
 			height: viewerRef.current.clientHeight,
@@ -136,7 +135,8 @@ function EpubReader({ bookId }: { bookId: number }) {
 
 			const page = book.locations.locationFromCfi(cfi);
 			const total = book.locations.total;
-			const lastLocation = Math.max(0, total - 1);
+			// epub.js exposes total as the final zero-based location index, not a count.
+			const lastLocation = Math.max(0, total);
 			const progress = total <= 1 ? 100 : Math.round((page / lastLocation) * 100);
 			const readStatus = total > 0 && page >= lastLocation ? 'completed' : 'reading';
 
@@ -167,7 +167,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 
 		void book.ready
 			.then(async () => {
-				await book.locations.generate(100);
+				await book.locations.generate(EPUB_LOCATION_BREAK_SIZE);
 				if (disposed) return;
 
 				setNavigation(book.navigation);
@@ -199,7 +199,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 				renditionRef.current = null;
 			}
 		};
-	}, [bookId, epubUrl, readingInfoReady, spread, storageKey]);
+	}, [bookId, epubData, readingInfoReady, spread, storageKey]);
 
 	const handlePrev = () => {
 		const book = renditionRef.current?.book;
