@@ -25,7 +25,7 @@ export function portfolioApiBaseUrl(environment: NodeJS.ProcessEnv) {
 }
 
 export function portfolioFrontendOrigin(environment: NodeJS.ProcessEnv) {
-	const configured = environment.FRONTEND_URL?.trim();
+	const configured = environment.FRONTEND_URL;
 	if (!configured) throw new PortfolioSafetyError('FRONTEND_URL is required for the loopback admin login');
 	let url: URL;
 	try {
@@ -35,6 +35,9 @@ export function portfolioFrontendOrigin(environment: NodeJS.ProcessEnv) {
 	}
 	if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/') {
 		throw new PortfolioSafetyError('FRONTEND_URL must be a credential-free HTTP(S) origin');
+	}
+	if (configured !== url.origin) {
+		throw new PortfolioSafetyError('FRONTEND_URL must exactly equal its canonical origin');
 	}
 	return url.origin;
 }
