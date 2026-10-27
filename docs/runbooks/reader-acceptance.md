@@ -29,8 +29,9 @@ This does not implement multi-device conflict resolution.
 
 Spreads contain two real single-page renditions: primary and following, arranged
 right-to-left for RTL publications and left-to-right for LTR. This also applies
-across mixed writing-mode chapters. Verify actual pane geometry and source text
-continuity; an increased total or two copies of the same page is a failure.
+across mixed writing-mode chapters. Verify actual pane geometry, source text
+continuity, and settled layout at odd viewport widths (393px). A same-spine turn
+must retain its existing preview document; an increased total or two copies of the same page is a failure.
 The reading viewport's `aria-busy` remains true until queued UI movement settles.
 
 ## Device acceptance
@@ -74,3 +75,8 @@ established operator path, then repeat the production i5 GUI acceptance above.
 If i5 access or any mandatory observation fails, report **i5実機確認未完了** or the
 specific failure and keep acceptance incomplete. Never substitute another
 browser's result for this gate.
+
+For an optional same-file local diagnosis, set `READER_ACTUAL_EPUB_PATH` to an
+absolute protected local EPUB path and run the narrow odd-width rendering case.
+The default CI fixture is generated; no uploaded EPUB/PDF is committed. This
+local diagnosis is separate from the mandatory production physical-i5 gate.

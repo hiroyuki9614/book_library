@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { epubFixture } from './fixtures';
+import { readFileSync } from 'node:fs';
 
 async function fileApi(page: Page, file: Buffer, kind = 'epub', initial: string | null = null) {
 	let saved = initial;
@@ -91,12 +92,12 @@ async function progress(page: Page) {
 	expect(location, 'character location must be readable').not.toBeNull();
 	return { page: Number(screen![1]), section: Number(screen![3]), location: Number(location![1]) };
 }
-async function move(page: Page, name = '次のページへ') {
+async function move(page: Page, name = '次のページへ', timeout = 5000) {
 	const before = await cfi(page);
 	const beforeProgress = await progress(page);
 	const text = await visibleText(page);
 	await page.getByRole('button', { name, exact: true }).click();
-	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false');
+	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', {timeout});
 	await expect.poll(() => cfi(page)).not.toBe(before);
 	await expect.poll(() => visibleText(page)).not.toBe(text);
 	const afterProgress = await progress(page);
@@ -465,5 +466,36 @@ test(`native selection deep inside a Japanese chapter preserves the visible page
 	expect(await page.frameLocator(`[data-publication-pane="${variant.pane}"] iframe`).first().locator('body').evaluate(e=>e.ownerDocument.getSelection()?.toString().length??0)).toBeGreaterThan(0);
 	expect(await cfi(page)).toBe(before);expect(await visibleText(page)).toBe(text);
 	await move(page);
+});
+}
+
+// Odd viewports produce half-pixel panes; native iframe measurement rounds to
+// integer clientWidth. Ordinary page turns must retain the preview document.
+for (const vertical of process.env.READER_ACTUAL_EPUB_PATH ? [false] : [false, true]) {
+test(`narrow odd-width spreads finish layout and preserve real page movement vertical=${vertical}`, async ({page}) => {
+	test.setTimeout(240000);
+	await page.setViewportSize({width:736,height:859});
+	await fileApi(page,process.env.READER_ACTUAL_EPUB_PATH ? readFileSync(process.env.READER_ACTUAL_EPUB_PATH) : epubFixture({rtl:true,vertical}));
+	await page.goto('/e2e/readers/harness.html');await ready(page);
+	await page.getByRole('combobox').click();await page.getByRole('option',{name:'常に見開き',exact:true}).click();await ready(page);
+	for(let i=0;i<3;i++)await move(page,'次のページへ',30000);
+	await page.getByRole('combobox').click();await page.getByRole('option',{name:'常に単ページ',exact:true}).click();await ready(page);
+	for(const width of process.env.READER_ACTUAL_EPUB_PATH ? [393] : [393,391,320,833]) {
+		await page.setViewportSize({width,height:900});await ready(page);
+		for(const mode of ['常に単ページ','常に見開き','自動']) {
+			await page.getByRole('combobox').click();await page.getByRole('option',{name:mode,exact:true}).click();await ready(page);
+			for(let i=0;i<3;i++) {
+				const following=mode==='常に見開き'||(mode==='自動'&&width===833)
+					? await page.locator('[data-publication-pane="following"] iframe').elementHandle() : null;
+				const section=following && await following.evaluate(frame=>frame.closest('.epub-view')?.getAttribute('ref'));
+				await move(page,'次のページへ',30000);
+				if(following) {
+					const currentSection=await page.locator('[data-publication-pane="following"] iframe').evaluate(frame=>frame.closest('.epub-view')?.getAttribute('ref'));
+					if(currentSection===section)expect(await following.evaluate(frame=>frame.isConnected),'Same-spine page turns must retain the preview document').toBe(true);
+				}
+			}
+			await move(page,'前のページへ',30000);
+		}
+	}
 });
 }

@@ -77,3 +77,30 @@ turns and asserts unchanged CFI and visible text, then verifies explicit next
 still works. It fails before the fix and passes afterwards. PublicationManager
 records offsets from explicit scrollTo/scrollBy and restores that offset when
 native scrolling occurs with an expanded selection, preserving selected text.
+
+## Odd-width spread reinitialization found in the final i5 run
+
+PR #48 passed its 17 rendering cases, 101 frontend tests, real API E2E and
+all applicable CI, then deployed source `60e099b` at 21:03 JST. The i5 rerun
+passed desktop modes, edges/keys and native selection, but after 57 operations
+switching the 393px viewport to always-spread stayed busy for over 30 seconds.
+The failure report and screenshot remain in `after-60e099b` operator evidence.
+Acceptance is still incomplete.
+
+A small fixture initially passed visible movement, so it was insufficient to
+exclude the failure. Inspection found that epub.js Stage remeasures through
+integer clientWidth, while the adapter kept requesting half-pixel pane widths.
+Repeated preview.resize therefore cleared and reloaded the same spine. A new
+real browser regression directly fails on the unnecessary iframe destruction
+before the fix. Pane widths are now equal integers; the spare odd pixel is a
+central gap. The regression covers horizontal and vertical writing at 393/391/320px and
+auto-spread at an odd 801px reading width, mode switching and actual body/CFI
+movement. Preview identity is
+required only while its spine index stays unchanged.
+
+The same public-domain production EPUB can be supplied for local diagnosis via
+READER_ACTUAL_EPUB_PATH (absolute path; no EPUB is committed). Early large-file
+probes with tracing also hit the existing five-second movement threshold in
+wide mode; these are retained as diagnostic failures, not evidence of the
+specific narrow-mode cause. Temporary profiling was removed. Final acceptance
+requires the complete physical-i5 UI sequence after the new deployment.
