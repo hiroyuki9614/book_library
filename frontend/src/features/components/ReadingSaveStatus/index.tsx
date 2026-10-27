@@ -1,6 +1,6 @@
 export default function ReadingSaveStatus({ status, retry }: { status: 'saved' | 'saving' | 'error'; retry: () => void }) {
 	return (
-		<div className='text-xs text-muted-foreground' role={status === 'error' ? 'alert' : 'status'}>
+		<div className='flex min-h-11 items-center text-xs text-muted-foreground' role={status === 'error' ? 'alert' : 'status'}>
 			{status === 'error' ? (
 				<>
 					読書位置を保存できませんでした。

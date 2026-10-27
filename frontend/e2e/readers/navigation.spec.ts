@@ -83,7 +83,9 @@ for (const config of [
 	{ rtl: true, vertical: false },
 	{ rtl: true, vertical: true },
 ]) {
-	test(`real EPUB ${JSON.stringify(config)}: modes, 10 next/3 previous, CFI, body, hierarchical TOC and resume`, async ({ page }, testInfo) => {
+	test(`real EPUB ${JSON.stringify(config)}: modes, 10 next/3 previous, CFI, body, hierarchical TOC and resume`, async ({
+		page,
+	}, testInfo) => {
 		const api = await fileApi(page, epubFixture(config));
 		await page.goto('/e2e/readers/harness.html');
 		await ready(page);
@@ -99,7 +101,7 @@ for (const config of [
 		await page.getByRole('button', { name: '目次', exact: true }).click();
 		await expect(page.getByRole('button', { name: '第四章', exact: true })).toBeVisible();
 		await page.getByRole('button', { name: '第四章', exact: true }).click();
-		if (config.vertical) await testInfo.attach('vertical-layout', {body: await page.screenshot(), contentType:'image/png'});
+		if (config.vertical) await testInfo.attach('vertical-layout', { body: await page.screenshot(), contentType: 'image/png' });
 		await expect.poll(() => visibleText(page)).toContain('第4章');
 		await expect(page.getByText('読書位置を保存済み', { exact: true })).toBeVisible();
 		const saved = api.saved();
@@ -233,15 +235,18 @@ for (const width of [1100, 393, 320])
 		await page.frameLocator('iframe').getByRole('link', { name: '本文リンク', exact: true }).first().click();
 		await expect.poll(() => visibleText(page)).toContain('第2章');
 		const beforeSelect = await cfi(page);
-		// Drag through visible paragraph text; pointerup must not become an edge tap.
+		// Native word selection plus keyboard expansion must not turn a page.
 		const selectionBox = (await page.locator('.epub-container').boundingBox())!;
-  const selectionX = selectionBox.x + selectionBox.width * .65;
-  const selectionY = selectionBox.y + Math.min(160, selectionBox.height * .4);
-  await page.mouse.move(selectionX, selectionY);
-  await page.mouse.down();
-  await page.mouse.move(Math.min(selectionX + 65, selectionBox.x + selectionBox.width - 20), selectionY, {steps:5});
-  await page.mouse.up();
-  expect(await page.frameLocator('iframe').locator('body').evaluate(el => el.ownerDocument.getSelection()?.toString().length ?? 0)).toBeGreaterThan(0);
+		const selectionX = selectionBox.x + selectionBox.width * 0.65;
+		const selectionY = selectionBox.y + Math.min(160, selectionBox.height * 0.4);
+		await page.mouse.click(selectionX, selectionY, { clickCount: 2 });
+		await page.keyboard.press('Shift+ArrowRight');
+		expect(
+			await page
+				.frameLocator('iframe')
+				.locator('body')
+				.evaluate((el) => el.ownerDocument.getSelection()?.toString().length ?? 0),
+		).toBeGreaterThan(0);
 
 		expect(await cfi(page)).toBe(beforeSelect);
 		expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -322,15 +327,23 @@ for (const vertical of [false, true])
 		}
 	});
 
-test('in-flight EPUB movement tolerates resize and immediate shelf reentry without stale saves',async({page})=>{
- const errors:string[]=[];page.on('pageerror',e=>errors.push(String(e)));
- await fileApi(page,epubFixture({rtl:true}));await page.goto('/e2e/readers/harness.html');await ready(page);
- for(const width of [393,320,1100]){
-  await page.getByRole('button',{name:'次のページへ',exact:true}).click();
-  await page.setViewportSize({width,height:850});await ready(page);await move(page);
- }
- for(let i=0;i<3;i++) await page.getByRole('button',{name:'次のページへ',exact:true}).click({noWaitAfter:true});
- await page.getByRole('link',{name:'本棚に戻る'}).click();const last=await cfi(page);
- await page.getByRole('link',{name:'テスト書籍を読む'}).click();await ready(page);
- expect(await cfi(page)).toBe(last);expect(errors).toEqual([]);
+test('in-flight EPUB movement tolerates resize and immediate shelf reentry without stale saves', async ({ page }) => {
+	const errors: string[] = [];
+	page.on('pageerror', (e) => errors.push(String(e)));
+	await fileApi(page, epubFixture({ rtl: true }));
+	await page.goto('/e2e/readers/harness.html');
+	await ready(page);
+	for (const width of [393, 320, 1100]) {
+		await page.getByRole('button', { name: '次のページへ', exact: true }).click();
+		await page.setViewportSize({ width, height: 850 });
+		await ready(page);
+		await move(page);
+	}
+	for (let i = 0; i < 3; i++) await page.getByRole('button', { name: '次のページへ', exact: true }).click({ noWaitAfter: true });
+	await page.getByRole('link', { name: '本棚に戻る' }).click();
+	const last = await cfi(page);
+	await page.getByRole('link', { name: 'テスト書籍を読む' }).click();
+	await ready(page);
+	expect(await cfi(page)).toBe(last);
+	expect(errors).toEqual([]);
 });

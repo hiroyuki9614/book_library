@@ -104,6 +104,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 		let disposed = false;
 		let ready = false;
 		let resizeFrame = 0;
+		let lastSize = { width: viewer.clientWidth, height: viewer.clientHeight };
 		const book = ePub(epubData) as unknown as RuntimeBook;
 		const rendition = book.renderTo(viewer, {
 			width: viewer.clientWidth,
@@ -129,9 +130,11 @@ function EpubReader({ bookId }: { bookId: number }) {
 			save(cfi, location.atEnd ? 'completed' : 'reading');
 		};
 		const onKey = (event: KeyboardEvent) => {
-			if (!ready || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+			if (!ready || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
 			if ((event.target as Element)?.closest?.('input, select, textarea, button, [role="combobox"], [contenteditable="true"]')) return;
 			if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+			const eventDocument = (event.target as Node)?.ownerDocument;
+			if (eventDocument?.getSelection()?.isCollapsed === false) return;
 			event.preventDefault();
 			const next = (event.key === 'ArrowLeft') === (book.package.metadata.direction === 'rtl');
 			enqueue((r) => (next ? r.next() : r.prev()));
@@ -172,7 +175,13 @@ function EpubReader({ bookId }: { bookId: number }) {
 			if (!ready) return;
 			cancelAnimationFrame(resizeFrame);
 			resizeFrame = requestAnimationFrame(() => {
-				if (!disposed && viewer.clientWidth && viewer.clientHeight) {
+				if (
+					!disposed &&
+					viewer.clientWidth &&
+					viewer.clientHeight &&
+					(viewer.clientWidth !== lastSize.width || viewer.clientHeight !== lastSize.height)
+				) {
+					lastSize = { width: viewer.clientWidth, height: viewer.clientHeight };
 					enqueue(() => rendition.resize(viewer.clientWidth, viewer.clientHeight, currentCfiRef.current || undefined));
 				}
 			});
