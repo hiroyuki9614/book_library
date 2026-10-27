@@ -130,3 +130,12 @@ checks require iframe retention on spread reflow, anchor and selection retention
 on height changes, and conditional horizontal/vertical mode changes. The new
 iframe-retention check fails against the unmodified manager in both writing
 modes. Final CI, review, deployment and physical-i5 results remain pending.
+
+CI exposed two acceptance-driver races: height readiness checked width but could
+return before the resized stage height/CFI was published; and synthetic edge
+clicks could fall just inside the existing 250ms duplicate guard. Readiness now
+waits for stage height as well, and distinct test taps respect that guard. Body,
+CFI, numerical movement and save assertions remain unchanged. The failed traces
+are retained. A separate height-dependent writing-mode media-query limitation
+also reproduces with the previous manager and is tracked in issue #56; the
+production demo has no such conditional CSS.

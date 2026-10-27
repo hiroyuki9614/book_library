@@ -79,7 +79,8 @@ async function ready(page: Page) {
 		const mode=document.querySelector('[role=combobox]')?.textContent;
 		const dual=mode==='常に見開き'||(mode==='自動'&&viewer.clientWidth>=800);
 		const pane=viewer.querySelector<HTMLElement>('[data-publication-pane=primary]');
-		return Math.abs((pane?.getBoundingClientRect().width ?? 0)-viewer.clientWidth/(dual?2:1));
+		const stage=pane?.querySelector<HTMLElement>('.epub-container');
+		return Math.max(Math.abs((pane?.getBoundingClientRect().width ?? 0)-viewer.clientWidth/(dual?2:1)), Math.abs((stage?.clientHeight ?? 0)-viewer.clientHeight));
 	}), {timeout:30000}).toBeLessThan(1);
 	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 30000 });
 	await expect.poll(() => visibleText(page)).not.toBe('');
@@ -256,6 +257,8 @@ for (const width of [1100, 393, 320])
 		await page.keyboard.press('ArrowLeft');
 		await expect.poll(() => cfi(page)).not.toBe(afterEdge);
 		const right = await cfi(page);
+		// Distinct edge taps must be outside the shared 250ms duplicate guard.
+		await page.waitForTimeout(300);
 		await page.mouse.click(box.x + box.width - 5, box.y + box.height / 2);
 		await expect.poll(() => cfi(page)).not.toBe(right);
 		const text = await visibleText(page);
