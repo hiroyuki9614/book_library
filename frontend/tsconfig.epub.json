@@ -5,6 +5,7 @@
   },
   "include": [
     "src/api/books.ts",
+    "src/types/epubjs-view.d.ts",
     "src/pages/ReaderPage/index.tsx",
     "src/pages/ReaderPageT/index.tsx",
     "src/features/components/EpubReader/index.tsx"

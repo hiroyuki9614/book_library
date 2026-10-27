@@ -306,3 +306,20 @@ Production preflight, verified private DB backup, protection, deployment and pub
 - `docs/current-status.md`: current implementation and known drift
 - `docs/mvp_plan.md`: execution order and completion gates
 - Git history / Personal Vault records: dated execution evidence
+
+## Reader position and navigation semantics
+
+The reader distinguishes current-section screen pages from approximate
+1600-character EPUB locations; the saved EPUB anchor remains CFI. Logical next
+and previous follow publication order, with arrow placement and keyboard/edge
+mapping following page progression. The publisher's text direction and writing
+mode remain separate from page progression. Nested formal TOC entries are shown;
+when the formal TOC has at most one entry, actual body headings are presented as
+an explicitly labeled supplemental TOC without replacing the original file.
+
+PDF restoration waits for the real document layout and runs once per document,
+independently of subsequent saves and zoom/layout changes. Reading-info writes
+are ordered per book in a browser tab, and immediate reentry waits for pending
+writes. Failures are visible and retryable. Cross-device conflict resolution is
+not implemented. See [reader acceptance](runbooks/reader-acceptance.md) for the
+production GUI and real rendering gates.

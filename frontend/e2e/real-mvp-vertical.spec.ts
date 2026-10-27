@@ -74,7 +74,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	const pageInput = page.getByRole('spinbutton');
 	await expect(pageInput).toHaveValue('1', { timeout: 30_000 });
 	const saveResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.pdfBookId}/reading-info`) && response.request().method() === 'PATCH');
-	await page.getByRole('button', { name: '>' }).click();
+	await page.getByRole('button', { name: '次のページへ' }).click();
 	await expect(pageInput).toHaveValue('2');
 	expect((await saveResponse).status()).toBe(200);
 	await page.reload();

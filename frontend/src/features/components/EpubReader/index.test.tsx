@@ -105,9 +105,9 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		await render(<EpubReader bookId={7} />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
 
-		const relocatedHandler = runtime.rendition.on.mock.calls.find(([event]) => event === 'relocated')?.[1] as ((value: { start: { cfi: string } }) => void) | undefined;
+		const relocatedHandler = runtime.rendition.on.mock.calls.find(([event]) => event === 'relocated')?.[1] as ((value: { start: { cfi: string }; atEnd?: boolean }) => void) | undefined;
 		expect(relocatedHandler).toBeTypeOf('function');
-		relocatedHandler?.({ start: { cfi: 'epubcfi(final)' } });
+		relocatedHandler?.({ start: { cfi: 'epubcfi(final)' }, atEnd: true });
 
 		expect(localStorage.getItem('reader-location:7')).toBe('epubcfi(final)');
 		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(final)', 'completed'));

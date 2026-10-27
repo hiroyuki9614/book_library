@@ -1,5 +1,6 @@
 import { createPluginRegistration } from '@embedpdf/core';
 import { EmbedPDF } from '@embedpdf/core/react';
+import pdfiumWasmUrl from '@embedpdf/pdfium/pdfium.wasm?url';
 import { usePdfiumEngine } from '@embedpdf/engines/react';
 import { Link } from 'react-router-dom';
 import { Spinner } from '@/components/ui/spinner';
@@ -8,7 +9,7 @@ import CommandButton from './Command';
 import { useCommand } from '@embedpdf/plugin-commands/react';
 
 import { Viewport, ViewportPluginPackage } from '@embedpdf/plugin-viewport/react';
-import { Scroller, ScrollPluginPackage, ScrollStrategy, useScroll } from '@embedpdf/plugin-scroll/react';
+import { Scroller, ScrollPluginPackage, ScrollStrategy, useScroll, useScrollCapability } from '@embedpdf/plugin-scroll/react';
 import { DocumentContent, DocumentManagerPluginPackage } from '@embedpdf/plugin-document-manager/react';
 import { RenderLayer, RenderPluginPackage } from '@embedpdf/plugin-render/react';
 import { ZoomPluginPackage, ZoomMode } from '@embedpdf/plugin-zoom/react';
@@ -22,7 +23,9 @@ import type { ScrollState } from '@embedpdf/plugin-scroll';
 import { SelectionLayer, SelectionPluginPackage } from '@embedpdf/plugin-selection/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { fetchBookFile } from '@/api/books';
-import { fetchReadingInfo, saveReadingInfo } from '@/api/readingInfo';
+import { fetchReadingInfo } from '@/api/readingInfo';
+import ReadingSaveStatus from '../ReadingSaveStatus';
+import { useReadingSave } from '@/hooks/useReadingSave';
 
 export type AppState = GlobalStoreState<{
 	[SCROLL_PLUGIN_ID]: ScrollState;
@@ -33,9 +36,9 @@ const myCommands: Record<string, Command<AppState>> = {
 		id: 'nav.previous',
 		label: '<',
 		shortcuts: ['arrowleft', 'k'],
-		action: ({ registry }) => {
+		action: ({ registry, documentId }) => {
 			const scrollPlugin = registry.getPlugin('scroll');
-			const scroll = scrollPlugin?.provides?.();
+			const scroll = scrollPlugin?.provides?.().forDocument(documentId);
 
 			if (scroll) {
 				scroll.scrollToPage({ pageNumber: Math.max(1, scroll.getCurrentPage() - 1), behavior: 'auto' });
@@ -50,9 +53,9 @@ const myCommands: Record<string, Command<AppState>> = {
 		id: 'nav.next',
 		label: '>',
 		shortcuts: ['arrowright', 'j'],
-		action: ({ registry }) => {
+		action: ({ registry, documentId }) => {
 			const scrollPlugin = registry.getPlugin('scroll');
-			const scroll = scrollPlugin?.provides?.();
+			const scroll = scrollPlugin?.provides?.().forDocument(documentId);
 
 			if (scroll) {
 				scroll.scrollToPage({ pageNumber: Math.min(scroll.getTotalPages(), scroll.getCurrentPage() + 1), behavior: 'auto' });
@@ -65,10 +68,10 @@ const myCommands: Record<string, Command<AppState>> = {
 	},
 };
 
-function createPlugins(documentUrl: string) {
+function createPlugins(documentData: ArrayBuffer) {
 	return [
 		createPluginRegistration(DocumentManagerPluginPackage, {
-			initialDocuments: [{ url: documentUrl }],
+			initialDocuments: [{ buffer: documentData, name: 'book.pdf' }],
 		}),
 		createPluginRegistration(ViewportPluginPackage),
 		createPluginRegistration(RenderPluginPackage),
@@ -91,39 +94,35 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 	const { provides: scroll, state } = useScroll(documentId);
 	const [pageInputOverride, setPageInputOverride] = useState<string | null>(null);
 	const pageInput = pageInputOverride ?? String(state.currentPage);
-	const isReadyToPersistRef = useRef(false);
-	const targetPage = Math.min(initialPage, state.totalPages);
+	const restoredDocument = useRef<string | null>(null);
+	const { provides: scrollCapability } = useScrollCapability();
+	const [targetPage, setTargetPage] = useState<number | null>(null);
 	const lastPersistedPage = useRef<number | null>(null);
-
+	const { save, status, retry } = useReadingSave(bookId);
 	const previousCommand = useCommand('nav.previous', documentId);
 	const nextCommand = useCommand('nav.next', documentId);
 
 	useEffect(() => {
-		if (!scroll || state.totalPages < 1 || lastPersistedPage.current === targetPage) {
-			return;
-		}
-
-		lastPersistedPage.current = targetPage;
-		isReadyToPersistRef.current = false;
-		scroll.scrollToPage({ pageNumber: targetPage });
-	}, [scroll, state.totalPages, targetPage]);
+		if (!scrollCapability) return;
+		// LayoutReady is replayed to late subscribers and carries the real page count.
+		// useScroll's initial 1/1 state is not evidence that a document is ready.
+		return scrollCapability.onLayoutReady((event) => {
+			if (event.documentId !== documentId || restoredDocument.current === documentId) return;
+			const page = Math.max(1, Math.min(initialPage, event.totalPages));
+			restoredDocument.current = documentId;
+			lastPersistedPage.current = null;
+			setTargetPage(page);
+			scrollCapability.forDocument(documentId).scrollToPage({ pageNumber: page, behavior: 'auto' });
+		});
+	}, [documentId, initialPage, scrollCapability]);
 
 	useEffect(() => {
-		if (!isReadyToPersistRef.current) {
-			if (state.currentPage === targetPage) {
-				isReadyToPersistRef.current = true;
-			}
-			return;
-		}
-
-		if (state.currentPage === lastPersistedPage.current) {
-			return;
-		}
-
+		if (targetPage === null || restoredDocument.current !== documentId || state.totalPages < 1) return;
+		if (lastPersistedPage.current === null && state.currentPage !== targetPage) return;
+		if (lastPersistedPage.current === state.currentPage) return;
 		lastPersistedPage.current = state.currentPage;
-		const readStatus = state.currentPage >= state.totalPages ? 'completed' : 'reading';
-		void saveReadingInfo(bookId, state.currentPage, readStatus).catch(() => undefined);
-	}, [bookId, state.currentPage, state.totalPages, targetPage]);
+		save(state.currentPage, state.currentPage >= state.totalPages ? 'completed' : 'reading');
+	}, [documentId, state.currentPage, state.totalPages, targetPage, save]);
 
 	const handleGoToPage = (e: React.FormEvent<HTMLFormElement>) => {
 		e.preventDefault();
@@ -134,7 +133,19 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 		}
 	};
 
-	return <CommandButton prevResolved={previousCommand} nextResolved={nextCommand} state={state} pageInput={pageInput} setPageInput={setPageInputOverride} handleGoToPage={handleGoToPage} />;
+	return (
+		<div className='flex flex-col items-center gap-1'>
+			<CommandButton
+				prevResolved={previousCommand}
+				nextResolved={nextCommand}
+				state={state}
+				pageInput={pageInput}
+				setPageInput={setPageInputOverride}
+				handleGoToPage={handleGoToPage}
+			/>
+			<ReadingSaveStatus status={status} retry={retry} />
+		</div>
+	);
 };
 
 const PdfViewport = ({ documentId }: { documentId: string }) => {
@@ -177,7 +188,11 @@ const PdfViewport = ({ documentId }: { documentId: string }) => {
 	return (
 		<div ref={containerRef} className='relative h-full overflow-hidden'>
 			{!hasRenderedPage && (
-				<div className='pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-white/90' role='status' aria-live='polite'>
+				<div
+					className='pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-white/90'
+					role='status'
+					aria-live='polite'
+				>
 					<div className='flex items-center gap-2 text-sm text-muted-foreground'>
 						<Spinner className='size-6' />
 						<span>PDF本文を描画しています…</span>
@@ -189,7 +204,7 @@ const PdfViewport = ({ documentId }: { documentId: string }) => {
 					documentId={documentId}
 					renderPage={({ width, height, pageIndex }) => (
 						<PagePointerProvider documentId={documentId} pageIndex={pageIndex}>
-							<div style={{ width, height, position: 'relative' }}>
+							<div data-pdf-page={pageIndex + 1} style={{ width, height, position: 'relative' }}>
 								<RenderLayer documentId={documentId} pageIndex={pageIndex} style={{ pointerEvents: 'none' }} />
 								<SelectionLayer documentId={documentId} pageIndex={pageIndex} />
 							</div>
@@ -202,35 +217,46 @@ const PdfViewport = ({ documentId }: { documentId: string }) => {
 };
 
 function PdfReader({ bookId }: { bookId: number }) {
-	const [documentUrl, setDocumentUrl] = useState<string | null>(null);
+	const [documentData, setDocumentData] = useState<ArrayBuffer | null>(null);
 	const [fileError, setFileError] = useState(false);
+	const [restoreError, setRestoreError] = useState(false);
 	const [initialPage, setInitialPage] = useState<number | null>(null);
-	const { engine, isLoading } = usePdfiumEngine();
+	const { engine, isLoading, error: engineError } = usePdfiumEngine({ wasmUrl: new URL(pdfiumWasmUrl, window.location.href).href });
 
 	useEffect(() => {
-		let objectUrl: string | undefined;
+		let active = true;
 
 		void fetchBookFile(bookId)
-			.then((blob) => {
-				objectUrl = URL.createObjectURL(blob);
-				setDocumentUrl(objectUrl);
+			.then((blob) => blob.arrayBuffer())
+			.then((data) => {
+				if (!active) return;
+				setDocumentData(data);
 			})
-			.catch(() => setFileError(true));
+			.catch(() => {
+				if (active) setFileError(true);
+			});
 
 		void fetchReadingInfo(bookId)
-			.then((readingInfo) => setInitialPage(readingInfo.currentPage))
-			.catch(() => setInitialPage(1));
+			.then((readingInfo) => {
+				if (active) setInitialPage(readingInfo.currentPage);
+			})
+			.catch(() => {
+				if (active) {
+					setInitialPage(1);
+					setRestoreError(true);
+				}
+			});
 
 		return () => {
-			if (objectUrl) URL.revokeObjectURL(objectUrl);
+			active = false;
 		};
 	}, [bookId]);
 
-	const plugins = useMemo(() => (documentUrl ? createPlugins(documentUrl) : []), [documentUrl]);
+	const plugins = useMemo(() => (documentData ? createPlugins(documentData) : []), [documentData]);
 
-	if (fileError) return <p>PDFファイルを取得できませんでした。</p>;
+	if (fileError || engineError) return <p role='alert'>PDFファイルまたは描画エンジンを読み込めませんでした。</p>;
 
-	if (isLoading || !engine || !documentUrl || initialPage === null) {
+	if (isLoading || !engine || !documentData || initialPage === null) {
 		return (
 			<div className='overflow-hidden rounded-lg border border-gray-300 bg-white dark:border-gray-700 dark:bg-gray-900'>
 				<div className='flex h-[400px] items-center justify-center'>
@@ -245,9 +271,19 @@ function PdfReader({ bookId }: { bookId: number }) {
 	return (
 		<div className='flex h-[100dvh] flex-col bg-background text-foreground'>
 			<header className='flex shrink-0 items-center border-b p-2 sm:p-3'>
-				<Link to='/' className='inline-flex min-h-11 items-center rounded-md px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'>本棚に戻る</Link>
+				<Link
+					to='/'
+					className='inline-flex min-h-11 items-center rounded-md px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+				>
+					本棚に戻る
+				</Link>
 				<span className='ml-auto pr-2 text-sm font-medium text-muted-foreground'>PDFリーダー</span>
 			</header>
+			{restoreError && (
+				<p role='alert' className='text-xs'>
+					保存位置を取得できませんでした。先頭から表示しています。
+				</p>
+			)}
 			<main tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white px-2 outline-none sm:px-4'>
 				<EmbedPDF engine={engine} plugins={plugins}>
 					{({ activeDocumentId }) =>

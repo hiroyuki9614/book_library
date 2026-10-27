@@ -17,7 +17,10 @@ describe('reading-info API client', () => {
 		);
 
 		await expect(fetchReadingInfo(7)).resolves.toEqual({ bookId: 7, currentPosition: '3', currentPage: 3, readStatus: 'reading' });
-		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/books/7/reading-info', expect.objectContaining({ credentials: 'include' }));
+		expect(fetch).toHaveBeenCalledWith(
+			'http://localhost:3000/api/v1/books/7/reading-info',
+			expect.objectContaining({ credentials: 'include' }),
+		);
 	});
 
 	test('PDF現在ページとcompleted状態をPATCHで保存する', async () => {
@@ -62,5 +65,33 @@ describe('reading-info API client', () => {
 				body: JSON.stringify({ currentPosition: cfi, readStatus: 'reading' }),
 			}),
 		);
+	});
+	test('遅い古いPATCHを追い越さず、再入場のGETも最新保存を待つ', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		let release!: () => void;
+		const firstFinished = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const calls: string[] = [];
+		let position = '1';
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			if (options?.method === 'PATCH') {
+				const page = String(JSON.parse(String(options.body)).currentPage);
+				calls.push(`PATCH ${page}`);
+				if (page === '2') await firstFinished;
+				position = page;
+			} else calls.push(`GET ${position}`);
+			return new Response(JSON.stringify({ bookId: 99, currentPosition: position, currentPage: Number(position), readStatus: 'reading' }), {
+				headers: { 'Content-Type': 'application/json' },
+			});
+		});
+		const older = saveReadingInfo(99, 2);
+		const newer = saveReadingInfo(99, 9);
+		const reopened = fetchReadingInfo(99);
+		await vi.waitFor(() => expect(calls).toEqual(['PATCH 2']));
+		release();
+		await Promise.all([older, newer]);
+		await expect(reopened).resolves.toMatchObject({ currentPosition: '9' });
+		expect(calls).toEqual(['PATCH 2', 'PATCH 9', 'GET 9']);
 	});
 });
