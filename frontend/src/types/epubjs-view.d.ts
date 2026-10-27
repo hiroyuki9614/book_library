@@ -24,6 +24,8 @@ declare module 'epubjs/src/managers/default' {
 		updateLayout(): void;
 		moveTo(offset: { left: number; top: number }, width: number): void;
 		scrollTo(x: number, y: number, silent?: boolean): void;
+		scrollBy(x: number, y: number, silent?: boolean): void;
+		onScroll(): void;
 		currentLocation(): Array<{ index: number; pages: number[]; totalPages: number; mapping: { start: string; end: string } }>;
 		visible(): Array<{ section: { index: number; cfiBase: string }; contents: import('epubjs/types/contents').default; position: () => DOMRect; height: () => number }>;
 	}

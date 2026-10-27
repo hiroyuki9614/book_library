@@ -59,3 +59,21 @@ No renderer next/prev or React state was called directly for acceptance.
 
 Final commit, CI, independent-review disposition, immutable deployment identity,
 post-deploy GUI results and evidence index will be appended after verification.
+
+## Additional physical-i5 acceptance failure
+
+PR #47 passed all five CI workflows and independent review, merged as
+`48304955bbb0fb136a39566f0112266440affb17`, and deployed frontend candidate
+`f1185931a72fc807e5849433d98245be7679bb63` (same tree). The i5 run passed
+43 UI moves, including desktop modes and RTL edge/keyboard direction checks.
+Deep within the chapter, native double-click selection plus Shift+ArrowRight
+then scrolled Chromium's pagination container from -14784 to -12179 pixels,
+rewinding screen page 22 to 19 and saving that unintended CFI. Selection itself
+expanded correctly. Acceptance remains incomplete; issue #46 was reopened.
+
+The old selection regression ran at the chapter start, where native autoscroll
+cannot reveal the failure. A new real-renderer regression selects after 21 page
+turns and asserts unchanged CFI and visible text, then verifies explicit next
+still works. It fails before the fix and passes afterwards. PublicationManager
+records offsets from explicit scrollTo/scrollBy and restores that offset when
+native scrolling occurs with an expanded selection, preserving selected text.

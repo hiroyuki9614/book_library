@@ -49,7 +49,7 @@ allowed; do not invoke reader methods or update state with JavaScript.
 | EPUB modes | Single, spread, auto; desktop, 393px and 320px reading areas |
 | EPUB movement | 10 next + 3 previous in each mode; visible range and CFI change per action |
 | EPUB input | Buttons, iframe keys, left/right edges; rtl/ltr meanings and arrows agree |
-| EPUB interaction | Link activation and text selection remain usable; repeated input is ordered |
+| EPUB interaction | Link activation and text selection remain usable; repeat selection deep inside a long chapter, including Shift+Arrow expansion; visible text and CFI must remain unchanged after native scroll events; repeated input is ordered |
 | Boundaries | Within chapter, across chapter/spine, start and end; no false stop elsewhere |
 | TOC | All nested entries; distant destinations show the intended text |
 | Sparse TOC | Preserve formal TOC; label real body headings as supplemental; invent no headings |

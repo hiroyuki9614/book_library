@@ -78,22 +78,37 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	await page.getByRole('button', { name: '目次' }).click();
 	await expect(page.getByRole('button', { name: 'First chapter' })).toBeVisible();
 	await page.getByRole('button', { name: 'First chapter' }).click();
+	await expect(page.getByRole('dialog')).toBeHidden();
 
 	const saveResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.pdfBookId}/reading-info`)
 		&& response.request().method() === 'PATCH'
 		&& response.request().postDataJSON()?.readStatus === 'completed');
 	const viewport = page.getByTestId('pdf-viewport');
+	const shown = () => page.evaluate(() => {
+		const viewport = document.querySelector('[data-testid="pdf-viewport"]')!.getBoundingClientRect();
+		return [...document.querySelectorAll<HTMLElement>('[data-pdf-page]')].map(el => {
+			const r = el.getBoundingClientRect();
+			return {page:Number(el.dataset.pdfPage),area:Math.max(0,Math.min(r.bottom,viewport.bottom)-Math.max(r.top,viewport.top))*Math.max(0,Math.min(r.right,viewport.right)-Math.max(r.left,viewport.left))};
+		}).sort((a,b)=>b.area-a.area)[0]?.page;
+	});
+	await expect.poll(shown).toBe(1);
+	const firstImage = await page.locator('[data-pdf-page="1"] img').screenshot();
 	const viewportBounds = await viewport.boundingBox();
 	expect(viewportBounds).not.toBeNull();
-	await page.mouse.click(viewportBounds!.x + viewportBounds!.width - 5, viewportBounds!.y + viewportBounds!.height / 2);
+	// Locator hit testing waits until the closing TOC overlay releases pointer input.
+	await viewport.click({position:{x:viewportBounds!.width-5,y:viewportBounds!.height/2}});
 
 	await expect(pageInput).toHaveValue('2');
+	await expect.poll(shown).toBe(2);
+	expect((await page.locator('[data-pdf-page="2"] img').screenshot()).equals(firstImage)).toBe(false);
 	await expect(page.getByText('2 / 2 ページ 100%')).toBeVisible();
 	expect((await saveResponse).status()).toBe(200);
 	await page.setViewportSize({ width: 851, height: 393 });
 	await expect(viewport).toBeVisible();
 	await page.reload();
 	await expect(page.getByRole('spinbutton')).toHaveValue('2', { timeout: 30_000 });
+	await expect.poll(shown).toBe(2);
+	await expect(page.locator('[data-pdf-page="2"] img')).toBeVisible();
 });
 
 test('demo user opens protected EPUB and persists/restores a CFI', async ({ page }) => {

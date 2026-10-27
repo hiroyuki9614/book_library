@@ -124,6 +124,13 @@ jobs:
       - name: Run isolated reader E2E
         working-directory: frontend
         run: npm run test:e2e
+      - name: Retain real API reader evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reader-api-evidence
+          path: frontend/test-results
+          retention-days: 7
 
   production-compose:
     name: Production images, Compose config, and isolated smoke

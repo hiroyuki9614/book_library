@@ -448,3 +448,22 @@ test('mixed vertical/horizontal chapters: real two-page geometry, complete sourc
 		await expect(page.getByRole('button',{name:'次のページへ'})).toBeEnabled();
 	}
 });
+
+// Chromium can scroll the RTL pagination container while expanding a native
+// selection deep in a long Japanese chapter. Chapter-start selection misses it.
+for (const variant of [{vertical:false,spread:false,pane:'primary'}, {vertical:false,spread:true,pane:'following'}, {vertical:true,spread:false,pane:'primary'}, {vertical:true,spread:true,pane:'following'}]) {
+test(`native selection deep inside a Japanese chapter preserves the visible page ${JSON.stringify(variant)}`, async ({ page }) => {
+	await page.setViewportSize({width:704,height:798});
+	await fileApi(page,epubFixture({rtl:true,vertical:variant.vertical,paragraphs:40}));
+	await page.goto('/e2e/readers/harness.html');await ready(page);
+	await page.getByRole('combobox').click();await page.getByRole('option',{name:variant.spread?'常に見開き':'常に単ページ',exact:true}).click();await ready(page);
+	for(let i=0;i<21;i++) {await page.getByRole('button',{name:'次のページへ',exact:true}).click();await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');}
+	const before=await cfi(page),text=await visibleText(page);
+	const box=(await page.locator(`[data-publication-pane="${variant.pane}"]`).boundingBox())!;
+	await page.mouse.click(box.x+box.width*.65,box.y+150,{clickCount:2});
+	await page.keyboard.press('Shift+ArrowRight');await page.waitForTimeout(350);
+	expect(await page.frameLocator(`[data-publication-pane="${variant.pane}"] iframe`).first().locator('body').evaluate(e=>e.ownerDocument.getSelection()?.toString().length??0)).toBeGreaterThan(0);
+	expect(await cfi(page)).toBe(before);expect(await visibleText(page)).toBe(text);
+	await move(page);
+});
+}

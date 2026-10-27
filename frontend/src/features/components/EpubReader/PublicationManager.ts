@@ -5,6 +5,38 @@ import EpubCFI from 'epubjs/src/epubcfi';
 // delta to the horizontal width during location measurement and snaps CFI restores
 // to the wrong grid, even though next/prev advance by height.
 export class PublicationManager extends DefaultManager {
+	private readingScroll?: {left: number; top: number};
+
+	private rememberScroll() {
+		if (this.container) this.readingScroll = {left: this.container.scrollLeft, top: this.container.scrollTop};
+	}
+
+	override scrollTo(x: number, y: number, silent?: boolean) {
+		super.scrollTo(x, y, silent);
+		this.rememberScroll();
+	}
+
+	override scrollBy(x: number, y: number, silent?: boolean) {
+		super.scrollBy(x, y, silent);
+		this.rememberScroll();
+	}
+
+	override onScroll() {
+		// Chromium scrolls the pagination container to reveal the selection's text
+		// node when Shift+Arrow expands a native selection. A node can span several
+		// Japanese pages, so that scroll can land between columns and rewind the CFI.
+		// Keep the last explicit reader offset while leaving the selection intact.
+		const offset = this.readingScroll;
+		if (this.isPaginated && offset && this.visible().some(view => view.contents.document.getSelection()?.isCollapsed === false)
+			&& (Math.abs(this.container.scrollLeft - offset.left) > .5 || Math.abs(this.container.scrollTop - offset.top) > .5)) {
+			super.scrollTo(offset.left, offset.top, true);
+			this.rememberScroll();
+			return;
+		}
+		super.onScroll();
+		this.rememberScroll();
+	}
+
 	override updateLayout() {
 		// Each manager represents one actual page; the spread adapter arranges
 		// pages. Publisher spread metadata must not resurrect divisor=2 here.
