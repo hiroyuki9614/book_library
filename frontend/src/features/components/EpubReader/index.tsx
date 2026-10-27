@@ -12,9 +12,10 @@ import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Spinner } from '@/components/ui/spinner';
 import { Button } from '@/components/ui/button';
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheetCapture';
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheetCapture';
 import ReadingSaveStatus from '../ReadingSaveStatus';
 import { useReadingSave } from '@/hooks/useReadingSave';
+import { attachEdgeTapNavigation, type PageTurnDirection } from '../readerNavigation';
 import { PublicationView } from './PublicationView';
 import { createPublicationRendition, type PublicationRendition } from './PublicationRendition';
 import { flattenToc, headingToc, preserveTextDirection, type TocEntry, type PublicationSection } from './publication';
@@ -27,7 +28,7 @@ type RuntimeBook = Omit<Book, 'locations'> & {
 const EPUB_LOCATION_BREAK_SIZE = 1600;
 const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
-function EpubReader({ bookId }: { bookId: number }) {
+function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDirection?: PageTurnDirection }) {
 	const viewerRef = useRef<HTMLDivElement | null>(null);
 	const currentCfiRef = useRef('');
 	const renditionRef = useRef<RuntimeRendition | null>(null);
@@ -51,6 +52,10 @@ function EpubReader({ bookId }: { bookId: number }) {
 	const [history, setHistory] = useState<string[]>([]);
 	const [pendingOperations, setPendingOperations] = useState(0);
 	const [rendererBusy, setRendererBusy] = useState(false);
+	const [tocOpen, setTocOpen] = useState(false);
+	const tocOpenRef = useRef(false);
+	const [currentHref, setCurrentHref] = useState('');
+	const setTocVisible = (open: boolean) => { tocOpenRef.current = open; setTocOpen(open); };
 	const storageKey = `reader-location:${bookId}`;
 	const { save, status, retry } = useReadingSave(bookId);
 
@@ -118,7 +123,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 			minSpreadWidth: initialSpread.current === 'always' ? 1 : 800,
 			flow: 'paginated',
 			view: PublicationView,
-		}) as RuntimeRendition;
+		}, pageTurnDirection) as RuntimeRendition;
 		renditionRef.current = rendition;
 		const relocated = (location: Location) => {
 			if (disposed || !location.start?.cfi) return;
@@ -126,8 +131,9 @@ function EpubReader({ bookId }: { bookId: number }) {
 			const index = book.locations.locationFromCfi(cfi);
 			const last = book.locations.total;
 			currentCfiRef.current = cfi;
-			setPercentage(index >= 0 && last > 0 ? Math.round((index / last) * 100) : null);
-			setCurrentPage(index >= 0 ? index + 1 : 0);
+			setPercentage(location.atEnd ? 100 : index >= 0 && last > 0 ? Math.round((index / last) * 100) : null);
+			setCurrentPage(location.atEnd ? last + 1 : index >= 0 && last > 0 ? index + 1 : 0);
+			setCurrentHref(location.start.href ?? '');
 			setTotalPage(last >= 0 ? last + 1 : 0);
 			if (location.start.displayed) setScreenPage({ ...location.start.displayed, section: location.start.index + 1 });
 			setBounds({ start: !!location.atStart, end: !!location.atEnd });
@@ -135,45 +141,42 @@ function EpubReader({ bookId }: { bookId: number }) {
 			save(cfi, location.atEnd ? 'completed' : 'reading');
 		};
 		const onKey = (event: KeyboardEvent) => {
-			if (!ready || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-			if ((event.target as Element)?.closest?.('input, select, textarea, button, [role="combobox"], [contenteditable="true"]')) return;
+			if (!ready || tocOpenRef.current || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+			if ((event.target as Element)?.closest?.('a, input, select, textarea, button, [role="combobox"], [role="button"], [data-reader-tap-ignore], [contenteditable="true"]')) return;
 			if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
 			const eventDocument = (event.target as Node)?.ownerDocument;
 			if (eventDocument?.getSelection()?.isCollapsed === false) return;
 			event.preventDefault();
-			const next = (event.key === 'ArrowLeft') === (book.package.metadata.direction === 'rtl');
+			const next = (event.key === 'ArrowLeft') === ((pageTurnDirection ?? book.package.metadata.direction) === 'rtl');
 			enqueue((r) => (next ? r.next() : r.prev()));
 		};
+		const edgeDocuments = new Map<Document, () => void>();
 		const content = (contents: Contents) => {
 			const doc = contents.document;
 			const section = book.spine.get(contents.sectionIndex);
 			preserveTextDirection(doc, section?.document);
-			let down: { x: number; y: number; time: number } | null = null;
-			doc.addEventListener('pointerdown', (event) => {
-				if (event.button === 0) down = { x: event.clientX, y: event.clientY, time: Date.now() };
-			});
-			doc.addEventListener('pointerup', (event) => {
-				if (!down || !ready) return;
-				const start = down;
-				down = null;
-				if (Date.now() - start.time > 500 || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8) return;
-				if (
-					doc.getSelection()?.toString() ||
-					(event.target as Element)?.closest?.('a, button, input, select, textarea, [contenteditable="true"]')
-				)
-					return;
-				const iframe = doc.defaultView?.frameElement;
-				const container = viewer.getBoundingClientRect();
-				const x = (iframe?.getBoundingClientRect().left ?? 0) + event.clientX - container.left;
-				const edge = Math.min(44, container.width * 0.1);
-				if (x < 0 || x > container.width || (x > edge && x < container.width - edge)) return;
-				const next = x < edge === (book.package.metadata.direction === 'rtl');
-				enqueue((r) => (next ? r.next() : r.prev()));
-			});
+			if (!edgeDocuments.has(doc)) {
+				edgeDocuments.set(doc, attachEdgeTapNavigation(doc, {
+					direction: pageTurnDirection ?? (book.package.metadata.direction === 'rtl' ? 'rtl' : 'ltr'),
+					isDisabled: () => !ready || tocOpenRef.current,
+					getBounds: () => {
+						const container = viewer.getBoundingClientRect();
+						const frame = doc.defaultView?.frameElement?.getBoundingClientRect();
+						return { left: container.left - (frame?.left ?? 0), width: container.width };
+					},
+					getSelectionText: () => doc.getSelection()?.toString() ?? '',
+					onTurn: (action) => enqueue((r) => action === 'next' ? r.next() : r.prev()),
+				}));
+			}
 			return doc.fonts?.ready;
 		};
 		rendition.hooks?.content.register(content);
 		rendition.previewHooks(content, onKey);
+		const removed = (_section: unknown, view: { document?: Document; contents?: Contents }) => {
+			const doc = view.contents?.document ?? view.document;
+			if (doc) { edgeDocuments.get(doc)?.(); edgeDocuments.delete(doc); }
+		};
+		rendition.on('removed', removed);
 		rendition.on('relocated', relocated);
 		rendition.on('keydown', onKey);
 		const rendererError = () => { if (!disposed) setOperationError(true); };
@@ -204,7 +207,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 				if (disposed) return;
 				const toc = flattenToc(book.navigation.toc);
 				setNavigation(toc);
-				setDirection(book.package.metadata.direction ?? 'ltr');
+				setDirection(pageTurnDirection ?? book.package.metadata.direction ?? 'ltr');
 				if (toc.length <= 1 && book.spine?.each) {
 					const sections: PublicationSection[] = [];
 					book.spine.each((section: PublicationSection) => sections.push(section));
@@ -239,8 +242,11 @@ function EpubReader({ bookId }: { bookId: number }) {
 			ready = false;
 			cancelAnimationFrame(resizeFrame);
 			observer.disconnect();
+			for (const remove of edgeDocuments.values()) remove();
+			edgeDocuments.clear();
 			rendition.off('relocated', relocated);
 			rendition.off('keydown', onKey);
+			rendition.off('removed', removed);
 			rendition.off('reader-error', rendererError);
 			rendition.off('reader-busy', rendererBusyChanged);
 			document.removeEventListener('keydown', onKey);
@@ -251,7 +257,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 				book.destroy();
 			});
 		};
-	}, [bookId, epubData, readingInfoReady, storageKey, save, enqueue]);
+	}, [bookId, epubData, readingInfoReady, storageKey, save, enqueue, pageTurnDirection]);
 
 	const changeSpread = (value: string) => {
 		const mode = value as Spread;
@@ -265,6 +271,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 	const handlePrev = () => enqueue((r) => r.prev());
 	const handleNext = () => enqueue((r) => r.next());
 	const handleTocJump = (href: string) => {
+		setTocVisible(false);
 		if (currentCfiRef.current) setHistory((prev) => [...prev, currentCfiRef.current].slice(-20));
 		enqueue((r) => r.display(href));
 	};
@@ -286,6 +293,9 @@ function EpubReader({ bookId }: { bookId: number }) {
 		);
 	}
 
+	const normalize = (href: string) => { try { return decodeURIComponent(href).replace(/^\.\//, ''); } catch { return href.replace(/^\.\//, ''); } };
+	const resource = (href: string) => normalize(href.split('#')[0].split('?')[0]);
+	const activeTocHref = navigation.find((item) => normalize(item.href) === normalize(currentHref))?.href ?? navigation.find((item) => resource(item.href) === resource(currentHref))?.href;
 	return (
 		<div className='flex h-[100dvh] flex-col bg-background text-foreground'>
 			<header className='shrink-0 border-b p-2 sm:p-3'>
@@ -298,11 +308,11 @@ function EpubReader({ bookId }: { bookId: number }) {
 					</Link>
 					<div className='ml-auto flex items-center gap-2'>
 						{history.length > 0 && (
-							<Button variant='outline' onClick={handleBack} className='min-h-11 px-3'>
+							<Button aria-label='目次移動前へ戻る' variant='outline' onClick={handleBack} className='min-h-11 px-3'>
 								戻る
 							</Button>
 						)}
-						<Sheet>
+						<Sheet open={tocOpen} onOpenChange={setTocVisible}>
 							<SheetTrigger asChild>
 								<Button variant='outline' className='min-h-11 bg-white px-3 active:bg-white focus:bg-white data-[state=open]:bg-white'>
 									目次
@@ -313,21 +323,22 @@ function EpubReader({ bookId }: { bookId: number }) {
 								className='w-[calc(100vw-2rem)] max-w-sm data-[side=bottom]:max-h-[50vh] data-[side=top]:max-h-[50vh] [&>button]:size-11'
 							>
 								<SheetHeader>
-									<SheetTitle>この書籍の目次</SheetTitle>
+									<SheetTitle>この書籍の目次</SheetTitle><SheetDescription className="sr-only">目次から本文の章へ移動します。</SheetDescription>
 								</SheetHeader>
-								<div className='no-scrollbar min-h-0 overflow-y-auto px-4'>
-									<p className='py-2 text-sm text-muted-foreground'>書籍の目次</p>
+								<nav aria-label='EPUB目次' className='no-scrollbar min-h-0 overflow-y-auto px-4'>
+									<p className='py-2 text-sm text-muted-foreground'>書籍の目次</p>{navigation.length === 0 && <p>このEPUBには目次がありません。</p>}
 									{navigation.map((item, index) => (
 										<div key={`${item.href}-${index}`} style={{ paddingInlineStart: item.depth * 16 }}>
-											<SheetTrigger asChild>
+
 												<Button
 													variant='outline'
 													className='min-h-11 h-auto w-full whitespace-normal bg-white py-2 text-left'
-													onClick={() => handleTocJump(item.href)}
+													aria-current={item.href === activeTocHref ? 'location' : undefined}
+												onClick={() => handleTocJump(item.href)}
 												>
 													{item.label}
 												</Button>
-											</SheetTrigger>
+
 										</div>
 									))}
 									{supplement.length > 0 && (
@@ -335,20 +346,21 @@ function EpubReader({ bookId }: { bookId: number }) {
 											<p className='py-2 text-sm text-muted-foreground'>本文見出しから作成した補助目次</p>
 											{supplement.map((item, index) => (
 												<div key={`${item.href}-${index}`}>
-													<SheetTrigger asChild>
+
 														<Button
 															variant='outline'
 															className='min-h-11 h-auto w-full whitespace-normal bg-white py-2 text-left'
-															onClick={() => handleTocJump(item.href)}
+															aria-current={item.href === activeTocHref ? 'location' : undefined}
+												onClick={() => handleTocJump(item.href)}
 														>
 															{item.label}
 														</Button>
-													</SheetTrigger>
+
 												</div>
 											))}
 										</>
 									)}
-								</div>
+								</nav>
 							</SheetContent>
 						</Sheet>
 
@@ -375,7 +387,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 					<FieldLabel htmlFor='reading-progress' className='text-xs sm:text-sm'>
 						章内ページ: {screenPage.page} / {screenPage.total}（第{screenPage.section}節）
 						<br />
-						本文位置: {currentPage} / {totalPage}（約1600文字単位）
+						本文位置: {currentPage > 0 ? `${currentPage} / ${totalPage}（約1600文字単位）` : '計算中'}
 						<span className='ml-auto'>{percentage === null ? '進捗計算中' : `${percentage}%`}</span>
 					</FieldLabel>
 					<Progress value={percentage ?? 0} id='reading-progress' />

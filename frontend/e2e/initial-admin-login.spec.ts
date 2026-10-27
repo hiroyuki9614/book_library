@@ -14,5 +14,5 @@ test('logs in with the E2E initial admin', async ({ page }) => {
 	await page.locator('button[type="submit"]').click();
 
 	await expect(page).toHaveURL((url) => url.pathname === '/');
-	await expect(page.getByPlaceholder('Search books or authors...')).toBeVisible();
+	await expect(page.getByRole('textbox', { name: '書籍を検索' })).toBeVisible();
 });

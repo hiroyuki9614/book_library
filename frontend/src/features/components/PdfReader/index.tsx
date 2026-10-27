@@ -1,3 +1,9 @@
+import { PdfActionType, type PdfBookmarkObject } from '@embedpdf/models';
+import { BookmarkPluginPackage } from '@embedpdf/plugin-bookmark';
+import { useBookmarkCapability } from '@embedpdf/plugin-bookmark/react';
+import { Button } from '@/components/ui/button';
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheetCapture';
+import { attachEdgeTapNavigation, type PageTurnDirection } from '../readerNavigation';
 import { createPluginRegistration } from '@embedpdf/core';
 import { EmbedPDF } from '@embedpdf/core/react';
 import pdfiumWasmUrl from '@embedpdf/pdfium/pdfium.wasm?url';
@@ -31,11 +37,11 @@ export type AppState = GlobalStoreState<{
 	[SCROLL_PLUGIN_ID]: ScrollState;
 }>;
 
-const myCommands: Record<string, Command<AppState>> = {
+function createCommands(direction: PageTurnDirection): Record<string, Command<AppState>> { return {
 	'nav.previous': {
 		id: 'nav.previous',
-		label: '<',
-		shortcuts: ['arrowleft', 'k'],
+		label: direction === 'rtl' ? '>' : '<',
+		shortcuts: [direction === 'rtl' ? 'arrowright' : 'arrowleft', 'k'],
 		action: ({ registry, documentId }) => {
 			const scrollPlugin = registry.getPlugin('scroll');
 			const scroll = scrollPlugin?.provides?.().forDocument(documentId);
@@ -51,8 +57,8 @@ const myCommands: Record<string, Command<AppState>> = {
 	},
 	'nav.next': {
 		id: 'nav.next',
-		label: '>',
-		shortcuts: ['arrowright', 'j'],
+		label: direction === 'rtl' ? '<' : '>',
+		shortcuts: [direction === 'rtl' ? 'arrowleft' : 'arrowright', 'j'],
 		action: ({ registry, documentId }) => {
 			const scrollPlugin = registry.getPlugin('scroll');
 			const scroll = scrollPlugin?.provides?.().forDocument(documentId);
@@ -66,9 +72,9 @@ const myCommands: Record<string, Command<AppState>> = {
 			return scrollState ? scrollState.currentPage >= scrollState.totalPages : true;
 		},
 	},
-};
+}; }
 
-function createPlugins(documentData: ArrayBuffer) {
+function createPlugins(documentData: ArrayBuffer, direction: PageTurnDirection) {
 	return [
 		createPluginRegistration(DocumentManagerPluginPackage, {
 			initialDocuments: [{ buffer: documentData, name: 'book.pdf' }],
@@ -77,6 +83,7 @@ function createPlugins(documentData: ArrayBuffer) {
 		createPluginRegistration(RenderPluginPackage),
 		createPluginRegistration(InteractionManagerPluginPackage),
 		createPluginRegistration(SelectionPluginPackage),
+		createPluginRegistration(BookmarkPluginPackage),
 		createPluginRegistration(ZoomPluginPackage, {
 			defaultZoomLevel: ZoomMode.FitPage,
 		}),
@@ -85,12 +92,12 @@ function createPlugins(documentData: ArrayBuffer) {
 			defaultPageGap: 10,
 		}),
 		createPluginRegistration(CommandsPluginPackage, {
-			commands: myCommands,
+			commands: createCommands(direction),
 		}),
 	];
 }
 
-const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; documentId: string; initialPage: number }) => {
+const PageNavigation = ({ bookId, documentId, initialPage, pageTurnDirection }: { bookId: number; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection }) => {
 	const { provides: scroll, state } = useScroll(documentId);
 	const [pageInputOverride, setPageInputOverride] = useState<string | null>(null);
 	const pageInput = pageInputOverride ?? String(state.currentPage);
@@ -136,6 +143,7 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 	return (
 		<div className='flex flex-col items-center gap-1'>
 			<CommandButton
+				pageTurnDirection={pageTurnDirection}
 				prevResolved={previousCommand}
 				nextResolved={nextCommand}
 				state={state}
@@ -148,9 +156,117 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 	);
 };
 
-const PdfViewport = ({ documentId }: { documentId: string }) => {
+function getBookmarkPage(bookmark: PdfBookmarkObject) {
+	if (bookmark.target?.type === 'destination') return bookmark.target.destination.pageIndex + 1;
+	if (bookmark.target?.type === 'action' && bookmark.target.action.type === PdfActionType.Goto) {
+		return bookmark.target.action.destination.pageIndex + 1;
+	}
+	return null;
+}
+
+function BookmarkItems({ bookmarks, currentPage, onJump, depth = 0 }: {
+	bookmarks: PdfBookmarkObject[];
+	currentPage: number;
+	onJump: (page: number) => void;
+	depth?: number;
+}) {
+	return bookmarks.map((bookmark, index) => {
+		const page = getBookmarkPage(bookmark);
+		const active = page === currentPage;
+		return (
+			<div key={`${bookmark.title}-${page ?? 'group'}-${depth}-${index}`}>
+				{page === null ? (
+					<p className='min-h-11 px-3 py-2 font-medium' style={{ paddingInlineStart: `${12 + Math.min(depth, 5) * 16}px` }}>{bookmark.title || '名称のない項目'}</p>
+				) : (
+					<Button
+						variant='ghost'
+						aria-current={active ? 'location' : undefined}
+						className={`min-h-11 h-auto w-full justify-start whitespace-normal py-2 text-left ${active ? 'bg-accent font-semibold text-accent-foreground' : ''}`}
+						style={{ paddingInlineStart: `${12 + Math.min(depth, 5) * 16}px` }}
+						onClick={() => onJump(page)}
+					>
+						{bookmark.title || '名称のない項目'}
+					</Button>
+				)}
+				{bookmark.children && bookmark.children.length > 0 && (
+					<BookmarkItems bookmarks={bookmark.children} currentPage={currentPage} onJump={onJump} depth={depth + 1} />
+				)}
+			</div>
+		);
+	});
+}
+
+function PdfTableOfContents({ documentId, open, onOpenChange }: { documentId: string; open: boolean; onOpenChange: (open: boolean) => void }) {
+	const { provides: bookmarksCapability } = useBookmarkCapability();
+	const { provides: scroll, state } = useScroll(documentId);
+	const [bookmarks, setBookmarks] = useState<PdfBookmarkObject[] | null>(null);
+
+	useEffect(() => {
+		let active = true;
+		if (!bookmarksCapability) return;
+		void bookmarksCapability.forDocument(documentId).getBookmarks().toPromise()
+			.then((result) => {
+				if (active) setBookmarks(result.bookmarks);
+			})
+			.catch(() => {
+				if (active) setBookmarks([]);
+			});
+		return () => {
+			active = false;
+		};
+	}, [bookmarksCapability, documentId]);
+
+	const jump = (page: number) => {
+		scroll?.scrollToPage({ pageNumber: Math.max(1, Math.min(page, state.totalPages)), behavior: 'auto' });
+		onOpenChange(false);
+	};
+
+	return (
+		<Sheet open={open} onOpenChange={onOpenChange}>
+			<SheetTrigger asChild><Button variant='outline' className='min-h-11 px-3'>目次</Button></SheetTrigger>
+			<SheetContent side='right' className='w-[calc(100vw-2rem)] max-w-sm [&>button]:size-11'>
+				<SheetHeader className='shrink-0'>
+					<SheetTitle>このPDFの目次</SheetTitle>
+					<SheetDescription className='sr-only'>PDFに含まれるアウトラインからページへ移動します。</SheetDescription>
+				</SheetHeader>
+				<nav aria-label='PDF目次' className='no-scrollbar min-h-0 flex-1 overflow-y-auto px-2 pb-4'>
+					{bookmarks === null
+						? <p className='px-2 text-sm text-muted-foreground'>目次を読み込んでいます…</p>
+						: bookmarks.length > 0
+							? <BookmarkItems bookmarks={bookmarks} currentPage={state.currentPage} onJump={jump} />
+							: <p className='px-2 text-sm text-muted-foreground'>このPDFには目次がありません。</p>}
+				</nav>
+			</SheetContent>
+		</Sheet>
+	);
+}
+
+const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled }: { documentId: string; pageTurnDirection: PageTurnDirection; navigationDisabled: boolean }) => {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const [hasRenderedPage, setHasRenderedPage] = useState(false);
+	const { provides: scroll, state } = useScroll(documentId);
+	const pageStateRef = useRef(state);
+	useEffect(() => {
+		pageStateRef.current = state;
+	}, [state]);
+
+	useEffect(() => {
+		const container = containerRef.current;
+		if (!container || !scroll) return;
+		return attachEdgeTapNavigation(container, {
+			direction: pageTurnDirection,
+			isDisabled: () => navigationDisabled,
+			getBounds: () => container.getBoundingClientRect(),
+			getSelectionText: () => window.getSelection()?.toString() ?? '',
+			onTurn: (action) => {
+				const currentState = pageStateRef.current;
+				const delta = action === 'next' ? 1 : -1;
+				const pageNumber = Math.max(1, Math.min(currentState.totalPages, currentState.currentPage + delta));
+				if (pageNumber !== currentState.currentPage) scroll.scrollToPage({ pageNumber, behavior: 'auto' });
+			},
+		});
+	}, [navigationDisabled, pageTurnDirection, scroll]);
+
 
 	useEffect(() => {
 		const container = containerRef.current;
@@ -186,7 +302,7 @@ const PdfViewport = ({ documentId }: { documentId: string }) => {
 	}, [documentId]);
 
 	return (
-		<div ref={containerRef} className='relative h-full overflow-hidden'>
+		<div ref={containerRef} data-testid='pdf-viewport' className='relative h-full overflow-hidden'>
 			{!hasRenderedPage && (
 				<div
 					className='pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-white/90'
@@ -216,7 +332,23 @@ const PdfViewport = ({ documentId }: { documentId: string }) => {
 	);
 };
 
-function PdfReader({ bookId }: { bookId: number }) {
+function ReaderWorkspace({ bookId, documentId, initialPage, pageTurnDirection }: { bookId: number; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection }) {
+	const [tocOpen, setTocOpen] = useState(false);
+	return (
+		<div className='flex h-full flex-col'>
+			<div className='mb-1 flex shrink-0 flex-wrap items-center justify-center gap-2 border-b py-1 sm:mb-2 sm:py-2'>
+				<ZoomToolbar documentId={documentId} />
+				<PdfTableOfContents documentId={documentId} open={tocOpen} onOpenChange={setTocOpen} />
+				<PageNavigation bookId={bookId} documentId={documentId} initialPage={initialPage} pageTurnDirection={pageTurnDirection} />
+			</div>
+			<div className='min-h-0 flex-1 overflow-hidden'>
+				<PdfViewport documentId={documentId} pageTurnDirection={pageTurnDirection} navigationDisabled={tocOpen} />
+			</div>
+		</div>
+	);
+}
+
+function PdfReader({ bookId, pageTurnDirection = 'ltr' }: { bookId: number; pageTurnDirection?: PageTurnDirection }) {
 	const [documentData, setDocumentData] = useState<ArrayBuffer | null>(null);
 	const [fileError, setFileError] = useState(false);
 	const [restoreError, setRestoreError] = useState(false);
@@ -252,7 +384,7 @@ function PdfReader({ bookId }: { bookId: number }) {
 		};
 	}, [bookId]);
 
-	const plugins = useMemo(() => (documentData ? createPlugins(documentData) : []), [documentData]);
+	const plugins = useMemo(() => (documentData ? createPlugins(documentData, pageTurnDirection) : []), [documentData, pageTurnDirection]);
 
 	if (fileError || engineError) return <p role='alert'>PDFファイルまたは描画エンジンを読み込めませんでした。</p>;
 
@@ -291,15 +423,7 @@ function PdfReader({ bookId }: { bookId: number }) {
 							<DocumentContent documentId={activeDocumentId}>
 								{({ isLoaded }) =>
 									isLoaded && (
-										<div className='flex h-full flex-col'>
-											<div className='mb-2 flex shrink-0 flex-col gap-2 border-b py-2 sm:flex-row sm:items-center sm:justify-evenly'>
-												<ZoomToolbar documentId={activeDocumentId} />
-												<PageNavigation bookId={bookId} documentId={activeDocumentId} initialPage={initialPage} />
-											</div>
-											<div className='min-h-0 flex-1 overflow-hidden'>
-												<PdfViewport documentId={activeDocumentId} />
-											</div>
-										</div>
+										<ReaderWorkspace key={activeDocumentId} bookId={bookId} documentId={activeDocumentId} initialPage={initialPage} pageTurnDirection={pageTurnDirection} />
 									)
 								}
 							</DocumentContent>

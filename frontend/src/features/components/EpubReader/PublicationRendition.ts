@@ -22,7 +22,7 @@ const locationOf = (renderer: Native) => renderer.currentLocation() as unknown a
 // horizontal-only. Spreads use two actual single-page renditions:
 // the primary (saved CFI) page and the following page, in publication read order.
 // Both retain the publisher's vertical CSS, ruby and original source document.
-export function createPublicationRendition(book: Book, viewer: HTMLElement, options: RenditionOptions): PublicationRendition {
+export function createPublicationRendition(book: Book, viewer: HTMLElement, options: RenditionOptions, pageTurnDirection?: 'ltr' | 'rtl'): PublicationRendition {
 	const primaryHost = document.createElement('div');
 	const previewHost = document.createElement('div');
 	Object.assign(viewer.style, { position: 'relative' });
@@ -66,7 +66,7 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 		const nextDual = mode === 'always' || (mode === 'auto' && viewer.clientWidth >= 800);
 		const width = viewer.clientWidth / (nextDual ? 2 : 1);
 		const height = viewer.clientHeight;
-		const rtl = (book as unknown as { package: { metadata: { direction?: string } } }).package.metadata.direction === 'rtl';
+		const rtl = pageTurnDirection ? pageTurnDirection === 'rtl' : (book as unknown as { package: { metadata: { direction?: string } } }).package.metadata.direction === 'rtl';
 		const changed = dual !== nextDual || Number(primaryHost.dataset.width) !== width || Number(primaryHost.dataset.height) !== height;
 		dual = nextDual;
 		primaryHost.style.width = `${width}px`;
@@ -92,6 +92,7 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 				if (contentHook) preview.hooks.content.register(contentHook);
 				preview.hooks.content.register(routeLinks);
 				preview.on('keydown', (event: KeyboardEvent) => keyHook?.(event));
+				preview.on('removed', (section: unknown, view: unknown) => primary.emit('removed', section, view));
 				await preview.attachTo(previewHost);
 			}
 			preview.resize(width, height);

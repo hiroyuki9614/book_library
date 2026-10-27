@@ -10,6 +10,7 @@ export type ReadingInfo = {
 };
 
 export async function fetchReadingInfo(bookId: number): Promise<ReadingInfo> {
+	for (const flush of readingFlushes.get(bookId) ?? []) flush();
 	await pendingSaves.get(bookId)?.catch(() => undefined);
 	return apiFetch<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`);
 }
@@ -17,6 +18,17 @@ export async function fetchReadingInfo(bookId: number): Promise<ReadingInfo> {
 // Keep writes ordered across reader remounts too. A slow older PATCH must finish
 // before a newer position can be submitted for the same book in this tab.
 const pendingSaves = new Map<number, Promise<ReadingInfo>>();
+const readingFlushes = new Map<number, Set<() => void>>();
+
+export function registerReadingFlush(bookId: number, flush: () => void) {
+	const callbacks = readingFlushes.get(bookId) ?? new Set<() => void>();
+	callbacks.add(flush);
+	readingFlushes.set(bookId, callbacks);
+	return () => {
+		callbacks.delete(flush);
+		if (!callbacks.size) readingFlushes.delete(bookId);
+	};
+}
 
 export function saveReadingInfo(
 	bookId: number,

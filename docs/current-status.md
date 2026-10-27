@@ -1,6 +1,6 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-10-26
+- Updated: 2026-10-27
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
 - Base checkpoint: `main@a615f8760fb238586ac34d30c9600d8ac26c928b`
 - Current R2 implementation branch: `feat/r2-storage-cutover-20260912`
@@ -122,9 +122,18 @@ Rules:
 - an EPUB CFI restores through `currentPosition`; `currentPage` remains the compatibility value `1` for non-numeric positions.
 - EpubReader reads the DB CFI first and keeps `reader-location:<bookId>` localStorage only as a fallback/cache.
 - PDF Reader saves `completed` when the final page is displayed.
-- EPUB Reader saves `completed` when the generated final location is displayed.
+- EPUB Reader saves `completed` only when epub.js reports `relocated.atEnd`.
 
-Progress percentage is still a separate concern. The DB intentionally does not store percentage. Home's status counts and BookTable's status badges/filter now use backend `readStatus` through `Book.status`. Home's average percentage and any missing per-book percentage are explicitly shown as `未計測`, not zero or prototype values. Defining real reader-derived percentage semantics remains an open requirement; this correction does not mark that feature complete.
+The reader derives progress without adding a database percentage column. PDF displays the current page, total pages, and percentage from EmbedPDF scroll state. EPUB generates epub.js locations and displays a one-based location, generated total, and percentage when those values are valid. Home's status counts and BookTable's status badges/filter continue to use backend `readStatus` through `Book.status`; shelf-wide average percentage remains `未計測`.
+
+## Reader navigation and usability
+
+- EPUB renders nested `navigation.toc` / `subitems`, highlights the current resource when it can be identified, closes after a jump, and keeps a bounded in-memory stack for returning to the pre-TOC CFI.
+- PDF uses the matching EmbedPDF bookmark plugin and its existing PDFium engine. PDFs without an outline explicitly report that no table of contents is present.
+- `Book.pageTurnDirection` is included in the frontend book contract and passed to both readers as the common `ltr` / `rtl` direction source.
+- Both readers use approximately the outer 15% as tap navigation. Pointer travel, long press, multi-touch, existing text selection, links and interactive controls are excluded. EPUB listeners are installed inside each epub.js iframe through content hooks, de-duplicated per document, removed with the view, and fully cleaned up on reader teardown.
+- ReadingInfo writes are delayed briefly during ordinary navigation and serialized; the final PDF page and epub.js `atEnd` retain the existing immediate completed transition.
+- Final Android Chrome hardware acceptance remains a release gate and is not replaced by browser mobile emulation.
 
 ## Admin
 
@@ -254,7 +263,7 @@ R2-dependent:
 Non-R2:
 
 - disabled-user / existing-session semantic alignment.
-- final reader-derived progress-percentage presentation.
+- shelf-wide aggregate reader-derived progress presentation (the reader-local percentage is implemented).
 - category management CRUD and Admin UI.
 - general-user administration and disable/restore flow.
 - logical book delete / restore / permanent delete.
@@ -295,7 +304,7 @@ Production preflight, verified private DB backup, protection, deployment and pub
 3. Implement logical book delete/restore/permanent-delete lifecycle.
 4. Implement category management and user administration.
 5. Implement file replacement/recovery while keeping the storage adapter boundary R2-ready.
-6. Replace the remaining percentage prototype with reader-derived display semantics.
+6. Decide whether reader-derived percentages should also appear in shelf-wide aggregate UI.
 7. Run final backup/restore and browser/device acceptance after the management surface is complete.
 
 ## Documentation responsibilities

@@ -1,6 +1,6 @@
 # 画面定義書
 
-- 最終更新: 2026-08-23
+- 最終更新: 2026-10-27
 - 実routeの正本: `frontend/src/routes/AppRoutes.tsx`
 
 この文書は画面の役割と共通デザイン方針を説明します。route自体はfrontend実装を優先します。
@@ -50,6 +50,16 @@
 現在の書籍一覧表示は、そのページを開いている間に登録成功した書籍を表示するfocused実装であり、reload後にDB上の全管理書籍を再取得する管理一覧は残タスク。
 
 正式storage targetはCloudflare R2だが、現在の登録経路はprotected local storageを使用する。frontendはstorage pathへ依存しない。
+
+### Reader
+
+`/reader/:id` は書籍詳細APIの `fileType` と `pageTurnDirection` を使ってEPUB/PDF readerを選択する。
+
+- EPUBはepub.jsの階層目次、CFI、generated locationsを使用する。位置は1始まりで表示し、算出不能時は不正な数値を表示しない。
+- PDFはEmbedPDFのbookmark/scroll stateを使用し、アウトラインと固定ページ由来の進捗を表示する。
+- 目次は右側sheetに表示し、長い内容だけを内部スクロールさせる。本文領域の高さは維持する。
+- 本文左右端約15%の軽いタップでページを送る。中央、リンク、入力・ボタン、文字選択、ドラッグ、スクロール、ピンチ操作、目次表示中はページ送り対象外とする。
+- Androidの狭い画面では操作列を折り返し、本文領域を不必要に固定縮小しない。
 
 ## 主なUI部品
 
