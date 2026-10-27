@@ -473,7 +473,9 @@ test(`native selection deep inside a Japanese chapter preserves the visible page
 // integer clientWidth. Ordinary page turns must retain the preview document.
 for (const vertical of process.env.READER_ACTUAL_EPUB_PATH ? [false] : [false, true]) {
 test(`narrow odd-width spreads finish layout and preserve real page movement vertical=${vertical}`, async ({page}) => {
-	test.setTimeout(240000);
+	// The optional full novel covers two widths and many reflows. Keep each
+	// readiness/movement budget unchanged; allow time for the complete matrix.
+	test.setTimeout(process.env.READER_ACTUAL_EPUB_PATH ? 600000 : 240000);
 	await page.setViewportSize({width:736,height:859});
 	await fileApi(page,process.env.READER_ACTUAL_EPUB_PATH ? readFileSync(process.env.READER_ACTUAL_EPUB_PATH) : epubFixture({rtl:true,vertical}));
 	await page.goto('/e2e/readers/harness.html');await ready(page);
@@ -485,7 +487,9 @@ test(`narrow odd-width spreads finish layout and preserve real page movement ver
 	for(const width of process.env.READER_ACTUAL_EPUB_PATH ? [393,320] : [393,391,320,833]) {
 		await page.setViewportSize({width,height:900});await ready(page);
 		for(const mode of ['常に単ページ','常に見開き','自動']) {
+			if(process.env.READER_ACTUAL_EPUB_PATH)console.log('same-file mode start',new Date().toISOString(),width,mode);
 			await page.getByRole('combobox').click();await page.getByRole('option',{name:mode,exact:true}).click();await ready(page);
+			if(process.env.READER_ACTUAL_EPUB_PATH)console.log('same-file mode ready',new Date().toISOString(),width,mode);
 			for(let i=0;i<3;i++) {
 				const following=mode==='常に見開き'||(mode==='自動'&&width===833)
 					? await page.locator('[data-publication-pane="following"] iframe').elementHandle() : null;

@@ -80,6 +80,9 @@ For an optional same-file local diagnosis, set `READER_ACTUAL_EPUB_PATH` to an
 absolute protected local EPUB path and run the narrow odd-width rendering case.
 The default CI fixture is generated; no uploaded EPUB/PDF is committed. This
 local diagnosis is separate from the mandatory production physical-i5 gate.
+The full-novel diagnosis disables DOM tracing and has a ten-minute overall matrix
+budget; individual readiness and movement budgets remain unchanged. Default CI
+fixtures retain failure traces and their existing overall budgets.
 
 Mode and height reflow must also retain the loaded same-section document when
 publisher CSS is static, keep the prior CFI anchor visible, preserve native text
