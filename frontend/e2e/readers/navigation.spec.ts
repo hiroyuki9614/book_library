@@ -290,11 +290,12 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45000 });
 	const pdfViewportBox = (await page.getByTestId('pdf-viewport').boundingBox())!;
 	const firstPageBox = (await page.locator('[data-pdf-page="1"]').boundingBox())!;
-	const selectionStartX = firstPageBox.x + firstPageBox.width * 0.11;
-	expect((selectionStartX - pdfViewportBox.x) / pdfViewportBox.width, 'selection must start inside the reader edge zone').toBeLessThanOrEqual(0.15);
+	const selectionStartX = firstPageBox.x + firstPageBox.width * 0.35;
+	const selectionEndX = firstPageBox.x + firstPageBox.width * 0.89;
+	expect((selectionEndX - pdfViewportBox.x) / pdfViewportBox.width, 'selection pointer-up must finish inside the reader edge zone').toBeGreaterThanOrEqual(0.85);
 	await page.mouse.move(selectionStartX, firstPageBox.y + Math.min(110, firstPageBox.height * 0.15));
 	await page.mouse.down();
-	await page.mouse.move(firstPageBox.x + firstPageBox.width * 0.65, firstPageBox.y + Math.min(110, firstPageBox.height * 0.15), { steps: 12 });
+	await page.mouse.move(selectionEndX, firstPageBox.y + Math.min(110, firstPageBox.height * 0.15), { steps: 12 });
 	await page.mouse.up();
 	await expect.poll(() => page.locator('[data-pdf-page="1"] div').evaluateAll((nodes) => nodes.some((node) => getComputedStyle(node).backgroundColor.includes('33, 150, 243')))).toBe(true);
 	await page.waitForTimeout(300);

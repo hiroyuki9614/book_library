@@ -136,7 +136,7 @@ native spread order and left/right edge navigation.
 The review's non-blocking efficiency and coverage observations were also
 addressed before the replacement candidate was cut: resize now performs one
 layout synchronization instead of nesting two, and the real PDFium test drags
-across the actual selection layer from an edge zone, confirms that a text
+across the actual selection layer into the page-turn edge zone, confirms that a text
 highlight is produced, and confirms that the drag does not turn the page.
 
 ## Long-chapter reconstruction at 320px

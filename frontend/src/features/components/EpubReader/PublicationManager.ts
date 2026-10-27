@@ -60,9 +60,11 @@ export class PublicationManager extends DefaultManager {
 		if (this.isPaginated && offset && this.visible().some(view => view.contents.document.getSelection()?.isCollapsed === false)
 			&& (Math.abs(this.container.scrollLeft - offset.left) > .5 || Math.abs(this.container.scrollTop - offset.top) > .5)) {
 			super.scrollTo(offset.left, offset.top, true);
+			this.rememberScroll();
 			return;
 		}
 		super.onScroll();
+		this.rememberScroll();
 	}
 
 	override updateLayout() {
