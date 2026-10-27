@@ -26,7 +26,8 @@ async function visibleText(page: Page) {
 		const viewport = document.querySelector('main')!.getBoundingClientRect();
 		let text = '';
 		for (const iframe of document.querySelectorAll('iframe')) {
-			const doc = iframe.contentDocument!;
+			const doc = iframe.contentDocument;
+			if (!doc?.body) continue;
 			const f = iframe.getBoundingClientRect();
 			const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
 			while (walker.nextNode()) {
@@ -189,9 +190,11 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 	await page.reload();
 	await expect(page.getByRole('spinbutton')).toHaveValue('10', { timeout: 45000 });
 	await expect.poll(shown).toBe(10);
+	await image();
+	await page.waitForTimeout(300);
 	const area = (await page.locator('main').boundingBox())!;
 	await page.mouse.move(area.x + area.width / 2, area.y + area.height / 2);
-	await page.mouse.wheel(0, 800);
+	await page.mouse.wheel(0, 1400);
 	await expect.poll(async () => Number(await input.inputValue())).toBeGreaterThan(10);
 	await input.fill('12');
 	await input.press('Enter');
