@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { render } from 'vitest-browser-react';
+import { cleanup, render } from 'vitest-browser-react';
 
 const mocks = vi.hoisted(() => {
 	const scrollToPage = vi.fn();
@@ -23,7 +23,7 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock('@/api/books', () => ({ fetchBookFile: mocks.fetchBookFile }));
-vi.mock('@/api/readingInfo', () => ({ fetchReadingInfo: mocks.fetchReadingInfo, saveReadingInfo: mocks.saveReadingInfo }));
+vi.mock('@/api/readingInfo', () => ({ fetchReadingInfo: mocks.fetchReadingInfo, saveReadingInfo: mocks.saveReadingInfo, registerReadingFlush: () => () => {} }));
 vi.mock('react-router-dom', () => ({ Link: ({ children }: { children: React.ReactNode }) => <a href='/'>{children}</a> }));
 vi.mock('@embedpdf/core', () => ({
 	createPluginRegistration: (plugin: unknown, config?: unknown) => ({ plugin, config }),
@@ -42,6 +42,7 @@ vi.mock('@embedpdf/plugin-viewport/react', () => ({
 }));
 vi.mock('@embedpdf/plugin-scroll/react', () => ({
 	ScrollPluginPackage: {},
+	useScrollCapability: () => ({ provides: { onLayoutReady: (callback: (event: {documentId:string;totalPages:number}) => void) => { queueMicrotask(() => callback({documentId:'doc-1',totalPages:5})); return () => {}; }, forDocument: () => mocks.scrollProvides } }),
 	ScrollStrategy: { Vertical: 'vertical' },
 	useScroll: () => ({
 		provides: mocks.scrollProvides,
@@ -92,7 +93,8 @@ describe('PdfReader navigation, outline, and progress', () => {
 		vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		await cleanup();
 		vi.restoreAllMocks();
 		mocks.fetchBookFile.mockReset();
 		mocks.fetchReadingInfo.mockReset();
@@ -102,7 +104,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 
 	test('保存ページを復元し、現在ページ・総ページ・進捗率を表示する', async () => {
 		const { getByText } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2 }));
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
 		await expect.element(getByText('2 / 5 ページ 40%')).toBeInTheDocument();
 	});
 
@@ -142,6 +144,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 
 	test('RTLの左端タップは次ページへ進む', async () => {
 		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='rtl' />);
+		await expect.element(getByTestId('pdf-viewport')).toBeInTheDocument();
 		const element = getByTestId('pdf-viewport').element() as HTMLElement;
 		vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 600, width: 1000, height: 600, x: 0, y: 0, toJSON: () => ({}) });
 		mocks.scrollToPage.mockClear();

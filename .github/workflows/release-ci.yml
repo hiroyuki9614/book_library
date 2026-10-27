@@ -55,6 +55,19 @@ jobs:
       - name: Frontend tests
         working-directory: frontend
         run: npm test
+      - name: Japanese fonts for vertical layout regression
+        # Playwright's --with-deps step already refreshes the package lists.
+        run: sudo apt-get install -y --no-install-recommends -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 fonts-noto-cjk
+      - name: Real EPUB and PDF rendering regression
+        working-directory: frontend
+        run: npm run test:readers
+      - name: Retain reader rendering evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reader-rendering-evidence
+          path: frontend/test-results
+          retention-days: 7
       - name: Frontend node-side asset and fixture tests
         working-directory: frontend
         run: npm run test:node

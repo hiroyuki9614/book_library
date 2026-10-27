@@ -10,10 +10,27 @@ export type ReadingInfo = {
 };
 
 export async function fetchReadingInfo(bookId: number): Promise<ReadingInfo> {
+	for (const flush of readingFlushes.get(bookId) ?? []) flush();
+	await pendingSaves.get(bookId)?.catch(() => undefined);
 	return apiFetch<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`);
 }
 
-export async function saveReadingInfo(
+// Keep writes ordered across reader remounts too. A slow older PATCH must finish
+// before a newer position can be submitted for the same book in this tab.
+const pendingSaves = new Map<number, Promise<ReadingInfo>>();
+const readingFlushes = new Map<number, Set<() => void>>();
+
+export function registerReadingFlush(bookId: number, flush: () => void) {
+	const callbacks = readingFlushes.get(bookId) ?? new Set<() => void>();
+	callbacks.add(flush);
+	readingFlushes.set(bookId, callbacks);
+	return () => {
+		callbacks.delete(flush);
+		if (!callbacks.size) readingFlushes.delete(bookId);
+	};
+}
+
+export function saveReadingInfo(
 	bookId: number,
 	position: number | string,
 	readStatus: Exclude<ReadStatus, 'unread'> = 'reading',
@@ -22,9 +39,15 @@ export async function saveReadingInfo(
 		? { currentPage: position, readStatus }
 		: { currentPosition: position, readStatus };
 
-	return apiFetch<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`, {
+	const previous = pendingSaves.get(bookId) ?? Promise.resolve();
+	const next = previous.catch(() => undefined).then(() => apiFetch<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(body),
-	});
+	}));
+	pendingSaves.set(bookId, next);
+	void next.finally(() => {
+		if (pendingSaves.get(bookId) === next) pendingSaves.delete(bookId);
+	}).catch(() => undefined);
+	return next;
 }

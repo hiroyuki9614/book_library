@@ -131,7 +131,7 @@ The reader derives progress without adding a database percentage column. PDF dis
 - EPUB renders nested `navigation.toc` / `subitems`, highlights the current resource when it can be identified, closes after a jump, and keeps a bounded in-memory stack for returning to the pre-TOC CFI.
 - PDF uses the matching EmbedPDF bookmark plugin and its existing PDFium engine. PDFs without an outline explicitly report that no table of contents is present.
 - `Book.pageTurnDirection` is included in the frontend book contract and passed to both readers as the common `ltr` / `rtl` direction source.
-- Both readers use approximately the outer 15% as tap navigation. Pointer travel, long press, multi-touch, existing text selection, links and interactive controls are excluded. EPUB listeners are installed inside each epub.js iframe on `rendered`, de-duplicated per document, removed with the view, and fully cleaned up on reader teardown.
+- Both readers use approximately the outer 15% as tap navigation. Pointer travel, long press, multi-touch, existing text selection, links and interactive controls are excluded. EPUB listeners are installed inside each epub.js iframe through content hooks, de-duplicated per document, removed with the view, and fully cleaned up on reader teardown.
 - ReadingInfo writes are delayed briefly during ordinary navigation and serialized; the final PDF page and epub.js `atEnd` retain the existing immediate completed transition.
 - Final Android Chrome hardware acceptance remains a release gate and is not replaced by browser mobile emulation.
 
@@ -315,3 +315,20 @@ Production preflight, verified private DB backup, protection, deployment and pub
 - `docs/current-status.md`: current implementation and known drift
 - `docs/mvp_plan.md`: execution order and completion gates
 - Git history / Personal Vault records: dated execution evidence
+
+## Reader position and navigation semantics
+
+The reader distinguishes current-section screen pages from approximate
+1600-character EPUB locations; the saved EPUB anchor remains CFI. Logical next
+and previous follow publication order, with arrow placement and keyboard/edge
+mapping following page progression. The publisher's text direction and writing
+mode remain separate from page progression. Nested formal TOC entries are shown;
+when the formal TOC has at most one entry, actual body headings are presented as
+an explicitly labeled supplemental TOC without replacing the original file.
+
+PDF restoration waits for the real document layout and runs once per document,
+independently of subsequent saves and zoom/layout changes. Reading-info writes
+are ordered per book in a browser tab, and immediate reentry waits for pending
+writes. Failures are visible and retryable. Cross-device conflict resolution is
+not implemented. See [reader acceptance](runbooks/reader-acceptance.md) for the
+production GUI and real rendering gates.

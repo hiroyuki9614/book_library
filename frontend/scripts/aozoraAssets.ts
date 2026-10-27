@@ -71,7 +71,7 @@ function dosDateTime(date = new Date('2026-01-01T00:00:00.000Z')) {
 	};
 }
 
-function createStoredZip(entries: Array<{ name: string; data: Buffer }>) {
+export function createStoredZip(entries: Array<{ name: string; data: Buffer }>) {
 	const localParts: Buffer[] = [];
 	const centralParts: Buffer[] = [];
 	let offset = 0;

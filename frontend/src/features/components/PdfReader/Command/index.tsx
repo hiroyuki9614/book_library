@@ -7,6 +7,7 @@ type ResolvedCommand = {
 };
 
 type CommandButtonProps = {
+	pageTurnDirection?: 'ltr' | 'rtl';
 	state: {
 		currentPage: number;
 		totalPages: number;
@@ -18,12 +19,12 @@ type CommandButtonProps = {
 	nextResolved: ResolvedCommand | null;
 };
 
-const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageInput, handleGoToPage }: CommandButtonProps) => {
+const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageInput, handleGoToPage, pageTurnDirection = 'ltr' }: CommandButtonProps) => {
 	if (!prevResolved || !prevResolved.visible) return null;
 	const percentage = state.totalPages > 0 ? Math.round((state.currentPage / state.totalPages) * 1000) / 10 : null;
 
 	return (
-		<div className='flex flex-wrap items-center justify-center gap-2'>
+		<div style={{flexDirection:pageTurnDirection === 'rtl' ? 'row-reverse' : 'row'}} className='flex flex-wrap items-center justify-center gap-2'>
 			<button
 				onClick={prevResolved.execute}
 				disabled={prevResolved.disabled}
