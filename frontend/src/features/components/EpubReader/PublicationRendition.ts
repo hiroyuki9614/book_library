@@ -64,15 +64,18 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 		// Keep the same two-pane geometry across mixed horizontal/vertical spine
 		// sections so crossing a chapter cannot reflow past unseen source text.
 		const nextDual = mode === 'always' || (mode === 'auto' && viewer.clientWidth >= 800);
-		const width = viewer.clientWidth / (nextDual ? 2 : 1);
+		// epub.js remeasures with integer clientWidth. A half-pixel request would
+		// differ on every preview.resize(), destroying/reloading the full spine.
+		const width = Math.floor(viewer.clientWidth / (nextDual ? 2 : 1));
+		const farSide = viewer.clientWidth - width;
 		const height = viewer.clientHeight;
 		const rtl = pageTurnDirection ? pageTurnDirection === 'rtl' : (book as unknown as { package: { metadata: { direction?: string } } }).package.metadata.direction === 'rtl';
 		const changed = dual !== nextDual || Number(primaryHost.dataset.width) !== width || Number(primaryHost.dataset.height) !== height;
 		dual = nextDual;
 		primaryHost.style.width = `${width}px`;
-		primaryHost.style.left = dual && rtl ? `${width}px` : '0';
+		primaryHost.style.left = dual && rtl ? `${farSide}px` : '0';
 		previewHost.style.width = `${width}px`;
-		previewHost.style.left = rtl ? '0' : `${width}px`;
+		previewHost.style.left = rtl ? '0' : `${farSide}px`;
 		previewHost.style.display = dual ? 'block' : 'none';
 		previewHost.style.visibility = 'hidden';
 		if (changed) {

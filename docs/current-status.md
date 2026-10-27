@@ -326,6 +326,10 @@ mode remain separate from page progression. Nested formal TOC entries are shown;
 when the formal TOC has at most one entry, actual body headings are presented as
 an explicitly labeled supplemental TOC without replacing the original file.
 
+Spreads use equal integer pane widths, leaving an odd spare pixel in the central
+gap, so native integer remeasurement does not reload a spine on each turn. Native
+text selection keeps the explicit page offset while allowing selection expansion.
+
 PDF restoration waits for the real document layout and runs once per document,
 independently of subsequent saves and zoom/layout changes. Reading-info writes
 are ordered per book in a browser tab, and immediate reentry waits for pending
