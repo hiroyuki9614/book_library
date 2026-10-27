@@ -104,3 +104,15 @@ probes with tracing also hit the existing five-second movement threshold in
 wide mode; these are retained as diagnostic failures, not evidence of the
 specific narrow-mode cause. Temporary profiling was removed. Final acceptance
 requires the complete physical-i5 UI sequence after the new deployment.
+
+## Restoration and input safety in the final release repair
+
+The final release repair also treats initial EPUB/PDF restoration as a read-only
+operation: layout-time relocated/page events update the UI but cannot PATCH or
+replace the local fallback before the requested position settles. The first
+screen of the first spine section is explicitly displayed as one-based location
+1 even when visible-glyph CFI mapping falls after epub.js's first generated
+location boundary. Edge taps wait 220 ms and are cancelled by a second press,
+double-click, selection, drag, or multi-touch so native selection is not turned
+into a page move. Real-renderer coverage includes exact near-start vertical RTL
+reload/TOC return and an actual RTL PDF left-edge turn.

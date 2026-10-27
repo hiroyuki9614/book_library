@@ -30,11 +30,9 @@ export class PublicationManager extends DefaultManager {
 		if (this.isPaginated && offset && this.visible().some(view => view.contents.document.getSelection()?.isCollapsed === false)
 			&& (Math.abs(this.container.scrollLeft - offset.left) > .5 || Math.abs(this.container.scrollTop - offset.top) > .5)) {
 			super.scrollTo(offset.left, offset.top, true);
-			this.rememberScroll();
 			return;
 		}
 		super.onScroll();
-		this.rememberScroll();
 	}
 
 	override updateLayout() {
@@ -73,7 +71,10 @@ export class PublicationManager extends DefaultManager {
 			const iframe = doc.defaultView?.frameElement;
 			if (!iframe) continue;
 			const frame = iframe.getBoundingClientRect();
-			const inside = (r: DOMRect) => r.width > 0 && r.height > 0 && r.right + frame.left > viewport.left + 1 && r.left + frame.left < viewport.right - 1 && r.bottom + frame.top > viewport.top + 1 && r.top + frame.top < viewport.bottom - 1;
+			// Range boxes commonly touch a viewport edge even when the glyph ink is
+			// fully visible (notably the first vertical heading character). Positive
+			// intersection is the stable boundary; a one-pixel inset skips that glyph.
+			const inside = (r: DOMRect) => r.right + frame.left >= viewport.left && r.left + frame.left < viewport.right && r.bottom + frame.top >= viewport.top && r.top + frame.top < viewport.bottom;
 			const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
 			let firstRange: Range | undefined;
 			let lastRange: Range | undefined;

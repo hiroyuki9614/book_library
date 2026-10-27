@@ -7,6 +7,7 @@ import { PublicationManager } from './PublicationManager';
 
 type Native = NativeRendition & {
 	resize: (width: number, height: number, cfi?: string) => void;
+	manager?: { settings?: { axis?: string } };
 };
 export type PublicationRendition = Native & {
 	previewHooks: (content: (contents: Contents) => unknown, key: (event: KeyboardEvent) => void) => void;
@@ -37,7 +38,8 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 	let contentHook: ((contents: Contents) => unknown) | undefined;
 	let keyHook: ((event: KeyboardEvent) => void) | undefined;
 	let mode = options.spread ?? 'auto';
-	let dual = false;
+	let customDual = false;
+	let nativeDual = false;
 	let busy = false;
 	let closed = false;
 	let pending: Promise<unknown> = Promise.resolve();
@@ -61,35 +63,40 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 		if (!closed && current?.start) for (const listener of subscribers) listener(current);
 	};
 	const sync = async (anchor?: string) => {
-		// Keep the same two-pane geometry across mixed horizontal/vertical spine
-		// sections so crossing a chapter cannot reflow past unseen source text.
-		const nextDual = mode === 'always' || (mode === 'auto' && viewer.clientWidth >= 800);
-		// epub.js remeasures with integer clientWidth. A half-pixel request would
-		// differ on every preview.resize(), destroying/reloading the full spine.
-		const width = Math.floor(viewer.clientWidth / (nextDual ? 2 : 1));
+		const requestedDual = mode === 'always' || (mode === 'auto' && viewer.clientWidth >= 800);
+		// epub.js's native spread arithmetic is reliable for horizontal sections.
+		// Vertical writing uses two real single-page renditions because the native
+		// spread manager advances on the wrong axis. Mixed books switch per section.
+		const nextNativeDual = requestedDual && primary.manager?.settings?.axis === 'horizontal';
+		const nextCustomDual = requestedDual && !nextNativeDual;
+		// epub.js remeasures custom panes with integer clientWidth. A half-pixel
+		// request would differ on every preview.resize(), destroying/reloading the
+		// same spine at odd viewport widths. Native spreads keep the full width.
+		const width = nextCustomDual ? Math.floor(viewer.clientWidth / 2) : viewer.clientWidth;
 		const farSide = viewer.clientWidth - width;
 		const height = viewer.clientHeight;
 		const rtl = pageTurnDirection ? pageTurnDirection === 'rtl' : (book as unknown as { package: { metadata: { direction?: string } } }).package.metadata.direction === 'rtl';
-		const changed = dual !== nextDual || Number(primaryHost.dataset.width) !== width || Number(primaryHost.dataset.height) !== height;
-		dual = nextDual;
+		const changed = customDual !== nextCustomDual || nativeDual !== nextNativeDual || Number(primaryHost.dataset.width) !== width || Number(primaryHost.dataset.height) !== height;
+		customDual = nextCustomDual;
+		nativeDual = nextNativeDual;
 		primaryHost.style.width = `${width}px`;
-		primaryHost.style.left = dual && rtl ? `${farSide}px` : '0';
+		primaryHost.style.left = customDual && rtl ? `${farSide}px` : '0';
 		previewHost.style.width = `${width}px`;
 		previewHost.style.left = rtl ? '0' : `${farSide}px`;
-		previewHost.style.display = dual ? 'block' : 'none';
+		previewHost.style.display = customDual ? 'block' : 'none';
 		previewHost.style.visibility = 'hidden';
 		if (changed) {
 			const cfi = anchor || locationOf(primary)?.start?.cfi;
 			primaryHost.dataset.width = String(width);
 			primaryHost.dataset.height = String(height);
-			primary.spread('none');
+			primary.spread(nativeDual ? 'always' : 'none', nativeDual ? 1 : 800);
 			primary.resize(width, height, cfi);
 			await frames();
 			await primary.display(cfi);
 			await frames();
 		}
 		current = locationOf(primary);
-		if (dual && current?.start && !current.atEnd) {
+		if (customDual && current?.start && !current.atEnd) {
 			if (!preview) {
 				preview = new Rendition(book, { ...options, manager: PublicationManager, width, height, spread: 'none' }) as Native;
 				if (contentHook) preview.hooks.content.register(contentHook);
@@ -139,7 +146,7 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 	}, typeof target === 'string' && target.startsWith('epubcfi(') ? target : undefined);
 	primary.on('relocated', (location: Location) => {
 		if (!busy && !closed) {
-			if (dual) void run(async () => {}).catch(failed);
+			if (customDual || nativeDual) void run(async () => {}).catch(failed);
 			else { current = location; publish(); }
 		}
 	});
@@ -148,12 +155,12 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 		next: () => run(async () => {
 			if (current?.atEnd) return;
 			await primary.next(); await frames();
-			if (dual && !locationOf(primary)?.atEnd) await primary.next();
+			if (customDual && !locationOf(primary)?.atEnd) await primary.next();
 		}),
 		prev: () => run(async () => {
 			if (current?.atStart) return;
 			await primary.prev(); await frames();
-			if (dual && !locationOf(primary)?.atStart) await primary.prev();
+			if (customDual && !locationOf(primary)?.atStart) await primary.prev();
 		}),
 		spread: (value: string) => run(async () => {
 			mode = value;
