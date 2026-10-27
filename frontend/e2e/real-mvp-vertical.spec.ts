@@ -65,6 +65,7 @@ test('demo user sees only public EPUB/PDF and cannot access a private book or ad
 });
 
 test('demo user reads protected PDF and restores its saved page', async ({ page }) => {
+	await page.setViewportSize({ width: 393, height: 851 });
 	await login(page, metadata.demoEmail);
 	const fileResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.pdfBookId}/file`));
 	await page.getByText(metadata.pdfTitle, { exact: true }).click();
@@ -73,36 +74,64 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 
 	const pageInput = page.getByRole('spinbutton');
 	await expect(pageInput).toHaveValue('1', { timeout: 30_000 });
-	const saveResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.pdfBookId}/reading-info`) && response.request().method() === 'PATCH');
-	await page.getByRole('button', { name: '>' }).click();
+	await expect(page.getByText('1 / 2 ページ 50%')).toBeVisible();
+	await page.getByRole('button', { name: '目次' }).click();
+	await expect(page.getByRole('button', { name: 'First chapter' })).toBeVisible();
+	await page.getByRole('button', { name: 'First chapter' }).click();
+
+	const saveResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.pdfBookId}/reading-info`)
+		&& response.request().method() === 'PATCH'
+		&& response.request().postDataJSON()?.readStatus === 'completed');
+	const viewport = page.getByTestId('pdf-viewport');
+	const viewportBounds = await viewport.boundingBox();
+	expect(viewportBounds).not.toBeNull();
+	await page.mouse.click(viewportBounds!.x + viewportBounds!.width - 5, viewportBounds!.y + viewportBounds!.height / 2);
 	await expect(pageInput).toHaveValue('2');
+	await expect(page.getByText('2 / 2 ページ 100%')).toBeVisible();
 	expect((await saveResponse).status()).toBe(200);
+	await page.setViewportSize({ width: 851, height: 393 });
+	await expect(viewport).toBeVisible();
 	await page.reload();
 	await expect(page.getByRole('spinbutton')).toHaveValue('2', { timeout: 30_000 });
 });
 
 test('demo user opens protected EPUB and persists/restores a CFI', async ({ page }) => {
+	await page.setViewportSize({ width: 393, height: 851 });
 	await login(page, metadata.demoEmail);
 	const fileResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.epubBookId}/file`));
 	await page.getByText(metadata.epubTitle, { exact: true }).click();
 	await expect(page).toHaveURL(`/reader/${metadata.epubBookId}`);
 	expect((await fileResponse).headers()['content-type']).toContain('application/epub+zip');
 	await expect(page.getByRole('button', { name: '目次' })).toBeVisible({ timeout: 30_000 });
+	await expect(page.getByText(/位置 \d+ \/ \d+/)).toBeVisible();
+	await page.getByRole('button', { name: '目次' }).click();
+	await expect(page.getByRole('button', { name: '第一節' })).toBeVisible();
+	await page.getByRole('button', { name: '第一章' }).click();
+	await expect(page.getByRole('button', { name: '目次移動前へ戻る' })).toBeVisible();
+	await expect(page.frameLocator('iframe').getByRole('heading', { name: '第一章' })).toBeVisible();
 
-	const cfi = 'epubcfi(/6/2!/4/2/1:0)';
-	const result = await page.evaluate(async ({ bookId, cfi }) => {
-		const saved = await fetch(`http://localhost:3000/api/v1/books/${bookId}/reading-info`, {
-			method: 'PATCH',
-			credentials: 'include',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ currentPosition: cfi, readStatus: 'reading' }),
-		});
+	const epubBody = page.frameLocator('iframe').locator('body');
+	const epubBounds = await epubBody.boundingBox();
+	expect(epubBounds).not.toBeNull();
+	const saveResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.epubBookId}/reading-info`)
+		&& response.request().method() === 'PATCH'
+		&& response.request().postDataJSON()?.readStatus === 'completed');
+	await epubBody.click({ position: { x: epubBounds!.width - 5, y: epubBounds!.height / 2 } });
+	await expect(page.frameLocator('iframe').getByRole('heading', { name: '第二章' })).toBeVisible();
+	expect((await saveResponse).status()).toBe(200);
+	await expect(page.getByText(/100%/)).toBeVisible();
+
+	const result = await page.evaluate(async ({ bookId }) => {
 		const restored = await fetch(`http://localhost:3000/api/v1/books/${bookId}/reading-info`, { credentials: 'include' });
-		return { saveStatus: saved.status, restoreStatus: restored.status, body: await restored.json() };
-	}, { bookId: metadata.epubBookId, cfi });
-	expect(result).toEqual({ saveStatus: 200, restoreStatus: 200, body: { bookId: metadata.epubBookId, currentPosition: cfi, currentPage: 1, readStatus: 'reading' } });
+		return { restoreStatus: restored.status, body: await restored.json() };
+	}, { bookId: metadata.epubBookId });
+	expect(result.restoreStatus).toBe(200);
+	expect(result.body).toMatchObject({ bookId: metadata.epubBookId, currentPage: 1, readStatus: 'completed' });
+	expect(result.body.currentPosition).toMatch(/^epubcfi\(/);
+	await page.setViewportSize({ width: 851, height: 393 });
 	await page.reload();
 	await expect(page.getByRole('button', { name: '目次' })).toBeVisible({ timeout: 30_000 });
+	await expect(page.frameLocator('iframe').getByRole('heading', { name: '第二章' })).toBeVisible();
 });
 
 test('admin sees private and demo books', async ({ page }) => {

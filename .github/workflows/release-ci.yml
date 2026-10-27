@@ -65,10 +65,57 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+  reader-e2e:
+    name: Reader Playwright E2E
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: reader_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d reader_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      E2E_DATABASE_URL: postgresql://ci:ci-only-password@127.0.0.1:5432/reader_e2e
+      E2E_ADMIN_EMAIL: admin-e2e@example.com
+      E2E_ADMIN_NAME: E2E Administrator
+      E2E_ADMIN_PASSWORD: ci-admin-password-42
+      E2E_MVP_PASSWORD: ci-demo-password-42
+      E2E_BOOK_FILE_STORAGE_ROOT: /tmp/belib-reader-e2e-storage
+      E2E_MVP_METADATA_PATH: /tmp/belib-reader-e2e-metadata.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Backend install
+        working-directory: backend
+        run: npm ci
+      - name: Frontend install
+        working-directory: frontend
+        run: npm ci
+      - name: Install Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Run isolated reader E2E
+        working-directory: frontend
+        run: npm run test:e2e
+
   production-compose:
     name: Production images, Compose config, and isolated smoke
     runs-on: ubuntu-24.04
-    needs: [backend, frontend]
+    needs: [backend, frontend, reader-e2e]
     env:
       POSTGRES_USER: ci
       POSTGRES_PASSWORD: ci-only-password

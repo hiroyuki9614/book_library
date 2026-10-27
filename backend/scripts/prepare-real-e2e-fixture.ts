@@ -27,13 +27,15 @@ function createTwoPagePdf() {
 	const pageOneContent = 'BT /F1 24 Tf 72 720 Td (BeLib Demo Page 1) Tj ET\n';
 	const pageTwoContent = 'BT /F1 24 Tf 72 720 Td (BeLib Demo Page 2) Tj ET\n';
 	const bodies = [
-		'<< /Type /Catalog /Pages 2 0 R >>',
+		'<< /Type /Catalog /Pages 2 0 R /Outlines 8 0 R /PageMode /UseOutlines >>',
 		'<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>',
 		'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>',
 		`<< /Length ${Buffer.byteLength(pageOneContent, 'binary')} >>\nstream\n${pageOneContent}endstream`,
 		'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>',
 		`<< /Length ${Buffer.byteLength(pageTwoContent, 'binary')} >>\nstream\n${pageTwoContent}endstream`,
 		'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+		'<< /Type /Outlines /First 9 0 R /Last 9 0 R /Count 1 >>',
+		'<< /Title (First chapter) /Parent 8 0 R /Dest [3 0 R /Fit] >>',
 	];
 	const header = '%PDF-1.4\n%\xFF\xFF\xFF\xFF\n';
 	const offsets: number[] = [];
@@ -62,9 +64,10 @@ function createEpub() {
 	const entries = [
 		{ name: 'mimetype', data: Buffer.from('application/epub+zip') },
 		{ name: 'META-INF/container.xml', data: Buffer.from('<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>') },
-		{ name: 'OEBPS/content.opf', data: Buffer.from('<?xml version="1.0" encoding="UTF-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">urn:belib:e2e</dc:identifier><dc:title>BeLib EPUB Demo</dc:title><dc:language>ja</dc:language><meta property="dcterms:modified">2026-10-25T00:00:00Z</meta></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>') },
-		{ name: 'OEBPS/nav.xhtml', data: Buffer.from('<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目次</title></head><body><nav epub:type="toc"><ol><li><a href="chapter.xhtml">第一章</a></li></ol></nav></body></html>') },
-		{ name: 'OEBPS/chapter.xhtml', data: Buffer.from('<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja"><head><title>第一章</title></head><body><h1>第一章</h1><p><ruby>吾輩<rt>わがはい</rt></ruby>はデモ猫である。</p><p>EPUB CFIの保存と復元を確認する本文です。</p></body></html>') },
+		{ name: 'OEBPS/content.opf', data: Buffer.from('<?xml version="1.0" encoding="UTF-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">urn:belib:e2e</dc:identifier><dc:title>BeLib EPUB Demo</dc:title><dc:language>ja</dc:language><meta property="dcterms:modified">2026-10-25T00:00:00Z</meta></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="chapter-1" href="chapter-1.xhtml" media-type="application/xhtml+xml"/><item id="chapter-2" href="chapter-2.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter-1"/><itemref idref="chapter-2"/></spine></package>') },
+		{ name: 'OEBPS/nav.xhtml', data: Buffer.from('<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目次</title></head><body><nav epub:type="toc"><ol><li><a href="chapter-1.xhtml">第一章</a><ol><li><a href="chapter-1.xhtml#section-1">第一節</a></li></ol></li><li><a href="chapter-2.xhtml">第二章</a></li></ol></nav></body></html>') },
+		{ name: 'OEBPS/chapter-1.xhtml', data: Buffer.from('<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja"><head><title>第一章</title></head><body><h1>第一章</h1><section id="section-1"><h2>第一節</h2><p><ruby>吾輩<rt>わがはい</rt></ruby>はデモ猫である。</p><p>EPUB CFIの保存と復元を確認する本文です。</p></section></body></html>') },
+		{ name: 'OEBPS/chapter-2.xhtml', data: Buffer.from('<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja"><head><title>第二章</title></head><body><h1>第二章</h1><p>iframe内の端タップで到達する確認用本文です。</p></body></html>') },
 	];
 	const local: Buffer[] = [];
 	const central: Buffer[] = [];

@@ -7,6 +7,7 @@ export type BookDetails = {
 	authorName: string | null;
 	category: { id: number; name: string };
 	readStatus: 'unread' | 'reading' | 'completed';
+	pageTurnDirection: 'ltr' | 'rtl';
 	hasFile: boolean;
 	fileType: 'pdf' | 'epub' | null;
 	createdAt: string;
