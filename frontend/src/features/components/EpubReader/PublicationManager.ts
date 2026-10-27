@@ -6,6 +6,36 @@ import EpubCFI from 'epubjs/src/epubcfi';
 // to the wrong grid, even though next/prev advance by height.
 export class PublicationManager extends DefaultManager {
 	private readingScroll?: {left: number; top: number};
+	private retainingViews = false;
+
+	override resize(width?: number, height?: number, cfi?: string) {
+		// Native resize destroys every iframe, reparsing and laying out a whole
+		// long chapter twice when switching spreads. Reflow existing documents;
+		// rendition's resized handler still restores the CFI on the new grid.
+		this.retainingViews = this.isPaginated && this.layout?.name === 'reflowable';
+		this.views?.forEach(view => {
+			// Conditional publisher CSS can change the pagination axis on resize.
+			// Let native reload rediscover it; unreadable CSS also takes that path.
+			try {
+				for (const sheet of view.contents?.document.styleSheets ?? []) {
+					if ((sheet.media.mediaText && sheet.media.mediaText !== 'all') || [...sheet.cssRules].some(rule => /@(?:media|container|import)\b/i.test(rule.cssText))) this.retainingViews = false;
+				}
+			} catch { this.retainingViews = false; }
+		});
+		const previous = {width: this.viewSettings.width, height: this.viewSettings.height};
+		try {
+			super.resize(width, height, cfi);
+			if (this.retainingViews && (previous.width !== this.viewSettings.width || previous.height !== this.viewSettings.height)) {
+				this.views?.forEach(view => view.size(this.viewSettings.width, this.viewSettings.height));
+			}
+		} finally {
+			this.retainingViews = false;
+		}
+	}
+
+	override clear() {
+		if (!this.retainingViews) super.clear();
+	}
 
 	private rememberScroll() {
 		if (this.container) this.readingScroll = {left: this.container.scrollLeft, top: this.container.scrollTop};

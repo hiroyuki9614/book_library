@@ -138,3 +138,38 @@ addressed before the replacement candidate was cut: resize now performs one
 layout synchronization instead of nesting two, and the real PDFium test drags
 across the actual selection layer from an edge zone, confirms that a text
 highlight is produced, and confirms that the drag does not turn the page.
+
+## Long-chapter reconstruction at 320px
+
+PR #52 merged as `c7d6487851282d7ff79686d9ec5cc5b714682fc0` after
+all five workflows and immutable review passed. Candidate `cd2ba17` deployed
+at 21:49:43–21:49:44 JST. Public assets matched the immutable image; backend,
+database, nginx container identities and existing dirty changes stayed unchanged.
+The final physical-i5 run passed 101 operations, including all three modes at
+1000px and 393px, but switching 320px to always-spread remained busy beyond
+30 seconds. Evidence is retained in `after-cd2ba17`; acceptance is incomplete.
+
+Native manager resize clears and rebuilds the whole chapter iframe even when
+only geometry changes. The actual 350k-character single spine exposed costs
+that small fixtures did not. Local phase measurements found roughly 22 seconds
+of primary reconstruction plus preview reconstruction. No repeating sync queue
+was observed. A diagnostic with longer waits finished in 4.1 minutes; those
+wait changes were reverted and do not replace the failed physical acceptance.
+
+The follow-up retains existing reflowable paginated documents during native
+resize, preserving native layout/resized notification and CFI redisplay. Size
+locks are updated only on changed geometry. Conditional or unreadable publisher
+CSS uses reconstruction, preserving writing-axis rediscovery. New real-renderer
+checks require iframe retention on spread reflow, anchor and selection retention
+on height changes, and conditional horizontal/vertical mode changes. The new
+iframe-retention check fails against the unmodified manager in both writing
+modes. Final CI, review, deployment and physical-i5 results remain pending.
+
+CI exposed two acceptance-driver races: height readiness checked width but could
+return before the resized stage height/CFI was published; and synthetic edge
+clicks could fall just inside the existing 250ms duplicate guard. Readiness now
+waits for stage height as well, and distinct test taps respect that guard. Body,
+CFI, numerical movement and save assertions remain unchanged. The failed traces
+are retained. A separate height-dependent writing-mode media-query limitation
+also reproduces with the previous manager and is tracked in issue #56; the
+production demo has no such conditional CSS.

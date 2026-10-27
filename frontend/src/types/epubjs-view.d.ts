@@ -19,8 +19,12 @@ declare module 'epubjs/src/managers/default' {
 	export default class DefaultManager {
 		settings: { axis: string };
 		isPaginated: boolean;
-		layout: { delta: number; height: number; spread: (value: string) => void };
+		layout: { name: string; delta: number; height: number; spread: (value: string) => void };
+		viewSettings: { width: number; height: number };
+		views?: { forEach: (callback: (view: { contents?: import('epubjs/types/contents').default; size: (width: number, height: number) => void }) => void) => void };
 		container: HTMLElement;
+		resize(width?: number, height?: number, cfi?: string): void;
+		clear(): void;
 		updateLayout(): void;
 		moveTo(offset: { left: number; top: number }, width: number): void;
 		scrollTo(x: number, y: number, silent?: boolean): void;

@@ -76,11 +76,12 @@ async function ready(page: Page) {
 		const viewer=document.querySelector<HTMLElement>('[data-reader-viewport]')!;
 		const pane=viewer.querySelector<HTMLElement>('[data-publication-pane=primary]');
 		const preview=viewer.querySelector<HTMLElement>('[data-publication-pane=following]');
+		const stage=pane?.querySelector<HTMLElement>('.epub-container');
 		// Horizontal chapters use one full-width native epub.js spread. Vertical
 		// chapters use two real half-width renditions because native vertical
 		// spread arithmetic advances on the wrong axis.
 		const customDual=preview?.style.display==='block';
-		return Math.abs((pane?.getBoundingClientRect().width ?? 0)-viewer.clientWidth/(customDual?2:1));
+		return Math.max(Math.abs((pane?.getBoundingClientRect().width ?? 0)-viewer.clientWidth/(customDual?2:1)), Math.abs((stage?.clientHeight ?? 0)-viewer.clientHeight));
 	}), {timeout:30000}).toBeLessThan(1);
 	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 30000 });
 	await expect.poll(() => visibleText(page)).not.toBe('');
@@ -380,6 +381,8 @@ for (const width of [1100, 393, 320])
 		await page.keyboard.press('ArrowLeft');
 		await expect.poll(() => cfi(page)).not.toBe(afterEdge);
 		const right = await cfi(page);
+		// Distinct edge taps must be outside the shared 250ms duplicate guard.
+		await page.waitForTimeout(300);
 		await page.mouse.click(box.x + box.width - 5, box.y + box.height / 2);
 		await expect.poll(() => cfi(page)).not.toBe(right);
 		const text = await visibleText(page);
@@ -606,17 +609,23 @@ test(`native selection deep inside a Japanese chapter preserves the visible page
 // while vertical chapters use the custom following-page rendition.
 for (const vertical of process.env.READER_ACTUAL_EPUB_PATH ? [false] : [false, true]) {
 test(`narrow odd-width spreads finish layout and preserve real page movement vertical=${vertical}`, async ({page}) => {
-	test.setTimeout(240000);
+	// The optional full novel covers two widths and many reflows. Keep each
+	// readiness/movement budget unchanged; allow time for the complete matrix.
+	test.setTimeout(process.env.READER_ACTUAL_EPUB_PATH ? 600000 : 240000);
 	await page.setViewportSize({width:736,height:859});
 	await fileApi(page,process.env.READER_ACTUAL_EPUB_PATH ? readFileSync(process.env.READER_ACTUAL_EPUB_PATH) : epubFixture({rtl:true,vertical}));
 	await page.goto('/e2e/readers/harness.html');await ready(page);
+	const initialFrame=await page.locator('[data-publication-pane="primary"] iframe').elementHandle();
 	await page.getByRole('combobox').click();await page.getByRole('option',{name:'常に見開き',exact:true}).click();await ready(page);
+	expect(await initialFrame!.evaluate(frame=>frame.isConnected),'Spread reflow must retain the loaded chapter document').toBe(true);
 	for(let i=0;i<3;i++)await move(page,'次のページへ',30000);
 	await page.getByRole('combobox').click();await page.getByRole('option',{name:'常に単ページ',exact:true}).click();await ready(page);
-	for(const width of process.env.READER_ACTUAL_EPUB_PATH ? [393] : [393,391,320,833]) {
+	for(const width of process.env.READER_ACTUAL_EPUB_PATH ? [393,320] : [393,391,320,833]) {
 		await page.setViewportSize({width,height:900});await ready(page);
 		for(const mode of ['常に単ページ','常に見開き','自動']) {
+			if(process.env.READER_ACTUAL_EPUB_PATH)console.log('same-file mode start',new Date().toISOString(),width,mode);
 			await page.getByRole('combobox').click();await page.getByRole('option',{name:mode,exact:true}).click();await ready(page);
+			if(process.env.READER_ACTUAL_EPUB_PATH)console.log('same-file mode ready',new Date().toISOString(),width,mode);
 			for(let i=0;i<3;i++) {
 				const spreadActive=mode==='常に見開き'||(mode==='自動'&&width===833);
 				const tracked=spreadActive
@@ -634,3 +643,40 @@ test(`narrow odd-width spreads finish layout and preserve real page movement ver
 	}
 });
 }
+
+for (const vertical of [false,true]) {
+test(`height reflow retains the chapter, visible CFI anchor and native selection vertical=${vertical}`, async ({page}) => {
+	await page.setViewportSize({width:736,height:900});
+	await fileApi(page,epubFixture({rtl:true,vertical}));
+	await page.goto('/e2e/readers/harness.html');await ready(page);
+	for(let i=0;i<3;i++)await move(page);
+	const before=await visibleText(page);
+	const frame=await page.locator('[data-publication-pane="primary"] iframe').elementHandle();
+	const box=await page.locator('[data-reader-viewport]').boundingBox();
+	await page.mouse.click(box!.x+box!.width*.65,box!.y+150,{clickCount:2});await page.keyboard.press('Shift+ArrowRight');
+	const selection=await frame!.evaluate(f=>f.contentDocument!.getSelection()!.toString());expect(selection.length).toBeGreaterThan(0);
+	await page.setViewportSize({width:736,height:1050});await ready(page);
+	expect(await frame!.evaluate(f=>f.isConnected)).toBe(true);
+	expect(await frame!.evaluate(f=>f.contentDocument!.getSelection()!.toString())).toBe(selection);
+	expect(await visibleText(page)).toContain(before.slice(0,20));
+	const area=await page.locator('[data-reader-viewport]').boundingBox();await page.mouse.click(area!.x+area!.width/2,area!.y+area!.height/2);
+	await move(page);
+});
+}
+
+test('conditional publisher writing mode is rediscovered on resize', async ({page}) => {
+	await page.setViewportSize({width:736,height:1000});
+	await page.emulateMedia({colorScheme:'light'});
+	await fileApi(page,epubFixture({rtl:true,responsive:true}));
+	await page.goto('/e2e/readers/harness.html');await ready(page);
+	const writing=()=>page.locator('[data-publication-pane="primary"] iframe').evaluate(f=>f.contentWindow!.getComputedStyle(f.contentDocument!.body).writingMode);
+	expect(await writing()).toBe('horizontal-tb');await move(page);
+	const frame=await page.locator('[data-publication-pane="primary"] iframe').elementHandle();
+	await page.emulateMedia({colorScheme:'dark'});
+	await page.setViewportSize({width:736,height:650});await ready(page);
+	expect(await frame!.evaluate(f=>f.isConnected)).toBe(false);
+	expect(await writing()).toBe('vertical-rl');await move(page);
+	await page.emulateMedia({colorScheme:'light'});
+	await page.setViewportSize({width:736,height:1000});await ready(page);
+	expect(await writing()).toBe('horizontal-tb');await move(page);
+});
