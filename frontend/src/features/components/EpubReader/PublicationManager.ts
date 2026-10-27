@@ -36,9 +36,10 @@ export class PublicationManager extends DefaultManager {
 	}
 
 	override updateLayout() {
-		// Each manager represents one actual page; the spread adapter arranges
-		// pages. Publisher spread metadata must not resurrect divisor=2 here.
-		this.layout?.spread('none');
+		// Vertical spreads are composed from two single-page managers by the
+		// adapter. Horizontal chapters use epub.js's native spread layout, so do
+		// not erase the requested divisor=2 when their layout is updated.
+		if (this.settings.axis === 'vertical') this.layout?.spread('none');
 		super.updateLayout();
 		if (this.settings.axis === 'vertical' && this.isPaginated && this.layout) this.layout.delta = this.layout.height;
 	}

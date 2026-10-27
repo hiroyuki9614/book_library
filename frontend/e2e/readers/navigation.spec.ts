@@ -124,6 +124,19 @@ for (const config of [
 			await page.getByRole('combobox').click();
 			await page.getByRole('option', { name: mode, exact: true }).click();
 			await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
+			if (!config.vertical && mode === '常に見開き') {
+				const geometry = await page.locator('[data-publication-pane="primary"] iframe').first().evaluate((frame) => {
+					const viewer = frame.closest('[data-reader-viewport]') as HTMLElement;
+					const body = frame.contentDocument!.body;
+					return {
+						viewerWidth: viewer.clientWidth,
+						paneWidth: (frame.closest('[data-publication-pane]') as HTMLElement).getBoundingClientRect().width,
+						columnWidth: Number.parseFloat(frame.contentWindow!.getComputedStyle(body).columnWidth),
+					};
+				});
+				expect(geometry.paneWidth).toBeCloseTo(geometry.viewerWidth, 0);
+				expect(geometry.columnWidth, 'native horizontal spread must render two columns').toBeLessThan(geometry.viewerWidth * 0.75);
+			}
 			const position = await progress(page);
 			for (let i = 0; i < 10; i++) await move(page);
 			expect((await progress(page)).location, 'character location cannot stay fixed across ten actual page turns').toBeGreaterThan(position.location);
@@ -185,6 +198,42 @@ test('near-start vertical RTL restores exact saved CFI and returns from hierarch
 	await expect.poll(() => cfi(page)).toBe(savedCfi);
 });
 
+test('Book RTL overrides opposing LTR EPUB metadata for native spread order and edge turns', async ({ page }) => {
+	await fileApi(page, epubFixture({ rtl: false, vertical: false }));
+	await page.goto('/e2e/readers/harness.html?direction=rtl');
+	await ready(page);
+	await page.getByRole('combobox').click();
+	await page.getByRole('option', { name: '常に見開き', exact: true }).click();
+	await ready(page);
+	const layout = await page.locator('[data-publication-pane="primary"]').evaluate((pane) => {
+		const viewer = pane.closest('[data-reader-viewport]') as HTMLElement;
+		const stage = pane.querySelector<HTMLElement>('.epub-container')!;
+		const frame = pane.querySelector<HTMLIFrameElement>('iframe')!;
+		return {
+			stageDirection: getComputedStyle(stage).direction,
+			rootDirection: frame.contentWindow!.getComputedStyle(frame.contentDocument!.documentElement).direction,
+			columnWidth: Number.parseFloat(frame.contentWindow!.getComputedStyle(frame.contentDocument!.body).columnWidth),
+			viewerWidth: viewer.clientWidth,
+		};
+	});
+	expect(layout.stageDirection).toBe('rtl');
+	expect(layout.rootDirection).toBe('ltr');
+	expect(layout.columnWidth).toBeLessThan(layout.viewerWidth * 0.75);
+	const first = await cfi(page);
+	const firstProgress = await progress(page);
+	const viewport = (await page.locator('[data-reader-viewport]').boundingBox())!;
+	await page.mouse.click(viewport.x + 5, viewport.y + viewport.height / 2);
+	await expect.poll(() => cfi(page)).not.toBe(first);
+	const second = await cfi(page);
+	const secondProgress = await progress(page);
+	expect(secondProgress.page).toBeGreaterThan(firstProgress.page);
+	await page.mouse.click(viewport.x + viewport.width - 5, viewport.y + viewport.height / 2);
+	await expect.poll(() => cfi(page)).not.toBe(second);
+	const returnedProgress = await progress(page);
+	expect(returnedProgress.page).toBeLessThan(secondProgress.page);
+	expect(returnedProgress.page).toBe(firstProgress.page);
+});
+
 test('title-only source has real supplemental headings; no headings invents no chapters', async ({ page }) => {
 	await fileApi(page, epubFixture({ titleOnly: true }));
 	await page.goto('/e2e/readers/harness.html');
@@ -234,6 +283,14 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 		});
 	const image = async () => page.locator(`[data-pdf-page="${await shown()}"] img`).screenshot();
 	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45000 });
+	const firstPageBox = (await page.locator('[data-pdf-page="1"]').boundingBox())!;
+	await page.mouse.move(firstPageBox.x + firstPageBox.width * 0.12, firstPageBox.y + Math.min(110, firstPageBox.height * 0.15));
+	await page.mouse.down();
+	await page.mouse.move(firstPageBox.x + firstPageBox.width * 0.65, firstPageBox.y + Math.min(110, firstPageBox.height * 0.15), { steps: 12 });
+	await page.mouse.up();
+	await expect.poll(() => page.locator('[data-pdf-page="1"] div').evaluateAll((nodes) => nodes.some((node) => getComputedStyle(node).backgroundColor.includes('33, 150, 243')))).toBe(true);
+	await page.waitForTimeout(300);
+	await expect(input).toHaveValue('1');
 	const first = await image();
 	for (let i = 0; i < 5; i++) {
 		const old = await image();

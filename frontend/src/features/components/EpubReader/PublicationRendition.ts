@@ -34,6 +34,15 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 	previewHost.dataset.publicationPane = 'following';
 	viewer.append(primaryHost, previewHost);
 	const primary = book.renderTo(primaryHost, { ...options, spread: 'none', manager: PublicationManager }) as Native;
+	let effectiveDirection: 'ltr' | 'rtl' = pageTurnDirection ?? 'ltr';
+	// rendition.start() otherwise always reapplies OPF metadata. Apply the Book
+	// setting after start but before the first display so edge semantics and the
+	// native horizontal spread use the same authoritative direction.
+	const directionReady = primary.started.then(() => {
+		const publicationDirection = (book as unknown as { package: { metadata: { direction?: string } } }).package.metadata.direction;
+		effectiveDirection = pageTurnDirection ?? (publicationDirection === 'rtl' ? 'rtl' : 'ltr');
+		primary.direction(effectiveDirection);
+	});
 	let preview: Native | undefined;
 	let contentHook: ((contents: Contents) => unknown) | undefined;
 	let keyHook: ((event: KeyboardEvent) => void) | undefined;
@@ -75,7 +84,7 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 		const width = nextCustomDual ? Math.floor(viewer.clientWidth / 2) : viewer.clientWidth;
 		const farSide = viewer.clientWidth - width;
 		const height = viewer.clientHeight;
-		const rtl = pageTurnDirection ? pageTurnDirection === 'rtl' : (book as unknown as { package: { metadata: { direction?: string } } }).package.metadata.direction === 'rtl';
+		const rtl = effectiveDirection === 'rtl';
 		const changed = customDual !== nextCustomDual || nativeDual !== nextNativeDual || Number(primaryHost.dataset.width) !== width || Number(primaryHost.dataset.height) !== height;
 		customDual = nextCustomDual;
 		nativeDual = nextNativeDual;
@@ -99,6 +108,8 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 		if (customDual && current?.start && !current.atEnd) {
 			if (!preview) {
 				preview = new Rendition(book, { ...options, manager: PublicationManager, width, height, spread: 'none' }) as Native;
+				await preview.started;
+				preview.direction(effectiveDirection);
 				if (contentHook) preview.hooks.content.register(contentHook);
 				preview.hooks.content.register(routeLinks);
 				preview.on('keydown', (event: KeyboardEvent) => keyHook?.(event));
@@ -141,6 +152,7 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 		return result as Promise<void>;
 	};
 	const display = (target?: string | number) => run(async () => {
+		await directionReady;
 		if (typeof target === 'number') await primary.display(target);
 		else await primary.display(target);
 	}, typeof target === 'string' && target.startsWith('epubcfi(') ? target : undefined);
@@ -165,7 +177,7 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 		spread: (value: string) => run(async () => {
 			mode = value;
 		}),
-		resize: (_width: number, _height: number, cfi?: string) => run(async () => { await sync(cfi); }),
+		resize: (_width: number, _height: number, cfi?: string) => run(async () => {}, cfi),
 		previewHooks: (content: typeof contentHook, key: typeof keyHook) => { contentHook = content; keyHook = key; },
 		disposePreview: async () => {
 			closed = true;
