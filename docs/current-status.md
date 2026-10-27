@@ -330,6 +330,12 @@ Spreads use equal integer pane widths, leaving an odd spare pixel in the central
 gap, so native integer remeasurement does not reload a spine on each turn. Native
 text selection keeps the explicit page offset while allowing selection expansion.
 
+Reflowable paginated chapters retain their loaded iframe documents on size changes,
+with CFI redisplay and new size locks. Conditional or unreadable publisher CSS uses
+native reconstruction so responsive writing modes can be rediscovered. The latest
+320px i5 spread acceptance failure and follow-up status are recorded in the dated
+reader repair record; implementation alone is not final production acceptance.
+
 PDF restoration waits for the real document layout and runs once per document,
 independently of subsequent saves and zoom/layout changes. Reading-info writes
 are ordered per book in a browser tab, and immediate reentry waits for pending

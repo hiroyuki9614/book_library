@@ -2,7 +2,7 @@ import { createStoredZip } from '../../scripts/aozoraAssets';
 
 // Small reproducible publications with real ZIP/OPF/nav/spine/CSS and ruby.
 // No uploaded books or binary snapshots are committed.
-export function epubFixture({ vertical = false, rtl = false, titleOnly = false, headings = true, mixed = false, paragraphs = 22 } = {}) {
+export function epubFixture({ vertical = false, rtl = false, titleOnly = false, headings = true, mixed = false, paragraphs = 22, responsive = false } = {}) {
 	const entries: Array<{ name: string; data: Buffer }> = [];
 	const add = (name: string, value: string) => entries.push({ name, data: Buffer.from(value) });
 	add('mimetype', 'application/epub+zip');
@@ -31,7 +31,7 @@ export function epubFixture({ vertical = false, rtl = false, titleOnly = false, 
 			).join('');
 		add(
 			`OPS/s${i}.xhtml`,
-			`<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja"><head><title>第${i}章</title><style>body{writing-mode:${(mixed ? i % 2 === 1 : vertical) ? 'vertical-rl' : 'horizontal-tb'};font-family:"Noto Serif CJK JP",serif;line-height:1.8}p{margin:0 0 1em}rt{font-size:.5em}</style></head><body>${headings ? `<h2 id="chapter${i}">第${i}章</h2>` : ''}${body}<a href="s${i === 4 ? 1 : i + 1}.xhtml">本文リンク</a></body></html>`,
+			`<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja"><head><title>第${i}章</title><style>body{writing-mode:${(mixed ? i % 2 === 1 : vertical) ? 'vertical-rl' : 'horizontal-tb'};font-family:"Noto Serif CJK JP",serif;line-height:1.8}p{margin:0 0 1em}rt{font-size:.5em}${responsive ? '@media(prefers-color-scheme:dark){body{writing-mode:vertical-rl}}' : ''}</style></head><body>${headings ? `<h2 id="chapter${i}">第${i}章</h2>` : ''}${body}<a href="s${i === 4 ? 1 : i + 1}.xhtml">本文リンク</a></body></html>`,
 		);
 	}
 	return createStoredZip(entries);
