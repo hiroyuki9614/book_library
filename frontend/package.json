@@ -11,12 +11,14 @@
     "test": "vitest --run",
     "test:node": "vitest --run --config vitest.node.config.ts",
     "coverage": "vitest run --coverage",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:readers": "playwright test --config playwright.readers.config.ts"
   },
   "dependencies": {
     "@embedpdf/core": "^2.14.2",
     "@embedpdf/engines": "^2.14.2",
     "@embedpdf/models": "2.14.2",
+    "@embedpdf/pdfium": "2.14.2",
     "@embedpdf/plugin-bookmark": "2.14.2",
     "@embedpdf/plugin-commands": "^2.14.2",
     "@embedpdf/plugin-document-manager": "^2.14.2",

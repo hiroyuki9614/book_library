@@ -47,6 +47,15 @@ vi.mock('@embedpdf/plugin-scroll/react', () => ({
 		provides: mocks.scrollProvides,
 		state: mocks.scrollState,
 	}),
+	useScrollCapability: () => ({
+		provides: {
+			onLayoutReady: (callback: (event: { documentId: string; totalPages: number }) => void) => {
+				callback({ documentId: 'doc-1', totalPages: mocks.scrollState.totalPages });
+				return () => undefined;
+			},
+			forDocument: () => mocks.scrollProvides,
+		},
+	}),
 	Scroller: ({ renderPage }: { renderPage: (value: { width: number; height: number; pageIndex: number }) => React.ReactNode }) => (
 		<div>{renderPage({ width: 200, height: 300, pageIndex: 0 })}</div>
 	),
@@ -102,7 +111,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 
 	test('保存ページを復元し、現在ページ・総ページ・進捗率を表示する', async () => {
 		const { getByText } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2 }));
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
 		await expect.element(getByText('2 / 5 ページ 40%')).toBeInTheDocument();
 	});
 
@@ -132,7 +141,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 
 		element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, isPrimary: true, clientX: 990, clientY: 20 }));
 		element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, isPrimary: true, clientX: 990, clientY: 20 }));
-		expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 3, behavior: 'auto' });
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 3, behavior: 'auto' }));
 
 		mocks.scrollToPage.mockClear();
 		element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 2, isPrimary: true, clientX: 10, clientY: 20 }));
@@ -142,12 +151,14 @@ describe('PdfReader navigation, outline, and progress', () => {
 
 	test('RTLの左端タップは次ページへ進む', async () => {
 		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='rtl' />);
-		const element = getByTestId('pdf-viewport').element() as HTMLElement;
+		const viewport = getByTestId('pdf-viewport');
+		await expect.element(viewport).toBeInTheDocument();
+		const element = viewport.element() as HTMLElement;
 		vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 600, width: 1000, height: 600, x: 0, y: 0, toJSON: () => ({}) });
 		mocks.scrollToPage.mockClear();
 
 		element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, isPrimary: true, clientX: 5, clientY: 20 }));
 		element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, isPrimary: true, clientX: 5, clientY: 20 }));
-		expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 3, behavior: 'auto' });
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 3, behavior: 'auto' }));
 	});
 });

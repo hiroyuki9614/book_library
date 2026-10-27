@@ -1,12 +1,13 @@
 import { createPluginRegistration } from '@embedpdf/core';
 import { EmbedPDF } from '@embedpdf/core/react';
+import pdfiumWasmUrl from '@embedpdf/pdfium/pdfium.wasm?url';
 import { usePdfiumEngine } from '@embedpdf/engines/react';
 import { PdfActionType, type PdfBookmarkObject } from '@embedpdf/models';
 import { BookmarkPluginPackage } from '@embedpdf/plugin-bookmark';
 import { useBookmarkCapability } from '@embedpdf/plugin-bookmark/react';
 import { useCommand } from '@embedpdf/plugin-commands/react';
 import { Viewport, ViewportPluginPackage } from '@embedpdf/plugin-viewport/react';
-import { Scroller, ScrollPluginPackage, ScrollStrategy, useScroll } from '@embedpdf/plugin-scroll/react';
+import { Scroller, ScrollPluginPackage, ScrollStrategy, useScroll, useScrollCapability } from '@embedpdf/plugin-scroll/react';
 import { DocumentContent, DocumentManagerPluginPackage } from '@embedpdf/plugin-document-manager/react';
 import { RenderLayer, RenderPluginPackage } from '@embedpdf/plugin-render/react';
 import { ZoomPluginPackage, ZoomMode } from '@embedpdf/plugin-zoom/react';
@@ -40,8 +41,8 @@ function createCommands(direction: PageTurnDirection): Record<string, Command<Ap
 			id: 'nav.previous',
 			label: '<',
 			shortcuts: [direction === 'rtl' ? 'arrowright' : 'arrowleft', 'k'],
-			action: ({ registry }) => {
-				const scroll = registry.getPlugin('scroll')?.provides?.();
+			action: ({ registry, documentId }) => {
+				const scroll = registry.getPlugin('scroll')?.provides?.().forDocument(documentId);
 				if (scroll) scroll.scrollToPage({ pageNumber: Math.max(1, scroll.getCurrentPage() - 1), behavior: 'auto' });
 			},
 			disabled: ({ state, documentId }) => {
@@ -53,8 +54,8 @@ function createCommands(direction: PageTurnDirection): Record<string, Command<Ap
 			id: 'nav.next',
 			label: '>',
 			shortcuts: [direction === 'rtl' ? 'arrowleft' : 'arrowright', 'j'],
-			action: ({ registry }) => {
-				const scroll = registry.getPlugin('scroll')?.provides?.();
+			action: ({ registry, documentId }) => {
+				const scroll = registry.getPlugin('scroll')?.provides?.().forDocument(documentId);
 				if (scroll) scroll.scrollToPage({ pageNumber: Math.min(scroll.getTotalPages(), scroll.getCurrentPage() + 1), behavior: 'auto' });
 			},
 			disabled: ({ state, documentId }) => {
@@ -65,9 +66,9 @@ function createCommands(direction: PageTurnDirection): Record<string, Command<Ap
 	};
 }
 
-function createPlugins(documentUrl: string, direction: PageTurnDirection) {
+function createPlugins(documentData: ArrayBuffer, direction: PageTurnDirection) {
 	return [
-		createPluginRegistration(DocumentManagerPluginPackage, { initialDocuments: [{ url: documentUrl }] }),
+		createPluginRegistration(DocumentManagerPluginPackage, { initialDocuments: [{ buffer: documentData, name: 'book.pdf' }] }),
 		createPluginRegistration(ViewportPluginPackage),
 		createPluginRegistration(RenderPluginPackage),
 		createPluginRegistration(InteractionManagerPluginPackage),
@@ -84,7 +85,9 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 	const [pageInputOverride, setPageInputOverride] = useState<string | null>(null);
 	const pageInput = pageInputOverride ?? String(state.currentPage);
 	const isReadyToPersistRef = useRef(false);
-	const targetPage = Math.max(1, Math.min(initialPage, state.totalPages));
+	const restoredDocumentRef = useRef<string | null>(null);
+	const { provides: scrollCapability } = useScrollCapability();
+	const [targetPage, setTargetPage] = useState<number | null>(null);
 	const lastPersistedPage = useRef<number | null>(null);
 	const pendingPage = useRef<number | null>(null);
 	const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -93,13 +96,22 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 	const nextCommand = useCommand('nav.next', documentId);
 
 	useEffect(() => {
-		if (!scroll || state.totalPages < 1 || lastPersistedPage.current === targetPage) return;
-		lastPersistedPage.current = targetPage;
-		isReadyToPersistRef.current = false;
-		scroll.scrollToPage({ pageNumber: targetPage });
-	}, [scroll, state.totalPages, targetPage]);
+		if (!scrollCapability) return;
+		// LayoutReady is replayed to late subscribers and contains the actual
+		// page count. The initial useScroll 1/1 snapshot is not document layout.
+		return scrollCapability.onLayoutReady((event) => {
+			if (event.documentId !== documentId || restoredDocumentRef.current === documentId) return;
+			const page = Math.max(1, Math.min(initialPage, event.totalPages));
+			restoredDocumentRef.current = documentId;
+			isReadyToPersistRef.current = false;
+			lastPersistedPage.current = page;
+			setTargetPage(page);
+			scrollCapability.forDocument(documentId).scrollToPage({ pageNumber: page, behavior: 'auto' });
+		});
+	}, [documentId, initialPage, scrollCapability]);
 
 	useEffect(() => {
+		if (targetPage === null || restoredDocumentRef.current !== documentId || state.totalPages < 1) return;
 		if (!isReadyToPersistRef.current) {
 			if (state.currentPage === targetPage) isReadyToPersistRef.current = true;
 			return;
@@ -123,7 +135,7 @@ const PageNavigation = ({ bookId, documentId, initialPage }: { bookId: number; d
 
 		if (state.currentPage >= state.totalPages) persist();
 		else saveTimer.current = setTimeout(persist, READING_INFO_SAVE_DELAY_MS);
-	}, [bookId, state.currentPage, state.totalPages, targetPage]);
+	}, [bookId, documentId, state.currentPage, state.totalPages, targetPage]);
 
 	useEffect(() => () => {
 		if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -303,7 +315,7 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled }: { do
 			<Viewport documentId={documentId}>
 				<Scroller documentId={documentId} renderPage={({ width, height, pageIndex }) => (
 					<PagePointerProvider documentId={documentId} pageIndex={pageIndex}>
-						<div style={{ width, height, position: 'relative' }}>
+						<div data-pdf-page={pageIndex + 1} style={{ width, height, position: 'relative' }}>
 							<RenderLayer documentId={documentId} pageIndex={pageIndex} style={{ pointerEvents: 'none' }} />
 							<SelectionLayer documentId={documentId} pageIndex={pageIndex} />
 						</div>
@@ -331,19 +343,18 @@ function ReaderWorkspace({ bookId, documentId, initialPage, pageTurnDirection }:
 }
 
 function PdfReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDirection: PageTurnDirection }) {
-	const [documentUrl, setDocumentUrl] = useState<string | null>(null);
+	const [documentData, setDocumentData] = useState<ArrayBuffer | null>(null);
 	const [fileError, setFileError] = useState(false);
 	const [initialPage, setInitialPage] = useState<number | null>(null);
-	const { engine, isLoading } = usePdfiumEngine();
+	const { engine, isLoading, error: engineError } = usePdfiumEngine({ wasmUrl: new URL(pdfiumWasmUrl, window.location.href).href });
 
 	useEffect(() => {
 		let active = true;
-		let objectUrl: string | undefined;
 		void fetchBookFile(bookId)
-			.then((blob) => {
+			.then((blob) => blob.arrayBuffer())
+			.then((data) => {
 				if (!active) return;
-				objectUrl = URL.createObjectURL(blob);
-				setDocumentUrl(objectUrl);
+				setDocumentData(data);
 			})
 			.catch(() => {
 				if (active) setFileError(true);
@@ -357,14 +368,13 @@ function PdfReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDire
 			});
 		return () => {
 			active = false;
-			if (objectUrl) URL.revokeObjectURL(objectUrl);
 		};
 	}, [bookId]);
 
-	const plugins = useMemo(() => documentUrl ? createPlugins(documentUrl, pageTurnDirection) : [], [documentUrl, pageTurnDirection]);
+	const plugins = useMemo(() => documentData ? createPlugins(documentData, pageTurnDirection) : [], [documentData, pageTurnDirection]);
 
-	if (fileError) return <p>PDFファイルを取得できませんでした。</p>;
-	if (isLoading || !engine || !documentUrl || initialPage === null) {
+	if (fileError || engineError) return <p role='alert'>PDFファイルまたは描画エンジンを読み込めませんでした。</p>;
+	if (isLoading || !engine || !documentData || initialPage === null) {
 		return (
 			<div className='overflow-hidden rounded-lg border border-gray-300 bg-white dark:border-gray-700 dark:bg-gray-900'>
 				<div className='flex h-[400px] items-center justify-center'><div className='flex items-center gap-2 text-gray-500 dark:text-gray-400'><span className='text-sm'>Loading PDF Engine...</span></div></div>

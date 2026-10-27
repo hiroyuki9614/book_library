@@ -272,6 +272,31 @@ Non-R2:
 - PostgreSQL backup/restore acceptance.
 - PC Chrome + Android Chrome final acceptance.
 
+## Reader navigation release repair (2026-10-27)
+
+PR #45 added hierarchical EPUB/PDF tables of contents, one-based progress,
+LTR/RTL edge taps, and saved-position restore. Pre-release i5 Chrome acceptance
+then exposed a real vertical-EPUB regression: a saved page-2 CFI reopened at an
+incorrect position because epub.js laid out the publication before observing a
+`body` writing mode. Production was rolled back before the candidate was left
+deployed.
+
+The follow-up repair now:
+
+- establishes the effective EPUB writing mode before the first layout;
+- keeps one rendition across spread changes and serializes navigation/resize;
+- suppresses persistence while initial relocation events settle;
+- treats the server ReadingInfo value as authoritative and orders writes across
+  reader remounts;
+- restores PDFs only after EmbedPDF reports the real layout/page count;
+- delays edge taps briefly so double-click selection can cancel navigation;
+- runs real epub.js and PDFium rendering regressions in Playwright in addition
+  to the existing protected-reader E2E.
+
+Merge, production deployment, and final acceptance remain gated by an isolated
+preview, independent review, CI, and i5 GUI-browser verification. Android is a
+separate verification result and is not substituted for the i5 gate.
+
 ## Portfolio demo preparation (Issue #36)
 
 Implemented on the portfolio branch:

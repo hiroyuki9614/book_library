@@ -13,6 +13,7 @@
     "src/components/forms/BookEditor/index.tsx",
     "src/features/components/EpubReader/index.tsx",
     "src/features/components/PdfReader/index.tsx",
+    "src/types/epubjs-view.d.ts",
     "src/hooks/useBooks.ts",
     "src/hooks/useReadingProgresses.ts",
     "src/pages/Admin/index.tsx",

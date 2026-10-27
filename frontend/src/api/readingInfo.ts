@@ -9,11 +9,16 @@ export type ReadingInfo = {
 	readStatus: ReadStatus;
 };
 
+// Keep writes ordered across reader remounts. A slow, older PATCH must finish
+// before a newer position is submitted for the same book in this browser tab.
+const pendingSaves = new Map<number, Promise<ReadingInfo>>();
+
 export async function fetchReadingInfo(bookId: number): Promise<ReadingInfo> {
+	await pendingSaves.get(bookId)?.catch(() => undefined);
 	return apiFetch<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`);
 }
 
-export async function saveReadingInfo(
+export function saveReadingInfo(
 	bookId: number,
 	position: number | string,
 	readStatus: Exclude<ReadStatus, 'unread'> = 'reading',
@@ -22,9 +27,15 @@ export async function saveReadingInfo(
 		? { currentPage: position, readStatus }
 		: { currentPosition: position, readStatus };
 
-	return apiFetch<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`, {
+	const previous = pendingSaves.get(bookId) ?? Promise.resolve();
+	const next = previous.catch(() => undefined).then(() => apiFetch<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(body),
-	});
+	}));
+	pendingSaves.set(bookId, next);
+	void next.finally(() => {
+		if (pendingSaves.get(bookId) === next) pendingSaves.delete(bookId);
+	}).catch(() => undefined);
+	return next;
 }

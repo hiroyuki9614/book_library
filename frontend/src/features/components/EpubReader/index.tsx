@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import ePub from 'epubjs';
 import { fetchBookFile } from '@/api/books';
@@ -10,6 +10,8 @@ import { Spinner } from '@/components/ui/spinner';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheetCapture';
 import { attachEdgeTapNavigation, type PageTurnAction, type PageTurnDirection } from '../readerNavigation';
+import { PublicationView } from './PublicationView';
+import { preserveTextDirection } from './publication';
 
 type TocItem = {
 	href: string;
@@ -37,16 +39,31 @@ type EpubRenditionEventHandler = {
 type EpubRenditionRuntime = {
 	on: EpubRenditionEventHandler;
 	off?: EpubRenditionEventHandler;
-	display: (target?: string) => Promise<unknown>;
+	display: (target?: string | number) => Promise<unknown>;
 	destroy: () => void;
-	prev: () => void;
-	next: () => void;
+	prev: () => unknown;
+	next: () => unknown;
+	spread: (spread: 'always' | 'none' | 'auto', minSpreadWidth?: number) => void;
+	resize: (width: number, height: number, cfi?: string) => void;
+	hooks?: {
+		content: {
+			register: (handler: (contents: { document: Document }) => unknown) => void;
+			deregister: (handler: (contents: { document: Document }) => unknown) => void;
+		};
+	};
 };
 
 type EpubBookRuntime = {
 	renderTo: (
 		element: HTMLElement,
-		options: { width: number; height: number; spread: 'always' | 'none' | 'auto'; flow: 'paginated' },
+		options: {
+			width: number;
+			height: number;
+			spread: 'always' | 'none' | 'auto';
+			minSpreadWidth: number;
+			flow: 'paginated';
+			view: typeof PublicationView;
+		},
 	) => EpubRenditionRuntime;
 	ready: Promise<unknown>;
 	locations: {
@@ -55,6 +72,10 @@ type EpubBookRuntime = {
 		total: number;
 	};
 	navigation: { toc: TocItem[] };
+	spine?: {
+		get: (target: string) => { href: string; index: number; cfiBase?: string } | null;
+		spineItems?: Array<{ href: string; index: number; cfiBase?: string }>;
+	};
 	destroy: () => void;
 };
 
@@ -66,6 +87,10 @@ type EpubProgress = {
 
 const EPUB_LOCATION_BREAK_SIZE = 1600;
 const READING_INFO_SAVE_DELAY_MS = 750;
+
+function animationFrame() {
+	return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+}
 
 function getInitialSpread(): 'always' | 'none' {
 	return typeof window !== 'undefined' && window.innerWidth < 768 ? 'none' : 'always';
@@ -131,10 +156,14 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 	const mainRef = useRef<HTMLElement | null>(null);
 	const viewerRef = useRef<HTMLDivElement | null>(null);
 	const currentCfiRef = useRef('');
+	const savedCfiRef = useRef('');
 	const renditionRef = useRef<EpubRenditionRuntime | null>(null);
+	const resolveTocTargetRef = useRef<(href: string) => string | number>((href) => href);
 	const tocOpenRef = useRef(false);
 	const saveQueueRef = useRef(Promise.resolve());
 	const [spread, setSpread] = useState<'always' | 'none' | 'auto'>(getInitialSpread);
+	const initialSpreadRef = useRef(spread);
+	const renditionQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 	const [progress, setProgress] = useState<EpubProgress | null>(null);
 	const [isLoading, setIsLoading] = useState(true);
 	const [fileError, setFileError] = useState(false);
@@ -146,6 +175,21 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 	const [tocOpen, setTocOpen] = useState(false);
 	const storageKey = `reader-location:${bookId}`;
 	const activeTocHref = navigation ? findActiveTocHref(navigation.toc, currentHref) : '';
+
+	const enqueueRendition = useCallback((operation: (rendition: EpubRenditionRuntime) => unknown) => {
+		const rendition = renditionRef.current;
+		if (!rendition) return Promise.resolve();
+		const queued = renditionQueueRef.current
+			.catch(() => undefined)
+			.then(async () => {
+				if (renditionRef.current !== rendition) return;
+				await operation(rendition);
+				await animationFrame();
+				await animationFrame();
+			});
+		renditionQueueRef.current = queued;
+		return queued;
+	}, []);
 
 	useEffect(() => {
 		tocOpenRef.current = tocOpen;
@@ -177,11 +221,15 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 		void fetchReadingInfo(bookId)
 			.then((readingInfo) => {
 				if (!active) return;
-				if (readingInfo.currentPosition?.startsWith('epubcfi(')) {
-					localStorage.setItem(storageKey, readingInfo.currentPosition);
-				}
+				// A successful server response is authoritative, including an empty
+				// position for a book that has not been opened before.
+				savedCfiRef.current = readingInfo.currentPosition?.startsWith('epubcfi(')
+					? readingInfo.currentPosition
+					: '';
 			})
-			.catch(() => undefined)
+			.catch(() => {
+				if (active) savedCfiRef.current = localStorage.getItem(storageKey) ?? '';
+			})
 			.finally(() => {
 				if (active) setReadingInfoReady(true);
 			});
@@ -198,17 +246,41 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 		viewerRef.current.innerHTML = '';
 
 		const book = ePub(epubData) as unknown as EpubBookRuntime;
+		resolveTocTargetRef.current = (href) => {
+			const [resource, fragment] = href.split('#', 2);
+			const normalizedResource = normalizedResourceHref(resource);
+			const section = book.spine?.get(resource) ?? book.spine?.spineItems?.find((candidate) => {
+				const candidateHref = normalizedResourceHref(candidate.href);
+				return candidateHref === normalizedResource
+					|| candidateHref.endsWith(`/${normalizedResource}`)
+					|| normalizedResource.endsWith(`/${candidateHref}`);
+			}) ?? null;
+			if (!section) return href;
+			if (fragment) return `${section.href}#${fragment}`;
+			return section.cfiBase ? `epubcfi(${section.cfiBase}!/4/2/1:0)` : section.index;
+		};
 		const rendition = book.renderTo(viewerRef.current, {
 			width: viewerRef.current.clientWidth,
 			height: viewerRef.current.clientHeight,
-			spread,
+			spread: initialSpreadRef.current,
+			minSpreadWidth: initialSpreadRef.current === 'always' ? 1 : 800,
 			flow: 'paginated',
+			view: PublicationView,
 		});
 		renditionRef.current = rendition;
 		let disposed = false;
+		let readyToPersist = false;
+		let restorationSettleTimer: ReturnType<typeof setTimeout> | undefined;
+		let resizeFrame = 0;
+		let lastSize = { width: viewerRef.current.clientWidth, height: viewerRef.current.clientHeight };
 		let saveTimer: ReturnType<typeof setTimeout> | undefined;
 		let pendingSave: { cfi: string; status: 'reading' | 'completed' } | null = null;
 		const contentCleanups = new Map<Document, () => void>();
+		const prepareContent = (contents: { document: Document }) => {
+			preserveTextDirection(contents.document);
+			return contents.document.fonts?.ready;
+		};
+		rendition.hooks?.content.register(prepareContent);
 
 		const persistPending = () => {
 			if (!pendingSave) return;
@@ -231,14 +303,19 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 		};
 
 		const turnPage = (action: PageTurnAction) => {
-			if (action === 'next') {
-				rendition.next();
-				return;
-			}
-			rendition.prev();
+			enqueueRendition((activeRendition) => action === 'next' ? activeRendition.next() : activeRendition.prev());
+		};
+		const settleRestoration = () => {
+			if (restorationSettleTimer) clearTimeout(restorationSettleTimer);
+			restorationSettleTimer = setTimeout(() => {
+				if (disposed) return;
+				readyToPersist = true;
+				setIsLoading(false);
+			}, 250);
 		};
 
 		const handleRelocated = (location: RelocatedLocation) => {
+			const shouldPersist = readyToPersist;
 			const cfi = location.start.cfi;
 			currentCfiRef.current = cfi;
 			setCurrentHref(location.start.href ?? '');
@@ -250,7 +327,8 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 				if (finalLocationIndex === 0 && !atEnd) {
 					setProgress(null);
 					localStorage.setItem(storageKey, cfi);
-					scheduleSave(cfi, 'reading');
+					if (shouldPersist) scheduleSave(cfi, 'reading');
+					else settleRestoration();
 					return;
 				}
 				const clampedIndex = atEnd ? finalLocationIndex : Math.min(locationIndex, finalLocationIndex);
@@ -259,13 +337,15 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 
 				setProgress({ current: clampedIndex + 1, total: finalLocationIndex + 1, percentage: Math.max(0, Math.min(100, percentage)) });
 				localStorage.setItem(storageKey, cfi);
-				scheduleSave(cfi, readStatus);
+				if (shouldPersist) scheduleSave(cfi, readStatus);
+				else settleRestoration();
 				return;
 			}
 
 			setProgress(null);
 			localStorage.setItem(storageKey, cfi);
-			scheduleSave(cfi, 'reading');
+			if (shouldPersist) scheduleSave(cfi, 'reading');
+			else settleRestoration();
 		};
 
 		const handleKeyUp = (event: KeyboardEvent) => {
@@ -308,7 +388,27 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 			contentCleanups.delete(contentDocument);
 		};
 
-		void book.ready
+		const viewer = viewerRef.current;
+		const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => {
+			if (!readyToPersist) return;
+			cancelAnimationFrame(resizeFrame);
+			resizeFrame = requestAnimationFrame(() => {
+				if (disposed || !viewer.clientWidth || !viewer.clientHeight) return;
+				// Radix's sheet scroll lock can change the layout by one scrollbar
+				// width. Re-paginating for that cosmetic shift races a TOC jump.
+				// Real viewport/orientation changes are substantially larger.
+				if (Math.abs(viewer.clientWidth - lastSize.width) < 24 && Math.abs(viewer.clientHeight - lastSize.height) < 24) return;
+				lastSize = { width: viewer.clientWidth, height: viewer.clientHeight };
+				enqueueRendition((activeRendition) => activeRendition.resize(
+					viewer.clientWidth,
+					viewer.clientHeight,
+					currentCfiRef.current || undefined,
+				));
+			});
+		});
+		resizeObserver?.observe(viewer);
+
+		const initialization = book.ready
 			.then(async () => {
 				await book.locations.generate(EPUB_LOCATION_BREAK_SIZE);
 				if (disposed) return;
@@ -320,9 +420,10 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 				rendition.on('removed', handleRemoved);
 				document.addEventListener('keyup', handleKeyUp);
 
-				const savedCfi = localStorage.getItem(storageKey);
-				await rendition.display(savedCfi ?? undefined);
-				if (!disposed) setIsLoading(false);
+				await rendition.display(savedCfiRef.current || undefined);
+				await animationFrame();
+				await animationFrame();
+				if (!disposed) settleRestoration();
 			})
 			.catch(() => {
 				if (!disposed) {
@@ -333,42 +434,56 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 
 		return () => {
 			disposed = true;
+			readyToPersist = false;
+			if (restorationSettleTimer) clearTimeout(restorationSettleTimer);
+			cancelAnimationFrame(resizeFrame);
+			resizeObserver?.disconnect();
 			if (saveTimer) clearTimeout(saveTimer);
 			persistPending();
 			contentCleanups.forEach((cleanup) => cleanup());
 			contentCleanups.clear();
+			rendition.hooks?.content.deregister(prepareContent);
 			rendition.off?.('relocated', handleRelocated);
 			rendition.off?.('keyup', handleKeyUp);
 			rendition.off?.('rendered', handleRendered);
 			rendition.off?.('removed', handleRemoved);
 			document.removeEventListener('keyup', handleKeyUp);
-			rendition.destroy();
-			book.destroy();
 			if (renditionRef.current === rendition) renditionRef.current = null;
+			resolveTocTargetRef.current = (href) => href;
+			// The book owns its rendition. Wait for in-flight rendering before
+			// destroying it so cleanup cannot race a queued display/resize.
+			void Promise.allSettled([initialization, renditionQueueRef.current]).then(() => book.destroy());
 		};
-	}, [bookId, epubData, pageTurnDirection, readingInfoReady, spread, storageKey]);
+	}, [bookId, enqueueRendition, epubData, pageTurnDirection, readingInfoReady, storageKey]);
 
 	const turnPage = (action: PageTurnAction) => {
-		const rendition = renditionRef.current;
-		if (!rendition) return;
-		if (action === 'next') {
-			rendition.next();
-			return;
-		}
-		rendition.prev();
+		enqueueRendition((rendition) => action === 'next' ? rendition.next() : rendition.prev());
+	};
+
+	const changeSpread = (value: string) => {
+		const nextSpread = value as 'always' | 'none' | 'auto';
+		setSpread(nextSpread);
+		enqueueRendition(async (rendition) => {
+			const cfi = currentCfiRef.current;
+			rendition.spread(nextSpread, nextSpread === 'always' ? 1 : 800);
+			await rendition.display(cfi || undefined);
+		});
 	};
 
 	const handleTocJump = (href: string) => {
-		if (currentCfiRef.current) setHistory((previous) => [...previous, currentCfiRef.current].slice(-20));
+		const previousCfi = currentCfiRef.current;
 		setTocOpen(false);
-		void renditionRef.current?.display(href);
+		void enqueueRendition((rendition) => rendition.display(resolveTocTargetRef.current(href))).then(() => {
+			if (previousCfi) setHistory((previous) => [...previous, previousCfi].slice(-20));
+		});
 	};
 
 	const handleBack = () => {
 		const previousCfi = history.at(-1);
 		if (!previousCfi) return;
-		void renditionRef.current?.display(previousCfi);
-		setHistory((previous) => previous.slice(0, -1));
+		void enqueueRendition((rendition) => rendition.display(previousCfi)).then(() => {
+			setHistory((previous) => previous.slice(0, -1));
+		});
 	};
 
 	if (fileError) {
@@ -386,7 +501,7 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 				<div className='flex flex-wrap items-center gap-2'>
 					<Link to='/' className='inline-flex min-h-11 shrink-0 items-center rounded-md px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'>本棚に戻る</Link>
 					<div className='ml-auto flex items-center gap-2'>
-						{history.length > 0 && <Button variant='outline' onClick={handleBack} className='min-h-11 px-3'>目次移動前へ戻る</Button>}
+						{history.length > 0 && <Button variant='outline' aria-label='目次移動前へ戻る' onClick={handleBack} className='min-h-11 px-3'>戻る</Button>}
 						<Sheet open={tocOpen} onOpenChange={setTocOpen}>
 							<SheetTrigger asChild>
 								<Button variant='outline' className='min-h-11 bg-white px-3 active:bg-white focus:bg-white data-[state=open]:bg-white'>目次</Button>
@@ -404,7 +519,7 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 							</SheetContent>
 						</Sheet>
 
-						<Select value={spread} onValueChange={(value) => setSpread(value as 'always' | 'none' | 'auto')}>
+						<Select value={spread} onValueChange={changeSpread}>
 							<SelectTrigger aria-label='ページ表示方法' className='min-h-11 w-[132px] bg-reader-background sm:w-[180px]'><SelectValue /></SelectTrigger>
 							<SelectContent><SelectGroup>
 								<SelectItem value='always'>常に見開き</SelectItem>
@@ -426,7 +541,7 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 			</header>
 
 			<main ref={mainRef} tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white px-1 outline-none sm:px-4'>
-				{isLoading && <div className='absolute inset-0 z-50 flex items-center justify-center bg-reader-background'><Spinner className='size-16' /></div>}
+				{isLoading && <div data-testid='epub-loading' role='status' className='absolute inset-0 z-50 flex items-center justify-center bg-reader-background'><Spinner className='size-16' /></div>}
 				<div ref={viewerRef} tabIndex={1} className='h-full w-full overflow-hidden rounded bg-card shadow' />
 			</main>
 			<footer className='flex shrink-0 justify-center gap-3 border-t bg-background p-2'>

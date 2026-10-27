@@ -28,6 +28,8 @@ function createEpubRuntime() {
 		destroy: vi.fn(),
 		prev: vi.fn(),
 		next: vi.fn(),
+		spread: vi.fn(),
+		resize: vi.fn(),
 		book: { package: { metadata: { direction: 'ltr' } } },
 	};
 	const book = {
@@ -47,6 +49,11 @@ function createEpubRuntime() {
 
 function renditionHandler<T>(runtime: ReturnType<typeof createEpubRuntime>, event: string) {
 	return runtime.rendition.on.mock.calls.find(([registeredEvent]) => registeredEvent === event)?.[1] as T | undefined;
+}
+
+async function waitForEpubReady(runtime: ReturnType<typeof createEpubRuntime>) {
+	await vi.waitFor(() => expect(runtime.rendition.display).toHaveBeenCalled());
+	await vi.waitFor(() => expect(document.querySelector('[data-testid="epub-loading"]')).toBeNull());
 }
 
 describe('EpubReader protected source and ReadingInfo', () => {
@@ -108,6 +115,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 	test('relocated時にCFIとcompleted状態をReadingInfoへ保存する', async () => {
 		await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
+		await waitForEpubReady(runtime);
 
 		const relocatedHandler = renditionHandler<(value: { start: { cfi: string; href?: string }; atEnd?: boolean }) => void>(runtime, 'relocated');
 		expect(relocatedHandler).toBeTypeOf('function');
@@ -122,6 +130,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 	test('見開きの開始位置が最終location未満でもatEndなら読了にする', async () => {
 		await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
+		await waitForEpubReady(runtime);
 		const relocatedHandler = renditionHandler<(value: {
 			start: { cfi: string; href?: string };
 			end?: { cfi?: string };
@@ -142,6 +151,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 	test('最終locationを含む見開きでもatEndでなければ早期読了にしない', async () => {
 		await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
+		await waitForEpubReady(runtime);
 		const relocatedHandler = renditionHandler<(value: {
 			start: { cfi: string; href?: string };
 			end?: { cfi?: string };
@@ -163,6 +173,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		runtime.book.locations.total = 0;
 		await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
+		await waitForEpubReady(runtime);
 		const relocatedHandler = renditionHandler<(value: {
 			start: { cfi: string; href?: string };
 			atEnd?: boolean;
@@ -181,6 +192,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 	test('通常移動のReadingInfo保存をまとめ、最後のCFIだけを送る', async () => {
 		await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
+		await waitForEpubReady(runtime);
 		const relocatedHandler = renditionHandler<(value: { start: { cfi: string; href?: string } }) => void>(runtime, 'relocated');
 
 		relocatedHandler?.({ start: { cfi: 'epubcfi(first)', href: 'chapter-1.xhtml' } });
@@ -234,7 +246,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		const rightEdge = (contentDocument.defaultView?.innerWidth ?? 300) - 1;
 		contentDocument.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, isPrimary: true, clientX: rightEdge, clientY: 20 }));
 		contentDocument.body.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, isPrimary: true, clientX: rightEdge, clientY: 20 }));
-		expect(runtime.rendition.next).toHaveBeenCalledTimes(1);
+		await vi.waitFor(() => expect(runtime.rendition.next).toHaveBeenCalledTimes(1));
 
 		const link = contentDocument.createElement('a');
 		link.href = '#target';
@@ -265,7 +277,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 
 		contentDocument.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, isPrimary: true, clientX: 5, clientY: 20 }));
 		contentDocument.body.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, isPrimary: true, clientX: 5, clientY: 20 }));
-		expect(runtime.rendition.next).toHaveBeenCalledTimes(1);
+		await vi.waitFor(() => expect(runtime.rendition.next).toHaveBeenCalledTimes(1));
 		expect(runtime.rendition.prev).not.toHaveBeenCalled();
 		frame.remove();
 	});

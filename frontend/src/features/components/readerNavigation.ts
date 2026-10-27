@@ -62,8 +62,17 @@ export function attachEdgeTapNavigation(target: Document | HTMLElement, options:
 	const activePointers = new Set<number>();
 	let pointer: PointerSnapshot | null = null;
 	let lastTurnAt = Number.NEGATIVE_INFINITY;
+	let pendingTurn: ReturnType<typeof setTimeout> | undefined;
+
+	const cancelPendingTurn = () => {
+		if (pendingTurn) clearTimeout(pendingTurn);
+		pendingTurn = undefined;
+	};
 
 	const handlePointerDown = (event: PointerEvent) => {
+		// A second press can be the start of a double-click selection. Wait until
+		// that gesture has had a chance to declare itself before turning a page.
+		cancelPendingTurn();
 		activePointers.add(event.pointerId);
 		if (activePointers.size > 1 && pointer) {
 			pointer.cancelled = true;
@@ -104,22 +113,38 @@ export function attachEdgeTapNavigation(target: Document | HTMLElement, options:
 		const action = getEdgeTurnAction(event.clientX, bounds.left, bounds.width, options.direction, options.edgeRatio);
 		if (!action) return;
 
-		lastTurnAt = now;
-		options.onTurn(action);
+		pendingTurn = setTimeout(() => {
+			pendingTurn = undefined;
+			if (options.isDisabled?.() || options.getSelectionText().trim()) return;
+			const executedAt = performance.now();
+			if (executedAt - lastTurnAt < 250) return;
+			lastTurnAt = executedAt;
+			options.onTurn(action);
+		}, 220);
 	};
 
 	const handlePointerCancel = (event: PointerEvent) => {
 		activePointers.delete(event.pointerId);
 		if (pointer?.pointerId === event.pointerId) pointer = null;
+		cancelPendingTurn();
 	};
+	const handleSelectionChange = () => {
+		if (options.getSelectionText().trim()) cancelPendingTurn();
+	};
+	const handleDoubleClick = () => cancelPendingTurn();
 
 	target.addEventListener('pointerdown', handlePointerDown as EventListener, { passive: true });
 	target.addEventListener('pointerup', handlePointerUp as EventListener, { passive: true });
 	target.addEventListener('pointercancel', handlePointerCancel as EventListener, { passive: true });
+	target.addEventListener('selectionchange', handleSelectionChange as EventListener);
+	target.addEventListener('dblclick', handleDoubleClick as EventListener);
 
 	return () => {
+		cancelPendingTurn();
 		target.removeEventListener('pointerdown', handlePointerDown as EventListener);
 		target.removeEventListener('pointerup', handlePointerUp as EventListener);
 		target.removeEventListener('pointercancel', handlePointerCancel as EventListener);
+		target.removeEventListener('selectionchange', handleSelectionChange as EventListener);
+		target.removeEventListener('dblclick', handleDoubleClick as EventListener);
 	};
 }
