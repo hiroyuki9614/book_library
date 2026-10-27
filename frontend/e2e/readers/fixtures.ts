@@ -2,7 +2,7 @@ import { createStoredZip } from '../../scripts/aozoraAssets';
 
 // Small reproducible publications with real ZIP/OPF/nav/spine/CSS and ruby.
 // No uploaded books or binary snapshots are committed.
-export function epubFixture({ vertical = false, rtl = false, titleOnly = false, headings = true } = {}) {
+export function epubFixture({ vertical = false, rtl = false, titleOnly = false, headings = true, mixed = false, paragraphs = 22 } = {}) {
 	const entries: Array<{ name: string; data: Buffer }> = [];
 	const add = (name: string, value: string) => entries.push({ name, data: Buffer.from(value) });
 	add('mimetype', 'application/epub+zip');
@@ -25,13 +25,13 @@ export function epubFixture({ vertical = false, rtl = false, titleOnly = false, 
 		const body =
 			`<a href="s${i === 4 ? 1 : i + 1}.xhtml">本文リンク</a>` +
 			Array.from(
-				{ length: 22 },
+				{ length: paragraphs },
 				(_, p) =>
 					`<p>第${i}章第${String(p + 1).padStart(2, '0')}段。${Array.from({ length: 12 }, (_, n) => `章${i}段${p + 1}文${n + 1}。文章は原文の順番どおりに続く。句読点、括弧（読書）、<ruby>漢字<rt>かんじ</rt></ruby>を含む。知れぬ。見える。`).join('')}</p>`,
 			).join('');
 		add(
 			`OPS/s${i}.xhtml`,
-			`<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja"><head><title>第${i}章</title><style>body{writing-mode:${vertical ? 'vertical-rl' : 'horizontal-tb'};font-family:"Noto Serif CJK JP",serif;line-height:1.8}p{margin:0 0 1em}rt{font-size:.5em}</style></head><body>${headings ? `<h2 id="chapter${i}">第${i}章</h2>` : ''}${body}<a href="s${i === 4 ? 1 : i + 1}.xhtml">本文リンク</a></body></html>`,
+			`<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja"><head><title>第${i}章</title><style>body{writing-mode:${(mixed ? i % 2 === 1 : vertical) ? 'vertical-rl' : 'horizontal-tb'};font-family:"Noto Serif CJK JP",serif;line-height:1.8}p{margin:0 0 1em}rt{font-size:.5em}</style></head><body>${headings ? `<h2 id="chapter${i}">第${i}章</h2>` : ''}${body}<a href="s${i === 4 ? 1 : i + 1}.xhtml">本文リンク</a></body></html>`,
 		);
 	}
 	return createStoredZip(entries);

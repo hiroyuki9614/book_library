@@ -16,10 +16,11 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/co
 import ReadingSaveStatus from '../ReadingSaveStatus';
 import { useReadingSave } from '@/hooks/useReadingSave';
 import { PublicationView } from './PublicationView';
+import { createPublicationRendition, type PublicationRendition } from './PublicationRendition';
 import { flattenToc, headingToc, preserveTextDirection, type TocEntry, type PublicationSection } from './publication';
 
 type Spread = 'always' | 'none' | 'auto';
-type RuntimeRendition = Rendition & { resize: (width: number, height: number, cfi?: string) => void };
+type RuntimeRendition = PublicationRendition;
 type RuntimeBook = Omit<Book, 'locations'> & {
 	locations: { generate: (chars: number) => Promise<unknown>; locationFromCfi: (cfi: string) => number; total: number };
 } & { package: { metadata: { direction?: string } } };
@@ -48,12 +49,15 @@ function EpubReader({ bookId }: { bookId: number }) {
 	const [navigation, setNavigation] = useState<TocEntry[]>([]);
 	const [supplement, setSupplement] = useState<TocEntry[]>([]);
 	const [history, setHistory] = useState<string[]>([]);
+	const [pendingOperations, setPendingOperations] = useState(0);
+	const [rendererBusy, setRendererBusy] = useState(false);
 	const storageKey = `reader-location:${bookId}`;
 	const { save, status, retry } = useReadingSave(bookId);
 
 	const enqueue = useCallback((action: (rendition: Rendition) => unknown) => {
 		const rendition = renditionRef.current;
 		if (!rendition) return;
+		setPendingOperations((count) => count + 1);
 		queueRef.current = queueRef.current
 			.catch(() => undefined)
 			.then(async () => {
@@ -62,7 +66,8 @@ function EpubReader({ bookId }: { bookId: number }) {
 				await frame();
 				await frame();
 			})
-			.catch(() => setOperationError(true));
+			.catch(() => setOperationError(true))
+			.finally(() => setPendingOperations((count) => Math.max(0, count - 1)));
 	}, []);
 
 	useEffect(() => {
@@ -106,7 +111,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 		let resizeFrame = 0;
 		let lastSize = { width: viewer.clientWidth, height: viewer.clientHeight };
 		const book = ePub(epubData) as unknown as RuntimeBook;
-		const rendition = book.renderTo(viewer, {
+		const rendition = createPublicationRendition(book as unknown as Book, viewer, {
 			width: viewer.clientWidth,
 			height: viewer.clientHeight,
 			spread: initialSpread.current,
@@ -168,8 +173,13 @@ function EpubReader({ bookId }: { bookId: number }) {
 			return doc.fonts?.ready;
 		};
 		rendition.hooks?.content.register(content);
+		rendition.previewHooks(content, onKey);
 		rendition.on('relocated', relocated);
 		rendition.on('keydown', onKey);
+		const rendererError = () => { if (!disposed) setOperationError(true); };
+		rendition.on('reader-error', rendererError);
+		const rendererBusyChanged = (value: boolean) => { if (!disposed) setRendererBusy(value); };
+		rendition.on('reader-busy', rendererBusyChanged);
 		document.addEventListener('keydown', onKey);
 		const observer = new ResizeObserver(() => {
 			if (!ready) return;
@@ -231,10 +241,15 @@ function EpubReader({ bookId }: { bookId: number }) {
 			observer.disconnect();
 			rendition.off('relocated', relocated);
 			rendition.off('keydown', onKey);
+			rendition.off('reader-error', rendererError);
+			rendition.off('reader-busy', rendererBusyChanged);
 			document.removeEventListener('keydown', onKey);
 			if (renditionRef.current === rendition) renditionRef.current = null;
 			// book owns rendition; destroying both races queued rendering work.
-			void Promise.allSettled([initialization, queueRef.current]).then(() => book.destroy());
+			void Promise.allSettled([initialization, queueRef.current]).then(async () => {
+				await rendition.disposePreview();
+				book.destroy();
+			});
 		};
 	}, [bookId, epubData, readingInfoReady, storageKey, save, enqueue]);
 
@@ -243,7 +258,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 		setSpread(mode);
 		enqueue(async (rendition) => {
 			const cfi = currentCfiRef.current;
-			rendition.spread(mode, mode === 'always' ? 1 : 800);
+			await rendition.spread(mode, mode === 'always' ? 1 : 800);
 			await rendition.display(cfi || undefined);
 		});
 	};
@@ -384,7 +399,7 @@ function EpubReader({ bookId }: { bookId: number }) {
 						<Spinner className='size-16' />
 					</div>
 				)}
-				<div ref={viewerRef} tabIndex={0} className='h-full w-full overflow-hidden rounded bg-card shadow' />
+				<div ref={viewerRef} data-reader-viewport aria-busy={isLoading || rendererBusy || pendingOperations > 0} tabIndex={0} className='h-full w-full overflow-hidden rounded bg-card shadow' />
 			</main>
 			<footer
 				style={{ flexDirection: direction === 'rtl' ? 'row-reverse' : 'row' }}

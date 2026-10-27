@@ -27,6 +27,12 @@ Per-book PATCHes are serialized in one browser tab and a remount's GET waits for
 pending saves. Save failures remain visible with a retry for the current position.
 This does not implement multi-device conflict resolution.
 
+Spreads contain two real single-page renditions: primary and following, arranged
+right-to-left for RTL publications and left-to-right for LTR. This also applies
+across mixed writing-mode chapters. Verify actual pane geometry and source text
+continuity; an increased total or two copies of the same page is a failure.
+The reading viewport's `aria-busy` remains true until queued UI movement settles.
+
 ## Device acceptance
 
 Record device identity, CPU, OS, browser/version, actual GUI display/session,

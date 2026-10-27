@@ -20,6 +20,14 @@ Issue: #46. Baseline: PR #43 / merge `49e8bc8`.
   conflated. Body-only vertical writing also needed detection before axis sizing.
 - Edge taps were removed in PR #43. Save failures were suppressed, writes could
   arrive out of order, and immediate reentry could fetch a stale position.
+- Stronger numerical assertions exposed epub.js vertical spread divisor/count
+  disagreement and a one-page overestimate of the visible end, affecting bounds.
+  Spreads now compose two actual single-page renditions in publication order,
+  including mixed horizontal/vertical spine transitions.
+- Native word-based mapping can return the preceding page's CFI for Japanese
+  text nodes without spaces. Source-preserving visible-glyph Range mapping uses
+  rectangle pruning and bisection, with native fallback for image-only pages.
+  Vertical CFI restoration snaps on viewport height rather than horizontal width.
 
 ## Source and comparison
 

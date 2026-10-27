@@ -3,6 +3,7 @@ import { epubFixture } from './fixtures';
 
 async function fileApi(page: Page, file: Buffer, kind = 'epub', initial: string | null = null) {
 	let saved = initial;
+	let readStatus = 'reading';
 	const writes: string[] = [];
 	await page.route('**/api/v1/books/1/file', (route) =>
 		route.fulfill({ body: file, contentType: kind === 'epub' ? 'application/epub+zip' : 'application/pdf' }),
@@ -12,13 +13,14 @@ async function fileApi(page: Page, file: Buffer, kind = 'epub', initial: string 
 			const body = route.request().postDataJSON();
 			await new Promise((resolve) => setTimeout(resolve, writes.length === 0 ? 120 : 5));
 			saved = String(body.currentPosition ?? body.currentPage);
+			readStatus = body.readStatus ?? 'reading';
 			writes.push(saved);
 		}
 		await route.fulfill({
-			json: { bookId: 1, currentPosition: saved, currentPage: kind === 'pdf' ? Number(saved ?? 1) : 1, readStatus: 'reading' },
+			json: { bookId: 1, currentPosition: saved, currentPage: kind === 'pdf' ? Number(saved ?? 1) : 1, readStatus },
 		});
 	});
-	return { writes, saved: () => saved };
+	return { writes, saved: () => saved, status: () => readStatus };
 }
 
 async function visibleText(page: Page) {
@@ -29,6 +31,8 @@ async function visibleText(page: Page) {
 			const doc = iframe.contentDocument;
 			if (!doc?.body) continue;
 			const f = iframe.getBoundingClientRect();
+			if (!f.width || !f.height || getComputedStyle(iframe).visibility === 'hidden') continue;
+			const pane = iframe.closest('[data-publication-pane]')?.getBoundingClientRect() ?? viewport;
 			const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
 			while (walker.nextNode()) {
 				const node = walker.currentNode;
@@ -37,11 +41,11 @@ async function visibleText(page: Page) {
 				range.selectNodeContents(node);
 				if (
 					![...range.getClientRects()].some(
-						(r) =>
-							r.right + f.left > viewport.left &&
-							r.left + f.left < viewport.right &&
-							r.bottom + f.top > viewport.top &&
-							r.top + f.top < viewport.bottom,
+							(r) =>
+								r.right + f.left > pane.left &&
+								r.left + f.left < pane.right &&
+								r.bottom + f.top > viewport.top &&
+								r.top + f.top < viewport.bottom,
 					)
 				)
 					continue;
@@ -52,8 +56,8 @@ async function visibleText(page: Page) {
 					if (
 						r.width > 0 &&
 						r.height > 0 &&
-						r.right + f.left > viewport.left + 1 &&
-						r.left + f.left < viewport.right - 1 &&
+						r.right + f.left > pane.left + 1 &&
+						r.left + f.left < pane.right - 1 &&
 						r.bottom + f.top > viewport.top + 1 &&
 						r.top + f.top < viewport.bottom - 1
 					)
@@ -69,14 +73,37 @@ async function cfi(page: Page) {
 }
 async function ready(page: Page) {
 	await expect(page.getByRole('combobox')).toBeEnabled({ timeout: 30000 });
+	await expect.poll(() => page.evaluate(() => {
+		const viewer=document.querySelector<HTMLElement>('[data-reader-viewport]')!;
+		const mode=document.querySelector('[role=combobox]')?.textContent;
+		const dual=mode==='常に見開き'||(mode==='自動'&&viewer.clientWidth>=800);
+		const pane=viewer.querySelector<HTMLElement>('[data-publication-pane=primary]');
+		return Math.abs((pane?.getBoundingClientRect().width ?? 0)-viewer.clientWidth/(dual?2:1));
+	}), {timeout:30000}).toBeLessThan(1);
+	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 30000 });
 	await expect.poll(() => visibleText(page)).not.toBe('');
+}
+async function progress(page: Page) {
+	const label = await page.locator('label[for="reading-progress"]').innerText();
+	const screen = label.match(/章内ページ:\s*(\d+)\s*\/\s*(\d+)（第(\d+)節）/);
+	const location = label.match(/本文位置:\s*(\d+)\s*\/\s*(\d+)/);
+	expect(screen, 'screen page must be readable').not.toBeNull();
+	expect(location, 'character location must be readable').not.toBeNull();
+	return { page: Number(screen![1]), section: Number(screen![3]), location: Number(location![1]) };
 }
 async function move(page: Page, name = '次のページへ') {
 	const before = await cfi(page);
+	const beforeProgress = await progress(page);
 	const text = await visibleText(page);
 	await page.getByRole('button', { name, exact: true }).click();
+	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false');
 	await expect.poll(() => cfi(page)).not.toBe(before);
 	await expect.poll(() => visibleText(page)).not.toBe(text);
+	const afterProgress = await progress(page);
+	if (afterProgress.section === beforeProgress.section) {
+		if (name === '次のページへ') expect(afterProgress.page).toBeGreaterThan(beforeProgress.page);
+		else expect(afterProgress.page).toBeLessThan(beforeProgress.page);
+	}
 }
 
 for (const config of [
@@ -87,21 +114,24 @@ for (const config of [
 	test(`real EPUB ${JSON.stringify(config)}: modes, 10 next/3 previous, CFI, body, hierarchical TOC and resume`, async ({
 		page,
 	}, testInfo) => {
+		test.setTimeout(180000);
 		const api = await fileApi(page, epubFixture(config));
 		await page.goto('/e2e/readers/harness.html');
 		await ready(page);
 		for (const mode of ['常に単ページ', '常に見開き', '自動']) {
 			await page.getByRole('combobox').click();
 			await page.getByRole('option', { name: mode, exact: true }).click();
-			await page.waitForTimeout(300);
-			const position = await page.locator('label[for="reading-progress"]').innerText();
+			await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
+			const position = await progress(page);
 			for (let i = 0; i < 10; i++) await move(page);
+			expect((await progress(page)).location, 'character location cannot stay fixed across ten actual page turns').toBeGreaterThan(position.location);
 			for (let i = 0; i < 3; i++) await move(page, '前のページへ');
-			expect(await page.locator('label[for="reading-progress"]').innerText()).not.toBe(position);
+			expect(await progress(page)).not.toEqual(position);
 		}
 		await page.getByRole('button', { name: '目次', exact: true }).click();
 		await expect(page.getByRole('button', { name: '第四章', exact: true })).toBeVisible();
 		await page.getByRole('button', { name: '第四章', exact: true }).click();
+		await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
 		if (config.vertical) await testInfo.attach('vertical-layout', { body: await page.screenshot(), contentType: 'image/png' });
 		await expect.poll(() => visibleText(page)).toContain('第4章');
 		await expect(page.getByText('読書位置を保存済み', { exact: true })).toBeVisible();
@@ -218,7 +248,7 @@ for (const width of [1100, 393, 320])
 		await expect(prev).toBeDisabled();
 		await move(page);
 		const before = await cfi(page);
-		const box = (await page.locator('.epub-container').boundingBox())!;
+		const box = (await page.locator('[data-reader-viewport]').boundingBox())!;
 		await page.mouse.click(box.x + 5, box.y + box.height / 2);
 		await expect.poll(() => cfi(page)).not.toBe(before);
 		const afterEdge = await cfi(page);
@@ -229,24 +259,26 @@ for (const width of [1100, 393, 320])
 		await expect.poll(() => cfi(page)).not.toBe(right);
 		const text = await visibleText(page);
 		for (let i = 0; i < 5; i++) await next.click({ noWaitAfter: true });
+		await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false');
 		await expect.poll(() => visibleText(page)).not.toBe(text);
 		await expect(page.getByText('読書位置を保存済み', { exact: true })).toBeVisible();
 		expect(api.saved()).toBe(await cfi(page));
 		await page.getByRole('button', { name: '目次', exact: true }).click();
 		await page.getByRole('button', { name: '第1章', exact: true }).click();
 		await expect.poll(() => visibleText(page)).toContain('第1章');
-		await page.frameLocator('iframe').getByRole('link', { name: '本文リンク', exact: true }).first().click();
+		await page.frameLocator('[data-publication-pane="primary"] iframe').first().getByRole('link', { name: '本文リンク', exact: true }).first().click();
+		await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
 		await expect.poll(() => visibleText(page)).toContain('第2章');
 		const beforeSelect = await cfi(page);
 		// Native word selection plus keyboard expansion must not turn a page.
-		const selectionBox = (await page.locator('.epub-container').boundingBox())!;
+		const selectionBox = (await page.locator('[data-reader-viewport]').boundingBox())!;
 		const selectionX = selectionBox.x + selectionBox.width * 0.65;
 		const selectionY = selectionBox.y + Math.min(160, selectionBox.height * 0.4);
 		await page.mouse.click(selectionX, selectionY, { clickCount: 2 });
 		await page.keyboard.press('Shift+ArrowRight');
 		expect(
 			await page
-				.frameLocator('iframe')
+				.frameLocator('[data-publication-pane="primary"] iframe').first()
 				.locator('body')
 				.evaluate((el) => el.ownerDocument.getSelection()?.toString().length ?? 0),
 		).toBeGreaterThan(0);
@@ -349,4 +381,70 @@ test('in-flight EPUB movement tolerates resize and immediate shelf reentry witho
 	await ready(page);
 	expect(await cfi(page)).toBe(last);
 	expect(errors).toEqual([]);
+});
+
+// Mixed writing modes must not reinterpret a spread or skip the next chapter.
+test('mixed vertical/horizontal chapters: real two-page geometry, complete source order, boundaries and completed save', async ({ page }, testInfo) => {
+	test.setTimeout(180000);
+	const api = await fileApi(page, epubFixture({ rtl: true, mixed: true, paragraphs: 2 }));
+	await page.goto('/e2e/readers/harness.html');
+	await ready(page);
+	const source = () => page.evaluate(() => {
+		const viewport = document.querySelector('main')!.getBoundingClientRect();
+		const all: number[] = [];
+		const panes: Array<{ x: number; width: number; writing: string }> = [];
+		let chapterLength = 0;
+		for (const iframe of document.querySelectorAll('iframe')) {
+			const f = iframe.getBoundingClientRect(), doc = iframe.contentDocument;
+			if (!doc?.body || !f.width || getComputedStyle(iframe).visibility === 'hidden') continue;
+			const pane=iframe.closest('[data-publication-pane]')?.getBoundingClientRect() ?? viewport;
+			const section = Number(doc.title.match(/第(\d+)章/)![1]);
+			const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+			let index = 0; const visible: number[] = [];
+			while (walker.nextNode()) {
+				const node = walker.currentNode;
+				if (node.parentElement?.closest('rt,rp,style,script')) continue;
+				for (let i=0;i<(node.textContent?.length ?? 0);i++) {
+					if (/\s/.test(node.textContent![i])) continue;
+					const range=doc.createRange();range.setStart(node,i);range.setEnd(node,i+1);
+					const r=range.getBoundingClientRect();
+					if (r.width>0 && r.height>0 && r.right+f.left>pane.left+1 && r.left+f.left<pane.right-1 && r.bottom+f.top>viewport.top+1 && r.top+f.top<viewport.bottom-1) visible.push(index);
+					index++;
+				}
+			}
+			chapterLength=index;
+			all.push(...visible.map(n=>(section-1)*index+n));
+			if (visible.length) panes.push({x:f.left,width:f.width,writing:doc.defaultView!.getComputedStyle(doc.body).writingMode});
+		}
+		return { all, panes, chapterLength };
+	});
+	for (const mode of ['常に単ページ', '常に見開き', '自動']) {
+		await page.getByRole('combobox').click();await page.getByRole('option',{name:mode,exact:true}).click();
+		await page.getByRole('button',{name:'目次',exact:true}).click();await page.getByRole('button',{name:'第一章',exact:true}).click();
+		await expect.poll(async()=> (await source()).all[0]).toBe(0);
+		await expect(page.getByRole('button',{name:'前のページへ'})).toBeDisabled();
+		let before=await source(); let turns=0;
+		if(mode!=='常に単ページ') {
+			expect(before.panes).toHaveLength(2);
+			expect(before.panes[0].x).toBeGreaterThan(before.panes[1].x);
+			expect(before.panes[0].width).toBeLessThan(600);
+			expect(before.panes[0].writing).toBe('vertical-rl');
+			await page.screenshot({path:testInfo.outputPath(`mixed-${mode}.png`)});
+		}
+		while(await page.getByRole('button',{name:'次のページへ'}).isEnabled()) {
+			expect(turns++).toBeLessThan(60);
+			expect(before.all.every((v,i)=>i===0||v===before.all[i-1]+1),'within-spread source must be contiguous '+JSON.stringify({mode,turns,panes:before.panes,gaps:before.all.filter((v,i)=>i>0&&v!==before.all[i-1]+1).slice(0,12),start:before.all[0],end:before.all.at(-1)})).toBe(true);
+			await move(page);
+			const after=await source();
+			expect(after.all[0], 'next screen must start at the next original character').toBe(before.all.at(-1)!+1);
+			before=after;
+		}
+		expect(before.all.at(-1)).toBe(before.chapterLength*4-1);
+		await expect(page.getByText('読書位置を保存済み',{exact:true})).toBeVisible();
+		expect(api.writes.length).toBeGreaterThan(0);
+		expect(api.status()).toBe('completed');
+		expect(api.saved()).toBe(await cfi(page));
+		await page.getByRole('button',{name:'前のページへ'}).click();
+		await expect(page.getByRole('button',{name:'次のページへ'})).toBeEnabled();
+	}
 });

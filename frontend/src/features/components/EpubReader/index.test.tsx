@@ -14,6 +14,15 @@ vi.mock('@/api/readingInfo', () => ({
 	saveReadingInfo: mocks.saveReadingInfo,
 }));
 vi.mock('epubjs', () => ({ default: mocks.ePub }));
+// Component API tests isolate the renderer. The browser regression suite covers
+// the real two-pane renderer with actual EPUB bytes and visible source ranges.
+vi.mock('./PublicationRendition', () => ({
+	createPublicationRendition: (book: { renderTo: (element: HTMLElement, options: object) => object }, element: HTMLElement, options: object) => ({
+		...book.renderTo(element, options),
+		previewHooks: vi.fn(),
+		disposePreview: vi.fn().mockResolvedValue(undefined),
+	}),
+}));
 vi.mock('react-router-dom', () => ({
 	Link: ({ children }: { children: React.ReactNode }) => <a href='/'>{children}</a>,
 }));
@@ -28,6 +37,14 @@ function createEpubRuntime() {
 		destroy: vi.fn(),
 		prev: vi.fn(),
 		next: vi.fn(),
+		resize: vi.fn(),
+		spread: vi.fn(),
+		getContents: vi.fn(() => []),
+		currentLocation: vi.fn(() => ({
+			start: { cfi: 'epubcfi(/6/2!/4/1:0)', index: 0, displayed: { page: 1, total: 4 } },
+			end: { cfi: 'epubcfi(/6/2!/4/1:1)', index: 0, displayed: { page: 1, total: 4 } },
+			atStart: true, atEnd: false,
+		})),
 		book: { package: { metadata: { direction: 'ltr' } } },
 	};
 	const book = {
@@ -104,6 +121,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 	test('relocated時にCFIとcompleted状態をReadingInfoへ保存する', async () => {
 		await render(<EpubReader bookId={7} />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
+		await vi.waitFor(() => expect(document.querySelector('[aria-label="次のページへ"]')?.hasAttribute('disabled')).toBe(false));
 
 		const relocatedHandler = runtime.rendition.on.mock.calls.find(([event]) => event === 'relocated')?.[1] as ((value: { start: { cfi: string }; atEnd?: boolean }) => void) | undefined;
 		expect(relocatedHandler).toBeTypeOf('function');
