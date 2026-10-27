@@ -62,6 +62,10 @@ function renditionHandler<T>(runtime: ReturnType<typeof createEpubRuntime>, even
 	return runtime.rendition.on.mock.calls.find(([registeredEvent]) => registeredEvent === event)?.[1] as T | undefined;
 }
 
+async function waitForInitialRestore() {
+	await vi.waitFor(() => expect(localStorage.getItem('reader-location:7')).toBe('epubcfi(/6/2!/4/1:0)'));
+}
+
 describe('EpubReader protected source and ReadingInfo', () => {
 	let runtime: ReturnType<typeof createEpubRuntime>;
 
@@ -101,6 +105,9 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		await vi.waitFor(() => expect(mocks.ePub).toHaveBeenCalledWith(expect.any(ArrayBuffer)));
 		expect(runtime.book.locations.generate).toHaveBeenCalledWith(1600);
 		await vi.waitFor(() => expect(runtime.rendition.display).toHaveBeenCalledWith('epubcfi(/6/2!/4/1:0)'));
+		await new Promise((resolve) => setTimeout(resolve, 850));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+		expect(localStorage.getItem('reader-location:7')).toBe('epubcfi(/6/2!/4/1:0)');
 	});
 
 	test('スマホ幅では単ページ表示を初期値にする', async () => {
@@ -122,6 +129,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 	test('relocated時にCFIとcompleted状態をReadingInfoへ保存する', async () => {
 		await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
+		await waitForInitialRestore();
 
 		const relocatedHandler = renditionHandler<(value: { start: { cfi: string; href?: string }; atEnd?: boolean }) => void>(runtime, 'relocated');
 		expect(relocatedHandler).toBeTypeOf('function');
@@ -136,6 +144,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 	test('見開きの開始位置が最終location未満でもatEndなら読了にする', async () => {
 		await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
+		await waitForInitialRestore();
 		const relocatedHandler = renditionHandler<(value: {
 			start: { cfi: string; href?: string };
 			end?: { cfi?: string };
@@ -156,6 +165,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 	test('最終locationを含む見開きでもatEndでなければ早期読了にしない', async () => {
 		await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
+		await waitForInitialRestore();
 		const relocatedHandler = renditionHandler<(value: {
 			start: { cfi: string; href?: string };
 			end?: { cfi?: string };
@@ -177,6 +187,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		runtime.book.locations.total = 0;
 		await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
+		await waitForInitialRestore();
 		const relocatedHandler = renditionHandler<(value: {
 			start: { cfi: string; href?: string };
 			atEnd?: boolean;
@@ -195,6 +206,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 	test('通常移動のReadingInfo保存をまとめ、最後のCFIだけを送る', async () => {
 		await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
+		await waitForInitialRestore();
 		const relocatedHandler = renditionHandler<(value: { start: { cfi: string; href?: string } }) => void>(runtime, 'relocated');
 
 		relocatedHandler?.({ start: { cfi: 'epubcfi(first)', href: 'chapter-1.xhtml' } });
@@ -212,6 +224,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		}];
 		const { getByRole } = await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.display).toHaveBeenCalled());
+		await waitForInitialRestore();
 
 		const relocatedHandler = renditionHandler<(value: { start: { cfi: string; href?: string } }) => void>(runtime, 'relocated');
 		relocatedHandler?.({ start: { cfi: 'epubcfi(before-toc)', href: 'chapter-1.xhtml' } });

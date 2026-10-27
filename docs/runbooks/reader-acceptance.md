@@ -57,6 +57,7 @@ allowed; do not invoke reader methods or update state with JavaScript.
 | Typography | Compare actual source CSS and another reader; preserve vertical writing, ruby and punctuation |
 | Page seams | Adjacent visible ranges follow original text without missing or repeated characters |
 | EPUB restore | Saved CFI/body after reload, shelf reentry, logout/login; repeat without local position cache |
+| Initial restore safety | Opening/reloading emits no position PATCH until the user moves; EPUB begins at displayed location 1 |
 | PDF | 5 next + 2 previous, distant number entry, scrolling, zoom, first/middle/last |
 | PDF restore | Visible page image and number agree after reload and logout/login |
 | Save failure | Visible error and retry; delayed writes cannot overwrite newer queued positions |

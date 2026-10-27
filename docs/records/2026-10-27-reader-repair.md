@@ -105,6 +105,40 @@ wide mode; these are retained as diagnostic failures, not evidence of the
 specific narrow-mode cause. Temporary profiling was removed. Final acceptance
 requires the complete physical-i5 UI sequence after the new deployment.
 
+## Restoration and input safety in the final release repair
+
+The final release repair also treats initial EPUB/PDF restoration as a read-only
+operation: layout-time relocated/page events update the UI but cannot PATCH or
+replace the local fallback before the requested position settles. The first
+screen of the first spine section is explicitly displayed as one-based location
+1 even when visible-glyph CFI mapping falls after epub.js's first generated
+location boundary. Edge taps wait 220 ms and are cancelled by a second press,
+double-click, selection, drag, or multi-touch so native selection is not turned
+into a page move. Real-renderer coverage includes exact near-start vertical RTL
+reload/TOC return and an actual RTL PDF left-edge turn.
+
+## Native horizontal spread review finding
+
+Independent review of the first final-release candidate found that the custom
+manager still forced every layout to `spread: none`. That cancelled the native
+two-column layout selected for horizontal chapters even though the display-mode
+control said “always spread”. The manager now suppresses native spread only for
+vertical chapters, where the adapter intentionally composes two single-page
+renditions. Real-browser coverage directly asserts the horizontal body column
+width instead of inferring spread behavior from the control value.
+
+The same review found that epub.js reapplied OPF direction during rendition
+startup. `Book.pageTurnDirection` is now applied after startup and before first
+display to both primary and preview renditions. A conflicting-metadata fixture
+proves that an LTR document keeps LTR text while an RTL Book setting controls
+native spread order and left/right edge navigation.
+
+The review's non-blocking efficiency and coverage observations were also
+addressed before the replacement candidate was cut: resize now performs one
+layout synchronization instead of nesting two, and the real PDFium test drags
+across the actual selection layer into the page-turn edge zone, confirms that a text
+highlight is produced, and confirms that the drag does not turn the page.
+
 ## Long-chapter reconstruction at 320px
 
 PR #52 merged as `c7d6487851282d7ff79686d9ec5cc5b714682fc0` after

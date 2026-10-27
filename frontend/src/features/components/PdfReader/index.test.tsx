@@ -106,6 +106,8 @@ describe('PdfReader navigation, outline, and progress', () => {
 		const { getByText } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
 		await expect.element(getByText('2 / 5 ページ 40%')).toBeInTheDocument();
+		await new Promise((resolve) => setTimeout(resolve, 850));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 	});
 
 	test('階層アウトラインを表示して対応ページへ移動し、目次を閉じる', async () => {
@@ -134,7 +136,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 
 		element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, isPrimary: true, clientX: 990, clientY: 20 }));
 		element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, isPrimary: true, clientX: 990, clientY: 20 }));
-		expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 3, behavior: 'auto' });
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 3, behavior: 'auto' }));
 
 		mocks.scrollToPage.mockClear();
 		element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 2, isPrimary: true, clientX: 10, clientY: 20 }));
@@ -151,6 +153,6 @@ describe('PdfReader navigation, outline, and progress', () => {
 
 		element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, isPrimary: true, clientX: 5, clientY: 20 }));
 		element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, isPrimary: true, clientX: 5, clientY: 20 }));
-		expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 3, behavior: 'auto' });
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 3, behavior: 'auto' }));
 	});
 });

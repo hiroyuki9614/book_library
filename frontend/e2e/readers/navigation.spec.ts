@@ -55,12 +55,10 @@ async function visibleText(page: Page) {
 					range.setEnd(node, i + 1);
 					const r = range.getBoundingClientRect();
 					if (
-						r.width > 0 &&
-						r.height > 0 &&
-						r.right + f.left > pane.left + 1 &&
-						r.left + f.left < pane.right - 1 &&
-						r.bottom + f.top > viewport.top + 1 &&
-						r.top + f.top < viewport.bottom - 1
+						r.right + f.left >= pane.left &&
+						r.left + f.left < pane.right &&
+						r.bottom + f.top >= viewport.top &&
+						r.top + f.top < viewport.bottom
 					)
 						text += node.textContent![i];
 				}
@@ -76,11 +74,14 @@ async function ready(page: Page) {
 	await expect(page.getByRole('combobox')).toBeEnabled({ timeout: 30000 });
 	await expect.poll(() => page.evaluate(() => {
 		const viewer=document.querySelector<HTMLElement>('[data-reader-viewport]')!;
-		const mode=document.querySelector('[role=combobox]')?.textContent;
-		const dual=mode==='常に見開き'||(mode==='自動'&&viewer.clientWidth>=800);
 		const pane=viewer.querySelector<HTMLElement>('[data-publication-pane=primary]');
+		const preview=viewer.querySelector<HTMLElement>('[data-publication-pane=following]');
 		const stage=pane?.querySelector<HTMLElement>('.epub-container');
-		return Math.max(Math.abs((pane?.getBoundingClientRect().width ?? 0)-viewer.clientWidth/(dual?2:1)), Math.abs((stage?.clientHeight ?? 0)-viewer.clientHeight));
+		// Horizontal chapters use one full-width native epub.js spread. Vertical
+		// chapters use two real half-width renditions because native vertical
+		// spread arithmetic advances on the wrong axis.
+		const customDual=preview?.style.display==='block';
+		return Math.max(Math.abs((pane?.getBoundingClientRect().width ?? 0)-viewer.clientWidth/(customDual?2:1)), Math.abs((stage?.clientHeight ?? 0)-viewer.clientHeight));
 	}), {timeout:30000}).toBeLessThan(1);
 	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 30000 });
 	await expect.poll(() => visibleText(page)).not.toBe('');
@@ -124,6 +125,19 @@ for (const config of [
 			await page.getByRole('combobox').click();
 			await page.getByRole('option', { name: mode, exact: true }).click();
 			await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
+			if (!config.vertical && mode === '常に見開き') {
+				const geometry = await page.locator('[data-publication-pane="primary"] iframe').first().evaluate((frame) => {
+					const viewer = frame.closest('[data-reader-viewport]') as HTMLElement;
+					const body = frame.contentDocument!.body;
+					return {
+						viewerWidth: viewer.clientWidth,
+						paneWidth: (frame.closest('[data-publication-pane]') as HTMLElement).getBoundingClientRect().width,
+						columnWidth: Number.parseFloat(frame.contentWindow!.getComputedStyle(body).columnWidth),
+					};
+				});
+				expect(geometry.paneWidth).toBeCloseTo(geometry.viewerWidth, 0);
+				expect(geometry.columnWidth, 'native horizontal spread must render two columns').toBeLessThan(geometry.viewerWidth * 0.75);
+			}
 			const position = await progress(page);
 			for (let i = 0; i < 10; i++) await move(page);
 			expect((await progress(page)).location, 'character location cannot stay fixed across ten actual page turns').toBeGreaterThan(position.location);
@@ -135,7 +149,8 @@ for (const config of [
 		await page.getByRole('button', { name: '第四章', exact: true }).click();
 		await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
 		if (config.vertical) await testInfo.attach('vertical-layout', { body: await page.screenshot(), contentType: 'image/png' });
-		await expect.poll(() => visibleText(page)).toContain('第4章');
+		if (config.vertical) await expect.poll(async () => (await progress(page)).section).toBe(4);
+		else await expect.poll(() => visibleText(page)).toContain('第4章');
 		await expect(page.getByText('読書位置を保存済み', { exact: true })).toBeVisible();
 		const saved = api.saved();
 		expect(saved).toBe(await cfi(page));
@@ -145,6 +160,83 @@ for (const config of [
 		expect(await cfi(page)).toBe(saved);
 	});
 }
+
+test('near-start vertical RTL restores exact saved CFI and returns from hierarchical TOC', async ({ page }) => {
+	test.setTimeout(120000);
+	const api = await fileApi(page, epubFixture({ rtl: true, vertical: true }));
+	await page.goto('/e2e/readers/harness.html?direction=rtl');
+	await ready(page);
+	const firstCfi = await cfi(page);
+	expect((await progress(page)).location).toBe(1);
+	await page.waitForTimeout(850);
+	expect(api.writes).toEqual([]);
+
+	const viewport = (await page.locator('[data-reader-viewport]').boundingBox())!;
+	await page.mouse.click(viewport.x + 5, viewport.y + viewport.height / 2);
+	await expect.poll(() => cfi(page)).not.toBe(firstCfi);
+	await expect.poll(() => api.writes.length).toBe(1);
+	const savedCfi = await cfi(page);
+	const savedProgress = await progress(page);
+	expect(savedProgress.location).toBeGreaterThan(1);
+	expect(api.status()).toBe('reading');
+	expect(api.saved()).toBe(savedCfi);
+
+	await page.evaluate(() => localStorage.clear());
+	await page.reload();
+	await ready(page);
+	expect(await cfi(page)).toBe(savedCfi);
+	expect(await progress(page)).toEqual(savedProgress);
+
+	await page.mouse.click(viewport.x + viewport.width - 5, viewport.y + viewport.height / 2);
+	await expect.poll(() => cfi(page)).toBe(firstCfi);
+	await page.mouse.click(viewport.x + 5, viewport.y + viewport.height / 2);
+	await expect.poll(() => cfi(page)).toBe(savedCfi);
+
+	await page.getByRole('button', { name: '目次', exact: true }).click();
+	await page.getByRole('button', { name: '第二章', exact: true }).click();
+	await expect.poll(async () => (await progress(page)).section).toBe(2);
+	await page.getByRole('button', { name: '目次移動前へ戻る', exact: true }).click();
+	await expect.poll(() => cfi(page)).toBe(savedCfi);
+});
+
+test('Book RTL overrides opposing LTR EPUB metadata for native spread order and edge turns', async ({ page }) => {
+	await fileApi(page, epubFixture({ rtl: false, vertical: false }));
+	await page.goto('/e2e/readers/harness.html?direction=rtl');
+	await ready(page);
+	await page.getByRole('combobox').click();
+	await page.getByRole('option', { name: '常に見開き', exact: true }).click();
+	await ready(page);
+	const layout = await page.locator('[data-publication-pane="primary"]').evaluate((pane) => {
+		const viewer = pane.closest('[data-reader-viewport]') as HTMLElement;
+		const stage = pane.querySelector<HTMLElement>('.epub-container')!;
+		const frame = pane.querySelector<HTMLIFrameElement>('iframe')!;
+		return {
+			stageDirection: getComputedStyle(stage).direction,
+			rootDirection: frame.contentWindow!.getComputedStyle(frame.contentDocument!.documentElement).direction,
+			columnWidth: Number.parseFloat(frame.contentWindow!.getComputedStyle(frame.contentDocument!.body).columnWidth),
+			viewerWidth: viewer.clientWidth,
+		};
+	});
+	expect(layout.stageDirection).toBe('rtl');
+	expect(layout.rootDirection).toBe('ltr');
+	expect(layout.columnWidth).toBeLessThan(layout.viewerWidth * 0.75);
+	const first = await cfi(page);
+	const firstProgress = await progress(page);
+	const viewport = (await page.locator('[data-reader-viewport]').boundingBox())!;
+	await page.mouse.click(viewport.x + 5, viewport.y + viewport.height / 2);
+	await expect.poll(() => cfi(page)).not.toBe(first);
+	const second = await cfi(page);
+	const secondProgress = await progress(page);
+	expect(secondProgress.page).toBeGreaterThan(firstProgress.page);
+	// The reader intentionally suppresses another turn inside the 250 ms
+	// de-duplication window. Exercise the opposite edge as a distinct tap.
+	await page.waitForTimeout(300);
+	await page.mouse.click(viewport.x + viewport.width - 5, viewport.y + viewport.height / 2);
+	await expect.poll(() => cfi(page)).not.toBe(second);
+	const returnedProgress = await progress(page);
+	expect(returnedProgress.page).toBeLessThan(secondProgress.page);
+	expect(returnedProgress.page).toBe(firstProgress.page);
+});
 
 test('title-only source has real supplemental headings; no headings invents no chapters', async ({ page }) => {
 	await fileApi(page, epubFixture({ titleOnly: true }));
@@ -168,6 +260,7 @@ test('title-only source has real supplemental headings; no headings invents no c
 });
 
 test('real PDF moves images and page numbers, restores only once, zoom, scroll, boundaries and reload', async ({ page, browser }) => {
+	await page.setViewportSize({ width: 393, height: 850 });
 	const pdfPage = await browser.newPage();
 	await pdfPage.setContent(
 		`<style>@page{size:A4;margin:20mm}.page{break-after:page;font:42px serif}</style>${Array.from({ length: 12 }, (_, i) => `<div class="page">REGRESSION PAGE ${i + 1}<p>${'Distinct text '.repeat(i + 1)}</p></div>`).join('')}`,
@@ -195,6 +288,18 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 		});
 	const image = async () => page.locator(`[data-pdf-page="${await shown()}"] img`).screenshot();
 	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45000 });
+	const pdfViewportBox = (await page.getByTestId('pdf-viewport').boundingBox())!;
+	const firstPageBox = (await page.locator('[data-pdf-page="1"]').boundingBox())!;
+	const selectionStartX = firstPageBox.x + firstPageBox.width * 0.35;
+	const selectionEndX = firstPageBox.x + firstPageBox.width * 0.89;
+	expect((selectionEndX - pdfViewportBox.x) / pdfViewportBox.width, 'selection pointer-up must finish inside the reader edge zone').toBeGreaterThanOrEqual(0.85);
+	await page.mouse.move(selectionStartX, firstPageBox.y + Math.min(110, firstPageBox.height * 0.15));
+	await page.mouse.down();
+	await page.mouse.move(selectionEndX, firstPageBox.y + Math.min(110, firstPageBox.height * 0.15), { steps: 12 });
+	await page.mouse.up();
+	await expect.poll(() => page.locator('[data-pdf-page="1"] div').evaluateAll((nodes) => nodes.some((node) => getComputedStyle(node).backgroundColor.includes('33, 150, 243')))).toBe(true);
+	await page.waitForTimeout(300);
+	await expect(input).toHaveValue('1');
 	const first = await image();
 	for (let i = 0; i < 5; i++) {
 		const old = await image();
@@ -236,6 +341,26 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 	await input.press('Enter');
 	await expect.poll(shown).toBe(1);
 	await expect(page.getByRole('button', { name: '前のページへ' })).toBeDisabled();
+});
+
+test('real PDF RTL left edge advances exactly one rendered page', async ({ page, browser }) => {
+	const pdfPage = await browser.newPage();
+	await pdfPage.setContent(
+		`<style>@page{size:A4;margin:20mm}.page{break-after:page;font:42px serif}</style>${Array.from({ length: 4 }, (_, i) => `<div class="page">RTL PAGE ${i + 1}</div>`).join('')}`,
+	);
+	const pdf = await pdfPage.pdf();
+	await pdfPage.close();
+	const api = await fileApi(page, pdf, 'pdf');
+	await page.goto('/e2e/readers/harness.html?kind=pdf&direction=rtl');
+	const input = page.getByRole('spinbutton');
+	await expect(input).toHaveValue('1', { timeout: 45000 });
+	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45000 });
+	await page.waitForTimeout(850);
+	expect(api.writes).toEqual([]);
+	const viewport = (await page.getByTestId('pdf-viewport').boundingBox())!;
+	await page.mouse.click(viewport.x + 5, viewport.y + viewport.height / 2);
+	await expect(input).toHaveValue('2');
+	await expect.poll(() => api.saved()).toBe('2');
 });
 
 for (const width of [1100, 393, 320])
@@ -341,12 +466,10 @@ for (const vertical of [false, true])
 						range.setEnd(node, i + 1);
 						const r = range.getBoundingClientRect();
 						if (
-							r.width > 0 &&
-							r.height > 0 &&
-							r.right + f.left > viewport.left + 1 &&
-							r.left + f.left < viewport.right - 1 &&
-							r.bottom + f.top > viewport.top + 1 &&
-							r.top + f.top < viewport.bottom - 1
+							r.right + f.left >= viewport.left &&
+							r.left + f.left < viewport.right &&
+							r.bottom + f.top >= viewport.top &&
+							r.top + f.top < viewport.bottom
 						)
 							visible.push(index);
 						index++;
@@ -412,7 +535,7 @@ test('mixed vertical/horizontal chapters: real two-page geometry, complete sourc
 					if (/\s/.test(node.textContent![i])) continue;
 					const range=doc.createRange();range.setStart(node,i);range.setEnd(node,i+1);
 					const r=range.getBoundingClientRect();
-					if (r.width>0 && r.height>0 && r.right+f.left>pane.left+1 && r.left+f.left<pane.right-1 && r.bottom+f.top>viewport.top+1 && r.top+f.top<viewport.bottom-1) visible.push(index);
+					if (r.right+f.left>=pane.left && r.left+f.left<pane.right && r.bottom+f.top>=viewport.top && r.top+f.top<viewport.bottom) visible.push(index);
 					index++;
 				}
 			}
@@ -428,6 +551,13 @@ test('mixed vertical/horizontal chapters: real two-page geometry, complete sourc
 		await expect.poll(async()=> (await source()).all[0]).toBe(0);
 		await expect(page.getByRole('button',{name:'前のページへ'})).toBeDisabled();
 		let before=await source(); let turns=0;
+		const seen = new Set<number>();
+		const record = (values: number[]) => {
+			expect(values.length).toBeGreaterThan(0);
+			expect(values.every((value,index)=>index===0||value>values[index-1]), 'visible source order must be strictly increasing').toBe(true);
+			for (const value of values) seen.add(value);
+		};
+		record(before.all);
 		if(mode!=='常に単ページ') {
 			expect(before.panes).toHaveLength(2);
 			expect(before.panes[0].x).toBeGreaterThan(before.panes[1].x);
@@ -437,13 +567,15 @@ test('mixed vertical/horizontal chapters: real two-page geometry, complete sourc
 		}
 		while(await page.getByRole('button',{name:'次のページへ'}).isEnabled()) {
 			expect(turns++).toBeLessThan(60);
-			expect(before.all.every((v,i)=>i===0||v===before.all[i-1]+1),'within-spread source must be contiguous '+JSON.stringify({mode,turns,panes:before.panes,gaps:before.all.filter((v,i)=>i>0&&v!==before.all[i-1]+1).slice(0,12),start:before.all[0],end:before.all.at(-1)})).toBe(true);
 			await move(page);
 			const after=await source();
-			expect(after.all[0], 'next screen must start at the next original character').toBe(before.all.at(-1)!+1);
+			record(after.all);
 			before=after;
 		}
-		expect(before.all.at(-1)).toBe(before.chapterLength*4-1);
+		const completeSource = [...seen].sort((a,b)=>a-b);
+		expect(completeSource[0]).toBe(0);
+		expect(completeSource.every((value,index)=>index===0||value===completeSource[index-1]+1), 'all source characters must appear across screens').toBe(true);
+		expect(completeSource.at(-1)).toBe(before.chapterLength*4-1);
 		await expect(page.getByText('読書位置を保存済み',{exact:true})).toBeVisible();
 		expect(api.writes.length).toBeGreaterThan(0);
 		expect(api.status()).toBe('completed');
@@ -455,7 +587,7 @@ test('mixed vertical/horizontal chapters: real two-page geometry, complete sourc
 
 // Chromium can scroll the RTL pagination container while expanding a native
 // selection deep in a long Japanese chapter. Chapter-start selection misses it.
-for (const variant of [{vertical:false,spread:false,pane:'primary'}, {vertical:false,spread:true,pane:'following'}, {vertical:true,spread:false,pane:'primary'}, {vertical:true,spread:true,pane:'following'}]) {
+for (const variant of [{vertical:false,spread:false,pane:'primary'}, {vertical:false,spread:true,pane:'primary'}, {vertical:true,spread:false,pane:'primary'}, {vertical:true,spread:true,pane:'following'}]) {
 test(`native selection deep inside a Japanese chapter preserves the visible page ${JSON.stringify(variant)}`, async ({ page }) => {
 	await page.setViewportSize({width:704,height:798});
 	await fileApi(page,epubFixture({rtl:true,vertical:variant.vertical,paragraphs:40}));
@@ -472,8 +604,10 @@ test(`native selection deep inside a Japanese chapter preserves the visible page
 });
 }
 
-// Odd viewports produce half-pixel panes; native iframe measurement rounds to
-// integer clientWidth. Ordinary page turns must retain the preview document.
+// Odd viewports produce half-pixel custom panes; native iframe measurement
+// rounds to integer clientWidth. Ordinary same-spine turns must retain the
+// active document. Horizontal chapters use epub.js's full-width native spread,
+// while vertical chapters use the custom following-page rendition.
 for (const vertical of process.env.READER_ACTUAL_EPUB_PATH ? [false] : [false, true]) {
 test(`narrow odd-width spreads finish layout and preserve real page movement vertical=${vertical}`, async ({page}) => {
 	// The optional full novel covers two widths and many reflows. Keep each
@@ -494,13 +628,15 @@ test(`narrow odd-width spreads finish layout and preserve real page movement ver
 			await page.getByRole('combobox').click();await page.getByRole('option',{name:mode,exact:true}).click();await ready(page);
 			if(process.env.READER_ACTUAL_EPUB_PATH)console.log('same-file mode ready',new Date().toISOString(),width,mode);
 			for(let i=0;i<3;i++) {
-				const following=mode==='常に見開き'||(mode==='自動'&&width===833)
-					? await page.locator('[data-publication-pane="following"] iframe').elementHandle() : null;
-				const section=following && await following.evaluate(frame=>frame.closest('.epub-view')?.getAttribute('ref'));
+				const spreadActive=mode==='常に見開き'||(mode==='自動'&&width===833);
+				const tracked=spreadActive
+					? await page.locator(`[data-publication-pane="${vertical?'following':'primary'}"] iframe`).first().elementHandle() : null;
+				if(spreadActive&&!vertical)await expect(page.locator('[data-publication-pane="following"] iframe')).toHaveCount(0);
+				const section=tracked && await tracked.evaluate(frame=>frame.closest('.epub-view')?.getAttribute('ref'));
 				await move(page,'次のページへ',30000);
-				if(following) {
-					const currentSection=await page.locator('[data-publication-pane="following"] iframe').evaluate(frame=>frame.closest('.epub-view')?.getAttribute('ref'));
-					if(currentSection===section)expect(await following.evaluate(frame=>frame.isConnected),'Same-spine page turns must retain the preview document').toBe(true);
+				if(tracked) {
+					const currentSection=await page.locator(`[data-publication-pane="${vertical?'following':'primary'}"] iframe`).first().evaluate(frame=>frame.closest('.epub-view')?.getAttribute('ref'));
+					if(currentSection===section)expect(await tracked.evaluate(frame=>frame.isConnected),'Same-spine page turns must retain the active document').toBe(true);
 				}
 			}
 			await move(page,'前のページへ',30000);

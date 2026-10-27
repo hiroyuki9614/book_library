@@ -117,7 +117,9 @@ const PageNavigation = ({ bookId, documentId, initialPage, pageTurnDirection }: 
 			if (event.documentId !== documentId || restoredDocument.current === documentId) return;
 			const page = Math.max(1, Math.min(initialPage, event.totalPages));
 			restoredDocument.current = documentId;
-			lastPersistedPage.current = null;
+			// The restored target is already authoritative. Do not PATCH it again;
+			// only a subsequent user-visible page change should be persisted.
+			lastPersistedPage.current = page;
 			setTargetPage(page);
 			scrollCapability.forDocument(documentId).scrollToPage({ pageNumber: page, behavior: 'auto' });
 		});

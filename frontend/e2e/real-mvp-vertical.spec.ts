@@ -75,6 +75,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	const pageInput = page.getByRole('spinbutton');
 	await expect(pageInput).toHaveValue('1', { timeout: 30_000 });
 	await expect(page.getByText('1 / 2 ページ 50%')).toBeVisible();
+	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 30_000 });
 	await page.getByRole('button', { name: '目次' }).click();
 	await expect(page.getByRole('button', { name: 'First chapter' })).toBeVisible();
 	await page.getByRole('button', { name: 'First chapter' }).click();

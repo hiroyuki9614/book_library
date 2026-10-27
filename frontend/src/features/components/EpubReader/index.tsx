@@ -113,6 +113,8 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 		if (!viewer || !epubData || !readingInfoReady) return;
 		let disposed = false;
 		let ready = false;
+		let readyToPersist = false;
+		let initialLocation = '';
 		let resizeFrame = 0;
 		let lastSize = { width: viewer.clientWidth, height: viewer.clientHeight };
 		const book = ePub(epubData) as unknown as RuntimeBook;
@@ -130,15 +132,22 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 			const cfi = location.start.cfi;
 			const index = book.locations.locationFromCfi(cfi);
 			const last = book.locations.total;
-			currentCfiRef.current = cfi;
-			setPercentage(location.atEnd ? 100 : index >= 0 && last > 0 ? Math.round((index / last) * 100) : null);
-			setCurrentPage(location.atEnd ? last + 1 : index >= 0 && last > 0 ? index + 1 : 0);
+			const atPublicationStart = Boolean(
+				location.atStart
+				|| (location.start.index === 0 && location.start.displayed?.page === 1),
+			);
+			initialLocation = cfi;
+			setPercentage(location.atEnd ? 100 : atPublicationStart ? 0 : index >= 0 && last > 0 ? Math.round((index / last) * 100) : null);
+			setCurrentPage(location.atEnd ? last + 1 : atPublicationStart ? 1 : index >= 0 && last > 0 ? index + 1 : 0);
 			setCurrentHref(location.start.href ?? '');
 			setTotalPage(last >= 0 ? last + 1 : 0);
 			if (location.start.displayed) setScreenPage({ ...location.start.displayed, section: location.start.index + 1 });
 			setBounds({ start: !!location.atStart, end: !!location.atEnd });
-			localStorage.setItem(storageKey, cfi);
-			save(cfi, location.atEnd ? 'completed' : 'reading');
+			if (readyToPersist) {
+				currentCfiRef.current = cfi;
+				localStorage.setItem(storageKey, cfi);
+				save(cfi, location.atEnd ? 'completed' : 'reading');
+			}
 		};
 		const onKey = (event: KeyboardEvent) => {
 			if (!ready || tocOpenRef.current || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
@@ -219,14 +228,27 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 					}
 				}
 				if (disposed) return;
+				const restoreTarget = currentCfiRef.current;
+				let restoredSavedTarget = false;
 				try {
-					await rendition.display(currentCfiRef.current || undefined);
+					await rendition.display(restoreTarget || undefined);
+					restoredSavedTarget = Boolean(restoreTarget);
 				} catch {
-					if (!currentCfiRef.current || disposed) throw new Error('EPUB display failed');
+					if (!restoreTarget || disposed) throw new Error('EPUB display failed');
 					setRestoreError(true);
 					await rendition.display();
 				}
 				if (!disposed) {
+					// Initial relocated events are layout observations, not user moves. Keep
+					// the authoritative saved CFI until display has fully settled so a
+					// transient end-of-book mapping cannot overwrite server or fallback data.
+					await frame();
+					await frame();
+					if (disposed) return;
+					const stableLocation = restoredSavedTarget ? restoreTarget : initialLocation;
+					currentCfiRef.current = stableLocation;
+					if (stableLocation) localStorage.setItem(storageKey, stableLocation);
+					readyToPersist = true;
 					ready = true;
 					setIsLoading(false);
 				}
