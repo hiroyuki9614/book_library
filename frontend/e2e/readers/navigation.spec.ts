@@ -227,6 +227,9 @@ test('Book RTL overrides opposing LTR EPUB metadata for native spread order and 
 	const second = await cfi(page);
 	const secondProgress = await progress(page);
 	expect(secondProgress.page).toBeGreaterThan(firstProgress.page);
+	// The reader intentionally suppresses another turn inside the 250 ms
+	// de-duplication window. Exercise the opposite edge as a distinct tap.
+	await page.waitForTimeout(300);
 	await page.mouse.click(viewport.x + viewport.width - 5, viewport.y + viewport.height / 2);
 	await expect.poll(() => cfi(page)).not.toBe(second);
 	const returnedProgress = await progress(page);
@@ -256,6 +259,7 @@ test('title-only source has real supplemental headings; no headings invents no c
 });
 
 test('real PDF moves images and page numbers, restores only once, zoom, scroll, boundaries and reload', async ({ page, browser }) => {
+	await page.setViewportSize({ width: 393, height: 850 });
 	const pdfPage = await browser.newPage();
 	await pdfPage.setContent(
 		`<style>@page{size:A4;margin:20mm}.page{break-after:page;font:42px serif}</style>${Array.from({ length: 12 }, (_, i) => `<div class="page">REGRESSION PAGE ${i + 1}<p>${'Distinct text '.repeat(i + 1)}</p></div>`).join('')}`,
@@ -283,8 +287,11 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 		});
 	const image = async () => page.locator(`[data-pdf-page="${await shown()}"] img`).screenshot();
 	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45000 });
+	const pdfViewportBox = (await page.getByTestId('pdf-viewport').boundingBox())!;
 	const firstPageBox = (await page.locator('[data-pdf-page="1"]').boundingBox())!;
-	await page.mouse.move(firstPageBox.x + firstPageBox.width * 0.12, firstPageBox.y + Math.min(110, firstPageBox.height * 0.15));
+	const selectionStartX = firstPageBox.x + firstPageBox.width * 0.11;
+	expect((selectionStartX - pdfViewportBox.x) / pdfViewportBox.width, 'selection must start inside the reader edge zone').toBeLessThanOrEqual(0.15);
+	await page.mouse.move(selectionStartX, firstPageBox.y + Math.min(110, firstPageBox.height * 0.15));
 	await page.mouse.down();
 	await page.mouse.move(firstPageBox.x + firstPageBox.width * 0.65, firstPageBox.y + Math.min(110, firstPageBox.height * 0.15), { steps: 12 });
 	await page.mouse.up();
