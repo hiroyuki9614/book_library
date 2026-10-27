@@ -20,9 +20,10 @@ type CommandButtonProps = {
 
 const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageInput, handleGoToPage }: CommandButtonProps) => {
 	if (!prevResolved || !prevResolved.visible) return null;
+	const percentage = state.totalPages > 0 ? Math.round((state.currentPage / state.totalPages) * 1000) / 10 : null;
 
 	return (
-		<div className='flex items-center justify-center gap-2'>
+		<div className='flex flex-wrap items-center justify-center gap-2'>
 			<button
 				onClick={prevResolved.execute}
 				disabled={prevResolved.disabled}
@@ -44,8 +45,13 @@ const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageIn
 					max={state.totalPages}
 					className='h-11 w-16 rounded-md border-0 bg-white px-2 text-center font-mono text-sm font-medium text-gray-700 shadow-sm ring-1 ring-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-gray-300 dark:ring-gray-600'
 				/>
-				<span className='text-xs font-medium text-gray-600 dark:text-gray-300'>of {state.totalPages}</span>
+				<span className='text-xs font-medium text-gray-600 dark:text-gray-300'>/ {state.totalPages}</span>
 			</form>
+			{percentage !== null && (
+				<output aria-live='polite' className='min-w-32 text-center text-xs font-medium text-gray-600 dark:text-gray-300'>
+					{state.currentPage} / {state.totalPages} ページ {percentage}%
+				</output>
+			)}
 			<button
 				onClick={nextResolved?.execute}
 				disabled={nextResolved?.disabled}

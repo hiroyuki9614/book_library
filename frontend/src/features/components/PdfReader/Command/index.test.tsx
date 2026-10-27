@@ -34,7 +34,8 @@ describe('CommandButton', () => {
 
 		await expect.element(getByText('Page')).toBeInTheDocument();
 		await expect.element(getByRole('spinbutton')).toHaveValue(4);
-		await expect.element(getByText('of 5')).toBeInTheDocument();
+		await expect.element(getByText('/ 5', { exact: true })).toBeInTheDocument();
+		await expect.element(getByText('2 / 5 ページ 40%')).toBeInTheDocument();
 	});
 
 	test('executes visible navigation commands', async () => {
