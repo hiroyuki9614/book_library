@@ -97,7 +97,9 @@ function createPlugins(documentData: ArrayBuffer, direction: PageTurnDirection) 
 	];
 }
 
-const PageNavigation = ({ bookId, documentId, initialPage, pageTurnDirection }: { bookId: number; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection }) => {
+type PageNavigationProps = { bookId: number; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection };
+
+const usePageNavigation = ({ bookId, documentId, initialPage, pageTurnDirection }: PageNavigationProps) => {
 	const { provides: scroll, state } = useScroll(documentId);
 	const [pageInputOverride, setPageInputOverride] = useState<string | null>(null);
 	const pageInput = pageInputOverride ?? String(state.currentPage);
@@ -142,21 +144,35 @@ const PageNavigation = ({ bookId, documentId, initialPage, pageTurnDirection }: 
 		}
 	};
 
-	return (
+	return {
+		state,
+		pageInput,
+		setPageInput: setPageInputOverride,
+		handleGoToPage,
+		previousCommand,
+		nextCommand,
+		status,
+		retry,
+		pageTurnDirection,
+	};
+};
+
+type PageNavigationModel = ReturnType<typeof usePageNavigation>;
+
+const PageNavigation = ({ navigation }: { navigation: PageNavigationModel }) => (
 		<div className='flex flex-col items-center gap-1'>
 			<CommandButton
-				pageTurnDirection={pageTurnDirection}
-				prevResolved={previousCommand}
-				nextResolved={nextCommand}
-				state={state}
-				pageInput={pageInput}
-				setPageInput={setPageInputOverride}
-				handleGoToPage={handleGoToPage}
+				pageTurnDirection={navigation.pageTurnDirection}
+				prevResolved={navigation.previousCommand}
+				nextResolved={navigation.nextCommand}
+				state={navigation.state}
+				pageInput={navigation.pageInput}
+				setPageInput={navigation.setPageInput}
+				handleGoToPage={navigation.handleGoToPage}
 			/>
-			<ReadingSaveStatus status={status} retry={retry} />
+			<ReadingSaveStatus status={navigation.status} retry={navigation.retry} />
 		</div>
-	);
-};
+);
 
 function getBookmarkPage(bookmark: PdfBookmarkObject) {
 	if (bookmark.target?.type === 'destination') return bookmark.target.destination.pageIndex + 1;
@@ -454,12 +470,13 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled }: { do
 function ReaderWorkspace({ bookId, documentId, initialPage, pageTurnDirection, mobileMenuOpen, onMobileMenuChange }: { bookId: number; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection; mobileMenuOpen: boolean; onMobileMenuChange: (open: boolean) => void }) {
 	const [tocOpen, setTocOpen] = useState(false);
 	const [mobileTocOpen, setMobileTocOpen] = useState(false);
+	const navigation = usePageNavigation({ bookId, documentId, initialPage, pageTurnDirection });
 	return (
 		<div className='flex h-full flex-col'>
 			<div className='mb-1 hidden shrink-0 flex-wrap items-center justify-center gap-2 border-b py-1 sm:mb-2 sm:py-2 md:flex'>
 				<ZoomToolbar documentId={documentId} />
 				<PdfTableOfContents documentId={documentId} open={tocOpen} onOpenChange={setTocOpen} />
-				<PageNavigation bookId={bookId} documentId={documentId} initialPage={initialPage} pageTurnDirection={pageTurnDirection} />
+				<PageNavigation navigation={navigation} />
 			</div>
 			<Sheet open={mobileMenuOpen} onOpenChange={onMobileMenuChange}>
 				<SheetContent side='right' className='w-[min(88vw,22rem)] p-0 duration-[240ms] motion-reduce:duration-0 [&>button]:size-11'>
@@ -470,7 +487,7 @@ function ReaderWorkspace({ bookId, documentId, initialPage, pageTurnDirection, m
 					<div className='no-scrollbar min-h-0 flex-1 overflow-y-auto p-4'>
 						<div className='flex flex-col gap-3'>
 							<ZoomToolbar documentId={documentId} compact />
-							<PageNavigation bookId={bookId} documentId={documentId} initialPage={initialPage} pageTurnDirection={pageTurnDirection} />
+							<PageNavigation navigation={navigation} />
 							<Button type='button' variant='outline' className='min-h-11 w-full justify-start' aria-expanded={mobileTocOpen} onClick={() => setMobileTocOpen((open) => !open)}>目次</Button>
 							{mobileTocOpen && <PdfTableOfContents inline documentId={documentId} open={mobileTocOpen} onOpenChange={setMobileTocOpen} />}
 						</div>
