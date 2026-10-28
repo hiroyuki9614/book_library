@@ -134,7 +134,7 @@ The reader derives progress without adding a database percentage column. PDF dis
 - Both readers use approximately the outer 15% as tap navigation. Pointer travel, long press, multi-touch, existing text selection, links and interactive controls are excluded. EPUB listeners are installed inside each epub.js iframe through content hooks, de-duplicated per document, removed with the view, and fully cleaned up on reader teardown.
 - ReadingInfo writes are delayed briefly during ordinary navigation and serialized; the final PDF page and epub.js `atEnd` retain the existing immediate completed transition.
 - Physical i5 GUI-browser acceptance is the release gate for this reader repair and is not replaced by headless or mobile emulation. Android hardware acceptance is tracked and reported separately; it is not a blocker for this approved release path.
-- Mobile reader design work is isolated on `feat/mobile-reader-design-20261028`: PDF mobile controls are grouped in a right-side menu, EmbedPDF text selection is used for the explicit copy mode, and EPUB mobile rendition content is full width with 16px horizontal text padding. Browser/device acceptance remains pending until a browser-capable environment is available.
+- Mobile reader design work is isolated on `feat/mobile-reader-design-20261028`: PDF mobile controls are grouped in a right-side menu, EmbedPDF text selection is used for the explicit copy mode, and EPUB mobile rendition content is full width with 16px horizontal text padding. The epub.js column gap is synchronized to 32px on mobile and 0px on desktop so its inline layout padding cannot change that contract at narrow widths. Browser/device acceptance remains pending until a browser-capable environment is available.
 
 ## Admin
 
