@@ -91,7 +91,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.useScroll.mockReset();
 		mocks.useScroll.mockImplementation(() => {
 			const callIndex = mocks.useScroll.mock.calls.length;
-			const state = callIndex % 3 === 2 ? mocks.viewportScrollState : mocks.scrollState;
+			const state = callIndex % 3 === 0 ? mocks.viewportScrollState : mocks.scrollState;
 			return { provides: mocks.scrollProvides, state };
 		});
 		mocks.fetchBookFile.mockResolvedValue(new Blob(['PDF'], { type: 'application/pdf' }));
