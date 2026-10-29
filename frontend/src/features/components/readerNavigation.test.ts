@@ -7,7 +7,7 @@ describe('reader edge tap navigation', () => {
 		const host = document.createElement('div');
 		const onTurn = vi.fn();
 		const pointerUp = vi.fn();
-		host.addEventListener('pointerup', pointerUp);
+		window.addEventListener('pointerup', pointerUp, { capture: true });
 		const cleanup = attachEdgeTapNavigation(host, {
 			direction: 'ltr',
 			getBounds: () => ({ left: 0, width: 100 }),
@@ -24,6 +24,7 @@ describe('reader edge tap navigation', () => {
 		expect(pointerUp).toHaveBeenCalledOnce();
 
 		cleanup();
+		window.removeEventListener('pointerup', pointerUp, { capture: true });
 		vi.useRealTimers();
 	});
 

@@ -366,7 +366,7 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, curren
 		const onWheel = () => cancelLongPress();
 		const onTouchStart = (event: TouchEvent) => { if (event.touches.length > 1) cancelLongPress(); };
 		container.addEventListener('pointerdown', onPointerDown);
-		container.addEventListener('pointermove', onPointerMove);
+		window.addEventListener('pointermove', onPointerMove, { capture: true, passive: true });
 		// Edge navigation observes pointerup in window capture and may stop it
 		// before EmbedPDF's page layer receives it. Keep long-press cleanup on the
 		// same target so a short edge tap cannot leave its timer armed.
@@ -376,7 +376,7 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, curren
 		container.addEventListener('touchstart', onTouchStart, { passive: true });
 		return () => {
 			container.removeEventListener('pointerdown', onPointerDown);
-			container.removeEventListener('pointermove', onPointerMove);
+			window.removeEventListener('pointermove', onPointerMove, { capture: true });
 			window.removeEventListener('pointerup', onPointerEnd, { capture: true });
 			window.removeEventListener('pointercancel', onPointerEnd, { capture: true });
 			container.removeEventListener('wheel', onWheel);

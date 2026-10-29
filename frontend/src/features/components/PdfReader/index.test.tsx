@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => {
 		copyToClipboard,
 		selectionProvides: { forDocument: () => ({ clear: clearSelection, copyToClipboard, getSelectedText: () => ({ toPromise: async () => ['選択したPDF本文'] }) }) },
 		scrollState: { currentPage: 2, totalPages: 5 },
+		viewportScrollState: { currentPage: 2, totalPages: 5 },
+		useScroll: vi.fn(),
 		scrollProvides: {
 			scrollToPage,
 			getCurrentPage: vi.fn(() => 2),
@@ -49,10 +51,7 @@ vi.mock('@embedpdf/plugin-scroll/react', () => ({
 	ScrollPluginPackage: {},
 	useScrollCapability: () => ({ provides: { onLayoutReady: (callback: (event: {documentId:string;totalPages:number}) => void) => { queueMicrotask(() => callback({documentId:'doc-1',totalPages:5})); return () => {}; }, forDocument: () => mocks.scrollProvides } }),
 	ScrollStrategy: { Vertical: 'vertical' },
-	useScroll: () => ({
-		provides: mocks.scrollProvides,
-		state: mocks.scrollState,
-	}),
+	useScroll: () => mocks.useScroll(),
 	Scroller: ({ renderPage }: { renderPage: (value: { width: number; height: number; pageIndex: number }) => React.ReactNode }) => (
 		<div>{renderPage({ width: 200, height: 300, pageIndex: 0 })}</div>
 	),
@@ -87,6 +86,14 @@ describe('PdfReader navigation, outline, and progress', () => {
 	beforeEach(() => {
 		mocks.scrollState.currentPage = 2;
 		mocks.scrollState.totalPages = 5;
+		mocks.viewportScrollState.currentPage = 2;
+		mocks.viewportScrollState.totalPages = 5;
+		mocks.useScroll.mockReset();
+		mocks.useScroll.mockImplementation(() => {
+			const callIndex = mocks.useScroll.mock.calls.length;
+			const state = callIndex % 3 === 2 ? mocks.viewportScrollState : mocks.scrollState;
+			return { provides: mocks.scrollProvides, state };
+		});
 		mocks.fetchBookFile.mockResolvedValue(new Blob(['PDF'], { type: 'application/pdf' }));
 		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '2', currentPage: 2, readStatus: 'reading' });
 		mocks.saveReadingInfo.mockResolvedValue({});
@@ -157,7 +164,8 @@ describe('PdfReader navigation, outline, and progress', () => {
 	});
 
 	test('端タップはツールバーと共有するページ状態から次ページを計算する', async () => {
-		mocks.scrollProvides.getCurrentPage.mockReturnValue(4);
+		mocks.scrollState.currentPage = 4;
+		mocks.viewportScrollState.currentPage = 2;
 		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		const element = getByTestId('pdf-viewport').element() as HTMLElement;
 		vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 600, width: 1000, height: 600, x: 0, y: 0, toJSON: () => ({}) });
@@ -165,8 +173,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 
 		element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 11, isPrimary: true, clientX: 990, clientY: 20 }));
 		element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 11, isPrimary: true, clientX: 990, clientY: 20 }));
-		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 3, behavior: 'auto' }));
-		mocks.scrollProvides.getCurrentPage.mockReturnValue(2);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 5, behavior: 'auto' }));
 	});
 
 	test('端タップ後に長押しタイマーを残さない', async () => {
