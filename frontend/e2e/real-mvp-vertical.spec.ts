@@ -107,10 +107,15 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	// Locator hit testing waits until the closing TOC overlay releases pointer input.
 	await viewport.click({position:{x:viewportBounds!.width-5,y:viewportBounds!.height/2}});
 
+	if (mobileControls) {
+		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
+		await expect(page.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
+	}
 	await expect(pageInput).toHaveValue('2');
 	await expect.poll(shown).toBe(2);
 	expect((await page.locator('[data-pdf-page="2"] img').screenshot()).equals(firstImage)).toBe(false);
 	await expect(page.locator('output[aria-live="polite"]:visible')).toHaveText('2 / 2 ページ 100%');
+	if (mobileControls) await page.getByRole('button', { name: '閉じる', exact: true }).click();
 	expect((await saveResponse).status()).toBe(200);
 	await page.setViewportSize({ width: 851, height: 393 });
 	await expect(viewport).toBeVisible();
