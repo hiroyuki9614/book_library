@@ -13,17 +13,17 @@ export class PublicationManager extends DefaultManager {
 		// long chapter twice when switching spreads. Reflow existing documents;
 		// rendition's resized handler still restores the CFI on the new grid.
 		this.retainingViews = this.isPaginated && this.layout?.name === 'reflowable';
+		const writingModes = new Map<unknown, string>();
+		const retainedViews: Array<{ contents?: { document: Document }; size: (width: number, height: number) => void }> = [];
 		this.views?.forEach(view => {
-			// Conditional publisher CSS can change the pagination axis on resize.
-			// Let native reload rediscover it; unrelated media rules should not
-			// discard the loaded iframe and its native selection.
+			retainedViews.push(view);
 			try {
+				const body = view.contents?.document.body;
+				if (body) writingModes.set(view, getComputedStyle(body).writingMode);
 				for (const sheet of view.contents?.document.styleSheets ?? []) {
-					const rules = [...sheet.cssRules].map((rule) => rule.cssText).join('\n');
-					if (
-						(sheet.media.mediaText && sheet.media.mediaText !== 'all' && /writing-mode|direction/i.test(rules))
-						|| (/@(?:media|container|import)\b/i.test(rules) && /writing-mode|direction/i.test(rules))
-					) this.retainingViews = false;
+					// An unreadable stylesheet can change the writing axis without being
+					// observable here; let epub.js rebuild in that case.
+					void sheet.cssRules;
 				}
 			} catch { this.retainingViews = false; }
 		});
@@ -31,7 +31,15 @@ export class PublicationManager extends DefaultManager {
 		try {
 			super.resize(width, height, cfi);
 			if (this.retainingViews && (previous.width !== this.viewSettings.width || previous.height !== this.viewSettings.height)) {
-				this.views?.forEach(view => view.size(this.viewSettings.width, this.viewSettings.height));
+				retainedViews.forEach(view => view.size(this.viewSettings.width, this.viewSettings.height));
+				for (const view of retainedViews) {
+					const body = view.contents?.document.body;
+					if (body && writingModes.get(view) !== getComputedStyle(body).writingMode) {
+						this.retainingViews = false;
+						break;
+					}
+				}
+				if (!this.retainingViews) super.resize(width, height, cfi);
 			}
 		} finally {
 			this.retainingViews = false;
