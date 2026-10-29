@@ -15,10 +15,15 @@ export class PublicationManager extends DefaultManager {
 		this.retainingViews = this.isPaginated && this.layout?.name === 'reflowable';
 		this.views?.forEach(view => {
 			// Conditional publisher CSS can change the pagination axis on resize.
-			// Let native reload rediscover it; unreadable CSS also takes that path.
+			// Let native reload rediscover it; unrelated media rules should not
+			// discard the loaded iframe and its native selection.
 			try {
 				for (const sheet of view.contents?.document.styleSheets ?? []) {
-					if ((sheet.media.mediaText && sheet.media.mediaText !== 'all') || [...sheet.cssRules].some(rule => /@(?:media|container|import)\b/i.test(rule.cssText))) this.retainingViews = false;
+					const rules = [...sheet.cssRules].map((rule) => rule.cssText).join('\n');
+					if (
+						(sheet.media.mediaText && sheet.media.mediaText !== 'all' && /writing-mode|direction/i.test(rules))
+						|| (/@(?:media|container|import)\b/i.test(rules) && /writing-mode|direction/i.test(rules))
+					) this.retainingViews = false;
 				}
 			} catch { this.retainingViews = false; }
 		});
