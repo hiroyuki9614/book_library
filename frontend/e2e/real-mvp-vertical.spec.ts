@@ -79,7 +79,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	}
 	const pageInput = page.getByRole('spinbutton');
 	await expect(pageInput).toHaveValue('1', { timeout: 30_000 });
-	await expect(page.getByText('1 / 2 ページ 50%')).toBeVisible();
+	await expect(page.locator('output[aria-live="polite"]:visible')).toHaveText('1 / 2 ページ 50%');
 	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 30_000 });
 	await page.getByRole('button', { name: '目次' }).click();
 	await expect(page.getByRole('button', { name: 'First chapter' })).toBeVisible();
@@ -110,7 +110,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	await expect(pageInput).toHaveValue('2');
 	await expect.poll(shown).toBe(2);
 	expect((await page.locator('[data-pdf-page="2"] img').screenshot()).equals(firstImage)).toBe(false);
-	await expect(page.getByText('2 / 2 ページ 100%')).toBeVisible();
+	await expect(page.locator('output[aria-live="polite"]:visible')).toHaveText('2 / 2 ページ 100%');
 	expect((await saveResponse).status()).toBe(200);
 	await page.setViewportSize({ width: 851, height: 393 });
 	await expect(viewport).toBeVisible();
