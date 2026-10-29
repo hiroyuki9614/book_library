@@ -327,7 +327,9 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 	await page.mouse.up();
 	await expect.poll(() => page.locator('[data-pdf-page="1"] div').evaluateAll((nodes) => nodes.some((node) => getComputedStyle(node).backgroundColor.includes('33, 150, 243')))).toBe(true);
 	await page.waitForTimeout(300);
+	if (mobileControls) await openControls();
 	await expect(input).toHaveValue('1');
+	if (mobileControls) await closeControls();
 	const first = await image();
 	await testInfo.attach('pdf-normal', { body: await page.screenshot(), contentType: 'image/png' });
 	const longPressPage = (await page.locator('[data-pdf-page="1"]').boundingBox())!;

@@ -109,8 +109,6 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 			primary.spread(nativeDual ? 'always' : 'none', nativeDual ? 1 : 800);
 			primary.resize(width, height, cfi);
 			await frames();
-			await primary.display(cfi);
-			await frames();
 		}
 		current = locationOf(primary);
 		if (customDual && current?.start && !current.atEnd) {
