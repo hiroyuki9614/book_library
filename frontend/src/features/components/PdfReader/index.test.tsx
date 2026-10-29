@@ -167,7 +167,9 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.scrollState.currentPage = 4;
 		mocks.viewportScrollState.currentPage = 2;
 		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		const element = getByTestId('pdf-viewport').element() as HTMLElement;
+		const viewport = getByTestId('pdf-viewport');
+		await expect.element(viewport).toBeInTheDocument();
+		const element = viewport.element() as HTMLElement;
 		vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 600, width: 1000, height: 600, x: 0, y: 0, toJSON: () => ({}) });
 		mocks.scrollToPage.mockClear();
 
@@ -178,7 +180,9 @@ describe('PdfReader navigation, outline, and progress', () => {
 
 	test('端タップ後に長押しタイマーを残さない', async () => {
 		const { getByRole, getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		const element = getByTestId('pdf-viewport').element() as HTMLElement;
+		const viewport = getByTestId('pdf-viewport');
+		await expect.element(viewport).toBeInTheDocument();
+		const element = viewport.element() as HTMLElement;
 		vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 600, width: 1000, height: 600, x: 0, y: 0, toJSON: () => ({}) });
 
 		element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 12, isPrimary: true, clientX: 990, clientY: 20 }));
@@ -202,7 +206,9 @@ describe('PdfReader navigation, outline, and progress', () => {
 
 	test('長押しではコピーせず、メニューのコピー選択後にコピーモードへ入る', async () => {
 		const { getByTestId, getByRole } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		const element = getByTestId('pdf-viewport').element() as HTMLElement;
+		const viewport = getByTestId('pdf-viewport');
+		await expect.element(viewport).toBeInTheDocument();
+		const element = viewport.element() as HTMLElement;
 		vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 600, width: 1000, height: 600, x: 0, y: 0, toJSON: () => ({}) });
 		mocks.scrollToPage.mockClear();
 		element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 9, isPrimary: true, clientX: 500, clientY: 250 }));
