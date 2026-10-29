@@ -265,22 +265,22 @@ function PdfTableOfContents({ documentId, open, onOpenChange, inline = false }: 
 	);
 }
 
-const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled }: { documentId: string; pageTurnDirection: PageTurnDirection; navigationDisabled: boolean }) => {
+const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, currentPage, totalPages }: { documentId: string; pageTurnDirection: PageTurnDirection; navigationDisabled: boolean; currentPage: number; totalPages: number }) => {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const [hasRenderedPage, setHasRenderedPage] = useState(false);
 	const [copyMode, setCopyMode] = useState(false);
 	const [longPressMenuOpen, setLongPressMenuOpen] = useState(false);
 	const [longPressPoint, setLongPressPoint] = useState({ x: 0, y: 0 });
 	const [copyStatus, setCopyStatus] = useState<'idle' | 'copying' | 'copied' | 'unavailable' | 'failed'>('idle');
-	const { provides: scroll, state } = useScroll(documentId);
+	const { provides: scroll } = useScroll(documentId);
 	const { provides: selection } = useSelectionCapability();
-	const pageStateRef = useRef(state);
+	const pageStateRef = useRef({ currentPage, totalPages });
 	const longPressTimer = useRef<number | null>(null);
 	const pointerIds = useRef(new Set<number>());
 	const pointerStart = useRef<{ id: number; x: number; y: number } | null>(null);
 	useEffect(() => {
-		pageStateRef.current = state;
-	}, [state]);
+		pageStateRef.current = { currentPage, totalPages };
+	}, [currentPage, totalPages]);
 
 	useEffect(() => {
 		const container = containerRef.current;
@@ -288,9 +288,22 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled }: { do
 		return attachEdgeTapNavigation(container, {
 			direction: pageTurnDirection,
 			isDisabled: () => navigationDisabled || copyMode || longPressMenuOpen,
-			getBounds: () => container.getBoundingClientRect(),
+			getBounds: () => {
+				const bounds = container.getBoundingClientRect();
+				let page = container.querySelector<HTMLElement>('[data-pdf-page]');
+				while (page && page !== container) {
+					const style = getComputedStyle(page);
+					if ((style.overflowX === 'auto' || style.overflowX === 'scroll' || style.overflowY === 'auto' || style.overflowY === 'scroll') && page.scrollHeight > page.clientHeight) {
+						return { left: bounds.left, width: Math.min(bounds.width, page.clientWidth) };
+					}
+					page = page.parentElement;
+				}
+				return { left: bounds.left, width: bounds.width };
+			},
 			getSelectionText: () => window.getSelection()?.toString() ?? '',
 			onTurn: (action) => {
+				// Use the same page state shown in the toolbar. EmbedPDF's capability
+				// snapshot can briefly lag after a page input or restored position.
 				const currentState = pageStateRef.current;
 				const delta = action === 'next' ? 1 : -1;
 				const pageNumber = Math.max(1, Math.min(currentState.totalPages, currentState.currentPage + delta));
@@ -495,7 +508,7 @@ function ReaderWorkspace({ bookId, documentId, initialPage, pageTurnDirection, m
 				</SheetContent>
 			</Sheet>
 			<div className='min-h-0 flex-1 overflow-hidden'>
-				<PdfViewport documentId={documentId} pageTurnDirection={pageTurnDirection} navigationDisabled={tocOpen || mobileMenuOpen} />
+				<PdfViewport documentId={documentId} pageTurnDirection={pageTurnDirection} navigationDisabled={tocOpen || mobileMenuOpen} currentPage={navigation.state.currentPage} totalPages={navigation.state.totalPages} />
 			</div>
 		</div>
 	);

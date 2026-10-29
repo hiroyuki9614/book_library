@@ -18,7 +18,7 @@ const mocks = vi.hoisted(() => {
 		scrollState: { currentPage: 2, totalPages: 5 },
 		scrollProvides: {
 			scrollToPage,
-			getCurrentPage: () => 2,
+			getCurrentPage: vi.fn(() => 2),
 			getTotalPages: () => 5,
 		},
 		bookmarkProvides: {
@@ -98,6 +98,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 			}],
 		});
 		mocks.scrollToPage.mockReset();
+		mocks.scrollProvides.getCurrentPage.mockReturnValue(2);
 		vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:pdf');
 		vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
 	});
@@ -153,6 +154,19 @@ describe('PdfReader navigation, outline, and progress', () => {
 		element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 2, isPrimary: true, clientX: 10, clientY: 20 }));
 		element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 2, isPrimary: true, clientX: 40, clientY: 20 }));
 		expect(mocks.scrollToPage).not.toHaveBeenCalled();
+	});
+
+	test('端タップはツールバーと共有するページ状態から次ページを計算する', async () => {
+		mocks.scrollProvides.getCurrentPage.mockReturnValue(4);
+		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		const element = getByTestId('pdf-viewport').element() as HTMLElement;
+		vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 600, width: 1000, height: 600, x: 0, y: 0, toJSON: () => ({}) });
+		mocks.scrollToPage.mockClear();
+
+		element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 11, isPrimary: true, clientX: 990, clientY: 20 }));
+		element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 11, isPrimary: true, clientX: 990, clientY: 20 }));
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 3, behavior: 'auto' }));
+		mocks.scrollProvides.getCurrentPage.mockReturnValue(2);
 	});
 
 	test('RTLの左端タップは次ページへ進む', async () => {
