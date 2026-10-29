@@ -104,16 +104,23 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	const firstImage = await page.locator('[data-pdf-page="1"] img').screenshot();
 	const viewportBounds = await viewport.boundingBox();
 	expect(viewportBounds).not.toBeNull();
-	// Locator hit testing waits until the closing TOC overlay releases pointer input.
-	// Stay inside the page content rather than the vertical scrollbar gutter;
-	// this is still within the rightmost 15% edge-tap zone.
-	await viewport.click({position:{x:viewportBounds!.width * 0.9,y:viewportBounds!.height/2}});
-
+	if (mobileControls) {
+		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
+		await expect(page.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
+		await page.getByRole('button', { name: '次のページへ', exact: true }).click();
+	} else {
+		// Locator hit testing waits until the closing TOC overlay releases pointer input.
+		// Stay inside the page content rather than the vertical scrollbar gutter;
+		// this is still within the rightmost 15% edge-tap zone.
+		await viewport.click({ position: { x: viewportBounds!.width * 0.9, y: viewportBounds!.height / 2 } });
+	}
+	if (mobileControls) await page.getByRole('button', { name: '閉じる', exact: true }).click();
+	if (!mobileControls) await expect(pageInput).toHaveValue('2');
 	if (mobileControls) {
 		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
 		await expect(page.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
 	}
-	await expect(pageInput).toHaveValue('2');
+	await expect(page.getByRole('spinbutton')).toHaveValue('2');
 	await expect.poll(shown).toBe(2);
 	expect((await page.locator('[data-pdf-page="2"] img').screenshot()).equals(firstImage)).toBe(false);
 	await expect(page.locator('output[aria-live="polite"]:visible')).toHaveText('2 / 2 ページ 100%');
