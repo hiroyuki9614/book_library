@@ -72,6 +72,11 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	await expect(page).toHaveURL(`/reader/${metadata.pdfBookId}`);
 	expect((await fileResponse).headers()['content-type']).toContain('application/pdf');
 
+	const mobileControls = (await page.evaluate(() => innerWidth)) < 768;
+	if (mobileControls) {
+		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
+		await expect(page.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
+	}
 	const pageInput = page.getByRole('spinbutton');
 	await expect(pageInput).toHaveValue('1', { timeout: 30_000 });
 	await expect(page.getByText('1 / 2 ページ 50%')).toBeVisible();
@@ -79,6 +84,9 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	await page.getByRole('button', { name: '目次' }).click();
 	await expect(page.getByRole('button', { name: 'First chapter' })).toBeVisible();
 	await page.getByRole('button', { name: 'First chapter' }).click();
+	if (mobileControls) {
+		await page.getByRole('button', { name: '閉じる', exact: true }).click();
+	}
 	await expect(page.getByRole('dialog')).toBeHidden();
 
 	const saveResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.pdfBookId}/reading-info`)
@@ -107,6 +115,9 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	await page.setViewportSize({ width: 851, height: 393 });
 	await expect(viewport).toBeVisible();
 	await page.reload();
+	if ((await page.evaluate(() => innerWidth)) < 768) {
+		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
+	}
 	await expect(page.getByRole('spinbutton')).toHaveValue('2', { timeout: 30_000 });
 	await expect.poll(shown).toBe(2);
 	await expect(page.locator('[data-pdf-page="2"] img')).toBeVisible();
