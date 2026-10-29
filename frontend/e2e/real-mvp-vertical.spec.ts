@@ -105,7 +105,9 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	const viewportBounds = await viewport.boundingBox();
 	expect(viewportBounds).not.toBeNull();
 	// Locator hit testing waits until the closing TOC overlay releases pointer input.
-	await viewport.click({position:{x:viewportBounds!.width-5,y:viewportBounds!.height/2}});
+	// Stay inside the page content rather than the vertical scrollbar gutter;
+	// this is still within the rightmost 15% edge-tap zone.
+	await viewport.click({position:{x:viewportBounds!.width * 0.9,y:viewportBounds!.height/2}});
 
 	if (mobileControls) {
 		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
