@@ -373,7 +373,9 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 	await expectPage('10');
 	await page.waitForTimeout(500);
 	await expectPage('10');
-	await page.getByText('読書位置を保存済み', { exact: true }).waitFor();
+	await openControls();
+	await expect(page.locator('[role="status"]:visible')).toContainText('読書位置を保存済み');
+	await closeControls();
 	expect(api.saved()).toBe('10');
 	await page.reload();
 	controlsOpen = false;

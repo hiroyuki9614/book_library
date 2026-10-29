@@ -23,7 +23,8 @@ export class PublicationManager extends DefaultManager {
 				for (const sheet of view.contents?.document.styleSheets ?? []) {
 					// An unreadable stylesheet can change the writing axis without being
 					// observable here; let epub.js rebuild in that case.
-					void sheet.cssRules;
+					const rules = [...sheet.cssRules].map((rule) => rule.cssText).join('\n');
+					if (/@(?:media|container)\b/i.test(rules) && /writing-mode|direction/i.test(rules)) this.retainingViews = false;
 				}
 			} catch { this.retainingViews = false; }
 		});
