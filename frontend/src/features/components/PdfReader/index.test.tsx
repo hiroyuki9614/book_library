@@ -169,6 +169,18 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.scrollProvides.getCurrentPage.mockReturnValue(2);
 	});
 
+	test('端タップ後に長押しタイマーを残さない', async () => {
+		const { getByRole, getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		const element = getByTestId('pdf-viewport').element() as HTMLElement;
+		vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 600, width: 1000, height: 600, x: 0, y: 0, toJSON: () => ({}) });
+
+		element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 12, isPrimary: true, clientX: 990, clientY: 20 }));
+		element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 12, isPrimary: true, clientX: 990, clientY: 20 }));
+		await new Promise((resolve) => setTimeout(resolve, 500));
+
+		await expect.element(getByRole('button', { name: 'コピー', exact: true })).not.toBeInTheDocument();
+	});
+
 	test('RTLの左端タップは次ページへ進む', async () => {
 		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='rtl' />);
 		await expect.element(getByTestId('pdf-viewport')).toBeInTheDocument();
