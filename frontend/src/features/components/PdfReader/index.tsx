@@ -26,8 +26,8 @@ import type { Command } from '@embedpdf/plugin-commands';
 import { SCROLL_PLUGIN_ID } from '@embedpdf/plugin-scroll';
 import type { ScrollState } from '@embedpdf/plugin-scroll';
 
-import { SelectionLayer, SelectionPluginPackage } from '@embedpdf/plugin-selection/react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { SelectionLayer, SelectionPluginPackage, useSelectionCapability, type SelectionSelectionMenuRenderFn } from '@embedpdf/plugin-selection/react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchBookFile } from '@/api/books';
 import { fetchReadingInfo } from '@/api/readingInfo';
 import ReadingSaveStatus from '../ReadingSaveStatus';
@@ -97,7 +97,9 @@ function createPlugins(documentData: ArrayBuffer, direction: PageTurnDirection) 
 	];
 }
 
-const PageNavigation = ({ bookId, documentId, initialPage, pageTurnDirection }: { bookId: number; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection }) => {
+type PageNavigationProps = { bookId: number; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection };
+
+const usePageNavigation = ({ bookId, documentId, initialPage, pageTurnDirection }: PageNavigationProps) => {
 	const { provides: scroll, state } = useScroll(documentId);
 	const [pageInputOverride, setPageInputOverride] = useState<string | null>(null);
 	const pageInput = pageInputOverride ?? String(state.currentPage);
@@ -142,21 +144,35 @@ const PageNavigation = ({ bookId, documentId, initialPage, pageTurnDirection }: 
 		}
 	};
 
-	return (
+	return {
+		state,
+		pageInput,
+		setPageInput: setPageInputOverride,
+		handleGoToPage,
+		previousCommand,
+		nextCommand,
+		status,
+		retry,
+		pageTurnDirection,
+	};
+};
+
+type PageNavigationModel = ReturnType<typeof usePageNavigation>;
+
+const PageNavigation = ({ navigation }: { navigation: PageNavigationModel }) => (
 		<div className='flex flex-col items-center gap-1'>
 			<CommandButton
-				pageTurnDirection={pageTurnDirection}
-				prevResolved={previousCommand}
-				nextResolved={nextCommand}
-				state={state}
-				pageInput={pageInput}
-				setPageInput={setPageInputOverride}
-				handleGoToPage={handleGoToPage}
+				pageTurnDirection={navigation.pageTurnDirection}
+				prevResolved={navigation.previousCommand}
+				nextResolved={navigation.nextCommand}
+				state={navigation.state}
+				pageInput={navigation.pageInput}
+				setPageInput={navigation.setPageInput}
+				handleGoToPage={navigation.handleGoToPage}
 			/>
-			<ReadingSaveStatus status={status} retry={retry} />
+			<ReadingSaveStatus status={navigation.status} retry={navigation.retry} />
 		</div>
-	);
-};
+);
 
 function getBookmarkPage(bookmark: PdfBookmarkObject) {
 	if (bookmark.target?.type === 'destination') return bookmark.target.destination.pageIndex + 1;
@@ -198,7 +214,7 @@ function BookmarkItems({ bookmarks, currentPage, onJump, depth = 0 }: {
 	});
 }
 
-function PdfTableOfContents({ documentId, open, onOpenChange }: { documentId: string; open: boolean; onOpenChange: (open: boolean) => void }) {
+function PdfTableOfContents({ documentId, open, onOpenChange, inline = false }: { documentId: string; open: boolean; onOpenChange: (open: boolean) => void; inline?: boolean }) {
 	const { provides: bookmarksCapability } = useBookmarkCapability();
 	const { provides: scroll, state } = useScroll(documentId);
 	const [bookmarks, setBookmarks] = useState<PdfBookmarkObject[] | null>(null);
@@ -223,6 +239,18 @@ function PdfTableOfContents({ documentId, open, onOpenChange }: { documentId: st
 		onOpenChange(false);
 	};
 
+	const navigation = (
+		<nav aria-label='PDF目次' className='no-scrollbar min-h-0 flex-1 overflow-y-auto px-2 pb-4'>
+			{bookmarks === null
+				? <p className='px-2 text-sm text-muted-foreground'>目次を読み込んでいます…</p>
+				: bookmarks.length > 0
+					? <BookmarkItems bookmarks={bookmarks} currentPage={state.currentPage} onJump={jump} />
+					: <p className='px-2 text-sm text-muted-foreground'>このPDFには目次がありません。</p>}
+		</nav>
+	);
+	if (inline) {
+		return <section data-testid='pdf-mobile-toc' className='min-h-0 flex-1 overflow-hidden border-t pt-2'><h3 className='px-2 pb-1 font-medium'>このPDFの目次</h3>{navigation}</section>;
+	}
 	return (
 		<Sheet open={open} onOpenChange={onOpenChange}>
 			<SheetTrigger asChild><Button variant='outline' className='min-h-11 px-3'>目次</Button></SheetTrigger>
@@ -231,44 +259,159 @@ function PdfTableOfContents({ documentId, open, onOpenChange }: { documentId: st
 					<SheetTitle>このPDFの目次</SheetTitle>
 					<SheetDescription className='sr-only'>PDFに含まれるアウトラインからページへ移動します。</SheetDescription>
 				</SheetHeader>
-				<nav aria-label='PDF目次' className='no-scrollbar min-h-0 flex-1 overflow-y-auto px-2 pb-4'>
-					{bookmarks === null
-						? <p className='px-2 text-sm text-muted-foreground'>目次を読み込んでいます…</p>
-						: bookmarks.length > 0
-							? <BookmarkItems bookmarks={bookmarks} currentPage={state.currentPage} onJump={jump} />
-							: <p className='px-2 text-sm text-muted-foreground'>このPDFには目次がありません。</p>}
-				</nav>
+				{navigation}
 			</SheetContent>
 		</Sheet>
 	);
 }
 
-const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled }: { documentId: string; pageTurnDirection: PageTurnDirection; navigationDisabled: boolean }) => {
+const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, currentPage, totalPages }: { documentId: string; pageTurnDirection: PageTurnDirection; navigationDisabled: boolean; currentPage: number; totalPages: number }) => {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const [hasRenderedPage, setHasRenderedPage] = useState(false);
-	const { provides: scroll, state } = useScroll(documentId);
-	const pageStateRef = useRef(state);
+	const [copyMode, setCopyMode] = useState(false);
+	const [longPressMenuOpen, setLongPressMenuOpen] = useState(false);
+	const [longPressPoint, setLongPressPoint] = useState({ x: 0, y: 0 });
+	const [copyStatus, setCopyStatus] = useState<'idle' | 'copying' | 'copied' | 'unavailable' | 'failed'>('idle');
+	const { provides: scroll } = useScroll(documentId);
+	const { provides: selection } = useSelectionCapability();
+	const pageStateRef = useRef({ currentPage, totalPages });
+	const longPressTimer = useRef<number | null>(null);
+	const pointerIds = useRef(new Set<number>());
+	const pointerStart = useRef<{ id: number; x: number; y: number } | null>(null);
 	useEffect(() => {
-		pageStateRef.current = state;
-	}, [state]);
+		pageStateRef.current = { currentPage, totalPages };
+	}, [currentPage, totalPages]);
 
 	useEffect(() => {
 		const container = containerRef.current;
 		if (!container || !scroll) return;
 		return attachEdgeTapNavigation(container, {
 			direction: pageTurnDirection,
-			isDisabled: () => navigationDisabled,
-			getBounds: () => container.getBoundingClientRect(),
+			isDisabled: () => navigationDisabled || copyMode || longPressMenuOpen,
+			getBounds: () => {
+				const bounds = container.getBoundingClientRect();
+				let page = container.querySelector<HTMLElement>('[data-pdf-page]');
+				while (page && page !== container) {
+					const style = getComputedStyle(page);
+					if ((style.overflowX === 'auto' || style.overflowX === 'scroll' || style.overflowY === 'auto' || style.overflowY === 'scroll') && page.scrollHeight > page.clientHeight) {
+						return { left: bounds.left, width: Math.min(bounds.width, page.clientWidth) };
+					}
+					page = page.parentElement;
+				}
+				return { left: bounds.left, width: bounds.width };
+			},
 			getSelectionText: () => window.getSelection()?.toString() ?? '',
 			onTurn: (action) => {
+				// Use the same page state shown in the toolbar. EmbedPDF's capability
+				// snapshot can briefly lag after a page input or restored position.
 				const currentState = pageStateRef.current;
 				const delta = action === 'next' ? 1 : -1;
 				const pageNumber = Math.max(1, Math.min(currentState.totalPages, currentState.currentPage + delta));
 				if (pageNumber !== currentState.currentPage) scroll.scrollToPage({ pageNumber, behavior: 'auto' });
 			},
 		});
-	}, [navigationDisabled, pageTurnDirection, scroll]);
+	}, [copyMode, longPressMenuOpen, navigationDisabled, pageTurnDirection, scroll]);
 
+	const cancelLongPress = useCallback(() => {
+		if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
+		longPressTimer.current = null;
+		pointerStart.current = null;
+	}, []);
+
+	useEffect(() => {
+		const container = containerRef.current;
+		if (!container) return;
+		const activePointerIds = pointerIds.current;
+		const onPointerDown = (event: PointerEvent) => {
+			const target = event.target as Element | null;
+			if (target?.closest('[data-pdf-longpress-menu], [data-pdf-selection-menu], button, a, input, select, textarea, [contenteditable="true"]')) return;
+			if (!event.isPrimary) {
+				cancelLongPress();
+				return;
+			}
+			if (copyMode || (event.pointerType === 'mouse' && event.button !== 0)) return;
+			if (longPressMenuOpen) {
+				setLongPressMenuOpen(false);
+				cancelLongPress();
+				return;
+			}
+			activePointerIds.add(event.pointerId);
+			if (activePointerIds.size > 1) {
+				cancelLongPress();
+				return;
+			}
+			pointerStart.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
+			if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
+			longPressTimer.current = window.setTimeout(() => {
+				const start = pointerStart.current;
+				if (!start || start.id !== event.pointerId || activePointerIds.size !== 1) return;
+				const bounds = container.getBoundingClientRect();
+				setLongPressPoint({
+					x: Math.max(8, Math.min(bounds.width - 160, event.clientX - bounds.left)),
+					y: Math.max(8, Math.min(bounds.height - 56, event.clientY - bounds.top)),
+				});
+				setCopyStatus('idle');
+				setLongPressMenuOpen(true);
+			}, 450);
+		};
+		const onPointerMove = (event: PointerEvent) => {
+			const start = pointerStart.current;
+			if (!start || start.id !== event.pointerId) return;
+			if (Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 10) cancelLongPress();
+		};
+		const onPointerEnd = (event: PointerEvent) => {
+			activePointerIds.delete(event.pointerId);
+			cancelLongPress();
+		};
+		const onWheel = () => cancelLongPress();
+		const onTouchStart = (event: TouchEvent) => { if (event.touches.length > 1) cancelLongPress(); };
+		container.addEventListener('pointerdown', onPointerDown);
+		window.addEventListener('pointermove', onPointerMove, { capture: true, passive: true });
+		// Edge navigation observes pointerup in window capture and may stop it
+		// before EmbedPDF's page layer receives it. Keep long-press cleanup on the
+		// same target so a short edge tap cannot leave its timer armed.
+		window.addEventListener('pointerup', onPointerEnd, { capture: true });
+		window.addEventListener('pointercancel', onPointerEnd, { capture: true });
+		container.addEventListener('wheel', onWheel, { passive: true });
+		container.addEventListener('touchstart', onTouchStart, { passive: true });
+		return () => {
+			container.removeEventListener('pointerdown', onPointerDown);
+			window.removeEventListener('pointermove', onPointerMove, { capture: true });
+			window.removeEventListener('pointerup', onPointerEnd, { capture: true });
+			window.removeEventListener('pointercancel', onPointerEnd, { capture: true });
+			container.removeEventListener('wheel', onWheel);
+			container.removeEventListener('touchstart', onTouchStart);
+			activePointerIds.clear();
+			cancelLongPress();
+		};
+	}, [cancelLongPress, copyMode, longPressMenuOpen]);
+
+	const handleCopy = useCallback(async () => {
+		const scope = selection?.forDocument(documentId);
+		if (!scope) {
+			setCopyStatus('unavailable');
+			return;
+		}
+		setCopyStatus('copying');
+		try {
+			const parts = await scope.getSelectedText().toPromise();
+			const text = parts.join('\n').trim();
+			if (!text) throw new Error('empty-selection');
+			if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+			else scope.copyToClipboard();
+			setCopyStatus('copied');
+		} catch (error) {
+			setCopyStatus(error instanceof Error && error.message === 'empty-selection' ? 'unavailable' : 'failed');
+		}
+	}, [documentId, selection]);
+
+	const renderSelectionMenu = useCallback<SelectionSelectionMenuRenderFn>(({ menuWrapperProps }) => (
+		<div {...menuWrapperProps} data-pdf-selection-menu className='z-30 max-w-[calc(100vw-16px)] rounded-md border bg-popover p-1 shadow-lg' style={{ ...menuWrapperProps.style, width: 'max-content', maxWidth: 'calc(100vw - 16px)', pointerEvents: 'auto' }} onPointerDown={(event) => event.stopPropagation()}>
+			<Button type='button' className='min-h-11 whitespace-nowrap' onClick={() => void handleCopy()}>選択範囲をコピー</Button>
+		</div>
+	), [handleCopy]);
+
+	useEffect(() => () => cancelLongPress(), [cancelLongPress]);
 
 	useEffect(() => {
 		const container = containerRef.current;
@@ -303,18 +446,24 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled }: { do
 		};
 	}, [documentId]);
 
+	const copyModeMessage = copyStatus === 'copied' ? '選択範囲をコピーしました。' : copyStatus === 'unavailable' ? 'このPDFには選択できるテキストがありません。画像PDFはコピーできません。' : copyStatus === 'failed' ? 'コピーに失敗しました。ブラウザのクリップボード権限を確認してください。' : copyStatus === 'copying' ? 'コピーしています…' : '';
 	return (
-		<div ref={containerRef} data-testid='pdf-viewport' className='relative h-full overflow-hidden'>
+		<div ref={containerRef} data-testid='pdf-viewport' data-pdf-copy-mode={copyMode ? 'true' : 'false'} className='relative h-full overflow-hidden'>
 			{!hasRenderedPage && (
-				<div
-					className='pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-white/90'
-					role='status'
-					aria-live='polite'
-				>
-					<div className='flex items-center gap-2 text-sm text-muted-foreground'>
-						<Spinner className='size-6' />
-						<span>PDF本文を描画しています…</span>
-					</div>
+				<div className='pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-white/90' role='status' aria-live='polite'>
+					<div className='flex items-center gap-2 text-sm text-muted-foreground'><Spinner className='size-6' /><span>PDF本文を描画しています…</span></div>
+				</div>
+			)}
+			{copyMode && (
+				<div className='absolute inset-x-2 top-2 z-20 flex items-center justify-between gap-2 rounded-md border bg-background/95 px-3 py-2 text-sm shadow' data-testid='pdf-copy-mode-banner'>
+					<span className='min-w-0'>コピーモード：本文を範囲選択してください。テキストレイヤーのない画像PDFはコピーできません。</span>
+					<Button type='button' variant='outline' className='min-h-11 shrink-0' onClick={() => { setCopyMode(false); setCopyStatus('idle'); }}>完了</Button>
+				</div>
+			)}
+			{copyStatus !== 'idle' && <p role='status' aria-live='polite' className='absolute inset-x-2 bottom-2 z-20 rounded-md border bg-background/95 px-3 py-2 text-sm shadow'>{copyModeMessage}</p>}
+			{longPressMenuOpen && !copyMode && (
+				<div data-pdf-longpress-menu className='absolute z-30 rounded-md border bg-popover p-2 shadow-lg' style={{ left: longPressPoint.x, top: longPressPoint.y }} onPointerDown={(event) => event.stopPropagation()}>
+					<Button type='button' className='min-h-11 whitespace-nowrap' onClick={() => { selection?.forDocument(documentId).clear(); setCopyMode(true); setLongPressMenuOpen(false); setCopyStatus('idle'); }}>コピー</Button>
 				</div>
 			)}
 			<Viewport documentId={documentId}>
@@ -324,7 +473,7 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled }: { do
 						<PagePointerProvider documentId={documentId} pageIndex={pageIndex}>
 							<div data-pdf-page={pageIndex + 1} style={{ width, height, position: 'relative' }}>
 								<RenderLayer documentId={documentId} pageIndex={pageIndex} style={{ pointerEvents: 'none' }} />
-								<SelectionLayer documentId={documentId} pageIndex={pageIndex} />
+								<SelectionLayer documentId={documentId} pageIndex={pageIndex} selectionMenu={copyMode ? renderSelectionMenu : undefined} />
 							</div>
 						</PagePointerProvider>
 					)}
@@ -334,27 +483,46 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled }: { do
 	);
 };
 
-function ReaderWorkspace({ bookId, documentId, initialPage, pageTurnDirection }: { bookId: number; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection }) {
+function ReaderWorkspace({ bookId, documentId, initialPage, pageTurnDirection, mobileMenuOpen, onMobileMenuChange }: { bookId: number; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection; mobileMenuOpen: boolean; onMobileMenuChange: (open: boolean) => void }) {
 	const [tocOpen, setTocOpen] = useState(false);
+	const [mobileTocOpen, setMobileTocOpen] = useState(false);
+	const navigation = usePageNavigation({ bookId, documentId, initialPage, pageTurnDirection });
 	return (
 		<div className='flex h-full flex-col'>
-			<div className='mb-1 flex shrink-0 flex-wrap items-center justify-center gap-2 border-b py-1 sm:mb-2 sm:py-2'>
+			<div className='mb-1 hidden shrink-0 flex-wrap items-center justify-center gap-2 border-b py-1 sm:mb-2 sm:py-2 md:flex'>
 				<ZoomToolbar documentId={documentId} />
 				<PdfTableOfContents documentId={documentId} open={tocOpen} onOpenChange={setTocOpen} />
-				<PageNavigation bookId={bookId} documentId={documentId} initialPage={initialPage} pageTurnDirection={pageTurnDirection} />
+				<PageNavigation navigation={navigation} />
 			</div>
+			<Sheet open={mobileMenuOpen} onOpenChange={onMobileMenuChange}>
+				<SheetContent side='right' className='w-[min(88vw,22rem)] p-0 duration-[240ms] motion-reduce:duration-0 [&>button]:size-11'>
+					<SheetHeader className='shrink-0 border-b pr-16'>
+						<SheetTitle>操作メニュー</SheetTitle>
+						<SheetDescription>拡大・ページ移動・目次</SheetDescription>
+					</SheetHeader>
+					<div className='no-scrollbar min-h-0 flex-1 overflow-y-auto p-4'>
+						<div className='flex flex-col gap-3'>
+							<ZoomToolbar documentId={documentId} compact />
+							<PageNavigation navigation={navigation} />
+							<Button type='button' variant='outline' className='min-h-11 w-full justify-start' aria-expanded={mobileTocOpen} onClick={() => setMobileTocOpen((open) => !open)}>目次</Button>
+							{mobileTocOpen && <PdfTableOfContents inline documentId={documentId} open={mobileTocOpen} onOpenChange={setMobileTocOpen} />}
+						</div>
+					</div>
+				</SheetContent>
+			</Sheet>
 			<div className='min-h-0 flex-1 overflow-hidden'>
-				<PdfViewport documentId={documentId} pageTurnDirection={pageTurnDirection} navigationDisabled={tocOpen} />
+				<PdfViewport documentId={documentId} pageTurnDirection={pageTurnDirection} navigationDisabled={tocOpen || mobileMenuOpen} currentPage={navigation.state.currentPage} totalPages={navigation.state.totalPages} />
 			</div>
 		</div>
 	);
 }
 
-function PdfReader({ bookId, pageTurnDirection = 'ltr' }: { bookId: number; pageTurnDirection?: PageTurnDirection }) {
+function PdfReader({ bookId, bookTitle, pageTurnDirection = 'ltr' }: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection }) {
 	const [documentData, setDocumentData] = useState<ArrayBuffer | null>(null);
 	const [fileError, setFileError] = useState(false);
 	const [restoreError, setRestoreError] = useState(false);
 	const [initialPage, setInitialPage] = useState<number | null>(null);
+	const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 	const { engine, isLoading, error: engineError } = usePdfiumEngine({ wasmUrl: new URL(pdfiumWasmUrl, window.location.href).href });
 
 	useEffect(() => {
@@ -411,21 +579,22 @@ function PdfReader({ bookId, pageTurnDirection = 'ltr' }: { bookId: number; page
 				>
 					本棚に戻る
 				</Link>
-				<span className='ml-auto pr-2 text-sm font-medium text-muted-foreground'>PDFリーダー</span>
+				<span className='min-w-0 flex-1 truncate px-2 text-center text-sm font-medium text-foreground'>{bookTitle || 'PDFリーダー'}</span>
+				<Button type='button' variant='outline' className='min-h-11 shrink-0 px-3 md:hidden' aria-label='操作メニューを開く' onClick={() => setMobileMenuOpen(true)}>メニュー</Button>
 			</header>
 			{restoreError && (
 				<p role='alert' className='text-xs'>
 					保存位置を取得できませんでした。先頭から表示しています。
 				</p>
 			)}
-			<main tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white px-2 outline-none sm:px-4'>
+			<main tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white px-0 outline-none sm:px-4'>
 				<EmbedPDF engine={engine} plugins={plugins}>
 					{({ activeDocumentId }) =>
 						activeDocumentId && (
 							<DocumentContent documentId={activeDocumentId}>
 								{({ isLoaded }) =>
 									isLoaded && (
-										<ReaderWorkspace key={activeDocumentId} bookId={bookId} documentId={activeDocumentId} initialPage={initialPage} pageTurnDirection={pageTurnDirection} />
+										<ReaderWorkspace key={activeDocumentId} bookId={bookId} documentId={activeDocumentId} initialPage={initialPage} pageTurnDirection={pageTurnDirection} mobileMenuOpen={mobileMenuOpen} onMobileMenuChange={setMobileMenuOpen} />
 									)
 								}
 							</DocumentContent>

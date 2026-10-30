@@ -259,7 +259,7 @@ test('title-only source has real supplemental headings; no headings invents no c
 	await expect(page.getByText('本文見出しから作成した補助目次')).toHaveCount(0);
 });
 
-test('real PDF moves images and page numbers, restores only once, zoom, scroll, boundaries and reload', async ({ page, browser }) => {
+test('real PDF moves images and page numbers, restores only once, zoom, scroll, boundaries and reload', async ({ page, browser }, testInfo) => {
 	await page.setViewportSize({ width: 393, height: 850 });
 	const pdfPage = await browser.newPage();
 	await pdfPage.setContent(
@@ -269,6 +269,38 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 	await pdfPage.close();
 	const api = await fileApi(page, pdf, 'pdf');
 	await page.goto('/e2e/readers/harness.html?kind=pdf');
+	const mobileControls = (await page.evaluate(() => innerWidth)) < 768;
+	let controlsOpen = false;
+	const openControls = async () => {
+		if (!mobileControls || controlsOpen) return;
+		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
+		await expect(page.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
+		controlsOpen = true;
+	};
+	const closeControls = async () => {
+		if (!mobileControls || !controlsOpen) return;
+		await page.getByRole('button', { name: '閉じる', exact: true }).click();
+		controlsOpen = false;
+	};
+	const clickControl = async (name: string) => {
+		await openControls();
+		await page.getByRole('button', { name, exact: true }).click();
+		await closeControls();
+	};
+	const goToPage = async (pageNumber: string) => {
+		await openControls();
+		const control = page.getByRole('spinbutton');
+		await control.fill(pageNumber);
+		await control.press('Enter');
+		await closeControls();
+	};
+	const expectPage = async (pageNumber: string) => {
+		await openControls();
+		await expect(page.getByRole('spinbutton')).toHaveValue(pageNumber);
+		await closeControls();
+	};
+	await openControls();
+	await testInfo.attach('pdf-mobile-menu', { body: await page.screenshot(), contentType: 'image/png' });
 	const input = page.getByRole('spinbutton');
 	await expect(input).toHaveValue('1', { timeout: 45000 });
 	const shown = () =>
@@ -288,6 +320,7 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 		});
 	const image = async () => page.locator(`[data-pdf-page="${await shown()}"] img`).screenshot();
 	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45000 });
+	await closeControls();
 	const pdfViewportBox = (await page.getByTestId('pdf-viewport').boundingBox())!;
 	const firstPageBox = (await page.locator('[data-pdf-page="1"]').boundingBox())!;
 	const selectionStartX = firstPageBox.x + firstPageBox.width * 0.35;
@@ -299,48 +332,75 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 	await page.mouse.up();
 	await expect.poll(() => page.locator('[data-pdf-page="1"] div').evaluateAll((nodes) => nodes.some((node) => getComputedStyle(node).backgroundColor.includes('33, 150, 243')))).toBe(true);
 	await page.waitForTimeout(300);
-	await expect(input).toHaveValue('1');
+	await expectPage('1');
 	const first = await image();
+	await testInfo.attach('pdf-normal', { body: await page.screenshot(), contentType: 'image/png' });
+	const longPressPage = (await page.locator('[data-pdf-page="1"]').boundingBox())!;
+	await page.mouse.move(longPressPage.x + longPressPage.width * 0.5, longPressPage.y + longPressPage.height * 0.5);
+	await page.mouse.down();
+	await page.waitForTimeout(500);
+	await page.mouse.up();
+	await expect(page.getByRole('button', { name: 'コピー', exact: true })).toBeVisible();
+	await testInfo.attach('pdf-long-press-menu', { body: await page.screenshot(), contentType: 'image/png' });
+	await page.getByRole('button', { name: 'コピー', exact: true }).click();
+	await expect(page.getByTestId('pdf-copy-mode-banner')).toBeVisible();
+	await testInfo.attach('pdf-copy-mode', { body: await page.screenshot(), contentType: 'image/png' });
+	await page.mouse.move(selectionStartX, firstPageBox.y + Math.min(170, firstPageBox.height * 0.2));
+	await page.mouse.down();
+	await page.mouse.move(selectionEndX, firstPageBox.y + Math.min(170, firstPageBox.height * 0.2), { steps: 12 });
+	await page.mouse.up();
+	await expect(page.getByRole('button', { name: '選択範囲をコピー', exact: true })).toBeVisible();
+	await page.getByRole('button', { name: '選択範囲をコピー', exact: true }).click();
+	await expect(page.locator('[data-testid="pdf-viewport"] > p[role="status"]')).toContainText(/コピーしました|コピーに失敗|選択できるテキストがありません/);
+	await page.getByRole('button', { name: '完了', exact: true }).click();
 	for (let i = 0; i < 5; i++) {
 		const old = await image();
-		await page.getByRole('button', { name: '次のページへ' }).click();
-		await expect(input).toHaveValue(String(i + 2));
+		await clickControl('次のページへ');
+		await expectPage(String(i + 2));
 		await expect.poll(shown).toBe(i + 2);
 		expect((await image()).equals(old)).toBe(false);
 	}
 	for (let i = 0; i < 2; i++) {
-		await page.getByRole('button', { name: '前のページへ' }).click();
-		await expect(input).toHaveValue(String(5 - i));
+		await clickControl('前のページへ');
+		await expectPage(String(5 - i));
 		await expect.poll(shown).toBe(5 - i);
 	}
 	expect((await image()).equals(first)).toBe(false);
-	await input.fill('10');
-	await input.press('Enter');
-	await expect(input).toHaveValue('10');
+	await goToPage('10');
+	await expectPage('10');
 	await expect.poll(shown).toBe(10);
-	await page.getByRole('button', { name: '拡大', exact: true }).click();
-	await expect(input).toHaveValue('10');
+	await clickControl('拡大');
+	await expectPage('10');
 	await page.waitForTimeout(500);
-	await expect(input).toHaveValue('10');
-	await page.getByText('読書位置を保存済み', { exact: true }).waitFor();
+	await expectPage('10');
+	await openControls();
+	await expect(page.locator('[role="status"]:visible')).toContainText('読書位置を保存済み');
+	await closeControls();
 	expect(api.saved()).toBe('10');
 	await page.reload();
+	controlsOpen = false;
+	await openControls();
 	await expect(page.getByRole('spinbutton')).toHaveValue('10', { timeout: 45000 });
 	await expect.poll(shown).toBe(10);
+	await closeControls();
 	await image();
 	await page.waitForTimeout(300);
 	const area = (await page.locator('main').boundingBox())!;
 	await page.mouse.move(area.x + area.width / 2, area.y + area.height / 2);
 	await page.mouse.wheel(0, 1400);
-	await expect.poll(async () => Number(await input.inputValue())).toBeGreaterThan(10);
-	await input.fill('12');
-	await input.press('Enter');
+	await openControls();
+	await expect.poll(async () => Number(await page.getByRole('spinbutton').inputValue())).toBeGreaterThan(10);
+	await closeControls();
+	await goToPage('12');
 	await expect.poll(shown).toBe(12);
-	await expect(page.getByRole('button', { name: '次のページへ' })).toBeDisabled();
-	await input.fill('1');
-	await input.press('Enter');
+	await openControls();
+	await expect(page.getByRole('button', { name: '次のページへ', exact: true })).toBeDisabled();
+	await closeControls();
+	await goToPage('1');
 	await expect.poll(shown).toBe(1);
-	await expect(page.getByRole('button', { name: '前のページへ' })).toBeDisabled();
+	await openControls();
+	await expect(page.getByRole('button', { name: '前のページへ', exact: true })).toBeDisabled();
+	await closeControls();
 });
 
 test('real PDF RTL left edge advances exactly one rendered page', async ({ page, browser }) => {
@@ -369,6 +429,15 @@ for (const width of [1100, 393, 320])
 		const api = await fileApi(page, epubFixture({ rtl: true, titleOnly: true }));
 		await page.goto('/e2e/readers/harness.html');
 		await ready(page);
+		const iframePadding = await page.locator('[data-publication-pane="primary"] iframe').first().evaluate((frame) => {
+			const style = frame.contentWindow!.getComputedStyle(frame.contentDocument!.body);
+			return { left: style.paddingLeft, right: style.paddingRight };
+		});
+		if (width < 768) {
+			expect(iframePadding).toEqual({ left: '16px', right: '16px' });
+		} else {
+			expect(iframePadding).toEqual({ left: '0px', right: '0px' });
+		}
 		const next = page.getByRole('button', { name: '次のページへ', exact: true });
 		const prev = page.getByRole('button', { name: '前のページへ', exact: true });
 		expect((await next.boundingBox())!.x).toBeLessThan((await prev.boundingBox())!.x);

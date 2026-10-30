@@ -17,11 +17,11 @@ export default function ReaderPage() {
 	}
 
 	if (book.fileType === 'epub') {
-		return <EpubReader key={book.id} bookId={book.id} pageTurnDirection={book.pageTurnDirection} />;
+		return <EpubReader key={book.id} bookId={book.id} bookTitle={book.title} pageTurnDirection={book.pageTurnDirection} />;
 	}
 
 	if (book.fileType === 'pdf') {
-		return <PdfReader key={book.id} bookId={book.id} pageTurnDirection={book.pageTurnDirection} />;
+		return <PdfReader key={book.id} bookId={book.id} bookTitle={book.title} pageTurnDirection={book.pageTurnDirection} />;
 	}
 
 	return <p>この書籍ファイル形式は閲覧できません。</p>;

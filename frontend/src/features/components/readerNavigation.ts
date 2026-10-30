@@ -63,6 +63,9 @@ export function attachEdgeTapNavigation(target: Document | HTMLElement, options:
 	let pointer: PointerSnapshot | null = null;
 	let lastTurnAt = Number.NEGATIVE_INFINITY;
 	let pendingTurn: ReturnType<typeof setTimeout> | undefined;
+	const pointerUpTarget: Window | Document | HTMLElement = 'defaultView' in target
+		? (target.defaultView ?? target)
+		: (target.ownerDocument?.defaultView ?? target);
 
 	const cancelPendingTurn = () => {
 		if (pendingTurn) clearTimeout(pendingTurn);
@@ -113,6 +116,12 @@ export function attachEdgeTapNavigation(target: Document | HTMLElement, options:
 		const action = getEdgeTurnAction(event.clientX, bounds.left, bounds.width, options.direction, options.edgeRatio);
 		if (!action) return;
 
+		// EmbedPDF also observes pointer input on the viewport. Once this is
+		// confirmed to be a short edge tap, suppress its default click/scroll
+		// handling so one physical tap results in exactly one page turn.
+		event.preventDefault();
+		event.stopPropagation();
+
 		pendingTurn = setTimeout(() => {
 			pendingTurn = undefined;
 			if (options.isDisabled?.() || options.getSelectionText().trim()) return;
@@ -134,7 +143,7 @@ export function attachEdgeTapNavigation(target: Document | HTMLElement, options:
 	const handleDoubleClick = () => cancelPendingTurn();
 
 	target.addEventListener('pointerdown', handlePointerDown as EventListener, { passive: true });
-	target.addEventListener('pointerup', handlePointerUp as EventListener, { passive: true });
+	pointerUpTarget.addEventListener('pointerup', handlePointerUp as EventListener, { capture: true, passive: false });
 	target.addEventListener('pointercancel', handlePointerCancel as EventListener, { passive: true });
 	target.addEventListener('selectionchange', handleSelectionChange as EventListener);
 	target.addEventListener('dblclick', handleDoubleClick as EventListener);
@@ -142,7 +151,7 @@ export function attachEdgeTapNavigation(target: Document | HTMLElement, options:
 	return () => {
 		cancelPendingTurn();
 		target.removeEventListener('pointerdown', handlePointerDown as EventListener);
-		target.removeEventListener('pointerup', handlePointerUp as EventListener);
+		pointerUpTarget.removeEventListener('pointerup', handlePointerUp as EventListener, { capture: true });
 		target.removeEventListener('pointercancel', handlePointerCancel as EventListener);
 		target.removeEventListener('selectionchange', handleSelectionChange as EventListener);
 		target.removeEventListener('dblclick', handleDoubleClick as EventListener);

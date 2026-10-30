@@ -7,7 +7,8 @@ import { PublicationManager } from './PublicationManager';
 
 type Native = NativeRendition & {
 	resize: (width: number, height: number, cfi?: string) => void;
-	manager?: { settings?: { axis?: string } };
+	manager?: { settings?: { axis?: string; gap?: number } };
+	settings: NativeRendition['settings'] & { gap?: number };
 };
 export type PublicationRendition = Native & {
 	previewHooks: (content: (contents: Contents) => unknown, key: (event: KeyboardEvent) => void) => void;
@@ -72,6 +73,13 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 		if (!closed && current?.start) for (const listener of subscribers) listener(current);
 	};
 	const sync = async (anchor?: string) => {
+		// epub.js derives a responsive column gap when no value is provided and
+		// writes half of it as an inline body padding. Keep the approved mobile
+		// 16px text inset at every phone width and remove the reader-only inset on
+		// desktop without changing the publication's own content width.
+		const gap = viewer.clientWidth < 768 ? 32 : 0;
+		primary.settings.gap = gap;
+		if (primary.manager?.settings) primary.manager.settings.gap = gap;
 		const requestedDual = mode === 'always' || (mode === 'auto' && viewer.clientWidth >= 800);
 		// epub.js's native spread arithmetic is reliable for horizontal sections.
 		// Vertical writing uses two real single-page renditions because the native
@@ -101,8 +109,6 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 			primary.spread(nativeDual ? 'always' : 'none', nativeDual ? 1 : 800);
 			primary.resize(width, height, cfi);
 			await frames();
-			await primary.display(cfi);
-			await frames();
 		}
 		current = locationOf(primary);
 		if (customDual && current?.start && !current.atEnd) {
@@ -116,6 +122,8 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 				preview.on('removed', (section: unknown, view: unknown) => primary.emit('removed', section, view));
 				await preview.attachTo(previewHost);
 			}
+			preview.settings.gap = gap;
+			if (preview.manager?.settings) preview.manager.settings.gap = gap;
 			preview.resize(width, height);
 			await frames();
 			await preview.display(current.start.cfi);

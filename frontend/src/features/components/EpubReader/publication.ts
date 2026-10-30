@@ -42,6 +42,16 @@ export function preserveTextDirection(doc: Document, source?: Document) {
 	if (doc.getElementById('belib-text-direction')) return;
 	const style = doc.createElement('style');
 	style.id = 'belib-text-direction';
-	style.textContent = `:where(body > :not([dir])) { direction: ${direction === 'rtl' ? 'rtl' : 'ltr'}; }`;
+	style.textContent = `
+		html { width: 100% !important; box-sizing: border-box; }
+		body { box-sizing: border-box; }
+		@media (max-width: 767px) {
+			body { width: 100% !important; margin: 0 !important; padding-left: 16px !important; padding-right: 16px !important; }
+		}
+		@media (min-width: 768px) {
+			body { padding-left: 0 !important; padding-right: 0 !important; }
+		}
+		:where(body > :not([dir])) { direction: ${direction === 'rtl' ? 'rtl' : 'ltr'}; }
+	`;
 	doc.head.append(style);
 }

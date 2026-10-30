@@ -28,7 +28,7 @@ type RuntimeBook = Omit<Book, 'locations'> & {
 const EPUB_LOCATION_BREAK_SIZE = 1600;
 const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
-function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDirection?: PageTurnDirection }) {
+function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection }) {
 	const viewerRef = useRef<HTMLDivElement | null>(null);
 	const currentCfiRef = useRef('');
 	const renditionRef = useRef<RuntimeRendition | null>(null);
@@ -328,6 +328,7 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 					>
 						本棚に戻る
 					</Link>
+					{bookTitle && <span className='min-w-0 flex-1 truncate px-1 text-center text-sm font-medium'>{bookTitle}</span>}
 					<div className='ml-auto flex items-center gap-2'>
 						{history.length > 0 && (
 							<Button aria-label='目次移動前へ戻る' variant='outline' onClick={handleBack} className='min-h-11 px-3'>
@@ -427,13 +428,13 @@ function EpubReader({ bookId, pageTurnDirection }: { bookId: number; pageTurnDir
 				)}
 			</header>
 
-			<main tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white px-1 outline-none sm:px-4'>
+			<main tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white px-0 outline-none'>
 				{isLoading && (
 					<div className='absolute inset-0 z-50 flex items-center justify-center bg-reader-background'>
 						<Spinner className='size-16' />
 					</div>
 				)}
-				<div ref={viewerRef} data-reader-viewport aria-busy={isLoading || rendererBusy || pendingOperations > 0} tabIndex={0} className='h-full w-full overflow-hidden rounded bg-card shadow' />
+				<div ref={viewerRef} data-reader-viewport aria-busy={isLoading || rendererBusy || pendingOperations > 0} tabIndex={0} className='h-full w-full overflow-hidden bg-card sm:rounded sm:shadow' />
 			</main>
 			<footer
 				style={{ flexDirection: direction === 'rtl' ? 'row-reverse' : 'row' }}
