@@ -105,10 +105,11 @@ describe('Login flow', () => {
 		await expect.element(getByText(/公開デモ作品だけ/)).toBeInTheDocument();
 		await expect.element(getByText(/読書位置も共有/)).toBeInTheDocument();
 	});
+
 	test('公開デモID/PWは両方設定時のみ表示し、ログイン権限のデバッグ表示を出さない', async () => {
 		vi.stubEnv('VITE_PUBLIC_DEMO_EMAIL', ' demo@example.test ');
 		vi.stubEnv('VITE_PUBLIC_DEMO_PASSWORD', 'sample-demo-password');
-		const { getByText, queryByText } = await render(
+		const { getByText } = await render(
 			<authContext.Provider
 				value={{
 					user: null,
@@ -126,13 +127,13 @@ describe('Login flow', () => {
 
 		await expect.element(getByText('demo@example.test')).toBeInTheDocument();
 		await expect.element(getByText('sample-demo-password')).toBeInTheDocument();
-		expect(queryByText(/現在の権限/)).toBeNull();
+		await expect.element(getByText(/現在の権限/)).not.toBeInTheDocument();
 	});
 
 	test('公開デモID/PWが揃わなければ資格情報を表示しない', async () => {
 		vi.stubEnv('VITE_PUBLIC_DEMO_EMAIL', 'demo@example.test');
 		vi.stubEnv('VITE_PUBLIC_DEMO_PASSWORD', '');
-		const { getByText, queryByText } = await render(
+		const { getByText } = await render(
 			<authContext.Provider
 				value={{
 					user: null,
@@ -149,7 +150,6 @@ describe('Login flow', () => {
 		);
 
 		await expect.element(getByText(/現在公開準備中/)).toBeInTheDocument();
-		expect(queryByText('demo@example.test')).toBeNull();
+		await expect.element(getByText('demo@example.test')).not.toBeInTheDocument();
 	});
-
 });
