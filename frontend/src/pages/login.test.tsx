@@ -30,6 +30,7 @@ const adminUser: AuthenticatedUser = {
 describe('Login flow', () => {
 	beforeEach(() => {
 		vi.resetAllMocks();
+		vi.unstubAllEnvs();
 	});
 
 	test('ログイン成功後にセッションを再取得して認証済みページへ遷移する', async () => {
@@ -104,4 +105,51 @@ describe('Login flow', () => {
 		await expect.element(getByText(/公開デモ作品だけ/)).toBeInTheDocument();
 		await expect.element(getByText(/読書位置も共有/)).toBeInTheDocument();
 	});
+	test('公開デモID/PWは両方設定時のみ表示し、ログイン権限のデバッグ表示を出さない', async () => {
+		vi.stubEnv('VITE_PUBLIC_DEMO_EMAIL', ' demo@example.test ');
+		vi.stubEnv('VITE_PUBLIC_DEMO_PASSWORD', 'sample-demo-password');
+		const { getByText, queryByText } = await render(
+			<authContext.Provider
+				value={{
+					user: null,
+					isPending: false,
+					isAuthenticated: false,
+					role: null,
+					refreshAuth: vi.fn(),
+					signOut: vi.fn(),
+					logout: vi.fn(),
+				}}
+			>
+				<MemoryRouter><Login /></MemoryRouter>
+			</authContext.Provider>,
+		);
+
+		await expect.element(getByText('demo@example.test')).toBeInTheDocument();
+		await expect.element(getByText('sample-demo-password')).toBeInTheDocument();
+		expect(queryByText(/現在の権限/)).toBeNull();
+	});
+
+	test('公開デモID/PWが揃わなければ資格情報を表示しない', async () => {
+		vi.stubEnv('VITE_PUBLIC_DEMO_EMAIL', 'demo@example.test');
+		vi.stubEnv('VITE_PUBLIC_DEMO_PASSWORD', '');
+		const { getByText, queryByText } = await render(
+			<authContext.Provider
+				value={{
+					user: null,
+					isPending: false,
+					isAuthenticated: false,
+					role: null,
+					refreshAuth: vi.fn(),
+					signOut: vi.fn(),
+					logout: vi.fn(),
+				}}
+			>
+				<MemoryRouter><Login /></MemoryRouter>
+			</authContext.Provider>,
+		);
+
+		await expect.element(getByText(/現在公開準備中/)).toBeInTheDocument();
+		expect(queryByText('demo@example.test')).toBeNull();
+	});
+
 });
