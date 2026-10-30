@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { Link } from 'react-router-dom';
-import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarRail, SidebarHeader } from '@/components/ui/sidebar';
+import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarRail } from '@/components/ui/sidebar';
 import { useAuth } from '@/contexts/useAuth';
 import { navItems } from './navItems';
 import type { MenuGroup } from './navItems';
@@ -41,8 +41,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
 
 	return (
 		<Sidebar {...props}>
-			<SidebarHeader>ログイン状態： {role ?? '未ログイン'}</SidebarHeader>
-
 			<SidebarContent>
 				{renderMenu(navItems.navMain)}
 

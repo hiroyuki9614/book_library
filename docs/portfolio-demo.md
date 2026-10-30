@@ -171,6 +171,12 @@ unset PORTFOLIO_ADMIN_EMAIL PORTFOLIO_ADMIN_PASSWORD DEMO_USER_EMAIL DEMO_USER_N
 
 If registration partially succeeds, stop and inspect IDs/counts through the protected admin process. Inventory drift and title collision checks deliberately block automatic retry. Do not delete or overwrite books or regenerate a baseline merely to bypass the gate. Preserve the initial private ID set for a separately reviewed continuation.
 
+## Optional: publish intentionally public demo login credentials
+
+The unauthenticated entrypoint is `/login` (visitors to `/` are redirected there). It hides raw role/login-state debug labels. Once the existing production authorization checks below have been independently verified, an operator may explicitly approve displaying **only the restricted general demo account** email and password to all visitors.
+
+Set both `VITE_PUBLIC_DEMO_EMAIL` and `VITE_PUBLIC_DEMO_PASSWORD` when building the frontend. A missing or partial pair hides the credentials; the release artifact build refuses partial configuration. Both values are **public, not secrets**, and will appear as plain text in the browser/compiled bundle. They must never refer to admin/private/other reused credentials. Never copy `PORTFOLIO_ADMIN_PASSWORD`, an operator login, or a real personal password into these variables. Provision/rotate the restricted demo account through a separately reviewed, authorized operation first; re-run the general demo-role / admin-403 / private-book-403 gates before publishing the matching credentials. The UI code change alone does not authorize a production release.
+
 ## 5. Production acceptance still required
 
 Before deployment approval, capture counts/IDs only before and after and verify:

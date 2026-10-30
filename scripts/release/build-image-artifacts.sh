@@ -40,6 +40,17 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$BACKEND_DOCKERFILE" && -n "$FRONTEND_DOCKERFILE" ]] || { echo "error: both production Dockerfile paths are required" >&2; exit 1; }
 [[ -n "$FRONTEND_API_BASE_URL" && "$FRONTEND_API_BASE_URL" != *$'\n'* && "$FRONTEND_API_BASE_URL" != *$'\r'* ]] || { echo "error: --frontend-api-base-url is required and must not contain newlines" >&2; exit 1; }
+# These values are intentionally public in the frontend bundle. Never use admin credentials.
+PUBLIC_DEMO_EMAIL=${VITE_PUBLIC_DEMO_EMAIL:-}
+PUBLIC_DEMO_PASSWORD=${VITE_PUBLIC_DEMO_PASSWORD:-}
+if [[ -n "$PUBLIC_DEMO_EMAIL" && -z "$PUBLIC_DEMO_PASSWORD" || -z "$PUBLIC_DEMO_EMAIL" && -n "$PUBLIC_DEMO_PASSWORD" ]]; then
+  echo "error: VITE_PUBLIC_DEMO_EMAIL and VITE_PUBLIC_DEMO_PASSWORD must both be set or both be empty" >&2
+  exit 1
+fi
+if [[ "$PUBLIC_DEMO_EMAIL" == *$'\n'* || "$PUBLIC_DEMO_EMAIL" == *$'\r'* || "$PUBLIC_DEMO_PASSWORD" == *$'\n'* || "$PUBLIC_DEMO_PASSWORD" == *$'\r'* ]]; then
+  echo "error: public demo credentials must not contain newlines" >&2
+  exit 1
+fi
 command -v git >/dev/null || { echo "error: git is required" >&2; exit 1; }
 command -v docker >/dev/null || { echo "error: docker is required" >&2; exit 1; }
 command -v sha256sum >/dev/null || { echo "error: sha256sum is required" >&2; exit 1; }
@@ -90,7 +101,7 @@ FRONTEND_TAG="belib-frontend:$SOURCE_REVISION"
 FRONTEND_API_BASE_URL_SHA256=$(printf '%s' "$FRONTEND_API_BASE_URL" | sha256sum | awk '{print $1}')
 
 docker build --file "$BACKEND_DOCKERFILE_REAL" --build-arg "VCS_REF=$SOURCE_REVISION" --tag "$BACKEND_TAG" --label "org.opencontainers.image.revision=$SOURCE_REVISION" --label "org.opencontainers.image.created=$BUILD_TIMESTAMP" --label "org.opencontainers.image.source-revision=$SOURCE_REVISION" "$BACKEND_CONTEXT_REAL"
-docker build --file "$FRONTEND_DOCKERFILE_REAL" --build-arg "VITE_API_BASE_URL=$FRONTEND_API_BASE_URL" --tag "$FRONTEND_TAG" --label "org.opencontainers.image.revision=$SOURCE_REVISION" --label "org.opencontainers.image.created=$BUILD_TIMESTAMP" --label "org.opencontainers.image.source-revision=$SOURCE_REVISION" "$FRONTEND_CONTEXT_REAL"
+docker build --file "$FRONTEND_DOCKERFILE_REAL" --build-arg "VITE_API_BASE_URL=$FRONTEND_API_BASE_URL" --build-arg "VITE_PUBLIC_DEMO_EMAIL=$PUBLIC_DEMO_EMAIL" --build-arg "VITE_PUBLIC_DEMO_PASSWORD=$PUBLIC_DEMO_PASSWORD" --tag "$FRONTEND_TAG" --label "org.opencontainers.image.revision=$SOURCE_REVISION" --label "org.opencontainers.image.created=$BUILD_TIMESTAMP" --label "org.opencontainers.image.source-revision=$SOURCE_REVISION" "$FRONTEND_CONTEXT_REAL"
 docker image inspect "$BACKEND_TAG" >/dev/null
 docker image inspect "$FRONTEND_TAG" >/dev/null
 BACKEND_ID=$(docker image inspect --format '{{.Id}}' "$BACKEND_TAG")
