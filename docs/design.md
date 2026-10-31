@@ -1,21 +1,29 @@
 # 画面定義書
 
-- 最終更新: 2026-10-27
+- 最終更新: 2026-10-31
 - 実routeの正本: `frontend/src/routes/AppRoutes.tsx`
 
 この文書は画面の役割と共通デザイン方針を説明します。route自体はfrontend実装を優先します。
 
 ## 共通デザイン
 
-- 背景色: `#EEECDC`
-- 文字色: `#282828`
+- 背景色: 白 (`#fff`)
+- 文字色: 濃紺 (`--foreground`)
 - サイドナビ: `#1F293D`
 - サイドナビ文字: `#FDFDFD`
-- modal背景: `#FDFDFD`
-- overlay: `#D9D9D9`
+- modal / sheet背景: 白
+- accent / secondary: 淡い青みの色 (`--accent`, `--secondary`)
 - UI基盤: shadcn/ui + Tailwind CSS
 
 既存componentやdesign tokenが実装済みの場合、デザイン変更依頼なしに全面変更しません。
+
+### 2026-10-31 採用デザイン: Paper & Navy（実装候補。未リリース）
+
+- EPUBのヘッダー、本文、進捗表示、操作部は白を基調にし、濃紺を主要な文字・操作色にする。
+- 本文表示領域はreader幅100%。外側の紙風余白、角丸、影を付けない。
+- EPUB iframe内の本文左右だけ各16px空ける。書籍タイトルと既存の目次・表示設定・移動メニューは維持する。
+- この採用要件は `docs/current-status.md` の2026-10-31候補記録に対応する。本番適用の可否は同記録のrelease statusを参照する。
+- ブラウザータイトルとブランド表記は `BeLib`。
 
 ## 現在の画面
 

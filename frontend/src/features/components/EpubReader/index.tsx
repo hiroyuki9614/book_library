@@ -319,8 +319,8 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 	const resource = (href: string) => normalize(href.split('#')[0].split('?')[0]);
 	const activeTocHref = navigation.find((item) => normalize(item.href) === normalize(currentHref))?.href ?? navigation.find((item) => resource(item.href) === resource(currentHref))?.href;
 	return (
-		<div className='flex h-[100dvh] flex-col bg-background text-foreground'>
-			<header className='shrink-0 border-b p-2 sm:p-3'>
+		<div className='flex h-[100dvh] flex-col bg-white text-foreground'>
+			<header className='shrink-0 border-b border-border bg-white p-2 sm:p-3'>
 				<div className='flex flex-wrap items-center gap-2'>
 					<Link
 						to='/'
@@ -343,7 +343,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 							</SheetTrigger>
 							<SheetContent
 								side='right'
-								className='w-[calc(100vw-2rem)] max-w-sm data-[side=bottom]:max-h-[50vh] data-[side=top]:max-h-[50vh] [&>button]:size-11'
+								className='w-[calc(100vw-2rem)] max-w-sm bg-white text-foreground data-[side=bottom]:max-h-[50vh] data-[side=top]:max-h-[50vh] [&>button]:size-11'
 							>
 								<SheetHeader>
 									<SheetTitle>この書籍の目次</SheetTitle><SheetDescription className="sr-only">目次から本文の章へ移動します。</SheetDescription>
@@ -391,7 +391,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 							<SelectTrigger
 								disabled={isLoading}
 								aria-label='ページ表示方法'
-								className='min-h-11 w-[132px] bg-reader-background sm:w-[180px]'
+								className='min-h-11 w-[132px] bg-white sm:w-[180px]'
 							>
 								<SelectValue />
 							</SelectTrigger>
@@ -428,17 +428,25 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 				)}
 			</header>
 
-			<main tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white px-0 outline-none'>
+			<main tabIndex={0} className='relative min-h-0 w-full flex-1 overflow-hidden bg-white px-0 outline-none'>
 				{isLoading && (
 					<div className='absolute inset-0 z-50 flex items-center justify-center bg-reader-background'>
 						<Spinner className='size-16' />
 					</div>
 				)}
-				<div ref={viewerRef} data-reader-viewport aria-busy={isLoading || rendererBusy || pendingOperations > 0} tabIndex={0} className='h-full w-full overflow-hidden bg-card sm:rounded sm:shadow' />
+				<div
+					ref={viewerRef}
+					data-reader-viewport
+					data-reader-queue={pendingOperations}
+					data-renderer-busy={rendererBusy}
+					aria-busy={isLoading || rendererBusy || pendingOperations > 0}
+					tabIndex={0}
+					className='h-full w-full overflow-hidden bg-white'
+				/>
 			</main>
 			<footer
 				style={{ flexDirection: direction === 'rtl' ? 'row-reverse' : 'row' }}
-				className='flex shrink-0 justify-center gap-3 border-t bg-background p-2'
+				className='flex shrink-0 justify-center gap-3 border-t border-border bg-white p-2'
 			>
 				<Button
 					type='button'

@@ -73,11 +73,9 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 		if (!closed && current?.start) for (const listener of subscribers) listener(current);
 	};
 	const sync = async (anchor?: string) => {
-		// epub.js derives a responsive column gap when no value is provided and
-		// writes half of it as an inline body padding. Keep the approved mobile
-		// 16px text inset at every phone width and remove the reader-only inset on
-		// desktop without changing the publication's own content width.
-		const gap = viewer.clientWidth < 768 ? 32 : 0;
+		// epub.js writes half of the column gap as body padding. A fixed 32px gap
+		// gives the full-width publication a 16px text inset at every viewport.
+		const gap = 32;
 		primary.settings.gap = gap;
 		if (primary.manager?.settings) primary.manager.settings.gap = gap;
 		const requestedDual = mode === 'always' || (mode === 'auto' && viewer.clientWidth >= 800);
