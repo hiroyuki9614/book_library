@@ -71,7 +71,14 @@ async function cfi(page: Page) {
 	return page.evaluate(() => localStorage.getItem('reader-location:1'));
 }
 async function ready(page: Page) {
+	const diagnostic = Boolean(process.env.READER_ACTUAL_EPUB_PATH);
+	const logReady = (step: string) => {
+		if (diagnostic) console.log('reader readiness', new Date().toISOString(), step);
+	};
+	logReady('UI enabled wait start');
 	await expect(page.getByRole('combobox')).toBeEnabled({ timeout: 30000 });
+	logReady('UI enabled');
+	logReady('layout geometry wait start');
 	await expect.poll(() => page.evaluate(() => {
 		const viewer=document.querySelector<HTMLElement>('[data-reader-viewport]')!;
 		const pane=viewer.querySelector<HTMLElement>('[data-publication-pane=primary]');
@@ -83,8 +90,13 @@ async function ready(page: Page) {
 		const customDual=preview?.style.display==='block';
 		return Math.max(Math.abs((pane?.getBoundingClientRect().width ?? 0)-viewer.clientWidth/(customDual?2:1)), Math.abs((stage?.clientHeight ?? 0)-viewer.clientHeight));
 	}), {timeout:30000}).toBeLessThan(1);
+	logReady('layout geometry ready');
+	logReady('renderer idle wait start');
 	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 30000 });
+	logReady('renderer idle');
+	logReady('visible text wait start');
 	await expect.poll(() => visibleText(page)).not.toBe('');
+	logReady('visible text ready');
 }
 async function progress(page: Page) {
 	const label = await page.locator('label[for="reading-progress"]').innerText();
@@ -433,11 +445,7 @@ for (const width of [1100, 393, 320])
 			const style = frame.contentWindow!.getComputedStyle(frame.contentDocument!.body);
 			return { left: style.paddingLeft, right: style.paddingRight };
 		});
-		if (width < 768) {
-			expect(iframePadding).toEqual({ left: '16px', right: '16px' });
-		} else {
-			expect(iframePadding).toEqual({ left: '0px', right: '0px' });
-		}
+		expect(iframePadding).toEqual({ left: '16px', right: '16px' });
 		const next = page.getByRole('button', { name: '次のページへ', exact: true });
 		const prev = page.getByRole('button', { name: '前のページへ', exact: true });
 		expect((await next.boundingBox())!.x).toBeLessThan((await prev.boundingBox())!.x);
@@ -684,6 +692,20 @@ test(`narrow odd-width spreads finish layout and preserve real page movement ver
 	test.setTimeout(process.env.READER_ACTUAL_EPUB_PATH ? 600000 : 240000);
 	await page.setViewportSize({width:736,height:859});
 	await fileApi(page,process.env.READER_ACTUAL_EPUB_PATH ? readFileSync(process.env.READER_ACTUAL_EPUB_PATH) : epubFixture({rtl:true,vertical}));
+	if (process.env.READER_ACTUAL_EPUB_PATH) {
+		page.on('console', (message) => {
+			if (message.type() === 'log' && message.text().startsWith('reader state')) console.log(message.text());
+		});
+		await page.addInitScript(() => {
+			const logState = (viewer: HTMLElement, attribute: string) => console.log('reader state', new Date().toISOString(), attribute, viewer.getAttribute(attribute));
+			new MutationObserver((records) => {
+				for (const record of records) {
+					const viewer = record.target as HTMLElement;
+					if (record.attributeName) logState(viewer, record.attributeName);
+				}
+			}).observe(document, { subtree: true, attributes: true, attributeFilter: ['aria-busy', 'data-reader-queue', 'data-renderer-busy'] });
+		});
+	}
 	await page.goto('/e2e/readers/harness.html');await ready(page);
 	const initialFrame=await page.locator('[data-publication-pane="primary"] iframe').elementHandle();
 	await page.getByRole('combobox').click();await page.getByRole('option',{name:'常に見開き',exact:true}).click();await ready(page);
@@ -694,8 +716,34 @@ test(`narrow odd-width spreads finish layout and preserve real page movement ver
 		await page.setViewportSize({width,height:900});await ready(page);
 		for(const mode of ['常に単ページ','常に見開き','自動']) {
 			if(process.env.READER_ACTUAL_EPUB_PATH)console.log('same-file mode start',new Date().toISOString(),width,mode);
-			await page.getByRole('combobox').click();await page.getByRole('option',{name:mode,exact:true}).click();await ready(page);
+			if(process.env.READER_ACTUAL_EPUB_PATH)console.log('mode UI click start',new Date().toISOString(),width,mode);
+			await page.getByRole('combobox').click();await page.getByRole('option',{name:mode,exact:true}).click();
+			if(process.env.READER_ACTUAL_EPUB_PATH)console.log('mode UI click completed',new Date().toISOString(),width,mode);
+			await ready(page);
 			if(process.env.READER_ACTUAL_EPUB_PATH)console.log('same-file mode ready',new Date().toISOString(),width,mode);
+			const textGeometry=await page.locator('[data-publication-pane="primary"] iframe').first().evaluate(frame=>{
+				const body=frame.contentDocument!.body;
+				const styles=frame.contentWindow!.getComputedStyle(body);
+			const viewer=frame.closest('[data-reader-viewport]') as HTMLElement;
+			const pane=frame.closest('[data-publication-pane]') as HTMLElement;
+			return {viewerWidth:viewer.clientWidth,paneWidth:pane.clientWidth,bodyWidth:body.getBoundingClientRect().width,paddingLeft:styles.paddingLeft,paddingRight:styles.paddingRight,backgroundColor:styles.backgroundColor};
+			});
+			expect(textGeometry.viewerWidth).toBe(width);
+			expect(textGeometry.bodyWidth).toBeCloseTo(textGeometry.paneWidth,0);
+			expect(textGeometry.paddingLeft).toBe('16px');
+			expect(textGeometry.paddingRight).toBe('16px');
+			expect(textGeometry.backgroundColor).toBe('rgb(255, 255, 255)');
+			const chromeGeometry=await page.locator('header').evaluate(header=>{
+				const bounds=header.getBoundingClientRect();
+				const controls=[...header.querySelectorAll('a,button,[role="combobox"]')]
+					.filter(element=>(element as HTMLElement).getClientRects().length>0)
+					.map(element=>{const rect=element.getBoundingClientRect();return {left:rect.left,right:rect.right,top:rect.top,bottom:rect.bottom};});
+				const overlaps=controls.some((a,index)=>controls.slice(index+1).some(b=>a.left<b.right&&a.right>b.left&&a.top<b.bottom&&a.bottom>b.top));
+				return {width:bounds.width,scrollWidth:(header as HTMLElement).scrollWidth,controlsInside:controls.every(box=>box.left>=bounds.left&&box.right<=bounds.right),overlaps};
+			});
+			expect(chromeGeometry.scrollWidth).toBeLessThanOrEqual(chromeGeometry.width);
+			expect(chromeGeometry.controlsInside).toBe(true);
+			expect(chromeGeometry.overlaps).toBe(false);
 			for(let i=0;i<3;i++) {
 				const spreadActive=mode==='常に見開き'||(mode==='自動'&&width===833);
 				const tracked=spreadActive

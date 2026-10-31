@@ -13,10 +13,11 @@ export default function AppLayout() {
 
 			<SidebarInset>
 				{!isReaderRoute && (
-					<header className='sticky top-0 z-10 flex h-14 shrink-0 items-center px-4 md:hidden'>
+					<header className='sticky top-0 z-10 flex h-14 shrink-0 items-center gap-3 bg-background px-4 md:hidden'>
 						<SidebarTrigger className='size-11'>
 							<Menu className='h-5 w-5' />
 						</SidebarTrigger>
+						<span className='font-semibold text-primary'>BeLib</span>
 					</header>
 				)}
 

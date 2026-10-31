@@ -1,10 +1,12 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-10-27
+- Updated: 2026-10-31
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
-- Base checkpoint: `main@a615f8760fb238586ac34d30c9600d8ac26c928b`
-- Current R2 implementation branch: `feat/r2-storage-cutover-20260912`
-- Current portfolio implementation branch: `feat/belib-portfolio-demo-20261025`
+- Current main checkpoint for the scoped frontend release candidate: `f8d69c7f1f9a6676ff268ef3da7d815232a779d2`
+- The prior 2026-10-27 implementation snapshot remains historical; this scoped update does not refresh unrelated R2 or portfolio branch state.
+- The 2026-10-31 frontend candidate is in `codex/belib-frontend-release-20261031`, based on the checkpoint above. It is not merged or deployed.
+- The owner reports that the checkpoint above was deployed frontend-only at 2026-10-31 18:42:59 JST with image `sha256:49bf745ed0f5b7fd3d8951d64cbeed51d33034c762eed93547be8081c71f63c9`; this candidate did not independently read back that running image identity.
+- Candidate scope, test evidence and release holds: [2026-10-31 frontend candidate record](records/2026-10-31-frontend-candidate.md).
 - The portfolio MVP is live. The detailed immutable deployment and production-browser evidence is in [the 2026-10-26 production release record](records/2026-10-26-mvp-production-release.md).
 - Scoped update (2026-10-01): Home/BookTable reading-evidence behavior below; this is not a fresh R2 or production acceptance.
 
@@ -24,6 +26,7 @@ Book storage uses a driver boundary: local storage is explicitly selected for de
 
 ## Production MVP snapshot
 
+- This is the last independently recorded full MVP snapshot from 2026-10-26. The owner reports a later frontend-only baseline on 2026-10-31; its runtime identity was not read back in this scoped candidate work.
 - PR #37, the loopback-origin hotfix, and the EPUB ArrayBuffer hotfix are merged.
 - Production runs application revision `0d0a610d7d94ddfbafb979a9dee65c9e68f6e784` from immutable backend/frontend image IDs recorded in the release record.
 - The two pre-existing personal books are admin-only. The general demo user sees exactly the two public-domain demo books.
@@ -134,7 +137,7 @@ The reader derives progress without adding a database percentage column. PDF dis
 - Both readers use approximately the outer 15% as tap navigation. Pointer travel, long press, multi-touch, existing text selection, links and interactive controls are excluded. EPUB listeners are installed inside each epub.js iframe through content hooks, de-duplicated per document, removed with the view, and fully cleaned up on reader teardown.
 - ReadingInfo writes are delayed briefly during ordinary navigation and serialized; the final PDF page and epub.js `atEnd` retain the existing immediate completed transition.
 - Physical i5 GUI-browser acceptance is the release gate for this reader repair and is not replaced by headless or mobile emulation. Android hardware acceptance is tracked and reported separately; it is not a blocker for this approved release path.
-- Mobile reader design work is isolated on `feat/mobile-reader-design-20261028`: PDF mobile controls are grouped in a right-side menu, EmbedPDF text selection is used for the explicit copy mode, and EPUB mobile rendition content is full width with 16px horizontal text padding. The epub.js column gap is synchronized to 32px on mobile and 0px on desktop so its inline layout padding cannot change that contract at narrow widths. PDF page navigation state and ReadingInfo persistence are shared by the desktop toolbar and mobile menu to avoid duplicate save callbacks. Remote headless Chrome acceptance passed for the candidate preview; physical i5 GUI-browser acceptance remains pending because the registered i5 device is offline.
+- The 2026-10-28 reader branch (`6c4c6d0`) is historical reference work. The current 2026-10-31 candidate applies the accepted Paper & Navy EPUB surface on the real `ReaderPage -> EpubReader` route, keeps the viewer full-width with a 16px iframe text inset at every viewport, and preserves existing menus and the book title. Its local harness/browser checks pass; production and physical i5 acceptance remain incomplete. See the candidate record for exact scope and blockers.
 
 ## Admin
 
