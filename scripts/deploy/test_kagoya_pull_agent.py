@@ -11,10 +11,11 @@ from unittest.mock import patch
 
 from kagoya_compose import (
     ComposeIdentityError,
+    bootstrap_preflight,
     compose_contract_sha256,
+    validate_candidate_protected_contract,
     validate_compose_services,
     validate_live_compose_identity,
-    validate_overlay_preserves_nonfrontend,
     validate_frontend_service,
     validate_private_owner_file,
 )
@@ -257,30 +258,126 @@ class ProductionComposeIdentityTests(unittest.TestCase):
     def test_resolved_contract_keeps_four_active_services_and_profiled_migration(self):
         resolved = self.compose_fixture()
         validate_compose_services(resolved)
-        digest = validate_overlay_preserves_nonfrontend(
-            resolved, copy.deepcopy(resolved), self.project_dir
-        )
+        digest = compose_contract_sha256(resolved, self.project_dir)
         self.assertRegex(digest, r"^[0-9a-f]{64}$")
 
-    def test_overlay_may_change_frontend_only_within_its_separate_contract(self):
+    def test_frontend_sha_image_and_build_context_are_excluded_from_protected_projection(self):
         base = self.compose_fixture()
         effective = copy.deepcopy(base)
         effective["services"]["frontend"]["image"] = "belib-frontend:reviewed-sha"
+        effective["services"]["frontend"]["build"] = {
+            "context": str(self.project_dir / "frontend-candidate"),
+            "args": {"VCS_REF": SOURCE_SHA},
+        }
         self.assertEqual(
             compose_contract_sha256(base, self.project_dir),
             compose_contract_sha256(effective, self.project_dir),
         )
 
-    def test_rejects_override_changes_to_database_mounts_or_networks(self):
-        base = self.compose_fixture()
-        changed = copy.deepcopy(base)
-        changed["services"]["db"]["volumes"][0]["source"] = "other-volume"
-        with self.assertRaisesRegex(ComposeIdentityError, "protected service, database, mount"):
-            validate_overlay_preserves_nonfrontend(base, changed, self.project_dir)
-        changed = copy.deepcopy(base)
-        changed["networks"]["default"]["name"] = "other-project_default"
-        with self.assertRaisesRegex(ComposeIdentityError, "protected service, database, mount"):
-            validate_overlay_preserves_nonfrontend(base, changed, self.project_dir)
+    def test_candidate_must_match_frozen_effective_contract_for_all_protected_parts(self):
+        approved = self.compose_fixture(self.project_dir)
+        approved["services"]["backend"]["image"] = "belib-backend:approved-host-image"
+        approved["services"]["backend"]["environment"] = {"R2_BUCKET_NAME": "approved-bucket"}
+        approved["services"]["nginx"]["image"] = "nginx:approved-host-image"
+        approved["volumes"]["book-files"] = {
+            "name": "belib-production_book-files",
+            "external": True,
+        }
+        approved_digest = compose_contract_sha256(approved, self.project_dir)
+        base_digest = compose_contract_sha256(self.compose_fixture(self.project_dir), self.project_dir)
+        self.assertNotEqual(base_digest, approved_digest)
+        validate_candidate_protected_contract(approved, self.project_dir, approved_digest)
+
+        mutations = (
+            ("backend image", lambda candidate: candidate["services"]["backend"].update(image="belib-backend:changed")),
+            ("R2 setting", lambda candidate: candidate["services"]["backend"]["environment"].update(R2_BUCKET_NAME="changed-bucket")),
+            ("book-file mount", lambda candidate: candidate["services"]["backend"]["volumes"][0].update(source="other-volume")),
+            ("database", lambda candidate: candidate["services"]["db"]["environment"].update(POSTGRES_PASSWORD="changed")),
+            ("nginx image", lambda candidate: candidate["services"]["nginx"].update(image="nginx:changed")),
+            ("nginx mount", lambda candidate: candidate["services"]["nginx"]["volumes"][0].update(source="/other/nginx.conf")),
+            ("network", lambda candidate: candidate["networks"]["default"].update(name="changed_default")),
+            ("book-files volume", lambda candidate: candidate["volumes"]["book-files"].update(name="changed-book-files")),
+        )
+        for part, mutate in mutations:
+            with self.subTest(part=part):
+                candidate = copy.deepcopy(approved)
+                mutate(candidate)
+                with self.assertRaisesRegex(ComposeIdentityError, "candidate changes protected services"):
+                    validate_candidate_protected_contract(candidate, self.project_dir, approved_digest)
+
+    def test_bootstrap_freezes_the_approved_effective_two_file_projection(self):
+        frontend_dir = self.project_dir / "frontend"
+        frontend_dir.mkdir()
+        (frontend_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        env_file = Path(self.temporary.name) / "production.env"
+        env_file.write_text("SYNTHETIC_ONLY=value\n", encoding="utf-8")
+        env_file.chmod(0o600)
+
+        api_base_url = "https://api.example.test"
+        base = self.compose_fixture(self.project_dir)
+        base["services"]["frontend"]["build"] = {"args": {"VITE_API_BASE_URL": api_base_url}}
+        effective = copy.deepcopy(base)
+        effective["services"]["backend"]["image"] = "belib-backend:approved-host-image"
+        effective["services"]["nginx"]["image"] = "nginx:approved-host-image"
+        effective["services"]["frontend"] = {
+            "build": {
+                "args": {
+                    "VCS_REF": "0" * 40,
+                    "VITE_API_BASE_URL": api_base_url,
+                    "VITE_PUBLIC_DEMO_EMAIL": "",
+                    "VITE_PUBLIC_DEMO_PASSWORD": "",
+                },
+                "context": str(frontend_dir),
+                "dockerfile": "Dockerfile",
+                "target": "runtime",
+            },
+            "command": None,
+            "entrypoint": None,
+            "expose": ["8080"],
+            "image": "belib-frontend:" + "0" * 40,
+            "logging": {
+                "driver": "json-file",
+                "options": {"max-file": "3", "max-size": "10m"},
+            },
+            "networks": {"default": None},
+            "restart": "unless-stopped",
+        }
+        effective["volumes"]["book-files"] = {
+            "name": "belib-production_book-files",
+            "external": True,
+        }
+        self.base.write_text("services: {}\n", encoding="utf-8")
+        labels = {
+            "com.docker.compose.project": "belib-production",
+            "com.docker.compose.service": "frontend",
+            "com.docker.compose.project.working_dir": str(self.project_dir),
+            "com.docker.compose.project.config_files": f"{self.base},{self.override}",
+        }
+        inspected = [{
+            "Name": "/belib-production-frontend-1",
+            "Config": {"Labels": labels, "Image": "belib-frontend:existing"},
+            "State": {"Running": True},
+            "Image": OLD_ID,
+            "NetworkSettings": {"Networks": {"belib-production_default": {}}},
+        }]
+        compose_commands = []
+
+        def resolved_config(argv, _env):
+            if argv[:2] == ["docker", "inspect"]:
+                return inspected
+            files = [Path(argv[index + 1]) for index, value in enumerate(argv[:-1]) if value == "--file"]
+            compose_commands.append(files)
+            return base if len(files) == 1 else effective
+
+        with patch("kagoya_compose._run_json", side_effect=resolved_config):
+            metadata = bootstrap_preflight("belib-production-frontend-1", str(env_file), agent_uid=os.getuid())
+
+        self.assertEqual(compose_commands, [[self.base.resolve()], [self.base.resolve(), self.override.resolve()]])
+        self.assertNotEqual(compose_contract_sha256(base, self.project_dir), metadata["compose_contract_sha256"])
+        self.assertEqual(
+            metadata["compose_contract_sha256"],
+            compose_contract_sha256(effective, self.project_dir),
+        )
 
     def test_rejects_added_service_and_unexpected_active_migration(self):
         resolved = self.compose_fixture()
@@ -293,8 +390,8 @@ class ProductionComposeIdentityTests(unittest.TestCase):
             validate_compose_services(resolved)
 
     @staticmethod
-    def compose_fixture():
-        project_dir = Path(__file__).resolve().parents[2]
+    def compose_fixture(project_dir=None):
+        project_dir = project_dir or Path(__file__).resolve().parents[2]
         return {
             "name": "belib-production",
             "services": {

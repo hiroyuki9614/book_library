@@ -253,17 +253,18 @@ def compose_contract_sha256(resolved: dict, project_directory: str | Path) -> st
     return hashlib.sha256(serialized).hexdigest()
 
 
-def validate_overlay_preserves_nonfrontend(
-    base: dict, effective: dict, project_directory: str | Path
-) -> str:
-    """Refuse overlays that alter services, DB, storage, or networks outside frontend."""
-    base_digest = compose_contract_sha256(base, project_directory)
-    effective_digest = compose_contract_sha256(effective, project_directory)
-    if base_digest != effective_digest:
+def validate_candidate_protected_contract(
+    resolved: dict,
+    project_directory: str | Path,
+    approved_effective_sha256: str,
+) -> None:
+    """Require a candidate's effective protected projection to match bootstrap approval."""
+    if not re.fullmatch(r"[0-9a-f]{64}", approved_effective_sha256):
+        raise ComposeIdentityError("The stored production Compose contract digest is invalid")
+    if compose_contract_sha256(resolved, project_directory) != approved_effective_sha256:
         raise ComposeIdentityError(
-            "The production override changes a protected service, database, mount, volume, or network"
+            "The candidate changes protected services, database, mounts, or networks"
         )
-    return effective_digest
 
 
 def validate_frontend_service(
@@ -346,10 +347,7 @@ def validate_frontend_service(
     if sorted(actual_networks) != sorted(expected_networks):
         raise ComposeIdentityError("The candidate frontend networks differ from the approved production target")
     if expected_contract_sha256 is not None:
-        if not re.fullmatch(r"[0-9a-f]{64}", expected_contract_sha256):
-            raise ComposeIdentityError("The stored production Compose contract digest is invalid")
-        if compose_contract_sha256(resolved, checkout) != expected_contract_sha256:
-            raise ComposeIdentityError("The candidate changes protected services, database, mounts, or networks")
+        validate_candidate_protected_contract(resolved, checkout, expected_contract_sha256)
 
 
 def _run_json(argv: list[str], env: dict[str, str]) -> dict | list:
@@ -444,7 +442,11 @@ def bootstrap_preflight(container_name: str, production_env_file: str, *, agent_
         env=clean_env,
     )
     validate_compose_services(base)
-    contract_digest = validate_overlay_preserves_nonfrontend(base, effective, project_dir)
+    validate_compose_services(effective)
+    # The owner-approved two-file result is the contract. The base-only config
+    # is checked for supported services, but it is not a protected baseline:
+    # the private overlay may legitimately define the production services.
+    contract_digest = compose_contract_sha256(effective, project_dir)
     try:
         api_base_url = effective["services"]["frontend"]["build"]["args"]["VITE_API_BASE_URL"]
     except (KeyError, TypeError):
