@@ -183,7 +183,7 @@ def validate_live_container_compose_labels(labels: dict, config: dict) -> None:
         raise ComposeIdentityError("The original live Compose file has an unexpected project directory")
 
 
-def validate_compose_services(resolved: dict) -> None:
+def validate_compose_services(resolved: dict, *, require_migrate: bool = False) -> None:
     services = resolved.get("services") if isinstance(resolved, dict) else None
     if not isinstance(services, dict):
         raise ComposeIdentityError("The resolved production Compose services are missing")
@@ -192,6 +192,8 @@ def validate_compose_services(resolved: dict) -> None:
     if not set(services) <= ALLOWED_SERVICES or not EXPECTED_ACTIVE_SERVICES <= set(services):
         raise ComposeIdentityError("The resolved Compose service set differs from the approved production project")
     migrate = services.get("migrate")
+    if require_migrate and migrate is None:
+        raise ComposeIdentityError("The profiled production migration service is missing")
     if migrate is not None:
         profiles = migrate.get("profiles") if isinstance(migrate, dict) else None
         if profiles == []:
@@ -462,7 +464,7 @@ def bootstrap_preflight(container_name: str, production_env_file: str, *, agent_
     )
     validate_compose_services(base)
     validate_compose_services(effective)
-    validate_compose_services(effective_all_profiles)
+    validate_compose_services(effective_all_profiles, require_migrate=True)
     # The owner-approved two-file result is the contract. The base-only config
     # is checked for supported services, but it is not a protected baseline:
     # the private overlay may legitimately define the production services.

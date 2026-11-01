@@ -251,7 +251,7 @@ def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) ->
         validate_private_owner_file(
             config["production_env_file"], config["agent_uid"], description="production env file"
         )
-        validate_compose_services(all_profiles)
+        validate_compose_services(all_profiles, require_migrate=True)
         validate_frontend_service(
             resolved,
             checkout=checkout,
@@ -421,7 +421,7 @@ def _save_state(config: dict, state: dict) -> None:
             os.unlink(temporary)
 
 
-def _previous_state_record(config: dict, state: dict, result: dict) -> dict:
+def _previous_state_record(config: dict, state: dict, result: dict) -> dict | None:
     """Preserve the pre-switch image when replay sees the already-running candidate."""
     saved_current = state.get("current")
     image_id = result["previous_image_id"]
@@ -432,6 +432,20 @@ def _previous_state_record(config: dict, state: dict, result: dict) -> dict:
         if saved_image_id and saved_image_id != result["image_id"]:
             image_id = saved_image_id
             image_ref = _retained_image_ref(image_id)
+        elif saved_image_id == result["image_id"]:
+            saved_previous = state.get("previous")
+            if saved_previous is None:
+                return None
+            if (
+                not isinstance(saved_previous, dict)
+                or not saved_previous.get("image_id")
+                or not saved_previous.get("image_ref")
+                or saved_previous["image_id"] == result["image_id"]
+            ):
+                raise DeployError("The previously recorded frontend rollback image is invalid")
+            image_id = saved_previous["image_id"]
+            image_ref = saved_previous["image_ref"]
+            source_sha = saved_previous.get("source_sha")
         elif not saved_image_id and tuple(state.get("last_request", [0, 0])) == (0, 0):
             # The first request may have switched the bootstrap image before its
             # state save failed. Recover that durable owner-bootstrap pointer.
@@ -440,6 +454,8 @@ def _previous_state_record(config: dict, state: dict, result: dict) -> dict:
                 image_id = bootstrap_image_id
                 image_ref = config.get("bootstrap_rollback_ref") or _retained_image_ref(image_id)
                 source_sha = None
+        if image_id == result["image_id"]:
+            return None
         if image_id != result["previous_image_id"]:
             if _image(config, image_ref).get("Id") != image_id:
                 raise DeployError("The previously recorded frontend image is no longer retained")
@@ -626,7 +642,8 @@ def _rollback_frontend_unlocked(config: dict) -> int:
         )
         _verify_running_image(config, previous["image_id"])
         smoke_test(config["base_url"])
-        state["current"], state["previous"] = previous, current
+        prior_current = {**current, "source_sha": source_sha}
+        state["current"], state["previous"] = previous, prior_current
         state["current_sha"] = previous.get("source_sha")
         state["last_result"] = "manual frontend rollback"
         _save_state(config, state)
@@ -662,12 +679,16 @@ def _synchronize_state_after_rollback_failure(
         state["last_result"] = "manual frontend rollback failed; live image is unknown"
     else:
         image_id = live.get("Image")
+        recorded_prior_current = {
+            **prior_current,
+            "source_sha": prior_source_sha,
+        }
         if image_id == intended_current.get("image_id"):
             state["current"] = intended_current
-            state["previous"] = prior_current
+            state["previous"] = recorded_prior_current
             state["current_sha"] = intended_current.get("source_sha")
         elif image_id == prior_current.get("image_id"):
-            state["current"] = prior_current
+            state["current"] = recorded_prior_current
             state["previous"] = intended_current
             state["current_sha"] = prior_source_sha
         else:

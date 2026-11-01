@@ -262,9 +262,16 @@ class ProductionComposeIdentityTests(unittest.TestCase):
 
     def test_resolved_contract_keeps_four_active_services_and_profiled_migration(self):
         resolved = self.compose_fixture()
-        validate_compose_services(resolved)
+        validate_compose_services(resolved, require_migrate=True)
         digest = compose_contract_sha256(resolved, self.project_dir)
         self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_all_profiles_requires_migrate_but_default_config_may_omit_it(self):
+        default_config = self.compose_fixture()
+        del default_config["services"]["migrate"]
+        validate_compose_services(default_config)
+        with self.assertRaisesRegex(ComposeIdentityError, "migration service is missing"):
+            validate_compose_services(default_config, require_migrate=True)
 
     def test_frontend_sha_image_and_build_context_are_excluded_from_protected_projection(self):
         base = self.compose_fixture()
@@ -702,6 +709,58 @@ class PullAgentDeploymentTests(unittest.TestCase):
             {"image_id": OLD_ID, "image_ref": retained_bootstrap, "source_sha": None},
         )
 
+    def test_noop_replay_preserves_existing_previous_rollback_pointer(self):
+        retained_previous = _retained_image_ref(OLD_ID)
+        self.docker.images[retained_previous] = {
+            "Id": OLD_ID,
+            "Config": {"Labels": {}},
+        }
+        state = {
+            "last_request": [12, 1],
+            "current_sha": SOURCE_SHA,
+            "current": {"image_id": NEW_ID, "image_ref": f"belib-frontend:{SOURCE_SHA}"},
+            "previous": {
+                "image_id": OLD_ID,
+                "image_ref": retained_previous,
+                "source_sha": "d" * 40,
+            },
+        }
+        result = {
+            "no_op": True,
+            "image_id": NEW_ID,
+            "previous_image_id": NEW_ID,
+            "previous_image_ref": _retained_image_ref(NEW_ID),
+        }
+        with patch("kagoya_pull_agent._run", side_effect=self.docker.run):
+            record = _previous_state_record(self.config, state, result)
+
+        self.assertEqual(
+            record,
+            {
+                "image_id": OLD_ID,
+                "image_ref": retained_previous,
+                "source_sha": "d" * 40,
+            },
+        )
+
+    def test_noop_replay_without_saved_rollback_does_not_record_current_as_previous(self):
+        state = {
+            "last_request": [12, 1],
+            "current_sha": SOURCE_SHA,
+            "current": {"image_id": NEW_ID, "image_ref": f"belib-frontend:{SOURCE_SHA}"},
+            "previous": None,
+        }
+        result = {
+            "no_op": True,
+            "image_id": NEW_ID,
+            "previous_image_id": NEW_ID,
+            "previous_image_ref": _retained_image_ref(NEW_ID),
+        }
+
+        record = _previous_state_record(self.config, state, result)
+
+        self.assertIsNone(record)
+
     def test_deploy_targets_only_frontend_and_reads_back_exact_source_image(self):
         result = self.run_deploy(lambda _base_url: None)
         self.assertFalse(result["no_op"])
@@ -1025,7 +1084,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
         )
         self.assertEqual(
             rolled_back_state["previous"],
-            {"image_id": DEPLOYED_ID, "image_ref": next_ref},
+            {"image_id": DEPLOYED_ID, "image_ref": next_ref, "source_sha": next_sha},
         )
         self.assertEqual(rolled_back_state["preserved_metadata"], "synthetic")
 
@@ -1083,8 +1142,59 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(rolled_back_state["last_result"], "manual frontend rollback")
         self.assertEqual(rolled_back_state["current_sha"], previous["source_sha"])
         self.assertEqual(rolled_back_state["current"], previous)
-        self.assertEqual(rolled_back_state["previous"], current)
+        self.assertEqual(rolled_back_state["previous"], {**current, "source_sha": SOURCE_SHA})
         self.assertEqual(rolled_back_state["preserved_metadata"], "synthetic")
+
+    def test_manual_rollback_round_trip_preserves_each_image_source_sha(self):
+        state_path = Path(self.temporary.name) / "dispatcher-state.json"
+        old_sha = "b" * 40
+        current_ref = f"belib-frontend:{SOURCE_SHA}"
+        previous_ref = _retained_image_ref(OLD_ID)
+        current = {"image_id": NEW_ID, "image_ref": current_ref}
+        previous = {"image_id": OLD_ID, "image_ref": previous_ref, "source_sha": old_sha}
+        state_path.write_text(
+            json.dumps(
+                {
+                    "last_request": [8, 13],
+                    "last_result": "success",
+                    "current_sha": SOURCE_SHA,
+                    "current": current,
+                    "previous": previous,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.config.update(
+            {
+                "agent_uid": os.getuid(),
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "dispatcher.lock"),
+            }
+        )
+        self.docker.current_id = NEW_ID
+        self.docker.current_ref = current_ref
+        self.docker.images[current_ref] = {
+            "Id": NEW_ID,
+            "Config": {"Labels": {"org.opencontainers.image.revision": SOURCE_SHA}},
+        }
+        self.docker.images[previous_ref] = {"Id": OLD_ID, "Config": {"Labels": {}}}
+
+        with (
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch("kagoya_pull_agent.smoke_test"),
+        ):
+            self.assertEqual(rollback_frontend(self.config), 0)
+            first = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(first["current_sha"], old_sha)
+            self.assertEqual(first["previous"]["source_sha"], SOURCE_SHA)
+            self.assertEqual(rollback_frontend(self.config), 0)
+
+        restored = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(restored["current_sha"], SOURCE_SHA)
+        self.assertEqual(restored["current"]["image_id"], NEW_ID)
+        self.assertEqual(restored["previous"]["image_id"], OLD_ID)
+        self.assertEqual(restored["previous"]["source_sha"], old_sha)
 
     def test_manual_rollback_verification_failure_records_observed_runtime(self):
         state_path = Path(self.temporary.name) / "dispatcher-state.json"
@@ -1120,7 +1230,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
 
         saved = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(saved["current"], previous)
-        self.assertEqual(saved["previous"], current)
+        self.assertEqual(saved["previous"], {**current, "source_sha": SOURCE_SHA})
         self.assertEqual(saved["current_sha"], previous["source_sha"])
         self.assertEqual(saved["last_result"], "manual frontend rollback verification failed")
 
