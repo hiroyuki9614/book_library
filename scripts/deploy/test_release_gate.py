@@ -92,6 +92,22 @@ class ReleaseGateTests(unittest.TestCase):
             },
         )
 
+    def test_accepts_documented_workflow_path_ref_suffix_for_main_and_pr_runs(self):
+        api = FakeAPI()
+        api.main_run["path"] = f"{RELEASE_PATH}@refs/heads/main"
+        api.pr_run["path"] = f"{RELEASE_PATH}@refs/pull/70/merge"
+
+        proof = validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+
+        self.assertEqual(proof["source_sha"], SOURCE_SHA)
+
+    def test_rejects_workflow_path_lookalike_with_ref_suffix(self):
+        api = FakeAPI()
+        api.main_run["path"] = f"{RELEASE_PATH}-untrusted.yml@refs/heads/main"
+
+        with self.assertRaisesRegex(GateError, "No matching Release candidate gates run"):
+            validate_release(api, SOURCE_SHA)
+
     def test_rejects_stale_sha_before_checking_any_run(self):
         api = FakeAPI()
         original_get = api.get

@@ -70,6 +70,17 @@ def _require_release_jobs(api: GitHubAPI, run: dict) -> None:
         raise GateError("One or more mandatory release jobs did not succeed")
 
 
+def _matches_workflow_path(run: dict, expected_path: str) -> bool:
+    """Match GitHub's path value with or without its documented @ref suffix."""
+    actual_path = run.get("path")
+    if actual_path == expected_path:
+        return True
+    suffix_prefix = f"{expected_path}@"
+    return isinstance(actual_path, str) and actual_path.startswith(suffix_prefix) and bool(
+        actual_path[len(suffix_prefix) :]
+    )
+
+
 def _latest_run(runs: list[dict], *, event: str, branch: str, sha: str, path: str) -> dict:
     matching = [
         run
@@ -77,7 +88,7 @@ def _latest_run(runs: list[dict], *, event: str, branch: str, sha: str, path: st
         if run.get("event") == event
         and run.get("head_branch") == branch
         and run.get("head_sha", "").lower() == sha
-        and run.get("path") == path
+        and _matches_workflow_path(run, path)
     ]
     if not matching:
         raise GateError("No matching Release candidate gates run exists for the exact SHA")
@@ -177,7 +188,7 @@ def _verify_pr_review(api: GitHubAPI, pull: dict) -> None:
         if run.get("head_branch") == head.get("ref")
         and run.get("head_sha", "").lower() == head_sha
     ]
-    release_runs = [run for run in pr_runs if run.get("path") == RELEASE_WORKFLOW_PATH]
+    release_runs = [run for run in pr_runs if _matches_workflow_path(run, RELEASE_WORKFLOW_PATH)]
     if not release_runs:
         raise GateError("The merged PR head has no Release candidate gates run")
     release_run = max(
@@ -191,7 +202,7 @@ def _verify_pr_review(api: GitHubAPI, pull: dict) -> None:
     latest_by_workflow: dict[int, dict] = {}
     for run in pr_runs:
         workflow_id = int(run.get("workflow_id", 0))
-        if not workflow_id or run.get("path") == RELEASE_WORKFLOW_PATH:
+        if not workflow_id or _matches_workflow_path(run, RELEASE_WORKFLOW_PATH):
             continue
         previous = latest_by_workflow.get(workflow_id)
         if previous is None or (int(run.get("run_number", 0)), int(run.get("run_attempt", 0))) > (
