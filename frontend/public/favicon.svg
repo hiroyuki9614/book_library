@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="BeLib book icon">
+  <rect width="64" height="64" rx="14" fill="#14243B"/>
+  <path d="M11 17.5c7.4-2.8 14.3-2.5 21 1.2v28.5C25.7 43.7 18.5 43.4 11 46V17.5Z" fill="#F8FAFC"/>
+  <path d="M53 17.5c-7.4-2.8-14.3-2.5-21 1.2v28.5c6.3-3.5 13.5-3.8 21-1.2V17.5Z" fill="#E6EEF6"/>
+  <path d="M32 18.7v28.5" stroke="#31B9C2" stroke-width="2.8" stroke-linecap="round"/>
+  <path d="M16 24h10M16 30h10M38 24h10M38 30h10" stroke="#8094A8" stroke-width="2" stroke-linecap="round"/>
+  <path d="M11 48c7.8-2.8 14.4-2.7 21 .6 6.6-3.3 13.2-3.4 21-.6" fill="none" stroke="#31B9C2" stroke-width="2.5" stroke-linecap="round"/>
+</svg>
