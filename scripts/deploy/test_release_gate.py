@@ -53,6 +53,7 @@ class FakeAPI:
                 "state": "APPROVED",
                 "commit_id": PR_HEAD_SHA,
                 "submitted_at": "2026-11-01T23:00:00Z",
+                "author_association": "COLLABORATOR",
             }
         ]
         self.main_jobs = {name: "success" for name in REQUIRED_RELEASE_JOBS}
@@ -117,6 +118,32 @@ class ReleaseGateTests(unittest.TestCase):
         with self.assertRaisesRegex(GateError, "exact merged PR head SHA"):
             validate_release(api, SOURCE_SHA)
 
+    def test_rejects_exact_head_approval_from_public_noncollaborator(self):
+        api = FakeAPI()
+        api.reviews[0]["author_association"] = "NONE"
+        with self.assertRaisesRegex(GateError, "No non-author approval applies"):
+            validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+
+    def test_rejects_author_approval_even_on_exact_head(self):
+        api = FakeAPI()
+        api.pull["user"]["login"] = "reviewer"
+        with self.assertRaisesRegex(GateError, "No non-author approval applies"):
+            validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+
+    def test_ignores_changes_request_from_public_noncollaborator(self):
+        api = FakeAPI()
+        api.reviews.append(
+            {
+                "user": {"login": "outside-reviewer"},
+                "state": "CHANGES_REQUESTED",
+                "commit_id": PR_HEAD_SHA,
+                "submitted_at": "2026-11-02T00:30:00Z",
+                "author_association": "NONE",
+            }
+        )
+        proof = validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+        self.assertEqual(proof["pr_head_sha"], PR_HEAD_SHA)
+
     def test_rejects_latest_changes_requested_review(self):
         api = FakeAPI()
         api.reviews.append(
@@ -125,6 +152,7 @@ class ReleaseGateTests(unittest.TestCase):
                 "state": "CHANGES_REQUESTED",
                 "commit_id": PR_HEAD_SHA,
                 "submitted_at": "2026-11-02T00:30:00Z",
+                "author_association": "COLLABORATOR",
             }
         )
         with self.assertRaisesRegex(GateError, "remain unresolved"):
@@ -138,6 +166,7 @@ class ReleaseGateTests(unittest.TestCase):
                 "state": "CHANGES_REQUESTED",
                 "commit_id": PR_HEAD_SHA,
                 "submitted_at": "2026-11-02T00:30:00Z",
+                "author_association": "COLLABORATOR",
             }
         )
         with self.assertRaisesRegex(GateError, "remain unresolved"):
@@ -151,6 +180,7 @@ class ReleaseGateTests(unittest.TestCase):
                 "state": "CHANGES_REQUESTED",
                 "commit_id": "c" * 40,
                 "submitted_at": "2026-11-02T00:30:00Z",
+                "author_association": "COLLABORATOR",
             }
         )
         with self.assertRaisesRegex(GateError, "remain unresolved"):
@@ -165,12 +195,14 @@ class ReleaseGateTests(unittest.TestCase):
                     "state": "CHANGES_REQUESTED",
                     "commit_id": PR_HEAD_SHA,
                     "submitted_at": "2026-11-02T00:30:00Z",
+                    "author_association": "COLLABORATOR",
                 },
                 {
                     "user": {"login": "reviewer"},
                     "state": "COMMENTED",
                     "commit_id": PR_HEAD_SHA,
                     "submitted_at": "2026-11-02T00:40:00Z",
+                    "author_association": "COLLABORATOR",
                 },
             ]
         )
@@ -185,6 +217,7 @@ class ReleaseGateTests(unittest.TestCase):
                 "state": "APPROVED",
                 "commit_id": PR_HEAD_SHA,
                 "submitted_at": "2026-11-01T23:00:00Z",
+                "author_association": "COLLABORATOR",
             }
         ]
         api.reviews.extend(
@@ -193,6 +226,7 @@ class ReleaseGateTests(unittest.TestCase):
                 "state": "COMMENTED",
                 "commit_id": PR_HEAD_SHA,
                 "submitted_at": f"2026-11-02T00:{index:02d}:00Z",
+                "author_association": "COLLABORATOR",
             }
             for index in range(99)
         )
@@ -202,6 +236,7 @@ class ReleaseGateTests(unittest.TestCase):
                 "state": "CHANGES_REQUESTED",
                 "commit_id": PR_HEAD_SHA,
                 "submitted_at": "2026-11-02T02:00:00Z",
+                "author_association": "COLLABORATOR",
             }
         )
         with self.assertRaisesRegex(GateError, "remain unresolved"):

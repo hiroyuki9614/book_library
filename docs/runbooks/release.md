@@ -34,21 +34,63 @@ Go requires named ownership for release engineering, migration, backup/restore, 
 
 ## Frontend CI/CD handoff
 
-`.github/workflows/release-ci.yml` runs the existing release gates for pull requests and again on each `main` push, so both the reviewed PR head and merged main SHA have exact backend, frontend, reader E2E, and Compose smoke results. `.github/workflows/production-frontend-cd.yml` runs after that main run succeeds. It checks that the SHA is still current `main`, identifies its merged PR, requires a non-author approval on the exact PR head, rejects a latest unresolved non-author changes request, and checks all four release jobs on both the PR head and main merge SHA. It then creates a lightweight `belib-deploy-request-<run-id>-<attempt>` tag pointing to that immutable SHA. Manual replay is limited to the current `main` SHA and uses the same checks. Workflow runs are serialized; stale SHAs are rejected.
+`.github/workflows/release-ci.yml` runs the existing release gates for pull requests and again on each `main` push, so both the reviewed PR head and merged main SHA have exact backend, frontend, reader E2E, and Compose smoke results. `.github/workflows/production-frontend-cd.yml` runs after that main run succeeds. It checks that the SHA is still current `main`, identifies its merged PR, requires an approval from a non-author repository collaborator/owner on the exact PR head, rejects a latest unresolved collaborator/owner changes request, and checks all four release jobs on both the PR head and main merge SHA. It then creates a lightweight `belib-deploy-request-<run-id>-<attempt>` tag pointing to that immutable SHA. Manual replay is limited to the current `main` SHA and uses the same checks. Workflow runs are serialized; stale SHAs are rejected.
 
 The repository is public, so the owner-side pull dispatcher reads the handoff tag and release evidence through unauthenticated GitHub HTTPS. It needs no GitHub token, SSH key, registry credential, or Actions secret. The Actions workflow uses only its short-lived `GITHUB_TOKEN` to read Actions/PR data and create the handoff tag. The host independently revalidates the exact main SHA, merged PR review, and mandatory jobs before it downloads source.
 
-At the time this candidate was prepared, GitHub reported no branch-protection rule for `main`, no self-hosted Actions runner, no protected environment, and no Actions secrets. The CD workflow still refuses direct pushes without a merged, exactly approved PR and green release gates. Keep this PR in Draft; do not merge it until the owner has enabled the required `main` review and status-check protection.
+### One-time owner activation
 
-After merge, the one-time owner bootstrap is run from a clean checkout of reviewed `main` on KAGOYA as the existing `agent` account, using the existing protected production Compose env-file path:
+The sole-maintainer state cannot satisfy the release rule: a PR author cannot approve their own change, and a public user's approval is not an eligible substitute. The release gate accepts only `OWNER`/`COLLABORATOR` review associations; `main` branch protection must separately require an approving reviewer with write access. Before activation, confirm a distinct reviewer and an enforced `main` protection rule exist. Keep the PR in Draft and do not merge it until one of these owner decisions is complete:
+
+1. **Keep the independent-review policy (minimum activation path):** invite one trusted person other than the PR author as a repository collaborator with **Write** permission. They review the exact PR head and approve only after inspection. Configure `main` protection to require one approval, dismiss stale approvals, require the four checks below, require the branch to be up to date, enforce the rule for administrators, and disallow force pushes and branch deletion. The authorized reviewer must be able to approve every future release PR.
+2. **Solo-maintainer policy:** if no separate reviewer can be appointed, the owner must explicitly authorize a replacement policy in writing. Review and implement that policy as a separate focused change, including its release-gate behavior and tests, before changing branch protection or merging. Do not treat self-approval, an admin bypass, or an external public approval as an exception.
+
+Configure the classic `main` branch protection rule in **Settings → Branches** (branch pattern `main`) with these exact check names from `.github/workflows/release-ci.yml`:
+
+- `Backend tests, build, Prisma, and migrations`
+- `Frontend tests, lint, and build`
+- `Reader Playwright E2E`
+- `Production images, Compose config, and isolated smoke`
+
+Also select **Require a pull request before merging**, **1 required approval**, **Dismiss stale pull request approvals when new commits are pushed**, **Require branches to be up to date before merging**, and apply enforcement to administrators. Leave force pushes and deletion disabled. After saving, verify the rule through **Settings → Branches** or `gh api repos/hiroyuki9614/book_library/branches/main/protection`; do not proceed if the API still returns 404 or any required context/setting is missing.
+
+For each release PR, keep it Draft until an authorized independent reviewer has reviewed and approved the exact head SHA, the latest collaborator/owner review history has no unresolved `CHANGES_REQUESTED`, and all four exact-head checks succeed. The Actions CD gate and KAGOYA dispatcher then independently require the merged PR head approval plus green checks for both the PR head and exact `main` merge SHA. The handoff is a tag named `belib-deploy-request-<run-id>-<attempt>` that points to that main SHA. A green PR run alone is not deployment evidence.
+
+After merge, the one-time owner bootstrap is run from a clean checkout of reviewed `main` on KAGOYA in the existing `agent` user's owner-native session. That session must expose the same rootless Docker daemon and persistent user systemd manager inspected by the installer. The `ubuntu` CI/supervision user must not impersonate `agent`, access its Docker socket, or install the timer.
 
 ```bash
-scripts/deploy/install_kagoya_pull_agent.sh /absolute/path/to/existing-production.env
+git status --short  # stop if this checkout is not clean; do not discard local work
+git fetch origin main
+git checkout --detach origin/main
+git status --short  # must still be empty
+git rev-parse HEAD  # compare with the reviewed main SHA
+PRODUCTION_ENV_FILE=/absolute/path/to/existing-production.env
+scripts/deploy/install_kagoya_pull_agent.sh "$PRODUCTION_ENV_FILE"
+systemctl --user is-active belib-production-cd.timer
+systemctl --user list-timers belib-production-cd.timer
 ```
 
 The bootstrap checks rootless Docker, the running `belib-production-frontend-1` container, its actual Compose project/service/config/network labels, the protected env-file permissions, the existing immutable image ID, and a persistent `agent` user systemd manager. It refuses unknown or multi-file Compose identities and refuses to duplicate an existing BeLib deploy timer. It retains the current image by ID, installs a user-scoped five-minute poll timer, and makes no container change. The frontend build explicitly clears both public-demo build arguments until a dedicated non-admin account is verified, so a password from the host env file is never published by CD. It must be run by the authorized host owner; the `ubuntu` CI/supervision principal must not run it or access the rootless Docker socket.
 
-For each accepted request, the dispatcher checks the SHA is still `main`, downloads it into an isolated source directory, validates the resolved frontend Compose service against the approved no-mount/no-extra-capability contract, rejects a symlinked frontend context or Dockerfile, builds only `frontend`, and runs Compose `up --no-deps --no-build frontend`. It rejects frontend volumes, host devices, privilege/capability changes, altered networks, extra services, and nonstandard build contexts before any image build or switch. It verifies the live container's Compose project/service/network, exact source-revision label and image ID, `/login` title, versioned favicon as SVG, `/health`, and anonymous 401 responses for book and admin APIs. It never runs migrations, changes backend/DB/R2/volumes, touches preview or OdoTrack services, or prunes images. Prior frontend image IDs receive retained rollback tags. A failed switch or smoke restores only that saved frontend image and verifies its ID and smoke. To request the last saved frontend-only rollback manually:
+For each accepted request, the dispatcher checks the SHA is still `main`, downloads it into an isolated source directory, validates the resolved frontend Compose service against the approved no-mount/no-extra-capability contract, rejects a symlinked frontend context or Dockerfile, builds only `frontend`, and runs Compose `up --no-deps --no-build frontend`. It rejects frontend volumes, host devices, privilege/capability changes, altered networks, extra services, and nonstandard build contexts before any image build or switch. It verifies the live container's Compose project/service/network, exact source-revision label and image ID, `/login` title, versioned favicon as SVG, `/health`, and anonymous 401 responses for book and admin APIs. It never runs migrations, changes backend/DB/R2/volumes, touches preview or OdoTrack services, or prunes images. Prior frontend image IDs receive retained rollback tags. A failed switch or smoke restores only that saved frontend image and verifies its ID and smoke.
+
+After a merge, verify the `Release candidate gates` workflow succeeded on the exact main merge SHA with all four jobs green. Then verify the `Production frontend CD handoff` workflow succeeded and its `belib-deploy-request-<run-id>-<attempt>` tag points to that same SHA. Allow the timer up to five minutes to poll. In the existing `agent` session, inspect only the dispatcher result fields in `~/.local/state/belib-production-cd/state.json` and the service log:
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+state = json.loads(Path.home().joinpath('.local/state/belib-production-cd/state.json').read_text())
+print({key: state.get(key) for key in ('last_request', 'last_result', 'current_sha')})
+print({'current_image_id': (state.get('current') or {}).get('image_id')})
+PY
+journalctl --user -u belib-production-cd.service --since '15 minutes ago' --no-pager
+docker inspect --format '{{.Image}}' belib-production-frontend-1
+```
+
+Require the request tuple to match the handoff run ID/attempt, `last_result` to be `success`, `current_sha` to equal the merge SHA, and the live image ID to equal `current_image_id`. Confirm public `/login`, the linked versioned favicon as `image/svg+xml`, `/health` 200, and anonymous book/admin API 401 using the approved public origin. Do not print or record production environment values. `CICD_ACCEPTED` remains `INCOMPLETE` until this exact request consumption and read-back are complete.
+
+For an owner-authorized manual rollback, first confirm that the live frontend image ID still matches `current.image_id` in dispatcher state and `previous.image_id` is the intended retained image. Run as the existing KAGOYA `agent` user; the dispatcher refuses a changed live image or missing saved rollback, restores only the frontend image, then verifies its ID and smoke. After rollback, read back the restored image ID and smoke. To request the last saved frontend-only rollback manually:
 
 ```bash
 python3 ~/.local/libexec/belib-production-cd/kagoya_pull_agent.py \\

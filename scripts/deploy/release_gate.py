@@ -17,6 +17,7 @@ REQUIRED_RELEASE_JOBS = (
     "Reader Playwright E2E",
     "Production images, Compose config, and isolated smoke",
 )
+REVIEWER_ASSOCIATIONS = {"COLLABORATOR", "OWNER"}
 
 
 class GateError(RuntimeError):
@@ -144,6 +145,8 @@ def _verify_pr_review(api: GitHubAPI, pull: dict) -> None:
     for review in reviews:
         reviewer = review.get("user", {}).get("login")
         if not reviewer or reviewer == pull.get("user", {}).get("login"):
+            continue
+        if review.get("author_association") not in REVIEWER_ASSOCIATIONS:
             continue
         if review.get("state") in {"PENDING", "COMMENTED"}:
             continue
