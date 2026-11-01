@@ -111,7 +111,8 @@ export function createPublicationRendition(book: Book, viewer: HTMLElement, opti
 		current = locationOf(primary);
 		if (customDual && current?.start && !current.atEnd) {
 			if (!preview) {
-				preview = new Rendition(book, { ...options, manager: PublicationManager, width, height, spread: 'none' }) as Native;
+				const previewOptions = { ...options, manager: PublicationManager, width, height, spread: 'none', gap } as RenditionOptions & { gap: number };
+				preview = new Rendition(book, previewOptions) as Native;
 				await preview.started;
 				preview.direction(effectiveDirection);
 				if (contentHook) preview.hooks.content.register(contentHook);

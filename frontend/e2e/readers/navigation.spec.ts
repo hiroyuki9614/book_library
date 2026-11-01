@@ -733,6 +733,13 @@ test(`narrow odd-width spreads finish layout and preserve real page movement ver
 			expect(textGeometry.paddingLeft).toBe('16px');
 			expect(textGeometry.paddingRight).toBe('16px');
 			expect(textGeometry.backgroundColor).toBe('rgb(255, 255, 255)');
+			if (vertical && (mode === '常に見開き' || (mode === '自動' && width >= 800))) {
+				const followingPadding = await page.locator('[data-publication-pane="following"] iframe').first().evaluate((frame) => {
+					const styles = frame.contentWindow!.getComputedStyle(frame.contentDocument!.body);
+					return { left: styles.paddingLeft, right: styles.paddingRight };
+				});
+				expect(followingPadding).toEqual({ left: '16px', right: '16px' });
+			}
 			const chromeGeometry=await page.locator('header').evaluate(header=>{
 				const bounds=header.getBoundingClientRect();
 				const controls=[...header.querySelectorAll('a,button,[role="combobox"]')]
