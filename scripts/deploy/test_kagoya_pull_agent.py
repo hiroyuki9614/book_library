@@ -1,11 +1,12 @@
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from kagoya_pull_agent import DeployError, deploy_frontend
+from kagoya_pull_agent import DeployError, _run, deploy_frontend
 
 
 SOURCE_SHA = "a" * 40
@@ -22,6 +23,7 @@ class FakeDocker:
         self.commands = []
         self.up_targets = []
         self.frontend_compose_overrides = {}
+        self.frontend_build_arg_overrides = {}
 
     def container(self):
         return [
@@ -72,7 +74,7 @@ class FakeDocker:
                     "build": {
                         "args": {
                             "VCS_REF": source_sha,
-                            "VITE_API_BASE_URL": "https://api.example.test",
+                            "VITE_API_BASE_URL": (env or {}).get("VITE_API_BASE_URL"),
                             "VITE_PUBLIC_DEMO_EMAIL": "",
                             "VITE_PUBLIC_DEMO_PASSWORD": "",
                         },
@@ -91,6 +93,7 @@ class FakeDocker:
                     "networks": {"default": None},
                     "restart": "unless-stopped",
                 }
+                frontend["build"]["args"].update(self.frontend_build_arg_overrides)
                 frontend.update(self.frontend_compose_overrides)
                 stdout = json.dumps(
                     {
@@ -146,6 +149,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
             "production_container": "belib-production-frontend-1",
             "expected_networks": ["belib-production_default"],
             "production_env_file": str(self.environment_file),
+            "expected_api_base_url": "https://api.example.test",
             "base_url": "http://127.0.0.1:8080",
         }
         self.docker = FakeDocker()
@@ -171,10 +175,32 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertTrue(any("build" in argv and argv[-1] == "frontend" for argv in compose_commands))
         self.assertTrue(any("up" in argv and argv[-1] == "frontend" for argv in compose_commands))
         build_env = next(env for argv, env in self.docker.commands if "build" in argv)
+        config_env = next(env for argv, env in self.docker.commands if "config" in argv)
+        up_env = next(env for argv, env in self.docker.commands if "up" in argv)
+        for compose_env in (config_env, build_env, up_env):
+            self.assertEqual(compose_env["VITE_API_BASE_URL"], self.config["expected_api_base_url"])
         self.assertEqual(build_env["VITE_PUBLIC_DEMO_EMAIL"], "")
         self.assertEqual(build_env["VITE_PUBLIC_DEMO_PASSWORD"], "")
         self.assertFalse(any("down" in argv or "prune" in argv for argv in self.docker.commands))
         self.assertTrue(all(target == "frontend" for target in self.docker.up_targets))
+
+    def test_rejects_altered_candidate_api_url_before_build_or_switch(self):
+        self.docker.frontend_build_arg_overrides["VITE_API_BASE_URL"] = "https://altered.example.test"
+        with self.assertRaisesRegex(DeployError, "frontend build arguments differ from the operator-approved values"):
+            self.run_deploy(lambda _base_url: None)
+        self.assertEqual(self.docker.current_id, OLD_ID)
+        compose_commands = [argv for argv, _ in self.docker.commands if argv[:2] == ["docker", "compose"]]
+        self.assertFalse(any("build" in argv or "up" in argv for argv in compose_commands))
+
+    def test_pinned_api_url_overrides_ambient_host_environment(self):
+        expected = self.config["expected_api_base_url"]
+        with patch.dict(os.environ, {"VITE_API_BASE_URL": "https://ambient.example.test"}):
+            with patch(
+                "kagoya_pull_agent.subprocess.run",
+                return_value=subprocess.CompletedProcess(["docker"], 0, "", ""),
+            ) as run:
+                _run(["docker", "compose", "config"], env={"VITE_API_BASE_URL": expected})
+        self.assertEqual(run.call_args.kwargs["env"]["VITE_API_BASE_URL"], expected)
 
     def test_failed_smoke_restores_the_exact_prior_frontend_image(self):
         smoke_calls = 0

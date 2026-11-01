@@ -224,6 +224,7 @@ def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) ->
             # These are build-time public values; do not read demo credentials from the host env.
             "VITE_PUBLIC_DEMO_EMAIL": "",
             "VITE_PUBLIC_DEMO_PASSWORD": "",
+            "VITE_API_BASE_URL": config["expected_api_base_url"],
         },
     )
     if not isinstance(resolved, dict):
@@ -266,12 +267,11 @@ def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) ->
         raise DeployError("The frontend build argument set differs from the approved contract")
     if (
         args.get("VCS_REF") != source_sha
-        or not isinstance(args.get("VITE_API_BASE_URL"), str)
-        or not args.get("VITE_API_BASE_URL")
+        or args.get("VITE_API_BASE_URL") != config["expected_api_base_url"]
         or args.get("VITE_PUBLIC_DEMO_EMAIL") not in ("", None)
         or args.get("VITE_PUBLIC_DEMO_PASSWORD") not in ("", None)
     ):
-        raise DeployError("The frontend build arguments contain an invalid revision or public value")
+        raise DeployError("The frontend build arguments differ from the operator-approved values")
 
     network_refs = frontend.get("networks")
     declared_networks = resolved.get("networks")
@@ -306,7 +306,12 @@ def _up_frontend(
     image_override: str | None = None,
 ) -> None:
     prefix = _compose_prefix(config, checkout)
-    env = {"VCS_REF": source_sha}
+    env = {
+        "VCS_REF": source_sha,
+        "VITE_API_BASE_URL": config["expected_api_base_url"],
+        "VITE_PUBLIC_DEMO_EMAIL": "",
+        "VITE_PUBLIC_DEMO_PASSWORD": "",
+    }
     if image_override is not None:
         env["BELIB_FRONTEND_IMAGE"] = image_override
         with tempfile.TemporaryDirectory(prefix="belib-frontend-compose-") as temporary:
@@ -349,6 +354,7 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=smoke_test, main_sha
             "BELIB_FRONTEND_IMAGE": f"belib-frontend:{source_sha}",
             # The demo pair is not a CD prerequisite and has not been verified here.
             # Never expose values from the protected host env file in the public bundle.
+            "VITE_API_BASE_URL": config["expected_api_base_url"],
             "VITE_PUBLIC_DEMO_EMAIL": "",
             "VITE_PUBLIC_DEMO_PASSWORD": "",
         },
@@ -553,6 +559,7 @@ def main() -> int:
         "expected_project",
         "expected_networks",
         "production_env_file",
+        "expected_api_base_url",
         "release_root",
         "state_file",
         "lock_file",

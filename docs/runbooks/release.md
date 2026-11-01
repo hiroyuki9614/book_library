@@ -22,7 +22,7 @@ For each candidate, record:
 - smoke route evidence, synthetic-data identifier, browser/device status, approvers, and stop/go decision;
 - PR CI, GitHub Actions handoff, and owner-side deployment evidence as separate events.
 
-Do not place credentials, public Production hostnames, or secret values in this record. Public origin and `VITE_API_BASE_URL` remain operator-supplied.
+Do not place credentials, public Production hostnames, or secret values in this record. Public origin and `VITE_API_BASE_URL` remain operator-supplied in the protected production environment. The bootstrap resolves `VITE_API_BASE_URL` through the existing production Compose env file while clearing any ambient shell override for that variable, then stores the resolved value in the mode-0600 dispatcher config. Candidate Compose validation, frontend builds, and frontend `up` commands all receive that pinned value explicitly; a changed candidate build argument fails before build or switch.
 
 Backend runtime builds now require `VCS_REF`, the full reviewed source SHA supplied by the build host. Compose passes it to the Dockerfile's immutable revision file and OCI label. Record the source-to-registry-digest-to-image-ID provenance; a self-declared label is insufficient. Management commands run compiled JavaScript through `docker exec` in the approved running backend container, using the same DB network and storage mounts. Follow `docs/portfolio-demo.md` for revision/identity verification and the scoped MVP database backup gate before public-demo writes. Never infer the running revision from Git inside a runtime container.
 

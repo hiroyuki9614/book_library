@@ -14,7 +14,7 @@ CONTAINER_NAME=belib-production-frontend-1
 UNIT_NAME=belib-production-cd
 
 [[ "$(id -un)" == agent ]] || { echo "error: run this bootstrap as the existing KAGOYA agent user" >&2; exit 1; }
-for command in docker git python3 systemctl loginctl realpath install getent; do
+for command in docker git python3 systemctl loginctl realpath install getent env; do
   command -v "$command" >/dev/null || { echo "error: required command is unavailable: $command" >&2; exit 1; }
 done
 
@@ -109,6 +109,32 @@ print(json.dumps({
 
 PROJECT=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["project"])' <<<"$SAFE_METADATA")
 IMAGE_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["image_id"])' <<<"$SAFE_METADATA")
+PRODUCTION_PROJECT_DIR=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["working_dir"])' <<<"$SAFE_METADATA")
+PRODUCTION_COMPOSE_FILE=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["config_file"])' <<<"$SAFE_METADATA")
+if ! TRUSTED_COMPOSE_CONFIG=$(env -u VITE_API_BASE_URL docker compose \
+  --project-name "$PROJECT" \
+  --project-directory "$PRODUCTION_PROJECT_DIR" \
+  --file "$PRODUCTION_COMPOSE_FILE" \
+  --env-file "$PRODUCTION_ENV_FILE" \
+  config --format json 2>/dev/null); then
+  echo "error: the approved production Compose config could not be resolved" >&2
+  exit 1
+fi
+EXPECTED_API_BASE_URL=$(python3 -c '
+import json, sys
+try:
+    config = json.load(sys.stdin)
+    value = config["services"]["frontend"]["build"]["args"]["VITE_API_BASE_URL"]
+except (KeyError, TypeError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(value, str) or not value:
+    raise SystemExit(1)
+print(value)
+' <<<"$TRUSTED_COMPOSE_CONFIG") || {
+  echo "error: the approved production API base URL is missing" >&2
+  exit 1
+}
+unset TRUSTED_COMPOSE_CONFIG
 ROLLBACK_REF="belib-frontend:rollback-${IMAGE_ID#sha256:}"
 ROLLBACK_REF="${ROLLBACK_REF:0:44}"
 docker image tag "$IMAGE_ID" "$ROLLBACK_REF" >/dev/null
@@ -123,16 +149,20 @@ chmod 700 "$CONFIG_DIR" "$LIBEXEC_DIR" "$STATE_DIR" "$RELEASE_DIR"
 install -m 700 "$SCRIPT_DIR/kagoya_pull_agent.py" "$LIBEXEC_DIR/kagoya_pull_agent.py"
 install -m 700 "$SCRIPT_DIR/release_gate.py" "$LIBEXEC_DIR/release_gate.py"
 
-python3 - "$SAFE_METADATA" "$PRODUCTION_ENV_FILE" "$CONFIG_PATH" "$LIBEXEC_DIR" "$STATE_DIR" "$RELEASE_DIR" "$ROLLBACK_REF" <<'PY'
+BELIB_EXPECTED_API_BASE_URL="$EXPECTED_API_BASE_URL" python3 - "$SAFE_METADATA" "$PRODUCTION_ENV_FILE" "$CONFIG_PATH" "$LIBEXEC_DIR" "$STATE_DIR" "$RELEASE_DIR" "$ROLLBACK_REF" <<'PY'
 import json, os, sys
 metadata = json.loads(sys.argv[1])
 env_file, config_path, libexec, state_dir, release_dir, rollback_ref = sys.argv[2:]
+expected_api_base_url = os.environ.get("BELIB_EXPECTED_API_BASE_URL", "")
+if not expected_api_base_url:
+    raise SystemExit("error: the approved production API base URL is missing")
 config = {
     "repository": "hiroyuki9614/book_library",
     "repo_url": "https://github.com/hiroyuki9614/book_library.git",
     "production_container": "belib-production-frontend-1",
     "expected_project": metadata["project"],
     "expected_networks": metadata["networks"],
+    "expected_api_base_url": expected_api_base_url,
     "production_env_file": env_file,
     "original_project_dir": metadata["working_dir"],
     "original_compose_file": metadata["config_file"],
