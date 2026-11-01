@@ -21,8 +21,8 @@ export class PublicationManager extends DefaultManager {
 				const body = view.contents?.document.body;
 				if (body) writingModes.set(view, getComputedStyle(body).writingMode);
 				for (const sheet of view.contents?.document.styleSheets ?? []) {
-					// The reader's own mobile inset stylesheet contains media rules and
-					// direction declarations, but it cannot change the publication axis.
+					// The reader's own text-inset stylesheet contains direction rules,
+					// but it cannot change the publication axis.
 					// Only publisher CSS should trigger a native view rebuild here.
 					if ((sheet.ownerNode as HTMLElement | null)?.id === 'belib-text-direction') continue;
 					// An unreadable stylesheet can change the writing axis without being

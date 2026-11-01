@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type Request } from '@playwright/test';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -89,8 +89,10 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	}
 	await expect(page.getByRole('dialog')).toBeHidden();
 
-	const saveResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.pdfBookId}/reading-info`)
+	const readingInfoPath = `/api/v1/books/${metadata.pdfBookId}/reading-info`;
+	const saveResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
 		&& response.request().method() === 'PATCH'
+		&& response.request().postDataJSON()?.currentPage === 2
 		&& response.request().postDataJSON()?.readStatus === 'completed');
 	const viewport = page.getByTestId('pdf-viewport');
 	const shown = () => page.evaluate(() => {
@@ -125,10 +127,76 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	expect((await page.locator('[data-pdf-page="2"] img').screenshot()).equals(firstImage)).toBe(false);
 	await expect(page.locator('output[aria-live="polite"]:visible')).toHaveText('2 / 2 ページ 100%');
 	if (mobileControls) await page.getByRole('button', { name: '閉じる', exact: true }).click();
-	expect((await saveResponse).status()).toBe(200);
+	const savedResponse = await saveResponse;
+	expect(savedResponse.request().postDataJSON()).toEqual({ currentPage: 2, readStatus: 'completed' });
+	expect(savedResponse.status()).toBe(200);
+	expect(await savedResponse.json()).toMatchObject({
+		bookId: metadata.pdfBookId,
+		currentPosition: '2',
+		currentPage: 2,
+		readStatus: 'completed',
+	});
+
+	const latePatchRequests: Array<{
+		request: Request;
+		currentPage: unknown;
+		readStatus: unknown;
+	}> = [];
+	let monitorResizePatches = false;
+	const monitorLatePatches = (request: Request) => {
+		if (!monitorResizePatches || request.method() !== 'PATCH' || !request.url().endsWith(readingInfoPath)) return;
+		const body = request.postDataJSON() as { currentPage?: unknown; readStatus?: unknown };
+		latePatchRequests.push({ request, currentPage: body.currentPage, readStatus: body.readStatus });
+	};
+	page.on('request', monitorLatePatches);
+	monitorResizePatches = true;
 	await page.setViewportSize({ width: 851, height: 393 });
 	await expect(viewport).toBeVisible();
+	// Ordinary reading saves are debounced for 750ms. Observe that full window
+	// after resize so a transient EmbedPDF page 1 state cannot hide before reload.
+	await page.waitForTimeout(800);
+	const reloadReadingInfoResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
+		&& response.request().method() === 'GET');
 	await page.reload();
+	const reloadResponse = await reloadReadingInfoResponse;
+	const reloadBody = await reloadResponse.json() as {
+		bookId: number;
+		currentPosition: string | null;
+		currentPage: number;
+		readStatus: string;
+	};
+	const latePatchResponses = await Promise.all(latePatchRequests.map(async (patch) => {
+		const response = await patch.request.response();
+		let responseBodyDecoded = false;
+		const body = response
+			? await response.json().then((value: unknown) => {
+				responseBodyDecoded = true;
+				return value as { currentPage?: unknown; readStatus?: unknown } | null;
+			}).catch(() => null)
+			: null;
+		return {
+			requestCurrentPage: patch.currentPage,
+			requestReadStatus: patch.readStatus,
+			status: response?.status() ?? null,
+			responseBodyDecoded,
+			responseCurrentPage: body?.currentPage ?? null,
+			responseReadStatus: body?.readStatus ?? null,
+		};
+	}));
+	page.off('request', monitorLatePatches);
+	expect({
+		status: reloadResponse.status(),
+		currentPosition: reloadBody.currentPosition,
+		currentPage: reloadBody.currentPage,
+		readStatus: reloadBody.readStatus,
+		latePatches: latePatchResponses,
+	}, 'Reload ReadingInfo GET must confirm persisted page 2 before evaluating the visible PDF restore.')
+		.toMatchObject({ status: 200, currentPosition: '2', currentPage: 2, readStatus: 'completed' });
+	expect(latePatchResponses.every((patch) => patch.requestCurrentPage === 2
+		&& patch.status === 200
+		&& (!patch.responseBodyDecoded || (patch.responseCurrentPage === 2 && patch.responseReadStatus === 'completed'))),
+	`ReadingInfo PATCH calls after resize must not overwrite page 2; observed ${JSON.stringify(latePatchResponses)}`)
+		.toBe(true);
 	if ((await page.evaluate(() => innerWidth)) < 768) {
 		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
 	}

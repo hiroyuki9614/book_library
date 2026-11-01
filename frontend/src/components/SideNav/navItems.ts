@@ -19,7 +19,7 @@ export const navItems: {
 	versions: ['1.0.1', '1.1.0-alpha', '2.0.0-beta1'],
 	navMain: [
 		{
-			title: 'BeeLib',
+			title: 'BeLib',
 			url: '#',
 			items: [
 				{
@@ -32,7 +32,7 @@ export const navItems: {
 	],
 	adminMenu: [
 		{
-			title: 'BeeLib',
+			title: 'BeLib',
 			url: '#',
 			className: 'mt-auto',
 			items: [

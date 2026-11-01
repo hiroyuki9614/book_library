@@ -44,13 +44,13 @@ export default function Login() {
 
 	return (
 		<main className='flex min-h-screen items-center justify-center p-4'>
-			<SectionCard pageTitle='BeLib デモ' pageDescription='EPUB / PDFを安全に読む個人ライブラリ' size='large' className='w-full max-w-2xl text-center'>
+			<SectionCard pageTitle='BeLib' pageDescription='EPUB / PDFを安全に読む個人ライブラリ' size='large' className='w-full max-w-2xl text-center'>
 				<div className='mb-6 rounded-lg border bg-muted/40 p-4 text-left text-sm'>
 					<p className='font-semibold'>採用面接向けデモ</p>
 					<p className='mt-1 text-muted-foreground'>デモ用の一般ユーザーとしてログインすると、著作権保護期間が満了した公開デモ作品だけを閲覧できます。</p>
 					{demoCredentials ? (
 						<div className='mt-3 rounded-md border bg-background p-3' aria-label='デモ用ログイン情報'>
-							<p className='font-semibold'>サンプルログイン情報（一般ユーザー）</p>
+							<p className='font-semibold'>デモ用アカウント</p>
 							<dl className='mt-2 space-y-2'>
 								<div>
 									<dt className='text-muted-foreground'>ログインID（メールアドレス）</dt>
