@@ -34,3 +34,10 @@ Status: **release hold remains**. This record does not authorize merge, deployme
 - `npm --prefix frontend run build`: passed with the existing large-chunk warning.
 - No backend, database, R2, production service, or deployment state was changed.
 - Treat this as a **P1 release hold** until the demo account is proven non-admin with the requested denials and the production revision/rollback identity is read back. No P0 defect was established by this inspection; account privilege remains unverified.
+
+## PDF reload restore follow-up
+
+- On PR head `073e0bd6536241e4726141e7bcfa0fa6783f2078`, Reader Playwright job `124798479302` failed after the page-2 save and resize/reload; its single replay `124805562566` passed. This is intermittent evidence, not proof of an environment-only flake or a product race.
+- The PDF E2E now checks that the page-2 PATCH request and response both contain page 2, observes PATCHes triggered after resize across the reader's 750 ms save debounce, and reads the reload GET body before the visible restore assertions. The page-number, page visibility, visible-page position, and page-image comparisons remain in place.
+- Local focused frontend tests passed (12 unit tests and 9 node tests); lint and production build passed. The real API Playwright E2E was not run locally because its isolated database and fixture environment variables are not configured here. The updated PR head needs CI execution to verify the real API path.
+- This follow-up changes E2E diagnostics only. No reader runtime code, production service, database, R2 object, credential, or deployment state changed.
