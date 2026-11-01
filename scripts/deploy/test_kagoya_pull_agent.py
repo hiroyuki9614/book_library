@@ -78,7 +78,7 @@ class FakeDocker:
                             "VITE_PUBLIC_DEMO_EMAIL": "",
                             "VITE_PUBLIC_DEMO_PASSWORD": "",
                         },
-                        "context": str(checkout / "frontend"),
+                        "context": str((checkout / "frontend").resolve()),
                         "dockerfile": "Dockerfile",
                         "target": "runtime",
                     },
@@ -140,6 +140,9 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.checkout = Path(self.temporary.name) / SOURCE_SHA
         self.checkout.mkdir()
         (self.checkout / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+        frontend = self.checkout / "frontend"
+        frontend.mkdir()
+        (frontend / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
         self.environment_file = Path(self.temporary.name) / "production.env"
         self.environment_file.write_text("synthetic=only\n", encoding="utf-8")
         self.config = {
@@ -224,6 +227,32 @@ class PullAgentDeploymentTests(unittest.TestCase):
             {"type": "bind", "source": "/run/user/1000/docker.sock", "target": "/run/docker.sock"}
         ]
         with self.assertRaisesRegex(DeployError, "unsupported runtime capabilities"):
+            self.run_deploy(lambda _base_url: None)
+        self.assertEqual(self.docker.current_id, OLD_ID)
+        compose_commands = [argv for argv, _ in self.docker.commands if argv[:2] == ["docker", "compose"]]
+        self.assertFalse(any("build" in argv or "up" in argv for argv in compose_commands))
+
+    def test_rejects_candidate_frontend_symlink_to_external_context_before_build_or_switch(self):
+        frontend = self.checkout / "frontend"
+        (frontend / "Dockerfile").unlink()
+        frontend.rmdir()
+        outside = Path(self.temporary.name) / "outside"
+        outside.mkdir()
+        (outside / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        frontend.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(DeployError, "real directory inside the isolated checkout"):
+            self.run_deploy(lambda _base_url: None)
+        self.assertEqual(self.docker.current_id, OLD_ID)
+        compose_commands = [argv for argv, _ in self.docker.commands if argv[:2] == ["docker", "compose"]]
+        self.assertFalse(any("build" in argv or "up" in argv for argv in compose_commands))
+
+    def test_rejects_candidate_dockerfile_symlink_to_external_file_before_build_or_switch(self):
+        dockerfile = self.checkout / "frontend" / "Dockerfile"
+        dockerfile.unlink()
+        outside = Path(self.temporary.name) / "outside.Dockerfile"
+        outside.write_text("FROM scratch\n", encoding="utf-8")
+        dockerfile.symlink_to(outside)
+        with self.assertRaisesRegex(DeployError, "Dockerfile must be a regular file"):
             self.run_deploy(lambda _base_url: None)
         self.assertEqual(self.docker.current_id, OLD_ID)
         compose_commands = [argv for argv, _ in self.docker.commands if argv[:2] == ["docker", "compose"]]

@@ -251,8 +251,19 @@ def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) ->
     build = frontend.get("build")
     if not isinstance(build, dict) or set(build) != {"args", "context", "dockerfile", "target"}:
         raise DeployError("The frontend build adds unsupported build capabilities")
+    checkout_root = checkout.resolve(strict=True)
+    frontend_context = checkout_root / "frontend"
+    if frontend_context.is_symlink() or not frontend_context.is_dir():
+        raise DeployError("The frontend build context must be a real directory inside the isolated checkout")
+    dockerfile_path = frontend_context / "Dockerfile"
+    if dockerfile_path.is_symlink() or not dockerfile_path.is_file():
+        raise DeployError("The frontend Dockerfile must be a regular file inside the isolated checkout")
+    try:
+        resolved_context = Path(str(build.get("context", ""))).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise DeployError("The frontend build context could not be resolved inside the isolated checkout") from None
     if (
-        Path(str(build.get("context", ""))).resolve() != (checkout / "frontend").resolve()
+        resolved_context != frontend_context
         or build.get("dockerfile") != "Dockerfile"
         or build.get("target") != "runtime"
     ):

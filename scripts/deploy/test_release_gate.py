@@ -1,5 +1,5 @@
 import unittest
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlsplit
 
 from release_gate import GateError, REQUIRED_RELEASE_JOBS, validate_release
 
@@ -67,8 +67,10 @@ class FakeAPI:
             return {"jobs": [{"name": name, "conclusion": result} for name, result in self.main_jobs.items()]}
         if f"/commits/{SOURCE_SHA}/pulls?" in path:
             return [self.pull]
-        if f"/pulls/70/reviews?{urlencode({'per_page': 100})}" in path:
-            return self.reviews
+        if f"/pulls/70/reviews?" in path:
+            page = int(parse_qs(urlsplit(path).query).get("page", ["1"])[0])
+            start = (page - 1) * 100
+            return self.reviews[start : start + 100]
         if "/actions/runs?" in path and "event=pull_request" in path:
             return {"workflow_runs": [self.pr_run]}
         if path.endswith(f"/actions/runs/{PR_RUN_ID}/jobs?per_page=100"):
@@ -125,7 +127,84 @@ class ReleaseGateTests(unittest.TestCase):
                 "submitted_at": "2026-11-02T00:30:00Z",
             }
         )
-        with self.assertRaisesRegex(GateError, "exact merged PR head SHA"):
+        with self.assertRaisesRegex(GateError, "remain unresolved"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_changes_requested_by_another_reviewer(self):
+        api = FakeAPI()
+        api.reviews.append(
+            {
+                "user": {"login": "second-reviewer"},
+                "state": "CHANGES_REQUESTED",
+                "commit_id": PR_HEAD_SHA,
+                "submitted_at": "2026-11-02T00:30:00Z",
+            }
+        )
+        with self.assertRaisesRegex(GateError, "remain unresolved"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_outstanding_changes_request_on_an_older_head(self):
+        api = FakeAPI()
+        api.reviews.append(
+            {
+                "user": {"login": "second-reviewer"},
+                "state": "CHANGES_REQUESTED",
+                "commit_id": "c" * 40,
+                "submitted_at": "2026-11-02T00:30:00Z",
+            }
+        )
+        with self.assertRaisesRegex(GateError, "remain unresolved"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_comment_does_not_clear_a_changes_request(self):
+        api = FakeAPI()
+        api.reviews.extend(
+            [
+                {
+                    "user": {"login": "reviewer"},
+                    "state": "CHANGES_REQUESTED",
+                    "commit_id": PR_HEAD_SHA,
+                    "submitted_at": "2026-11-02T00:30:00Z",
+                },
+                {
+                    "user": {"login": "reviewer"},
+                    "state": "COMMENTED",
+                    "commit_id": PR_HEAD_SHA,
+                    "submitted_at": "2026-11-02T00:40:00Z",
+                },
+            ]
+        )
+        with self.assertRaisesRegex(GateError, "remain unresolved"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_changes_requested_review_on_a_later_history_page(self):
+        api = FakeAPI()
+        api.reviews = [
+            {
+                "user": {"login": "reviewer"},
+                "state": "APPROVED",
+                "commit_id": PR_HEAD_SHA,
+                "submitted_at": "2026-11-01T23:00:00Z",
+            }
+        ]
+        api.reviews.extend(
+            {
+                "user": {"login": f"commenter-{index}"},
+                "state": "COMMENTED",
+                "commit_id": PR_HEAD_SHA,
+                "submitted_at": f"2026-11-02T00:{index:02d}:00Z",
+            }
+            for index in range(99)
+        )
+        api.reviews.append(
+            {
+                "user": {"login": "reviewer"},
+                "state": "CHANGES_REQUESTED",
+                "commit_id": PR_HEAD_SHA,
+                "submitted_at": "2026-11-02T02:00:00Z",
+            }
+        )
+        with self.assertRaisesRegex(GateError, "remain unresolved"):
             validate_release(api, SOURCE_SHA)
 
     def test_rejects_unexpected_completed_pr_workflow_failure(self):

@@ -119,25 +119,45 @@ def _verify_merged_pr(api: GitHubAPI, source_sha: str) -> dict:
     return matches[0]
 
 
+def _pull_request_reviews(api: GitHubAPI, pull_number: int) -> list[dict]:
+    reviews: list[dict] = []
+    for page in range(1, 101):
+        query = urlencode({"per_page": 100, "page": page})
+        response = api.get(
+            f"/repos/{api.repository}/pulls/{pull_number}/reviews?{query}"
+        )
+        if not isinstance(response, list):
+            raise GateError("The pull-request review history has an invalid response")
+        reviews.extend(response)
+        if len(response) < 100:
+            return reviews
+    raise GateError("The pull-request review history exceeds the validation limit")
+
+
 def _verify_pr_review(api: GitHubAPI, pull: dict) -> None:
     head = pull.get("head", {})
     head_sha = head.get("sha", "").lower()
     if len(head_sha) != 40:
         raise GateError("The merged PR head SHA is missing or invalid")
-    query = urlencode({"per_page": 100})
-    reviews = api.get(f"/repos/{api.repository}/pulls/{pull['number']}/reviews?{query}")
+    reviews = _pull_request_reviews(api, int(pull["number"]))
     latest_by_user: dict[str, dict] = {}
     for review in reviews:
         reviewer = review.get("user", {}).get("login")
         if not reviewer or reviewer == pull.get("user", {}).get("login"):
             continue
-        if review.get("state") == "PENDING":
+        if review.get("state") in {"PENDING", "COMMENTED"}:
             continue
         previous = latest_by_user.get(reviewer)
         if previous is None or (review.get("submitted_at") or "") >= (
             previous.get("submitted_at") or ""
         ):
             latest_by_user[reviewer] = review
+    if any(
+        review.get("state") == "CHANGES_REQUESTED"
+        for review in latest_by_user.values()
+    ):
+        raise GateError("A non-author reviewer has requested changes that remain unresolved")
+
     approved = any(
         review.get("state") == "APPROVED"
         and review.get("commit_id", "").lower() == head_sha
