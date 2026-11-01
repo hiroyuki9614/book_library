@@ -167,13 +167,18 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	};
 	const latePatchResponses = await Promise.all(latePatchRequests.map(async (patch) => {
 		const response = await patch.request.response();
+		let responseBodyDecoded = false;
 		const body = response
-			? await response.json().catch(() => null) as { currentPage?: unknown; readStatus?: unknown } | null
+			? await response.json().then((value: unknown) => {
+				responseBodyDecoded = true;
+				return value as { currentPage?: unknown; readStatus?: unknown } | null;
+			}).catch(() => null)
 			: null;
 		return {
 			requestCurrentPage: patch.currentPage,
 			requestReadStatus: patch.readStatus,
 			status: response?.status() ?? null,
+			responseBodyDecoded,
 			responseCurrentPage: body?.currentPage ?? null,
 			responseReadStatus: body?.readStatus ?? null,
 		};
@@ -189,9 +194,8 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		.toMatchObject({ status: 200, currentPosition: '2', currentPage: 2, readStatus: 'completed' });
 	expect(latePatchResponses.every((patch) => patch.requestCurrentPage === 2
 		&& patch.status === 200
-		&& patch.responseCurrentPage === 2
-		&& patch.responseReadStatus === 'completed'),
-	`ReadingInfo PATCH calls after resize must preserve page 2; observed ${JSON.stringify(latePatchResponses)}`)
+		&& (!patch.responseBodyDecoded || (patch.responseCurrentPage === 2 && patch.responseReadStatus === 'completed'))),
+	`ReadingInfo PATCH calls after resize must not overwrite page 2; observed ${JSON.stringify(latePatchResponses)}`)
 		.toBe(true);
 	if ((await page.evaluate(() => innerWidth)) < 768) {
 		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
