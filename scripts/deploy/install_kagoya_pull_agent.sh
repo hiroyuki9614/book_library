@@ -18,6 +18,27 @@ for command in docker git python3 systemctl loginctl realpath install getent env
   command -v "$command" >/dev/null || { echo "error: required command is unavailable: $command" >&2; exit 1; }
 done
 
+AGENT_UID=$(id -u)
+AGENT_RUNTIME_DIR="/run/user/$AGENT_UID"
+python3 - "$AGENT_RUNTIME_DIR" "$AGENT_UID" "${XDG_RUNTIME_DIR:-}" <<'PY'
+import os, stat, sys
+runtime_dir, uid_text, inherited = sys.argv[1:]
+uid = int(uid_text)
+if inherited and inherited != runtime_dir:
+    raise SystemExit("error: XDG_RUNTIME_DIR does not identify the agent user runtime")
+try:
+    runtime_stat = os.lstat(runtime_dir)
+except OSError:
+    raise SystemExit("error: the agent user runtime directory is unavailable") from None
+if (
+    not stat.S_ISDIR(runtime_stat.st_mode)
+    or runtime_stat.st_uid != uid
+    or stat.S_IMODE(runtime_stat.st_mode) & 0o077
+):
+    raise SystemExit("error: the agent user runtime directory has unexpected ownership, type, or permissions")
+PY
+export XDG_RUNTIME_DIR="$AGENT_RUNTIME_DIR"
+
 [[ -f "$PRODUCTION_ENV_FILE" ]] || { echo "error: the existing production Compose env file is unavailable" >&2; exit 1; }
 python3 - "$PRODUCTION_ENV_FILE" <<'PY'
 import os, stat, sys
@@ -71,70 +92,17 @@ if [[ -e "$CONFIG_PATH" || -e "$SERVICE_PATH" || -e "$TIMER_PATH" ]]; then
   exit 1
 fi
 
-CONTAINER_JSON=$(docker inspect "$CONTAINER_NAME" 2>/dev/null) || {
-  echo "error: the approved production frontend container was not found" >&2
-  exit 1
-}
-SAFE_METADATA=$(python3 -c '
-import json, os, sys
-items = json.load(sys.stdin)
-if len(items) != 1:
-    raise SystemExit("error: production frontend container is not unique")
-item = items[0]
-labels = item.get("Config", {}).get("Labels") or {}
-name = item.get("Name", "").lstrip("/")
-if name != "belib-production-frontend-1" or labels.get("com.docker.compose.service") != "frontend":
-    raise SystemExit("error: container name/service does not match the production frontend")
-project = labels.get("com.docker.compose.project", "")
-working_dir = labels.get("com.docker.compose.project.working_dir", "")
-files = [part.strip() for part in labels.get("com.docker.compose.project.config_files", "").split(",") if part.strip()]
-networks = sorted((item.get("NetworkSettings", {}).get("Networks") or {}).keys())
-if not project or not working_dir or not os.path.isdir(working_dir) or len(files) != 1:
-    raise SystemExit("error: production Compose labels are missing or use multiple config files")
-if os.path.basename(files[0]) != "compose.yaml" or not os.path.isfile(files[0]):
-    raise SystemExit("error: the approved production config must be a readable compose.yaml")
-if not networks or item.get("State", {}).get("Running") is not True:
-    raise SystemExit("error: production frontend is stopped or has no Compose network")
-if not item.get("Image") or not item.get("Config", {}).get("Image"):
-    raise SystemExit("error: production frontend image identity is incomplete")
-print(json.dumps({
-  "project": project,
-  "working_dir": os.path.realpath(working_dir),
-  "config_file": os.path.realpath(files[0]),
-  "image_id": item["Image"],
-  "image_ref": item["Config"]["Image"],
-  "networks": networks,
-}, separators=(",", ":")))
-' <<<"$CONTAINER_JSON") || exit 1
+SAFE_METADATA=$(python3 "$SCRIPT_DIR/kagoya_compose.py" "$CONTAINER_NAME" "$PRODUCTION_ENV_FILE") || exit 1
 
 PROJECT=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["project"])' <<<"$SAFE_METADATA")
 IMAGE_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["image_id"])' <<<"$SAFE_METADATA")
-PRODUCTION_PROJECT_DIR=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["working_dir"])' <<<"$SAFE_METADATA")
-PRODUCTION_COMPOSE_FILE=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["config_file"])' <<<"$SAFE_METADATA")
-if ! TRUSTED_COMPOSE_CONFIG=$(env -u VITE_API_BASE_URL docker compose \
-  --project-name "$PROJECT" \
-  --project-directory "$PRODUCTION_PROJECT_DIR" \
-  --file "$PRODUCTION_COMPOSE_FILE" \
-  --env-file "$PRODUCTION_ENV_FILE" \
-  config --format json 2>/dev/null); then
-  echo "error: the approved production Compose config could not be resolved" >&2
-  exit 1
-fi
-EXPECTED_API_BASE_URL=$(python3 -c '
-import json, sys
-try:
-    config = json.load(sys.stdin)
-    value = config["services"]["frontend"]["build"]["args"]["VITE_API_BASE_URL"]
-except (KeyError, TypeError, json.JSONDecodeError):
-    raise SystemExit(1)
-if not isinstance(value, str) or not value:
-    raise SystemExit(1)
-print(value)
-' <<<"$TRUSTED_COMPOSE_CONFIG") || {
-  echo "error: the approved production API base URL is missing" >&2
-  exit 1
-}
-unset TRUSTED_COMPOSE_CONFIG
+PRODUCTION_PROJECT_DIR=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["project_dir"])' <<<"$SAFE_METADATA")
+PRODUCTION_COMPOSE_FILE=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["compose_file"])' <<<"$SAFE_METADATA")
+PRODUCTION_COMPOSE_OVERRIDE=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["compose_override_file"])' <<<"$SAFE_METADATA")
+EXPECTED_API_BASE_URL=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["expected_api_base_url"])' <<<"$SAFE_METADATA")
+EXPECTED_COMPOSE_CONTRACT_SHA256=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["compose_contract_sha256"])' <<<"$SAFE_METADATA")
+EXPECTED_NETWORKS_JSON=$(python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["networks"], separators=(",", ":")))' <<<"$SAFE_METADATA")
+unset SAFE_METADATA
 ROLLBACK_REF="belib-frontend:rollback-${IMAGE_ID#sha256:}"
 ROLLBACK_REF="${ROLLBACK_REF:0:44}"
 docker image tag "$IMAGE_ID" "$ROLLBACK_REF" >/dev/null
@@ -148,25 +116,28 @@ mkdir -m 700 -p "$CONFIG_DIR" "$LIBEXEC_DIR" "$STATE_DIR" "$RELEASE_DIR" "$UNIT_
 chmod 700 "$CONFIG_DIR" "$LIBEXEC_DIR" "$STATE_DIR" "$RELEASE_DIR"
 install -m 700 "$SCRIPT_DIR/kagoya_pull_agent.py" "$LIBEXEC_DIR/kagoya_pull_agent.py"
 install -m 700 "$SCRIPT_DIR/release_gate.py" "$LIBEXEC_DIR/release_gate.py"
+install -m 700 "$SCRIPT_DIR/kagoya_compose.py" "$LIBEXEC_DIR/kagoya_compose.py"
 
-BELIB_EXPECTED_API_BASE_URL="$EXPECTED_API_BASE_URL" python3 - "$SAFE_METADATA" "$PRODUCTION_ENV_FILE" "$CONFIG_PATH" "$LIBEXEC_DIR" "$STATE_DIR" "$RELEASE_DIR" "$ROLLBACK_REF" <<'PY'
+BELIB_EXPECTED_API_BASE_URL="$EXPECTED_API_BASE_URL" BELIB_EXPECTED_COMPOSE_CONTRACT_SHA256="$EXPECTED_COMPOSE_CONTRACT_SHA256" python3 - "$PROJECT" "$PRODUCTION_PROJECT_DIR" "$PRODUCTION_COMPOSE_FILE" "$PRODUCTION_COMPOSE_OVERRIDE" "$PRODUCTION_ENV_FILE" "$EXPECTED_NETWORKS_JSON" "$IMAGE_ID" "$CONFIG_PATH" "$LIBEXEC_DIR" "$STATE_DIR" "$RELEASE_DIR" "$ROLLBACK_REF" <<'PY'
 import json, os, sys
-metadata = json.loads(sys.argv[1])
-env_file, config_path, libexec, state_dir, release_dir, rollback_ref = sys.argv[2:]
+project, project_dir, compose_file, override_file, env_file, networks_json, image_id, config_path, libexec, state_dir, release_dir, rollback_ref = sys.argv[1:]
 expected_api_base_url = os.environ.get("BELIB_EXPECTED_API_BASE_URL", "")
-if not expected_api_base_url:
-    raise SystemExit("error: the approved production API base URL is missing")
+expected_contract_sha256 = os.environ.get("BELIB_EXPECTED_COMPOSE_CONTRACT_SHA256", "")
+if not expected_api_base_url or len(expected_contract_sha256) != 64:
+    raise SystemExit("error: approved production Compose metadata is missing")
 config = {
     "repository": "hiroyuki9614/book_library",
     "repo_url": "https://github.com/hiroyuki9614/book_library.git",
     "production_container": "belib-production-frontend-1",
-    "expected_project": metadata["project"],
-    "expected_networks": metadata["networks"],
+    "expected_project": project,
+    "expected_networks": json.loads(networks_json),
     "expected_api_base_url": expected_api_base_url,
+    "expected_compose_contract_sha256": expected_contract_sha256,
     "production_env_file": env_file,
-    "original_project_dir": metadata["working_dir"],
-    "original_compose_file": metadata["config_file"],
-    "bootstrap_image_id": metadata["image_id"],
+    "original_project_dir": project_dir,
+    "original_compose_file": compose_file,
+    "production_compose_override": override_file,
+    "bootstrap_image_id": image_id,
     "bootstrap_rollback_ref": rollback_ref,
     "release_root": release_dir,
     "state_file": os.path.join(state_dir, "state.json"),

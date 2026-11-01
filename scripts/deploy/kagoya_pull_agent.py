@@ -16,21 +16,17 @@ from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 from release_gate import GateError, GitHubAPI, validate_release
+from kagoya_compose import (
+    ComposeIdentityError,
+    validate_frontend_service,
+    validate_live_container_compose_labels,
+    validate_override_path,
+    validate_private_owner_file,
+)
 
 
 REQUEST_REF = re.compile(r"^refs/tags/belib-deploy-request-([0-9]+)-([0-9]+)$")
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
-EXPECTED_SERVICES = {"db", "migrate", "backend", "frontend", "nginx"}
-EXPECTED_FRONTEND_FIELDS = {
-    "build",
-    "command",
-    "entrypoint",
-    "expose",
-    "image",
-    "logging",
-    "networks",
-    "restart",
-}
 
 
 class DeployError(RuntimeError):
@@ -65,21 +61,32 @@ def _run_json(argv: list[str], *, env: dict[str, str] | None = None) -> dict | l
         raise DeployError("A Docker read-back was not valid JSON") from None
 
 
-def _compose_prefix(config: dict, checkout: Path, override: Path | None = None) -> list[str]:
+def _compose_prefix(config: dict, checkout: Path) -> list[str]:
+    try:
+        production_override = validate_override_path(config, config["agent_uid"])
+        production_env = validate_private_owner_file(
+            config["production_env_file"], config["agent_uid"], description="production env file"
+        )
+    except (ComposeIdentityError, KeyError, TypeError) as error:
+        raise DeployError(str(error)) from None
+    checkout_root = checkout.resolve(strict=True)
+    base_file = checkout_root / "compose.yaml"
+    if not base_file.is_file() or base_file.is_symlink():
+        raise DeployError("The release checkout Compose file must be a regular file")
     command = [
         "docker",
         "compose",
         "--project-name",
         config["expected_project"],
         "--project-directory",
-        str(checkout),
+        str(checkout_root),
         "--file",
-        str(checkout / "compose.yaml"),
+        str(base_file),
+        "--file",
+        str(production_override),
         "--env-file",
-        config["production_env_file"],
+        str(production_env),
     ]
-    if override:
-        command.extend(["--file", str(override)])
     return command
 
 
@@ -96,6 +103,10 @@ def _container(config: dict) -> dict:
         or item.get("State", {}).get("Running") is not True
     ):
         raise DeployError("The live container no longer matches the approved Compose target")
+    try:
+        validate_live_container_compose_labels(labels, config)
+    except ComposeIdentityError as error:
+        raise DeployError(str(error)) from None
     networks = sorted((item.get("NetworkSettings", {}).get("Networks") or {}).keys())
     if networks != sorted(config["expected_networks"]):
         raise DeployError("The live frontend network identity changed")
@@ -195,21 +206,14 @@ def smoke_test(base_url: str) -> None:
             raise DeployError("An anonymous protected API smoke did not return HTTP 401")
 
 
-def _write_override(image_ref: str, directory: Path) -> Path:
-    path = directory / "frontend-image-override.yaml"
-    path.write_text(
-        "services:\n  frontend:\n    image: " + json.dumps(image_ref) + "\n",
-        encoding="utf-8",
-    )
-    path.chmod(0o600)
-    return path
-
-
 def _verify_target_image(config: dict, source_sha: str) -> dict:
     expected_ref = f"belib-frontend:{source_sha}"
     image = _image(config, expected_ref)
     labels = image.get("Config", {}).get("Labels") or {}
-    if labels.get("org.opencontainers.image.revision", "").lower() != source_sha:
+    if (
+        not re.fullmatch(r"sha256:[0-9a-f]{64}", image.get("Id", ""))
+        or labels.get("org.opencontainers.image.revision", "").lower() != source_sha
+    ):
         raise DeployError("The built frontend image revision label does not match the source SHA")
     return image
 
@@ -219,6 +223,7 @@ def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) ->
     resolved = _run_json(
         _compose_prefix(config, checkout) + ["config", "--format", "json"],
         env={
+            "COMPOSE_PROFILES": "",
             "VCS_REF": source_sha,
             "BELIB_FRONTEND_IMAGE": f"belib-frontend:{source_sha}",
             # These are build-time public values; do not read demo credentials from the host env.
@@ -229,75 +234,20 @@ def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) ->
     )
     if not isinstance(resolved, dict):
         raise DeployError("The resolved production Compose config has an invalid shape")
-    services = resolved.get("services")
-    if not isinstance(services, dict) or set(services) != EXPECTED_SERVICES:
-        raise DeployError("The candidate Compose service set differs from the approved BeLib project")
-
-    frontend = services.get("frontend")
-    if not isinstance(frontend, dict) or set(frontend) != EXPECTED_FRONTEND_FIELDS:
-        raise DeployError("The frontend Compose service adds unsupported runtime capabilities")
-    if frontend.get("image") != f"belib-frontend:{source_sha}":
-        raise DeployError("The frontend Compose image is not tagged with the exact source SHA")
-    if frontend.get("command") is not None or frontend.get("entrypoint") is not None:
-        raise DeployError("The frontend Compose service may not override the reviewed image command")
-    if frontend.get("expose") != ["8080"] or frontend.get("restart") != "unless-stopped":
-        raise DeployError("The frontend Compose runtime contract changed")
-    if frontend.get("logging") != {
-        "driver": "json-file",
-        "options": {"max-file": "3", "max-size": "10m"},
-    }:
-        raise DeployError("The frontend Compose logging contract changed")
-
-    build = frontend.get("build")
-    if not isinstance(build, dict) or set(build) != {"args", "context", "dockerfile", "target"}:
-        raise DeployError("The frontend build adds unsupported build capabilities")
-    checkout_root = checkout.resolve(strict=True)
-    frontend_context = checkout_root / "frontend"
-    if frontend_context.is_symlink() or not frontend_context.is_dir():
-        raise DeployError("The frontend build context must be a real directory inside the isolated checkout")
-    dockerfile_path = frontend_context / "Dockerfile"
-    if dockerfile_path.is_symlink() or not dockerfile_path.is_file():
-        raise DeployError("The frontend Dockerfile must be a regular file inside the isolated checkout")
     try:
-        resolved_context = Path(str(build.get("context", ""))).resolve(strict=True)
-    except (OSError, RuntimeError):
-        raise DeployError("The frontend build context could not be resolved inside the isolated checkout") from None
-    if (
-        resolved_context != frontend_context
-        or build.get("dockerfile") != "Dockerfile"
-        or build.get("target") != "runtime"
-    ):
-        raise DeployError("The frontend build must use only the reviewed frontend runtime context")
-    args = build.get("args")
-    if not isinstance(args, dict) or set(args) != {
-        "VCS_REF",
-        "VITE_API_BASE_URL",
-        "VITE_PUBLIC_DEMO_EMAIL",
-        "VITE_PUBLIC_DEMO_PASSWORD",
-    }:
-        raise DeployError("The frontend build argument set differs from the approved contract")
-    if (
-        args.get("VCS_REF") != source_sha
-        or args.get("VITE_API_BASE_URL") != config["expected_api_base_url"]
-        or args.get("VITE_PUBLIC_DEMO_EMAIL") not in ("", None)
-        or args.get("VITE_PUBLIC_DEMO_PASSWORD") not in ("", None)
-    ):
-        raise DeployError("The frontend build arguments differ from the operator-approved values")
-
-    network_refs = frontend.get("networks")
-    declared_networks = resolved.get("networks")
-    if not isinstance(network_refs, dict) or not isinstance(declared_networks, dict):
-        raise DeployError("The resolved frontend network identity is missing")
-    if any(value not in (None, {}) for value in network_refs.values()):
-        raise DeployError("The frontend Compose network options may not change")
-    actual_networks = []
-    for name in network_refs:
-        network = declared_networks.get(name)
-        if not isinstance(network, dict) or not isinstance(network.get("name"), str):
-            raise DeployError("A frontend Compose network has no resolved identity")
-        actual_networks.append(network["name"])
-    if sorted(actual_networks) != sorted(config["expected_networks"]):
-        raise DeployError("The candidate frontend networks differ from the approved production target")
+        validate_private_owner_file(
+            config["production_env_file"], config["agent_uid"], description="production env file"
+        )
+        validate_frontend_service(
+            resolved,
+            checkout=checkout,
+            source_sha=source_sha,
+            api_base_url=config["expected_api_base_url"],
+            expected_networks=config["expected_networks"],
+            expected_contract_sha256=config["expected_compose_contract_sha256"],
+        )
+    except (ComposeIdentityError, KeyError, TypeError) as error:
+        raise DeployError(str(error)) from None
 
 
 def _verify_running_image(config: dict, image_id: str, source_sha: str | None = None) -> dict:
@@ -306,6 +256,21 @@ def _verify_running_image(config: dict, image_id: str, source_sha: str | None = 
         raise DeployError("The live frontend image ID does not match the requested image")
     if source_sha and live.get("Config", {}).get("Image") != f"belib-frontend:{source_sha}":
         raise DeployError("The live frontend image tag does not match the source SHA")
+    if source_sha:
+        labels = live.get("Config", {}).get("Labels") or {}
+        if labels.get("org.opencontainers.image.revision", "").lower() != source_sha:
+            raise DeployError("The live frontend immutable revision label does not match the source SHA")
+        files = [
+            part.strip()
+            for part in labels.get("com.docker.compose.project.config_files", "").split(",")
+        ]
+        try:
+            live_base = Path(files[0]).resolve(strict=True) if len(files) == 2 else None
+            expected_base = (Path(config["release_root"]) / source_sha / "compose.yaml").resolve(strict=True)
+        except (KeyError, OSError, RuntimeError):
+            raise DeployError("The live frontend Compose source checkout could not be verified") from None
+        if live_base != expected_base:
+            raise DeployError("The live frontend Compose source is not the exact release checkout")
     return live
 
 
@@ -318,6 +283,7 @@ def _up_frontend(
 ) -> None:
     prefix = _compose_prefix(config, checkout)
     env = {
+        "COMPOSE_PROFILES": "",
         "VCS_REF": source_sha,
         "VITE_API_BASE_URL": config["expected_api_base_url"],
         "VITE_PUBLIC_DEMO_EMAIL": "",
@@ -325,16 +291,9 @@ def _up_frontend(
     }
     if image_override is not None:
         env["BELIB_FRONTEND_IMAGE"] = image_override
-        with tempfile.TemporaryDirectory(prefix="belib-frontend-compose-") as temporary:
-            override = _write_override(image_override, Path(temporary))
-            _run(
-                prefix
-                + ["--file", str(override), "up", "--detach", "--no-deps", "--no-build", "frontend"],
-                env=env,
-            )
     else:
         env["BELIB_FRONTEND_IMAGE"] = f"belib-frontend:{source_sha}"
-        _run(prefix + ["up", "--detach", "--no-deps", "--no-build", "frontend"], env=env)
+    _run(prefix + ["up", "--detach", "--no-deps", "--no-build", "frontend"], env=env)
 
 
 def deploy_frontend(config: dict, source_sha: str, *, smoke=smoke_test, main_sha_reader=None) -> dict:
@@ -348,6 +307,7 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=smoke_test, main_sha
     if current.get("Config", {}).get("Image") == f"belib-frontend:{source_sha}":
         image = _verify_target_image(config, source_sha)
         if current["Image"] == image.get("Id"):
+            _verify_running_image(config, image["Id"], source_sha)
             smoke(config["base_url"])
             return {
                 "source_sha": source_sha,
@@ -361,6 +321,7 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=smoke_test, main_sha
     _run(
         _compose_prefix(config, checkout) + ["build", "frontend"],
         env={
+            "COMPOSE_PROFILES": "",
             "VCS_REF": source_sha,
             "BELIB_FRONTEND_IMAGE": f"belib-frontend:{source_sha}",
             # The demo pair is not a CD prerequisite and has not been verified here.
@@ -579,6 +540,10 @@ def main() -> int:
         "expected_project",
         "expected_networks",
         "production_env_file",
+        "production_compose_override",
+        "expected_compose_contract_sha256",
+        "original_project_dir",
+        "original_compose_file",
         "expected_api_base_url",
         "release_root",
         "state_file",

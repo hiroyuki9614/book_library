@@ -1,4 +1,5 @@
 import fcntl
+import copy
 import json
 import os
 import subprocess
@@ -8,10 +9,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from kagoya_compose import (
+    ComposeIdentityError,
+    compose_contract_sha256,
+    validate_compose_services,
+    validate_live_compose_identity,
+    validate_overlay_preserves_nonfrontend,
+    validate_frontend_service,
+    validate_private_owner_file,
+)
 from kagoya_pull_agent import (
     DeployError,
     _load_state,
     _run,
+    _verify_target_image,
     deploy_frontend,
     dispatch_once,
     rollback_frontend,
@@ -25,15 +36,20 @@ DEPLOYED_ID = "sha256:" + "c" * 64
 
 
 class FakeDocker:
-    def __init__(self):
+    def __init__(self, project_dir, production_override):
         self.current_id = OLD_ID
         self.current_ref = "belib-frontend:legacy"
         self.images = {self.current_ref: {"Id": OLD_ID, "Config": {"Labels": {}}}}
+        self.current_project_dir = project_dir
+        self.current_base_file = project_dir / "compose.yaml"
+        self.production_override = production_override
         self.tags = {}
         self.commands = []
         self.up_targets = []
         self.frontend_compose_overrides = {}
         self.frontend_build_arg_overrides = {}
+        self.other_service_overrides = {}
+        self.migrate_profiles = ["migration"]
 
     def container(self):
         return [
@@ -45,6 +61,10 @@ class FakeDocker:
                     "Labels": {
                         "com.docker.compose.project": "belib-production",
                         "com.docker.compose.service": "frontend",
+                        "com.docker.compose.project.working_dir": str(self.current_project_dir),
+                        "com.docker.compose.project.config_files": (
+                            f"{self.current_base_file},{self.production_override}"
+                        ),
                         "org.opencontainers.image.revision": (
                             SOURCE_SHA if self.current_ref == f"belib-frontend:{SOURCE_SHA}" else ""
                         ),
@@ -105,16 +125,20 @@ class FakeDocker:
                 }
                 frontend["build"]["args"].update(self.frontend_build_arg_overrides)
                 frontend.update(self.frontend_compose_overrides)
+                services = {
+                    "db": {},
+                    "migrate": {"profiles": self.migrate_profiles},
+                    "backend": {},
+                    "frontend": frontend,
+                    "nginx": {},
+                }
+                services.update(self.other_service_overrides)
                 stdout = json.dumps(
                     {
-                        "services": {
-                            "db": {},
-                            "migrate": {},
-                            "backend": {},
-                            "frontend": frontend,
-                            "nginx": {},
-                        },
+                        "name": "belib-production",
+                        "services": services,
                         "networks": {"default": {"name": "belib-production_default"}},
+                        "volumes": {"postgres-data": {}, "book-files": {}},
                     }
                 )
             elif "build" in argv:
@@ -123,17 +147,15 @@ class FakeDocker:
                     "Config": {"Labels": {"org.opencontainers.image.revision": SOURCE_SHA}},
                 }
             elif "up" in argv:
-                override_paths = [
+                ref = (env or {}).get("BELIB_FRONTEND_IMAGE", f"belib-frontend:{SOURCE_SHA}")
+                compose_files = [
                     Path(argv[index + 1])
                     for index, value in enumerate(argv[:-1])
                     if value == "--file"
                 ]
-                override_paths = [path for path in override_paths if "override" in path.name]
-                if override_paths:
-                    text = override_paths[-1].read_text(encoding="utf-8")
-                    ref = text.split("image:", 1)[1].strip().strip('"')
-                else:
-                    ref = f"belib-frontend:{SOURCE_SHA}"
+                self.current_project_dir = Path(argv[argv.index("--project-directory") + 1])
+                self.current_base_file = compose_files[0]
+                self.production_override = compose_files[1]
                 image = self.images[ref]
                 self.current_ref = ref
                 self.current_id = image["Id"]
@@ -143,18 +165,207 @@ class FakeDocker:
         return subprocess.CompletedProcess(argv, returncode, stdout, "")
 
 
+class ProductionComposeIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.project_dir = Path(self.temporary.name) / "production"
+        deployment_dir = self.project_dir / ".deployment"
+        deployment_dir.mkdir(parents=True)
+        self.base = self.project_dir / "compose.yaml"
+        self.base.write_text("services: {}\n", encoding="utf-8")
+        self.override = deployment_dir / "compose.production.yaml"
+        self.override.write_text("services: {}\n", encoding="utf-8")
+        self.override.chmod(0o600)
+        self.labels = {
+            "com.docker.compose.project": "belib-production",
+            "com.docker.compose.project.working_dir": str(self.project_dir),
+            "com.docker.compose.project.config_files": f"{self.base},{self.override}",
+        }
+
+    def test_accepts_only_the_canonical_production_base_and_private_override(self):
+        result = validate_live_compose_identity(
+            project=self.labels["com.docker.compose.project"],
+            working_dir=self.labels["com.docker.compose.project.working_dir"],
+            config_files=self.labels["com.docker.compose.project.config_files"],
+            agent_uid=os.getuid(),
+        )
+        self.assertEqual(result["compose_file"], str(self.base.resolve()))
+        self.assertEqual(result["compose_override_file"], str(self.override.resolve()))
+
+    def test_rejects_unrelated_override_path(self):
+        unrelated = self.project_dir / ".deployment" / "other.yaml"
+        unrelated.write_text("services: {}\n", encoding="utf-8")
+        unrelated.chmod(0o600)
+        with self.assertRaisesRegex(ComposeIdentityError, "approved base and override paths"):
+            validate_live_compose_identity(
+                project="belib-production",
+                working_dir=str(self.project_dir),
+                config_files=f"{self.base},{unrelated}",
+                agent_uid=os.getuid(),
+            )
+
+    def test_rejects_an_injected_third_compose_file(self):
+        with self.assertRaisesRegex(ComposeIdentityError, "exactly two approved files"):
+            validate_live_compose_identity(
+                project="belib-production",
+                working_dir=str(self.project_dir),
+                config_files=f"{self.base},{self.override},{self.base}",
+                agent_uid=os.getuid(),
+            )
+
+    def test_rejects_override_owned_by_another_uid(self):
+        with self.assertRaisesRegex(ComposeIdentityError, "owned by the production agent"):
+            validate_private_owner_file(
+                self.override, os.getuid() + 1, description="production Compose override"
+            )
+
+    def test_rejects_group_writable_override_directory(self):
+        (self.project_dir / ".deployment").chmod(0o775)
+        with self.assertRaisesRegex(ComposeIdentityError, "agent-owned and not group/world writable"):
+            validate_live_compose_identity(
+                project="belib-production",
+                working_dir=str(self.project_dir),
+                config_files=f"{self.base},{self.override}",
+                agent_uid=os.getuid(),
+            )
+
+    def test_rejects_group_or_world_accessible_override(self):
+        self.override.chmod(0o644)
+        with self.assertRaisesRegex(ComposeIdentityError, "owner-readable and private"):
+            validate_live_compose_identity(
+                project="belib-production",
+                working_dir=str(self.project_dir),
+                config_files=f"{self.base},{self.override}",
+                agent_uid=os.getuid(),
+            )
+
+    def test_rejects_symlinked_override_escape(self):
+        outside = Path(self.temporary.name) / "outside.yaml"
+        outside.write_text("services: {}\n", encoding="utf-8")
+        outside.chmod(0o600)
+        self.override.unlink()
+        self.override.symlink_to(outside)
+        with self.assertRaisesRegex(ComposeIdentityError, "regular file, not a symlink"):
+            validate_live_compose_identity(
+                project="belib-production",
+                working_dir=str(self.project_dir),
+                config_files=f"{self.base},{self.override}",
+                agent_uid=os.getuid(),
+            )
+
+    def test_resolved_contract_keeps_four_active_services_and_profiled_migration(self):
+        resolved = self.compose_fixture()
+        validate_compose_services(resolved)
+        digest = validate_overlay_preserves_nonfrontend(
+            resolved, copy.deepcopy(resolved), self.project_dir
+        )
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_overlay_may_change_frontend_only_within_its_separate_contract(self):
+        base = self.compose_fixture()
+        effective = copy.deepcopy(base)
+        effective["services"]["frontend"]["image"] = "belib-frontend:reviewed-sha"
+        self.assertEqual(
+            compose_contract_sha256(base, self.project_dir),
+            compose_contract_sha256(effective, self.project_dir),
+        )
+
+    def test_rejects_override_changes_to_database_mounts_or_networks(self):
+        base = self.compose_fixture()
+        changed = copy.deepcopy(base)
+        changed["services"]["db"]["volumes"][0]["source"] = "other-volume"
+        with self.assertRaisesRegex(ComposeIdentityError, "protected service, database, mount"):
+            validate_overlay_preserves_nonfrontend(base, changed, self.project_dir)
+        changed = copy.deepcopy(base)
+        changed["networks"]["default"]["name"] = "other-project_default"
+        with self.assertRaisesRegex(ComposeIdentityError, "protected service, database, mount"):
+            validate_overlay_preserves_nonfrontend(base, changed, self.project_dir)
+
+    def test_rejects_added_service_and_unexpected_active_migration(self):
+        resolved = self.compose_fixture()
+        resolved["services"]["unexpected"] = {"privileged": True}
+        with self.assertRaisesRegex(ComposeIdentityError, "service set differs"):
+            validate_compose_services(resolved)
+        resolved = self.compose_fixture()
+        resolved["services"]["migrate"]["profiles"] = []
+        with self.assertRaisesRegex(ComposeIdentityError, "migration service is unexpectedly active"):
+            validate_compose_services(resolved)
+
+    @staticmethod
+    def compose_fixture():
+        project_dir = Path(__file__).resolve().parents[2]
+        return {
+            "name": "belib-production",
+            "services": {
+                "db": {
+                    "image": "postgres:16.14-bookworm",
+                    "volumes": [
+                        {"type": "volume", "source": "postgres-data", "target": "/var/lib/postgresql/data"}
+                    ],
+                    "environment": {"POSTGRES_PASSWORD": "synthetic"},
+                },
+                "migrate": {
+                    "profiles": ["migration"],
+                    "build": {"context": str(project_dir / "backend"), "args": {"VCS_REF": SOURCE_SHA}},
+                },
+                "backend": {
+                    "build": {"context": str(project_dir / "backend"), "args": {"VCS_REF": SOURCE_SHA}},
+                    "volumes": [
+                        {"type": "volume", "source": "book-files", "target": "/var/lib/belib/books"}
+                    ],
+                },
+                "frontend": {"image": "belib-frontend:synthetic"},
+                "nginx": {
+                    "volumes": [
+                        {
+                            "type": "bind",
+                            "source": str(project_dir / "nginx" / "nginx.conf"),
+                            "target": "/etc/nginx/nginx.conf",
+                            "read_only": True,
+                        }
+                    ]
+                },
+            },
+            "networks": {"default": {"name": "belib-production_default"}},
+            "volumes": {"postgres-data": {}, "book-files": {}},
+        }
+
+
 class PullAgentDeploymentTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.checkout = Path(self.temporary.name) / SOURCE_SHA
-        self.checkout.mkdir()
+        self.release_root = Path(self.temporary.name) / "releases"
+        self.checkout = self.release_root / SOURCE_SHA
+        self.checkout.mkdir(parents=True)
         (self.checkout / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
         frontend = self.checkout / "frontend"
         frontend.mkdir()
         (frontend / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
         self.environment_file = Path(self.temporary.name) / "production.env"
         self.environment_file.write_text("synthetic=only\n", encoding="utf-8")
+        self.environment_file.chmod(0o600)
+        self.project_dir = Path(self.temporary.name) / "production"
+        (self.project_dir / ".deployment").mkdir(parents=True)
+        (self.project_dir / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+        self.production_override = self.project_dir / ".deployment" / "compose.production.yaml"
+        self.production_override.write_text("services: {}\n", encoding="utf-8")
+        self.production_override.chmod(0o600)
+        (self.project_dir / "frontend").mkdir()
+        (self.project_dir / "frontend" / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        active_config = {
+            "name": "belib-production",
+            "services": {
+                "db": {},
+                "migrate": {"profiles": ["migration"]},
+                "backend": {},
+                "frontend": {},
+                "nginx": {},
+            },
+            "networks": {"default": {"name": "belib-production_default"}},
+            "volumes": {"postgres-data": {}, "book-files": {}},
+        }
         self.config = {
             "repository": "hiroyuki9614/book_library",
             "repo_url": "https://github.com/hiroyuki9614/book_library.git",
@@ -162,10 +373,16 @@ class PullAgentDeploymentTests(unittest.TestCase):
             "production_container": "belib-production-frontend-1",
             "expected_networks": ["belib-production_default"],
             "production_env_file": str(self.environment_file),
+            "production_compose_override": str(self.production_override),
+            "expected_compose_contract_sha256": compose_contract_sha256(active_config, self.checkout),
+            "original_project_dir": str(self.project_dir),
+            "original_compose_file": str(self.project_dir / "compose.yaml"),
+            "release_root": str(self.release_root),
+            "agent_uid": os.getuid(),
             "expected_api_base_url": "https://api.example.test",
             "base_url": "http://127.0.0.1:8080",
         }
-        self.docker = FakeDocker()
+        self.docker = FakeDocker(self.project_dir, self.production_override)
 
     def run_deploy(self, smoke):
         with patch("kagoya_pull_agent._checkout", return_value=self.checkout), patch(
@@ -187,6 +404,10 @@ class PullAgentDeploymentTests(unittest.TestCase):
         compose_commands = [argv for argv, _ in self.docker.commands if argv[:2] == ["docker", "compose"]]
         self.assertTrue(any("build" in argv and argv[-1] == "frontend" for argv in compose_commands))
         self.assertTrue(any("up" in argv and argv[-1] == "frontend" for argv in compose_commands))
+        for argv in compose_commands:
+            files = [Path(argv[index + 1]) for index, value in enumerate(argv[:-1]) if value == "--file"]
+            self.assertEqual(files, [self.checkout / "compose.yaml", self.production_override])
+            self.assertEqual(Path(argv[argv.index("--project-directory") + 1]), self.checkout)
         build_env = next(env for argv, env in self.docker.commands if "build" in argv)
         config_env = next(env for argv, env in self.docker.commands if "config" in argv)
         up_env = next(env for argv, env in self.docker.commands if "up" in argv)
@@ -194,8 +415,25 @@ class PullAgentDeploymentTests(unittest.TestCase):
             self.assertEqual(compose_env["VITE_API_BASE_URL"], self.config["expected_api_base_url"])
         self.assertEqual(build_env["VITE_PUBLIC_DEMO_EMAIL"], "")
         self.assertEqual(build_env["VITE_PUBLIC_DEMO_PASSWORD"], "")
+        self.assertTrue(all(env["COMPOSE_PROFILES"] == "" for _argv, env in self.docker.commands if env))
         self.assertFalse(any("down" in argv or "prune" in argv for argv in self.docker.commands))
         self.assertTrue(all(target == "frontend" for target in self.docker.up_targets))
+
+    def test_verifies_the_exact_source_tag_and_immutable_revision_label(self):
+        expected_ref = f"belib-frontend:{SOURCE_SHA}"
+        self.docker.images[expected_ref] = {
+            "Id": NEW_ID,
+            "Config": {"Labels": {"org.opencontainers.image.revision": SOURCE_SHA}},
+        }
+        with patch("kagoya_pull_agent._run", side_effect=self.docker.run):
+            image = _verify_target_image(self.config, SOURCE_SHA)
+        self.assertEqual(image["Id"], NEW_ID)
+        self.assertIn(["docker", "image", "inspect", expected_ref], [argv for argv, _env in self.docker.commands])
+
+        self.docker.images[expected_ref]["Config"]["Labels"]["org.opencontainers.image.revision"] = "b" * 40
+        with patch("kagoya_pull_agent._run", side_effect=self.docker.run):
+            with self.assertRaisesRegex(DeployError, "revision label does not match"):
+                _verify_target_image(self.config, SOURCE_SHA)
 
     def test_rejects_altered_candidate_api_url_before_build_or_switch(self):
         self.docker.frontend_build_arg_overrides["VITE_API_BASE_URL"] = "https://altered.example.test"
@@ -241,6 +479,34 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(self.docker.current_id, OLD_ID)
         compose_commands = [argv for argv, _ in self.docker.commands if argv[:2] == ["docker", "compose"]]
         self.assertFalse(any("build" in argv or "up" in argv for argv in compose_commands))
+
+    def test_rejects_frontend_privilege_escalation(self):
+        self.docker.frontend_compose_overrides["privileged"] = True
+        with self.assertRaisesRegex(DeployError, "unsupported runtime capabilities"):
+            self.run_deploy(lambda _base_url: None)
+        self.assertEqual(self.docker.current_id, OLD_ID)
+        self.assertFalse(any("build" in argv or "up" in argv for argv, _env in self.docker.commands))
+
+    def test_rejects_unapproved_service_and_database_contract_changes(self):
+        self.docker.other_service_overrides["helper"] = {"privileged": True}
+        with self.assertRaisesRegex(DeployError, "service set differs"):
+            self.run_deploy(lambda _base_url: None)
+        self.assertEqual(self.docker.current_id, OLD_ID)
+        self.assertFalse(any("build" in argv or "up" in argv for argv, _env in self.docker.commands))
+
+        self.docker = FakeDocker(self.project_dir, self.production_override)
+        self.docker.other_service_overrides["db"] = {"privileged": True}
+        with self.assertRaisesRegex(DeployError, "candidate changes protected services"):
+            self.run_deploy(lambda _base_url: None)
+        self.assertEqual(self.docker.current_id, OLD_ID)
+        self.assertFalse(any("build" in argv or "up" in argv for argv, _env in self.docker.commands))
+
+    def test_rejects_unexpected_active_migration_service(self):
+        self.docker.migrate_profiles = []
+        with self.assertRaisesRegex(DeployError, "migration service is unexpectedly active"):
+            self.run_deploy(lambda _base_url: None)
+        self.assertEqual(self.docker.current_id, OLD_ID)
+        self.assertFalse(any("build" in argv or "up" in argv for argv, _env in self.docker.commands))
 
     def test_rejects_candidate_frontend_symlink_to_external_context_before_build_or_switch(self):
         frontend = self.checkout / "frontend"
@@ -477,16 +743,8 @@ class PullAgentDeploymentTests(unittest.TestCase):
         )
 
         commands = []
-        override_contents = []
-
         def fake_run(argv, *, env=None, check=True):
             commands.append((list(argv), dict(env or {}), check))
-            override_paths = [
-                Path(argv[index + 1])
-                for index, value in enumerate(argv[:-1])
-                if value == "--file" and "override" in argv[index + 1]
-            ]
-            override_contents.extend(path.read_text(encoding="utf-8") for path in override_paths)
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         with patch("kagoya_pull_agent._checkout", return_value=self.checkout), patch(
@@ -502,8 +760,10 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(up_commands[0][-1], "frontend")
         self.assertIn("--no-deps", up_commands[0])
         self.assertIn("--no-build", up_commands[0])
-        self.assertEqual(len(override_contents), 1)
-        self.assertIn(previous["image_ref"], override_contents[0])
+        up_argv, up_env, _ = next(command for command in commands if "up" in command[0])
+        files = [Path(up_argv[index + 1]) for index, value in enumerate(up_argv[:-1]) if value == "--file"]
+        self.assertEqual(files, [self.checkout / "compose.yaml", self.production_override])
+        self.assertEqual(up_env["BELIB_FRONTEND_IMAGE"], previous["image_ref"])
 
         rolled_back_state = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(rolled_back_state["last_request"], initial_state["last_request"])
