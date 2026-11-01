@@ -19,6 +19,7 @@ from release_gate import GateError, GitHubAPI, validate_release
 from kagoya_compose import (
     ComposeIdentityError,
     validate_frontend_service,
+    validate_compose_services,
     validate_live_container_compose_labels,
     validate_override_path,
     validate_private_owner_file,
@@ -227,24 +228,30 @@ def _verify_target_image(config: dict, source_sha: str) -> dict:
 
 def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) -> None:
     """Reject candidate Compose changes that could expand host/runtime authority."""
-    resolved = _run_json(
-        _compose_prefix(config, checkout) + ["config", "--format", "json"],
-        env={
-            "COMPOSE_PROFILES": "",
-            "VCS_REF": source_sha,
-            "BELIB_FRONTEND_IMAGE": f"belib-frontend:{source_sha}",
-            # These are build-time public values; do not read demo credentials from the host env.
-            "VITE_PUBLIC_DEMO_EMAIL": "",
-            "VITE_PUBLIC_DEMO_PASSWORD": "",
-            "VITE_API_BASE_URL": config["expected_api_base_url"],
-        },
+    compose_prefix = _compose_prefix(config, checkout)
+    compose_env = {
+        "COMPOSE_PROFILES": "",
+        "VCS_REF": source_sha,
+        "BELIB_FRONTEND_IMAGE": f"belib-frontend:{source_sha}",
+        # These are build-time public values; do not read demo credentials from the host env.
+        "VITE_PUBLIC_DEMO_EMAIL": "",
+        "VITE_PUBLIC_DEMO_PASSWORD": "",
+        "VITE_API_BASE_URL": config["expected_api_base_url"],
+    }
+    resolved = _run_json(compose_prefix + ["config", "--format", "json"], env=compose_env)
+    all_profiles = _run_json(
+        compose_prefix + ["--profile", "*", "config", "--format", "json"],
+        env=compose_env,
     )
     if not isinstance(resolved, dict):
         raise DeployError("The resolved production Compose config has an invalid shape")
+    if not isinstance(all_profiles, dict):
+        raise DeployError("The resolved profiled production Compose config has an invalid shape")
     try:
         validate_private_owner_file(
             config["production_env_file"], config["agent_uid"], description="production env file"
         )
+        validate_compose_services(all_profiles)
         validate_frontend_service(
             resolved,
             checkout=checkout,
@@ -439,6 +446,71 @@ def _previous_state_record(config: dict, state: dict, result: dict) -> dict:
     return {"image_id": image_id, "image_ref": image_ref, "source_sha": source_sha}
 
 
+def _synchronize_state_after_dispatch_failure(
+    config: dict,
+    state: dict,
+    *,
+    previous_request: tuple[int, int],
+) -> None:
+    """Record the actual frontend after a failed request, or fail closed as unknown."""
+    prior_current = state.get("current")
+    prior_source_sha = state.get("current_sha")
+    try:
+        live = _container(config)
+        image_id = live.get("Image")
+        image_ref = live.get("Config", {}).get("Image")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id or "") or not image_ref:
+            raise DeployError("The failed deployment live image identity is incomplete")
+    except Exception:
+        state["current"] = None
+        state["current_sha"] = None
+        state["last_result"] = "deployment failed; live image is unknown"
+    else:
+        labels = live.get("Config", {}).get("Labels") or {}
+        revision_value = labels.get("org.opencontainers.image.revision", "")
+        revision = revision_value.lower() if isinstance(revision_value, str) else ""
+        state["current"] = {"image_id": image_id, "image_ref": image_ref}
+        if SOURCE_SHA.fullmatch(revision):
+            state["current_sha"] = revision
+        elif isinstance(prior_current, dict) and prior_current.get("image_id") == image_id:
+            state["current_sha"] = prior_source_sha
+        else:
+            state["current_sha"] = None
+
+        prior_image_id = prior_current.get("image_id") if isinstance(prior_current, dict) else None
+        if prior_image_id and prior_image_id != image_id:
+            prior_image_ref = _retained_image_ref(prior_image_id)
+            try:
+                retained = _image(config, prior_image_ref).get("Id") == prior_image_id
+            except Exception:
+                retained = False
+            state["previous"] = (
+                {"image_id": prior_image_id, "image_ref": prior_image_ref, "source_sha": prior_source_sha}
+                if retained
+                else None
+            )
+        elif not prior_image_id and previous_request == (0, 0):
+            bootstrap_image_id = config.get("bootstrap_image_id")
+            bootstrap_ref = config.get("bootstrap_rollback_ref")
+            if bootstrap_image_id and bootstrap_image_id != image_id:
+                bootstrap_ref = bootstrap_ref or _retained_image_ref(bootstrap_image_id)
+                try:
+                    retained = _image(config, bootstrap_ref).get("Id") == bootstrap_image_id
+                except Exception:
+                    retained = False
+                state["previous"] = (
+                    {"image_id": bootstrap_image_id, "image_ref": bootstrap_ref, "source_sha": None}
+                    if retained
+                    else None
+                )
+        state["last_result"] = "failed"
+
+    try:
+        _save_state(config, state)
+    except Exception:
+        raise DeployError("Failed deployment state could not be synchronized") from None
+
+
 def _main_sha(config: dict) -> str:
     result = _run(["git", "ls-remote", "--refs", config["repo_url"], "refs/heads/main"])
     fields = result.stdout.split()
@@ -470,7 +542,10 @@ def dispatch_once(config: dict) -> int:
     with _lock_path(config).open("w", encoding="utf-8") as lock_stream:
         fcntl.flock(lock_stream, fcntl.LOCK_EX)
         state = _load_state(config)
-        if state.get("last_result") == "manual frontend rollback failed; live image is unknown":
+        if state.get("last_result") in {
+            "manual frontend rollback failed; live image is unknown",
+            "deployment failed; live image is unknown",
+        }:
             raise DeployError("The live frontend state is unknown; automatic deployment is stopped")
         requests = _requests(config)
         if not requests:
@@ -494,9 +569,13 @@ def dispatch_once(config: dict) -> int:
                 raise DeployError("Main advanced before the deployment began")
             result = deploy_frontend(config, source_sha)
         except Exception as error:
+            previous_request = tuple(state.get("last_request", [0, 0]))
             state["last_request"] = list(request_id)
-            state["last_result"] = "failed"
-            _save_state(config, state)
+            _synchronize_state_after_dispatch_failure(
+                config,
+                state,
+                previous_request=previous_request,
+            )
             if isinstance(error, DeployError):
                 raise
             raise DeployError("The deployment request failed closed") from None
@@ -594,7 +673,8 @@ def _synchronize_state_after_rollback_failure(
         else:
             image_ref = live.get("Config", {}).get("Image")
             labels = live.get("Config", {}).get("Labels") or {}
-            revision = labels.get("org.opencontainers.image.revision", "").lower()
+            revision_value = labels.get("org.opencontainers.image.revision", "")
+            revision = revision_value.lower() if isinstance(revision_value, str) else ""
             state["current"] = {"image_id": image_id, "image_ref": image_ref}
             state["previous"] = intended_current
             state["current_sha"] = revision if SOURCE_SHA.fullmatch(revision) else None

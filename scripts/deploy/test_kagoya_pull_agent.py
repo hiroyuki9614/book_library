@@ -27,6 +27,7 @@ from kagoya_pull_agent import (
     _http_get,
     _run,
     _retained_image_ref,
+    _up_frontend,
     _verify_target_image,
     deploy_frontend,
     dispatch_once,
@@ -309,6 +310,21 @@ class ProductionComposeIdentityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ComposeIdentityError, "candidate changes protected services"):
                     validate_candidate_protected_contract(candidate, self.project_dir, approved_digest)
 
+    def test_migrate_runtime_fields_are_not_pinned_beyond_the_inactive_profile_boundary(self):
+        approved = self.compose_fixture(self.project_dir)
+        approved_digest = compose_contract_sha256(approved, self.project_dir)
+        candidate = copy.deepcopy(approved)
+        candidate["services"]["migrate"].update(
+            image="belib-migrate:candidate",
+            command=["synthetic", "candidate"],
+            profiles=["candidate-migration"],
+        )
+        validate_candidate_protected_contract(candidate, self.project_dir, approved_digest)
+
+        candidate["services"]["migrate"]["profiles"] = []
+        with self.assertRaisesRegex(ComposeIdentityError, "migration service is unexpectedly active"):
+            validate_candidate_protected_contract(candidate, self.project_dir, approved_digest)
+
     def test_bootstrap_freezes_the_approved_effective_two_file_projection(self):
         frontend_dir = self.project_dir / "frontend"
         frontend_dir.mkdir()
@@ -365,18 +381,29 @@ class ProductionComposeIdentityTests(unittest.TestCase):
             "NetworkSettings": {"Networks": {"belib-production_default": {}}},
         }]
         compose_commands = []
+        profile_options = []
 
         def resolved_config(argv, _env):
             if argv[:2] == ["docker", "inspect"]:
                 return inspected
             files = [Path(argv[index + 1]) for index, value in enumerate(argv[:-1]) if value == "--file"]
             compose_commands.append(files)
+            if "--profile" in argv:
+                profile_options.append(argv[argv.index("--profile") + 1])
             return base if len(files) == 1 else effective
 
         with patch("kagoya_compose._run_json", side_effect=resolved_config):
             metadata = bootstrap_preflight("belib-production-frontend-1", str(env_file), agent_uid=os.getuid())
 
-        self.assertEqual(compose_commands, [[self.base.resolve()], [self.base.resolve(), self.override.resolve()]])
+        self.assertEqual(
+            compose_commands,
+            [
+                [self.base.resolve()],
+                [self.base.resolve(), self.override.resolve()],
+                [self.base.resolve(), self.override.resolve()],
+            ],
+        )
+        self.assertEqual(profile_options, ["*"])
         self.assertNotEqual(compose_contract_sha256(base, self.project_dir), metadata["compose_contract_sha256"])
         self.assertEqual(
             metadata["compose_contract_sha256"],
@@ -595,6 +622,55 @@ class PullAgentDeploymentTests(unittest.TestCase):
         )
         self.assertEqual(self.docker.images[retained_old]["Id"], OLD_ID)
 
+    def test_failed_automatic_rollback_synchronizes_actual_frontend_state(self):
+        state_path = Path(self.temporary.name) / "dispatcher-state.json"
+        self.config.update(
+            {
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "dispatcher.lock"),
+            }
+        )
+        old_sha = "d" * 40
+        initial_state = {
+            "last_request": [0, 0],
+            "last_result": "success",
+            "current_sha": old_sha,
+            "current": {"image_id": OLD_ID, "image_ref": f"belib-frontend:{old_sha}"},
+            "previous": None,
+        }
+        state_path.write_text(json.dumps(initial_state), encoding="utf-8")
+        request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
+        up_calls = 0
+
+        def switch_candidate_then_fail_rollback(config, checkout, source_sha, *, image_override=None):
+            nonlocal up_calls
+            up_calls += 1
+            if image_override is not None:
+                raise DeployError("synthetic rollback switch failure")
+            return _up_frontend(config, checkout, source_sha, image_override=image_override)
+
+        with (
+            patch("kagoya_pull_agent._requests", return_value=request),
+            patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch("kagoya_pull_agent._up_frontend", side_effect=switch_candidate_then_fail_rollback),
+            patch("kagoya_pull_agent.smoke_test", side_effect=DeployError("synthetic candidate smoke failure")),
+        ):
+            with self.assertRaisesRegex(DeployError, "saved frontend rollback also failed"):
+                dispatch_once(self.config)
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(up_calls, 2)
+        self.assertEqual(self.docker.current_id, NEW_ID)
+        self.assertEqual(saved["last_request"], [12, 1])
+        self.assertEqual(saved["last_result"], "failed")
+        self.assertEqual(saved["current"], {"image_id": NEW_ID, "image_ref": f"belib-frontend:{SOURCE_SHA}"})
+        self.assertEqual(saved["current_sha"], SOURCE_SHA)
+        self.assertEqual(saved["previous"]["image_id"], OLD_ID)
+        self.assertEqual(saved["previous"]["image_ref"], _retained_image_ref(OLD_ID))
+
     def test_first_deployment_replay_uses_bootstrap_rollback_image(self):
         retained_bootstrap = _retained_image_ref(OLD_ID)
         self.docker.images[retained_bootstrap] = {
@@ -633,6 +709,12 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(result["image_id"], NEW_ID)
         self.assertEqual(self.docker.current_id, NEW_ID)
         compose_commands = [argv for argv, _ in self.docker.commands if argv[:2] == ["docker", "compose"]]
+        self.assertTrue(
+            any(
+                "--profile" in argv and argv[argv.index("--profile") + 1] == "*"
+                for argv in compose_commands
+            )
+        )
         self.assertTrue(any("build" in argv and argv[-1] == "frontend" for argv in compose_commands))
         self.assertTrue(any("up" in argv and argv[-1] == "frontend" for argv in compose_commands))
         for argv in compose_commands:
@@ -1101,6 +1183,47 @@ class PullAgentDeploymentTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        with patch("kagoya_pull_agent._requests") as requests:
+            with self.assertRaisesRegex(DeployError, "live frontend state is unknown"):
+                dispatch_once(self.config)
+        requests.assert_not_called()
+
+    def test_dispatch_marks_unknown_and_stops_when_failed_switch_cannot_be_read_back(self):
+        state_path = Path(self.temporary.name) / "dispatcher-state.json"
+        self.config.update(
+            {
+                "agent_uid": os.getuid(),
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "dispatcher.lock"),
+            }
+        )
+        state_path.write_text(
+            json.dumps(
+                {
+                    "last_request": [0, 0],
+                    "last_result": "success",
+                    "current_sha": "d" * 40,
+                    "current": {"image_id": OLD_ID, "image_ref": "belib-frontend:old"},
+                    "previous": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
+        with (
+            patch("kagoya_pull_agent._requests", return_value=request),
+            patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent.deploy_frontend", side_effect=DeployError("synthetic switch failure")),
+            patch("kagoya_pull_agent._container", side_effect=DeployError("synthetic read-back failure")),
+        ):
+            with self.assertRaisesRegex(DeployError, "synthetic switch failure"):
+                dispatch_once(self.config)
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertIsNone(saved["current"])
+        self.assertIsNone(saved["current_sha"])
+        self.assertEqual(saved["last_result"], "deployment failed; live image is unknown")
         with patch("kagoya_pull_agent._requests") as requests:
             with self.assertRaisesRegex(DeployError, "live frontend state is unknown"):
                 dispatch_once(self.config)

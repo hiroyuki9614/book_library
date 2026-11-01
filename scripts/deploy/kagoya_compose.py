@@ -221,8 +221,10 @@ def _normalize_project_path(value: str, project_dir: Path) -> str:
 def _contract_projection(resolved: dict, project_directory: str | Path) -> dict:
     project_dir = Path(project_directory).resolve(strict=True)
     services = resolved["services"]
+    # The migration service is only checked for its non-active profile boundary.
+    # Frontend CD neither builds nor runs it, so its other fields are not pinned.
     protected_services = json.loads(
-        json.dumps({name: services[name] for name in sorted(set(services) - {"frontend"})})
+        json.dumps({name: services[name] for name in sorted(set(services) - {"frontend", "migrate"})})
     )
     for service in protected_services.values():
         build = service.get("build")
@@ -364,12 +366,21 @@ def _run_json(argv: list[str], env: dict[str, str]) -> dict | list:
 
 
 def _compose_config(
-    *, project: str, project_dir: Path, compose_files: list[Path], env_file: Path, env: dict[str, str]
+    *,
+    project: str,
+    project_dir: Path,
+    compose_files: list[Path],
+    env_file: Path,
+    env: dict[str, str],
+    include_all_profiles: bool = False,
 ) -> dict:
     command = ["docker", "compose", "--project-name", project, "--project-directory", str(project_dir)]
     for compose_file in compose_files:
         command.extend(["--file", str(compose_file)])
-    command.extend(["--env-file", str(env_file), "config", "--format", "json"])
+    command.extend(["--env-file", str(env_file)])
+    if include_all_profiles:
+        command.extend(["--profile", "*"])
+    command.extend(["config", "--format", "json"])
     resolved = _run_json(command, env)
     if not isinstance(resolved, dict):
         raise ComposeIdentityError("The resolved production Compose config has an invalid shape")
@@ -441,8 +452,17 @@ def bootstrap_preflight(container_name: str, production_env_file: str, *, agent_
         env_file=env_file,
         env=clean_env,
     )
+    effective_all_profiles = _compose_config(
+        project=EXPECTED_PROJECT,
+        project_dir=project_dir,
+        compose_files=[compose_file, override_file],
+        env_file=env_file,
+        env=clean_env,
+        include_all_profiles=True,
+    )
     validate_compose_services(base)
     validate_compose_services(effective)
+    validate_compose_services(effective_all_profiles)
     # The owner-approved two-file result is the contract. The base-only config
     # is checked for supported services, but it is not a protected baseline:
     # the private overlay may legitimately define the production services.
