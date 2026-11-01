@@ -1,0 +1,139 @@
+import unittest
+from urllib.parse import urlencode
+
+from release_gate import GateError, REQUIRED_RELEASE_JOBS, validate_release
+
+
+SOURCE_SHA = "a" * 40
+PR_HEAD_SHA = "b" * 40
+RELEASE_PATH = ".github/workflows/release-ci.yml"
+MAIN_RUN_ID = 110
+PR_RUN_ID = 210
+
+
+class FakeAPI:
+    repository = "hiroyuki9614/book_library"
+
+    def __init__(self):
+        self.main_run = {
+            "id": MAIN_RUN_ID,
+            "workflow_id": 1,
+            "path": RELEASE_PATH,
+            "event": "push",
+            "head_branch": "main",
+            "head_sha": SOURCE_SHA,
+            "status": "completed",
+            "conclusion": "success",
+            "run_number": 11,
+            "run_attempt": 1,
+        }
+        self.pr_run = {
+            "id": PR_RUN_ID,
+            "workflow_id": 1,
+            "path": RELEASE_PATH,
+            "event": "pull_request",
+            "head_branch": "codex/cd-test",
+            "head_sha": PR_HEAD_SHA,
+            "status": "completed",
+            "conclusion": "success",
+            "run_number": 21,
+            "run_attempt": 1,
+        }
+        self.pull = {
+            "number": 70,
+            "merged_at": "2026-11-02T00:00:00Z",
+            "merge_commit_sha": SOURCE_SHA,
+            "base": {"ref": "main", "repo": {"full_name": self.repository}},
+            "head": {"ref": "codex/cd-test", "sha": PR_HEAD_SHA},
+            "user": {"login": "author"},
+        }
+        self.reviews = [
+            {
+                "user": {"login": "reviewer"},
+                "state": "APPROVED",
+                "commit_id": PR_HEAD_SHA,
+                "submitted_at": "2026-11-01T23:00:00Z",
+            }
+        ]
+        self.main_jobs = {name: "success" for name in REQUIRED_RELEASE_JOBS}
+        self.pr_jobs = {name: "success" for name in REQUIRED_RELEASE_JOBS}
+
+    def get(self, path):
+        if path == f"/repos/{self.repository}/git/ref/heads/main":
+            return {"object": {"sha": SOURCE_SHA}}
+        if "/actions/runs?" in path and "event=push" in path:
+            return {"workflow_runs": [self.main_run]}
+        if path.endswith(f"/actions/runs/{MAIN_RUN_ID}/jobs?per_page=100"):
+            return {"jobs": [{"name": name, "conclusion": result} for name, result in self.main_jobs.items()]}
+        if f"/commits/{SOURCE_SHA}/pulls?" in path:
+            return [self.pull]
+        if f"/pulls/70/reviews?{urlencode({'per_page': 100})}" in path:
+            return self.reviews
+        if "/actions/runs?" in path and "event=pull_request" in path:
+            return {"workflow_runs": [self.pr_run]}
+        if path.endswith(f"/actions/runs/{PR_RUN_ID}/jobs?per_page=100"):
+            return {"jobs": [{"name": name, "conclusion": result} for name, result in self.pr_jobs.items()]}
+        raise AssertionError(f"Unexpected API request: {path}")
+
+
+class ReleaseGateTests(unittest.TestCase):
+    def test_accepts_exact_main_sha_with_green_pr_and_merge_gates(self):
+        proof = validate_release(FakeAPI(), SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+        self.assertEqual(
+            proof,
+            {
+                "source_sha": SOURCE_SHA,
+                "main_run_id": MAIN_RUN_ID,
+                "pr_number": 70,
+                "pr_head_sha": PR_HEAD_SHA,
+            },
+        )
+
+    def test_rejects_stale_sha_before_checking_any_run(self):
+        api = FakeAPI()
+        original_get = api.get
+
+        def stale_main(path):
+            result = original_get(path)
+            if path.endswith("/git/ref/heads/main"):
+                return {"object": {"sha": "c" * 40}}
+            return result
+
+        api.get = stale_main
+        with self.assertRaisesRegex(GateError, "Stale or out-of-order"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_missing_mandatory_main_job(self):
+        api = FakeAPI()
+        api.main_jobs[REQUIRED_RELEASE_JOBS[-1]] = "failure"
+        with self.assertRaisesRegex(GateError, "mandatory release jobs"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_review_approval_on_an_older_head(self):
+        api = FakeAPI()
+        api.reviews[0]["commit_id"] = "c" * 40
+        with self.assertRaisesRegex(GateError, "exact merged PR head SHA"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_latest_changes_requested_review(self):
+        api = FakeAPI()
+        api.reviews.append(
+            {
+                "user": {"login": "reviewer"},
+                "state": "CHANGES_REQUESTED",
+                "commit_id": PR_HEAD_SHA,
+                "submitted_at": "2026-11-02T00:30:00Z",
+            }
+        )
+        with self.assertRaisesRegex(GateError, "exact merged PR head SHA"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_unexpected_completed_pr_workflow_failure(self):
+        api = FakeAPI()
+        api.pr_run["conclusion"] = "failure"
+        with self.assertRaisesRegex(GateError, "Release candidate gates"):
+            validate_release(api, SOURCE_SHA)
+
+
+if __name__ == "__main__":
+    unittest.main()
