@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,8 +22,11 @@ from kagoya_compose import (
 )
 from kagoya_pull_agent import (
     DeployError,
+    _previous_state_record,
     _load_state,
+    _http_get,
     _run,
+    _retained_image_ref,
     _verify_target_image,
     deploy_frontend,
     dispatch_once,
@@ -429,6 +433,52 @@ class ProductionComposeIdentityTests(unittest.TestCase):
         }
 
 
+class HttpSmokeTests(unittest.TestCase):
+    def test_http_smoke_request_does_not_follow_redirect_to_another_listener(self):
+        class CanaryHandler(BaseHTTPRequestHandler):
+            requests = []
+
+            def do_GET(self):
+                type(self).requests.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, _format, *args):
+                pass
+
+        canary = HTTPServer(("127.0.0.1", 0), CanaryHandler)
+        canary_thread = threading.Thread(target=canary.serve_forever, daemon=True)
+        canary_thread.start()
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header(
+                    "Location",
+                    f"http://127.0.0.1:{canary.server_port}/internal-canary",
+                )
+                self.end_headers()
+
+            def log_message(self, _format, *args):
+                pass
+
+        redirector = HTTPServer(("127.0.0.1", 0), RedirectHandler)
+        redirect_thread = threading.Thread(target=redirector.serve_forever, daemon=True)
+        redirect_thread.start()
+        try:
+            status, _, _ = _http_get(f"http://127.0.0.1:{redirector.server_port}/redirect")
+        finally:
+            redirector.shutdown()
+            canary.shutdown()
+            redirector.server_close()
+            canary.server_close()
+            redirect_thread.join(timeout=2)
+            canary_thread.join(timeout=2)
+
+        self.assertEqual(status, 302)
+        self.assertEqual(CanaryHandler.requests, [])
+
+
 class PullAgentDeploymentTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -491,6 +541,90 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 smoke=smoke,
                 main_sha_reader=lambda _config: SOURCE_SHA,
             )
+
+    def test_replayed_success_preserves_pre_switch_rollback_after_state_save_failure(self):
+        state_path = Path(self.temporary.name) / "dispatcher-state.json"
+        self.config.update(
+            {
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "dispatcher.lock"),
+            }
+        )
+        old_sha = "d" * 40
+        initial_state = {
+            "last_request": [0, 0],
+            "last_result": "success",
+            "current_sha": old_sha,
+            "current": {"image_id": OLD_ID, "image_ref": f"belib-frontend:{old_sha}"},
+            "previous": None,
+        }
+        state_path.write_text(json.dumps(initial_state), encoding="utf-8")
+        request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
+
+        with (
+            patch("kagoya_pull_agent._requests", return_value=request),
+            patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch("kagoya_pull_agent._save_state", side_effect=OSError("synthetic disk failure")),
+        ):
+            with self.assertRaisesRegex(OSError, "synthetic disk failure"):
+                dispatch_once(self.config)
+
+        self.assertEqual(self.docker.current_id, NEW_ID)
+        self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), initial_state)
+
+        with (
+            patch("kagoya_pull_agent._requests", return_value=request),
+            patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch("kagoya_pull_agent.smoke_test"),
+        ):
+            self.assertEqual(dispatch_once(self.config), 0)
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        retained_old = _retained_image_ref(OLD_ID)
+        self.assertEqual(saved["last_request"], [12, 1])
+        self.assertEqual(saved["current"]["image_id"], NEW_ID)
+        self.assertEqual(
+            saved["previous"],
+            {"image_id": OLD_ID, "image_ref": retained_old, "source_sha": old_sha},
+        )
+        self.assertEqual(self.docker.images[retained_old]["Id"], OLD_ID)
+
+    def test_first_deployment_replay_uses_bootstrap_rollback_image(self):
+        retained_bootstrap = _retained_image_ref(OLD_ID)
+        self.docker.images[retained_bootstrap] = {
+            "Id": OLD_ID,
+            "Config": {"Labels": {}},
+        }
+        self.config.update(
+            {
+                "bootstrap_image_id": OLD_ID,
+                "bootstrap_rollback_ref": retained_bootstrap,
+            }
+        )
+        state = {
+            "last_request": [0, 0],
+            "current_sha": None,
+            "current": None,
+            "previous": None,
+        }
+        result = {
+            "no_op": True,
+            "image_id": NEW_ID,
+            "previous_image_id": NEW_ID,
+            "previous_image_ref": _retained_image_ref(NEW_ID),
+        }
+        with patch("kagoya_pull_agent._run", side_effect=self.docker.run):
+            record = _previous_state_record(self.config, state, result)
+        self.assertEqual(
+            record,
+            {"image_id": OLD_ID, "image_ref": retained_bootstrap, "source_sha": None},
+        )
 
     def test_deploy_targets_only_frontend_and_reads_back_exact_source_image(self):
         result = self.run_deploy(lambda _base_url: None)
@@ -869,6 +1003,108 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(rolled_back_state["current"], previous)
         self.assertEqual(rolled_back_state["previous"], current)
         self.assertEqual(rolled_back_state["preserved_metadata"], "synthetic")
+
+    def test_manual_rollback_verification_failure_records_observed_runtime(self):
+        state_path = Path(self.temporary.name) / "dispatcher-state.json"
+        self.config.update(
+            {
+                "agent_uid": os.getuid(),
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "dispatcher.lock"),
+            }
+        )
+        current = {"image_id": NEW_ID, "image_ref": f"belib-frontend:{SOURCE_SHA}"}
+        previous = {
+            "image_id": OLD_ID,
+            "image_ref": "belib-frontend:rollback-previous",
+            "source_sha": "b" * 40,
+        }
+        initial_state = {
+            "last_request": [8, 13],
+            "last_result": "success",
+            "current_sha": SOURCE_SHA,
+            "current": current,
+            "previous": previous,
+        }
+        state_path.write_text(json.dumps(initial_state), encoding="utf-8")
+        with (
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._container", side_effect=[{"Image": NEW_ID}, {"Image": OLD_ID}]),
+            patch("kagoya_pull_agent._up_frontend"),
+            patch("kagoya_pull_agent._verify_running_image", side_effect=DeployError("synthetic read-back mismatch")),
+        ):
+            with self.assertRaisesRegex(DeployError, "synthetic read-back mismatch"):
+                rollback_frontend(self.config)
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["current"], previous)
+        self.assertEqual(saved["previous"], current)
+        self.assertEqual(saved["current_sha"], previous["source_sha"])
+        self.assertEqual(saved["last_result"], "manual frontend rollback verification failed")
+
+    def test_manual_rollback_marks_runtime_unknown_when_readback_fails(self):
+        state_path = Path(self.temporary.name) / "dispatcher-state.json"
+        self.config.update(
+            {
+                "agent_uid": os.getuid(),
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "dispatcher.lock"),
+            }
+        )
+        initial_state = {
+            "last_request": [8, 13],
+            "last_result": "success",
+            "current_sha": SOURCE_SHA,
+            "current": {"image_id": NEW_ID, "image_ref": f"belib-frontend:{SOURCE_SHA}"},
+            "previous": {
+                "image_id": OLD_ID,
+                "image_ref": "belib-frontend:rollback-previous",
+                "source_sha": "b" * 40,
+            },
+        }
+        state_path.write_text(json.dumps(initial_state), encoding="utf-8")
+        with (
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch(
+                "kagoya_pull_agent._container",
+                side_effect=[{"Image": NEW_ID}, DeployError("synthetic read-back unavailable")],
+            ),
+            patch("kagoya_pull_agent._up_frontend"),
+            patch("kagoya_pull_agent._verify_running_image", side_effect=DeployError("synthetic verification failure")),
+        ):
+            with self.assertRaisesRegex(DeployError, "state was marked unknown"):
+                rollback_frontend(self.config)
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertIsNone(saved["current"])
+        self.assertIsNone(saved["current_sha"])
+        self.assertEqual(saved["last_result"], "manual frontend rollback failed; live image is unknown")
+
+    def test_dispatch_stops_when_manual_rollback_runtime_is_unknown(self):
+        state_path = Path(self.temporary.name) / "dispatcher-state.json"
+        self.config.update(
+            {
+                "agent_uid": os.getuid(),
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "dispatcher.lock"),
+            }
+        )
+        state_path.write_text(
+            json.dumps(
+                {
+                    "last_request": [8, 13],
+                    "last_result": "manual frontend rollback failed; live image is unknown",
+                    "current_sha": None,
+                    "current": None,
+                    "previous": {"image_id": OLD_ID, "image_ref": "belib-frontend:rollback-previous"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch("kagoya_pull_agent._requests") as requests:
+            with self.assertRaisesRegex(DeployError, "live frontend state is unknown"):
+                dispatch_once(self.config)
+        requests.assert_not_called()
 
 
 if __name__ == "__main__":

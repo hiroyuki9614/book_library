@@ -13,7 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from release_gate import GateError, GitHubAPI, validate_release
 from kagoya_compose import (
@@ -31,6 +31,13 @@ SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 class DeployError(RuntimeError):
     """A failed, fail-closed frontend release operation."""
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    """Prevent public smoke requests from being redirected to another host."""
+
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
 
 
 def _run(argv: list[str], *, env: dict[str, str] | None = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -173,7 +180,7 @@ def _checkout(config: dict, source_sha: str) -> Path:
 
 def _http_get(url: str) -> tuple[int, dict[str, str], bytes]:
     request = Request(url, headers={"User-Agent": "belib-frontend-cd"})
-    opener = build_opener(ProxyHandler({}))
+    opener = build_opener(ProxyHandler({}), _RejectRedirects())
     try:
         with opener.open(request, timeout=15) as response:
             return response.status, dict(response.headers.items()), response.read()
@@ -296,9 +303,11 @@ def _up_frontend(
     _run(prefix + ["up", "--detach", "--no-deps", "--no-build", "frontend"], env=env)
 
 
-def deploy_frontend(config: dict, source_sha: str, *, smoke=smoke_test, main_sha_reader=None) -> dict:
+def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reader=None) -> dict:
     if main_sha_reader is None:
         main_sha_reader = _main_sha
+    if smoke is None:
+        smoke = smoke_test
     checkout = _checkout(config, source_sha)
     _validate_frontend_compose(config, checkout, source_sha)
 
@@ -405,6 +414,31 @@ def _save_state(config: dict, state: dict) -> None:
             os.unlink(temporary)
 
 
+def _previous_state_record(config: dict, state: dict, result: dict) -> dict:
+    """Preserve the pre-switch image when replay sees the already-running candidate."""
+    saved_current = state.get("current")
+    image_id = result["previous_image_id"]
+    image_ref = result["previous_image_ref"]
+    source_sha = state.get("current_sha")
+    if result.get("no_op"):
+        saved_image_id = saved_current.get("image_id") if isinstance(saved_current, dict) else None
+        if saved_image_id and saved_image_id != result["image_id"]:
+            image_id = saved_image_id
+            image_ref = _retained_image_ref(image_id)
+        elif not saved_image_id and tuple(state.get("last_request", [0, 0])) == (0, 0):
+            # The first request may have switched the bootstrap image before its
+            # state save failed. Recover that durable owner-bootstrap pointer.
+            bootstrap_image_id = config.get("bootstrap_image_id")
+            if bootstrap_image_id and bootstrap_image_id != result["image_id"]:
+                image_id = bootstrap_image_id
+                image_ref = config.get("bootstrap_rollback_ref") or _retained_image_ref(image_id)
+                source_sha = None
+        if image_id != result["previous_image_id"]:
+            if _image(config, image_ref).get("Id") != image_id:
+                raise DeployError("The previously recorded frontend image is no longer retained")
+    return {"image_id": image_id, "image_ref": image_ref, "source_sha": source_sha}
+
+
 def _main_sha(config: dict) -> str:
     result = _run(["git", "ls-remote", "--refs", config["repo_url"], "refs/heads/main"])
     fields = result.stdout.split()
@@ -436,6 +470,8 @@ def dispatch_once(config: dict) -> int:
     with _lock_path(config).open("w", encoding="utf-8") as lock_stream:
         fcntl.flock(lock_stream, fcntl.LOCK_EX)
         state = _load_state(config)
+        if state.get("last_result") == "manual frontend rollback failed; live image is unknown":
+            raise DeployError("The live frontend state is unknown; automatic deployment is stopped")
         requests = _requests(config)
         if not requests:
             return 0
@@ -465,11 +501,7 @@ def dispatch_once(config: dict) -> int:
                 raise
             raise DeployError("The deployment request failed closed") from None
 
-        previous = {
-            "image_id": result["previous_image_id"],
-            "image_ref": result["previous_image_ref"],
-            "source_sha": state.get("current_sha"),
-        }
+        previous = _previous_state_record(config, state, result)
         state.update(
             {
                 "last_request": list(request_id),
@@ -506,20 +538,74 @@ def _rollback_frontend_unlocked(config: dict) -> int:
     live = _container(config)
     if live.get("Image") != current.get("image_id"):
         raise DeployError("The live frontend no longer matches the recorded deployment state")
-    _up_frontend(
-        config,
-        checkout,
-        source_sha,
-        image_override=previous["image_ref"],
-    )
-    _verify_running_image(config, previous["image_id"])
-    smoke_test(config["base_url"])
-    state["current"], state["previous"] = previous, current
-    state["current_sha"] = previous.get("source_sha")
-    state["last_result"] = "manual frontend rollback"
-    _save_state(config, state)
+    try:
+        _up_frontend(
+            config,
+            checkout,
+            source_sha,
+            image_override=previous["image_ref"],
+        )
+        _verify_running_image(config, previous["image_id"])
+        smoke_test(config["base_url"])
+        state["current"], state["previous"] = previous, current
+        state["current_sha"] = previous.get("source_sha")
+        state["last_result"] = "manual frontend rollback"
+        _save_state(config, state)
+    except Exception as error:
+        _synchronize_state_after_rollback_failure(
+            config,
+            state,
+            prior_current=current,
+            intended_current=previous,
+            prior_source_sha=source_sha,
+        )
+        if isinstance(error, DeployError):
+            raise
+        raise DeployError("The manual frontend rollback failed closed") from None
     print(f"Restored frontend image={previous['image_id']}; no other service was targeted")
     return 0
+
+
+def _synchronize_state_after_rollback_failure(
+    config: dict,
+    state: dict,
+    *,
+    prior_current: dict,
+    intended_current: dict,
+    prior_source_sha: str,
+) -> None:
+    """Record the observed runtime, or mark it unknown, before failing closed."""
+    try:
+        live = _container(config)
+    except Exception:
+        state["current"] = None
+        state["current_sha"] = None
+        state["last_result"] = "manual frontend rollback failed; live image is unknown"
+    else:
+        image_id = live.get("Image")
+        if image_id == intended_current.get("image_id"):
+            state["current"] = intended_current
+            state["previous"] = prior_current
+            state["current_sha"] = intended_current.get("source_sha")
+        elif image_id == prior_current.get("image_id"):
+            state["current"] = prior_current
+            state["previous"] = intended_current
+            state["current_sha"] = prior_source_sha
+        else:
+            image_ref = live.get("Config", {}).get("Image")
+            labels = live.get("Config", {}).get("Labels") or {}
+            revision = labels.get("org.opencontainers.image.revision", "").lower()
+            state["current"] = {"image_id": image_id, "image_ref": image_ref}
+            state["previous"] = intended_current
+            state["current_sha"] = revision if SOURCE_SHA.fullmatch(revision) else None
+        state["last_result"] = "manual frontend rollback verification failed"
+
+    try:
+        _save_state(config, state)
+    except Exception:
+        raise DeployError("Manual rollback failed and deployment state could not be synchronized") from None
+    if state["current"] is None:
+        raise DeployError("Manual rollback failed; live image read-back failed and state was marked unknown")
 
 
 def main() -> int:
