@@ -20,6 +20,17 @@ from release_gate import GateError, GitHubAPI, validate_release
 
 REQUEST_REF = re.compile(r"^refs/tags/belib-deploy-request-([0-9]+)-([0-9]+)$")
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
+EXPECTED_SERVICES = {"db", "migrate", "backend", "frontend", "nginx"}
+EXPECTED_FRONTEND_FIELDS = {
+    "build",
+    "command",
+    "entrypoint",
+    "expose",
+    "image",
+    "logging",
+    "networks",
+    "restart",
+}
 
 
 class DeployError(RuntimeError):
@@ -203,6 +214,81 @@ def _verify_target_image(config: dict, source_sha: str) -> dict:
     return image
 
 
+def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) -> None:
+    """Reject candidate Compose changes that could expand host/runtime authority."""
+    resolved = _run_json(
+        _compose_prefix(config, checkout) + ["config", "--format", "json"],
+        env={
+            "VCS_REF": source_sha,
+            "BELIB_FRONTEND_IMAGE": f"belib-frontend:{source_sha}",
+            # These are build-time public values; do not read demo credentials from the host env.
+            "VITE_PUBLIC_DEMO_EMAIL": "",
+            "VITE_PUBLIC_DEMO_PASSWORD": "",
+        },
+    )
+    if not isinstance(resolved, dict):
+        raise DeployError("The resolved production Compose config has an invalid shape")
+    services = resolved.get("services")
+    if not isinstance(services, dict) or set(services) != EXPECTED_SERVICES:
+        raise DeployError("The candidate Compose service set differs from the approved BeLib project")
+
+    frontend = services.get("frontend")
+    if not isinstance(frontend, dict) or set(frontend) != EXPECTED_FRONTEND_FIELDS:
+        raise DeployError("The frontend Compose service adds unsupported runtime capabilities")
+    if frontend.get("image") != f"belib-frontend:{source_sha}":
+        raise DeployError("The frontend Compose image is not tagged with the exact source SHA")
+    if frontend.get("command") is not None or frontend.get("entrypoint") is not None:
+        raise DeployError("The frontend Compose service may not override the reviewed image command")
+    if frontend.get("expose") != ["8080"] or frontend.get("restart") != "unless-stopped":
+        raise DeployError("The frontend Compose runtime contract changed")
+    if frontend.get("logging") != {
+        "driver": "json-file",
+        "options": {"max-file": "3", "max-size": "10m"},
+    }:
+        raise DeployError("The frontend Compose logging contract changed")
+
+    build = frontend.get("build")
+    if not isinstance(build, dict) or set(build) != {"args", "context", "dockerfile", "target"}:
+        raise DeployError("The frontend build adds unsupported build capabilities")
+    if (
+        Path(str(build.get("context", ""))).resolve() != (checkout / "frontend").resolve()
+        or build.get("dockerfile") != "Dockerfile"
+        or build.get("target") != "runtime"
+    ):
+        raise DeployError("The frontend build must use only the reviewed frontend runtime context")
+    args = build.get("args")
+    if not isinstance(args, dict) or set(args) != {
+        "VCS_REF",
+        "VITE_API_BASE_URL",
+        "VITE_PUBLIC_DEMO_EMAIL",
+        "VITE_PUBLIC_DEMO_PASSWORD",
+    }:
+        raise DeployError("The frontend build argument set differs from the approved contract")
+    if (
+        args.get("VCS_REF") != source_sha
+        or not isinstance(args.get("VITE_API_BASE_URL"), str)
+        or not args.get("VITE_API_BASE_URL")
+        or args.get("VITE_PUBLIC_DEMO_EMAIL") not in ("", None)
+        or args.get("VITE_PUBLIC_DEMO_PASSWORD") not in ("", None)
+    ):
+        raise DeployError("The frontend build arguments contain an invalid revision or public value")
+
+    network_refs = frontend.get("networks")
+    declared_networks = resolved.get("networks")
+    if not isinstance(network_refs, dict) or not isinstance(declared_networks, dict):
+        raise DeployError("The resolved frontend network identity is missing")
+    if any(value not in (None, {}) for value in network_refs.values()):
+        raise DeployError("The frontend Compose network options may not change")
+    actual_networks = []
+    for name in network_refs:
+        network = declared_networks.get(name)
+        if not isinstance(network, dict) or not isinstance(network.get("name"), str):
+            raise DeployError("A frontend Compose network has no resolved identity")
+        actual_networks.append(network["name"])
+    if sorted(actual_networks) != sorted(config["expected_networks"]):
+        raise DeployError("The candidate frontend networks differ from the approved production target")
+
+
 def _verify_running_image(config: dict, image_id: str, source_sha: str | None = None) -> dict:
     live = _container(config)
     if live["Image"] != image_id:
@@ -239,12 +325,7 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=smoke_test, main_sha
     if main_sha_reader is None:
         main_sha_reader = _main_sha
     checkout = _checkout(config, source_sha)
-    services = _run(
-        _compose_prefix(config, checkout) + ["config", "--services"],
-        env={"VCS_REF": source_sha, "BELIB_FRONTEND_IMAGE": f"belib-frontend:{source_sha}"},
-    ).stdout.splitlines()
-    if "frontend" not in services:
-        raise DeployError("The reviewed Compose file has no frontend service")
+    _validate_frontend_compose(config, checkout, source_sha)
 
     current = _container(config)
     rollback_ref, original_ref = _retain_live_image(config, current)

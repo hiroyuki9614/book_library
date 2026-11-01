@@ -21,6 +21,7 @@ class FakeDocker:
         self.tags = {}
         self.commands = []
         self.up_targets = []
+        self.frontend_compose_overrides = {}
 
     def container(self):
         return [
@@ -64,8 +65,45 @@ class FakeDocker:
             self.tags[argv[4]] = argv[3]
             self.images[argv[4]] = self.images.get(argv[3], {"Id": argv[3], "Config": {"Labels": {}}})
         elif argv[:3] == ["docker", "compose", "--project-name"]:
-            if "config" in argv and "--services" in argv:
-                stdout = "db\nbackend\nfrontend\nnginx\n"
+            if "config" in argv and "--format" in argv:
+                checkout = Path(argv[argv.index("--project-directory") + 1])
+                source_sha = (env or {})["VCS_REF"]
+                frontend = {
+                    "build": {
+                        "args": {
+                            "VCS_REF": source_sha,
+                            "VITE_API_BASE_URL": "https://api.example.test",
+                            "VITE_PUBLIC_DEMO_EMAIL": "",
+                            "VITE_PUBLIC_DEMO_PASSWORD": "",
+                        },
+                        "context": str(checkout / "frontend"),
+                        "dockerfile": "Dockerfile",
+                        "target": "runtime",
+                    },
+                    "command": None,
+                    "entrypoint": None,
+                    "expose": ["8080"],
+                    "image": f"belib-frontend:{source_sha}",
+                    "logging": {
+                        "driver": "json-file",
+                        "options": {"max-file": "3", "max-size": "10m"},
+                    },
+                    "networks": {"default": None},
+                    "restart": "unless-stopped",
+                }
+                frontend.update(self.frontend_compose_overrides)
+                stdout = json.dumps(
+                    {
+                        "services": {
+                            "db": {},
+                            "migrate": {},
+                            "backend": {},
+                            "frontend": frontend,
+                            "nginx": {},
+                        },
+                        "networks": {"default": {"name": "belib-production_default"}},
+                    }
+                )
             elif "build" in argv:
                 self.images[f"belib-frontend:{SOURCE_SHA}"] = {
                     "Id": NEW_ID,
@@ -154,6 +192,16 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertTrue(self.docker.current_ref.startswith("belib-frontend:rollback-"))
         self.assertEqual(self.docker.up_targets, ["frontend", "frontend"])
         self.assertFalse(any("up" in argv and argv[-1] in {"db", "backend", "nginx"} for argv, _ in self.docker.commands))
+
+    def test_rejects_host_mounts_in_candidate_frontend_compose_before_build_or_switch(self):
+        self.docker.frontend_compose_overrides["volumes"] = [
+            {"type": "bind", "source": "/run/user/1000/docker.sock", "target": "/run/docker.sock"}
+        ]
+        with self.assertRaisesRegex(DeployError, "unsupported runtime capabilities"):
+            self.run_deploy(lambda _base_url: None)
+        self.assertEqual(self.docker.current_id, OLD_ID)
+        compose_commands = [argv for argv, _ in self.docker.commands if argv[:2] == ["docker", "compose"]]
+        self.assertFalse(any("build" in argv or "up" in argv for argv in compose_commands))
 
     def test_stale_sha_after_build_is_rejected_before_switch(self):
         with patch("kagoya_pull_agent._checkout", return_value=self.checkout), patch(
