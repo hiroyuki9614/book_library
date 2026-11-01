@@ -524,8 +524,17 @@ def dispatch_once(config: dict) -> int:
 
 
 def rollback_frontend(config: dict) -> int:
+    if os.name != "posix":
+        raise DeployError("The production dispatcher requires a POSIX host")
     if os.getuid() != config.get("agent_uid"):
         raise DeployError("Rollback must run as the configured production agent")
+
+    with _lock_path(config).open("w", encoding="utf-8") as lock_stream:
+        fcntl.flock(lock_stream, fcntl.LOCK_EX)
+        return _rollback_frontend_unlocked(config)
+
+
+def _rollback_frontend_unlocked(config: dict) -> int:
     state = _load_state(config)
     current = state.get("current")
     previous = state.get("previous")

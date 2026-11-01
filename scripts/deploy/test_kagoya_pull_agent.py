@@ -1,17 +1,27 @@
+import fcntl
 import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from kagoya_pull_agent import DeployError, _run, deploy_frontend
+from kagoya_pull_agent import (
+    DeployError,
+    _load_state,
+    _run,
+    deploy_frontend,
+    dispatch_once,
+    rollback_frontend,
+)
 
 
 SOURCE_SHA = "a" * 40
 OLD_ID = "sha256:" + "b" * 64
 NEW_ID = "sha256:" + "a" * 64
+DEPLOYED_ID = "sha256:" + "c" * 64
 
 
 class FakeDocker:
@@ -286,6 +296,222 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 )
         self.assertEqual(self.docker.current_id, OLD_ID)
         self.assertEqual(self.docker.up_targets, ["frontend", "frontend"])
+
+    def test_manual_rollback_waits_for_active_dispatch_transaction(self):
+        state_path = Path(self.temporary.name) / "dispatcher-state.json"
+        lock_path = Path(self.temporary.name) / "dispatcher.lock"
+        initial_state = {
+            "last_request": [0, 0],
+            "last_result": "success",
+            "current_sha": SOURCE_SHA,
+            "current": {"image_id": NEW_ID, "image_ref": f"belib-frontend:{SOURCE_SHA}"},
+            "previous": {
+                "image_id": OLD_ID,
+                "image_ref": "belib-frontend:rollback-previous",
+                "source_sha": "b" * 40,
+            },
+            "preserved_metadata": "synthetic",
+        }
+        state_path.write_text(json.dumps(initial_state), encoding="utf-8")
+        self.config.update(
+            {
+                "agent_uid": os.getuid(),
+                "state_file": str(state_path),
+                "lock_file": str(lock_path),
+            }
+        )
+
+        next_sha = "f" * 40
+        next_ref = f"belib-frontend:{next_sha}"
+        dispatch_previous_ref = "belib-frontend:rollback-current"
+        dispatch_entered = threading.Event()
+        allow_dispatch_to_finish = threading.Event()
+        rollback_lock_attempted = threading.Event()
+        rollback_lock_acquired = threading.Event()
+        rollback_state_read = threading.Event()
+        rollback_up_called = threading.Event()
+        rollback_finished = threading.Event()
+        dispatch_lock_identity = []
+        rollback_lock_identity = []
+        errors = []
+        original_flock = fcntl.flock
+        original_load_state = _load_state
+        rollback_up_calls = []
+
+        def tracked_flock(lock_stream, operation):
+            thread_name = threading.current_thread().name
+            identity = os.fstat(lock_stream.fileno())
+            if thread_name == "automatic-dispatch":
+                result = original_flock(lock_stream, operation)
+                dispatch_lock_identity.append((identity.st_dev, identity.st_ino))
+                return result
+            if thread_name == "manual-rollback":
+                rollback_lock_identity.append((identity.st_dev, identity.st_ino))
+                rollback_lock_attempted.set()
+                result = original_flock(lock_stream, operation)
+                rollback_lock_acquired.set()
+                return result
+            return original_flock(lock_stream, operation)
+
+        def tracked_load_state(config):
+            if threading.current_thread().name == "manual-rollback":
+                rollback_state_read.set()
+            return original_load_state(config)
+
+        def deploy_while_paused(_config, source_sha):
+            self.assertEqual(source_sha, next_sha)
+            dispatch_entered.set()
+            if not allow_dispatch_to_finish.wait(timeout=5):
+                raise AssertionError("synthetic dispatch was not released")
+            return {
+                "image_id": DEPLOYED_ID,
+                "image_ref": next_ref,
+                "previous_image_id": NEW_ID,
+                "previous_image_ref": dispatch_previous_ref,
+                "no_op": False,
+            }
+
+        def record_rollback_up(*args, **kwargs):
+            rollback_up_calls.append((args, kwargs))
+            rollback_up_called.set()
+
+        def run_dispatch():
+            try:
+                dispatch_once(self.config)
+            except BaseException as error:
+                errors.append(error)
+
+        def run_rollback():
+            try:
+                rollback_frontend(self.config)
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                rollback_finished.set()
+
+        dispatch_thread = threading.Thread(target=run_dispatch, name="automatic-dispatch")
+        rollback_thread = threading.Thread(target=run_rollback, name="manual-rollback")
+        with (
+            patch("kagoya_pull_agent.fcntl.flock", side_effect=tracked_flock),
+            patch(
+                "kagoya_pull_agent._load_state", side_effect=tracked_load_state
+            ),
+            patch("kagoya_pull_agent._requests", return_value=[((1, 2), next_sha, "synthetic-ref")]),
+            patch("kagoya_pull_agent._main_sha", return_value=next_sha),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent.deploy_frontend", side_effect=deploy_while_paused),
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._container", return_value={"Image": DEPLOYED_ID}),
+            patch("kagoya_pull_agent._up_frontend", side_effect=record_rollback_up),
+            patch("kagoya_pull_agent._verify_running_image"),
+            patch("kagoya_pull_agent.smoke_test"),
+        ):
+            try:
+                dispatch_thread.start()
+                self.assertTrue(dispatch_entered.wait(timeout=3))
+                self.assertEqual(len(dispatch_lock_identity), 1)
+
+                rollback_thread.start()
+                self.assertTrue(rollback_lock_attempted.wait(timeout=3))
+                self.assertEqual(rollback_lock_identity, dispatch_lock_identity)
+                self.assertFalse(rollback_lock_acquired.is_set())
+                self.assertFalse(rollback_state_read.is_set())
+                self.assertFalse(rollback_up_called.is_set())
+                self.assertFalse(rollback_finished.is_set())
+                self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), initial_state)
+            finally:
+                allow_dispatch_to_finish.set()
+                if dispatch_thread.ident is not None:
+                    dispatch_thread.join(timeout=5)
+                if rollback_thread.ident is not None:
+                    rollback_thread.join(timeout=5)
+
+        self.assertFalse(dispatch_thread.is_alive())
+        self.assertFalse(rollback_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(rollback_lock_acquired.is_set())
+        self.assertTrue(rollback_state_read.is_set())
+        self.assertTrue(rollback_up_called.is_set())
+        self.assertTrue(rollback_finished.is_set())
+        self.assertEqual(len(rollback_up_calls), 1)
+        self.assertEqual(rollback_up_calls[0][1]["image_override"], dispatch_previous_ref)
+
+        rolled_back_state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(rolled_back_state["last_request"], [1, 2])
+        self.assertEqual(rolled_back_state["last_result"], "manual frontend rollback")
+        self.assertEqual(rolled_back_state["current_sha"], SOURCE_SHA)
+        self.assertEqual(
+            rolled_back_state["current"],
+            {"image_id": NEW_ID, "image_ref": dispatch_previous_ref, "source_sha": SOURCE_SHA},
+        )
+        self.assertEqual(
+            rolled_back_state["previous"],
+            {"image_id": DEPLOYED_ID, "image_ref": next_ref},
+        )
+        self.assertEqual(rolled_back_state["preserved_metadata"], "synthetic")
+
+    def test_manual_rollback_switches_only_frontend_and_preserves_state(self):
+        state_path = Path(self.temporary.name) / "dispatcher-state.json"
+        lock_path = Path(self.temporary.name) / "dispatcher.lock"
+        current = {"image_id": NEW_ID, "image_ref": f"belib-frontend:{SOURCE_SHA}"}
+        previous = {
+            "image_id": OLD_ID,
+            "image_ref": "belib-frontend:rollback-previous",
+            "source_sha": "b" * 40,
+        }
+        initial_state = {
+            "last_request": [8, 13],
+            "last_result": "success",
+            "current_sha": SOURCE_SHA,
+            "current": current,
+            "previous": previous,
+            "preserved_metadata": "synthetic",
+        }
+        state_path.write_text(json.dumps(initial_state), encoding="utf-8")
+        self.config.update(
+            {
+                "agent_uid": os.getuid(),
+                "state_file": str(state_path),
+                "lock_file": str(lock_path),
+            }
+        )
+
+        commands = []
+        override_contents = []
+
+        def fake_run(argv, *, env=None, check=True):
+            commands.append((list(argv), dict(env or {}), check))
+            override_paths = [
+                Path(argv[index + 1])
+                for index, value in enumerate(argv[:-1])
+                if value == "--file" and "override" in argv[index + 1]
+            ]
+            override_contents.extend(path.read_text(encoding="utf-8") for path in override_paths)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with patch("kagoya_pull_agent._checkout", return_value=self.checkout), patch(
+            "kagoya_pull_agent._container",
+            side_effect=[{"Image": NEW_ID}, {"Image": OLD_ID}],
+        ), patch("kagoya_pull_agent._run", side_effect=fake_run), patch(
+            "kagoya_pull_agent.smoke_test"
+        ):
+            self.assertEqual(rollback_frontend(self.config), 0)
+
+        up_commands = [argv for argv, _env, _check in commands if "up" in argv]
+        self.assertEqual(len(up_commands), 1)
+        self.assertEqual(up_commands[0][-1], "frontend")
+        self.assertIn("--no-deps", up_commands[0])
+        self.assertIn("--no-build", up_commands[0])
+        self.assertEqual(len(override_contents), 1)
+        self.assertIn(previous["image_ref"], override_contents[0])
+
+        rolled_back_state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(rolled_back_state["last_request"], initial_state["last_request"])
+        self.assertEqual(rolled_back_state["last_result"], "manual frontend rollback")
+        self.assertEqual(rolled_back_state["current_sha"], previous["source_sha"])
+        self.assertEqual(rolled_back_state["current"], previous)
+        self.assertEqual(rolled_back_state["previous"], current)
+        self.assertEqual(rolled_back_state["preserved_metadata"], "synthetic")
 
 
 if __name__ == "__main__":
