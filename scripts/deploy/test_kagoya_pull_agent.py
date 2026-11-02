@@ -763,7 +763,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
 
         with patch(
             "kagoya_pull_agent._run",
-            return_value=subprocess.CompletedProcess(command, 0, f"{SOURCE_SHA}\\trefs/heads/main\\n", ""),
+            return_value=subprocess.CompletedProcess(command, 0, f"{SOURCE_SHA}\trefs/heads/main\n", ""),
         ):
             self.assertEqual(_main_sha(self.config), SOURCE_SHA)
 
