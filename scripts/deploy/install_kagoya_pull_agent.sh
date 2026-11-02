@@ -102,6 +102,10 @@ PRODUCTION_COMPOSE_OVERRIDE=$(python3 -c 'import json,sys; print(json.load(sys.s
 EXPECTED_API_BASE_URL=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["expected_api_base_url"])' <<<"$SAFE_METADATA")
 EXPECTED_COMPOSE_CONTRACT_SHA256=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["compose_contract_sha256"])' <<<"$SAFE_METADATA")
 FRONTEND_BOOTSTRAP_MODE=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["frontend_bootstrap_mode"])' <<<"$SAFE_METADATA")
+if [[ "$FRONTEND_BOOTSTRAP_MODE" == legacy-override-update-required ]]; then
+  echo "error: dispatcher installation is blocked while the protected frontend override uses the legacy bootstrap shape; have its authorized owner update only that override, run the read-only KAGOYA preflight again, then rerun this installer" >&2
+  exit 1
+fi
 EXPECTED_NETWORKS_JSON=$(python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["networks"], separators=(",", ":")))' <<<"$SAFE_METADATA")
 unset SAFE_METADATA
 ROLLBACK_REF="belib-frontend:rollback-${IMAGE_ID#sha256:}"
