@@ -34,6 +34,10 @@ class DeployError(RuntimeError):
     """A failed, fail-closed frontend release operation."""
 
 
+class _DeferredPreSwitchGate(DeployError):
+    """An API outage before any frontend action; leave request unconsumed."""
+
+
 class _RejectRedirects(HTTPRedirectHandler):
     """Prevent public smoke requests from being redirected to another host."""
 
@@ -587,14 +591,19 @@ def dispatch_once(config: dict) -> int:
 
         config["request_sha"] = source_sha
         try:
-            _validate_network(config)
-        except TransientGitHubAPIError:
-            return 0
-
-        try:
+            try:
+                _validate_network(config)
+            except TransientGitHubAPIError:
+                raise _DeferredPreSwitchGate(
+                    "Transient GitHub release check failure; request retained for next timer run"
+                ) from None
             if _main_sha(config) != source_sha:
                 raise DeployError("Main advanced before the deployment began")
             result = deploy_frontend(config, source_sha)
+        except _DeferredPreSwitchGate as error:
+            # A visible service failure, but no state mutation or deployment.
+            # A later timer tick may safely revalidate this pending request.
+            raise DeployError(str(error)) from None
         except Exception as error:
             previous_request = tuple(state.get("last_request", [0, 0]))
             state["last_request"] = list(request_id)

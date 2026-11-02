@@ -33,7 +33,7 @@ from kagoya_pull_agent import (
     dispatch_once,
     rollback_frontend,
 )
-from release_gate import TransientGitHubAPIError
+from release_gate import GateError, TransientGitHubAPIError
 
 
 SOURCE_SHA = "a" * 40
@@ -691,7 +691,8 @@ class PullAgentDeploymentTests(unittest.TestCase):
             patch("kagoya_pull_agent._run", side_effect=self.docker.run),
             patch("kagoya_pull_agent.smoke_test"),
         ):
-            self.assertEqual(dispatch_once(self.config), 0)
+            with self.assertRaisesRegex(DeployError, "Transient GitHub release check failure"):
+                dispatch_once(self.config)
             self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), initial_state)
             self.assertEqual(self.docker.up_targets, [])
 
@@ -702,6 +703,48 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(saved["last_result"], "success")
         self.assertEqual(self.docker.up_targets, ["frontend"])
         self.assertEqual(self.docker.up_targets.count("frontend"), 1)
+
+    def test_permanent_gate_denial_consumes_request_and_never_switches(self):
+        state_path = Path(self.temporary.name) / "denied-state.json"
+        self.config.update({
+            "state_file": str(state_path),
+            "lock_file": str(Path(self.temporary.name) / "denied.lock"),
+        })
+        request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
+        with (
+            patch("kagoya_pull_agent._requests", return_value=request),
+            patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+            patch("kagoya_pull_agent.validate_release", side_effect=GateError("Approval missing")),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+        ):
+            with self.assertRaisesRegex(DeployError, "Approval missing"):
+                dispatch_once(self.config)
+            self.assertEqual(dispatch_once(self.config), 0)
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["last_request"], [12, 1])
+        self.assertEqual(saved["last_result"], "failed")
+        self.assertEqual(self.docker.up_targets, [])
+
+    def test_transient_error_after_gate_is_not_eligible_for_retry(self):
+        state_path = Path(self.temporary.name) / "post-gate-state.json"
+        self.config.update({
+            "state_file": str(state_path),
+            "lock_file": str(Path(self.temporary.name) / "post-gate.lock"),
+        })
+        request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
+        with (
+            patch("kagoya_pull_agent._requests", return_value=request),
+            patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent.deploy_frontend", side_effect=TransientGitHubAPIError("synthetic post-gate failure")),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+        ):
+            with self.assertRaisesRegex(DeployError, "The deployment request failed closed"):
+                dispatch_once(self.config)
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["last_request"], [12, 1])
+        self.assertEqual(saved["last_result"], "failed")
+        self.assertEqual(self.docker.up_targets, [])
 
     def test_failed_automatic_rollback_synchronizes_actual_frontend_state(self):
         state_path = Path(self.temporary.name) / "dispatcher-state.json"
