@@ -62,6 +62,7 @@ _GIT_NON_RETRYABLE_FAILURE_MARKERS = (
     "corruption",
     "packfile",
     "index-pack failed",
+    "invalid index-pack output",
     "unpack failed",
     "certificate verify failed",
     "server certificate verification failed",
@@ -74,8 +75,7 @@ _GIT_TRANSPORT_FAILURE_PATTERNS = (
     re.compile(r"\b(?:connection|operation) (?:timed out|reset|refused|closed)\b"),
     re.compile(r"\bnetwork is unreachable\b"),
     re.compile(r"\bno route to host\b"),
-    re.compile(r"\bremote end hung up unexpectedly\b"),
-    re.compile(r"\bearly eof\b"),
+    re.compile(r"\bunexpected disconnect while reading sideband packet\b"),
     re.compile(r"\bthe requested url returned error:\s*(?:429|5\d{2})\b"),
     re.compile(r"\bhttp\s+5\d{2}\b"),
 )

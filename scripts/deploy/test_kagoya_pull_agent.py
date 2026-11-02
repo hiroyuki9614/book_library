@@ -26,6 +26,7 @@ from kagoya_pull_agent import (
     _previous_state_record,
     _load_state,
     _http_get,
+    _is_retryable_git_transport_failure,
     _run,
     _retained_image_ref,
     _up_frontend,
@@ -533,6 +534,28 @@ class HttpSmokeTests(unittest.TestCase):
 
 
 class PullAgentDeploymentTests(unittest.TestCase):
+
+    def test_git_fetch_classifier_rejects_ambiguous_eof_and_integrity_failures(self):
+        self.assertFalse(_is_retryable_git_transport_failure("fatal: early EOF"))
+        self.assertFalse(
+            _is_retryable_git_transport_failure(
+                "fatal: early EOF\nfatal: fetch-pack: invalid index-pack output"
+            )
+        )
+        self.assertFalse(
+            _is_retryable_git_transport_failure(
+                "fatal: unexpected disconnect while reading sideband packet\n"
+                "fatal: fetch-pack: invalid index-pack output"
+            )
+        )
+
+    def test_git_fetch_classifier_accepts_explicit_sideband_disconnect(self):
+        self.assertTrue(
+            _is_retryable_git_transport_failure(
+                "fatal: fetch-pack: unexpected disconnect while reading sideband packet"
+            )
+        )
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
