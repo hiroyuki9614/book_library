@@ -81,13 +81,42 @@ def _matches_workflow_path(run: dict, expected_path: str) -> bool:
     )
 
 
-def _latest_run(runs: list[dict], *, event: str, branch: str, sha: str, path: str) -> dict:
+def _canonical_release_workflow_id(api: GitHubAPI) -> int:
+    workflow = api.get(
+        f"/repos/{api.repository}/actions/workflows/{RELEASE_WORKFLOW_PATH.rsplit('/', 1)[-1]}"
+    )
+    workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
+    if (
+        not isinstance(workflow, dict)
+        or workflow.get("path") != RELEASE_WORKFLOW_PATH
+        or type(workflow_id) is not int
+        or workflow_id <= 0
+    ):
+        raise GateError("The canonical release workflow identity is missing or invalid")
+    return workflow_id
+
+
+def _is_release_workflow_run(run: dict, workflow_id: int) -> bool:
+    return (
+        isinstance(run, dict)
+        and type(run.get("workflow_id")) is int
+        and run["workflow_id"] == workflow_id
+        and _matches_workflow_path(run, RELEASE_WORKFLOW_PATH)
+    )
+
+
+def _latest_run(
+    runs: list[dict], *, event: str, branch: str, sha: str, workflow_id: int, path: str
+) -> dict:
     matching = [
         run
         for run in runs
-        if run.get("event") == event
+        if isinstance(run, dict)
+        and run.get("event") == event
         and run.get("head_branch") == branch
         and run.get("head_sha", "").lower() == sha
+        and run.get("workflow_id") == workflow_id
+        and type(run.get("workflow_id")) is int
         and _matches_workflow_path(run, path)
     ]
     if not matching:
@@ -98,7 +127,12 @@ def _latest_run(runs: list[dict], *, event: str, branch: str, sha: str, path: st
     )
 
 
-def _verify_main_run(api: GitHubAPI, source_sha: str, expected_run_id: int | None) -> dict:
+def _verify_main_run(
+    api: GitHubAPI,
+    source_sha: str,
+    expected_run_id: int | None,
+    release_workflow_id: int,
+) -> dict:
     query = urlencode({"head_sha": source_sha, "event": "push", "per_page": 100})
     runs = api.get(f"/repos/{api.repository}/actions/runs?{query}").get("workflow_runs", [])
     run = _latest_run(
@@ -106,6 +140,7 @@ def _verify_main_run(api: GitHubAPI, source_sha: str, expected_run_id: int | Non
         event="push",
         branch="main",
         sha=source_sha,
+        workflow_id=release_workflow_id,
         path=RELEASE_WORKFLOW_PATH,
     )
     if expected_run_id is not None and int(run["id"]) != expected_run_id:
@@ -146,7 +181,7 @@ def _pull_request_reviews(api: GitHubAPI, pull_number: int) -> list[dict]:
     raise GateError("The pull-request review history exceeds the validation limit")
 
 
-def _verify_pr_review(api: GitHubAPI, pull: dict) -> None:
+def _verify_pr_review(api: GitHubAPI, pull: dict, release_workflow_id: int) -> None:
     head = pull.get("head", {})
     head_sha = head.get("sha", "").lower()
     if len(head_sha) != 40:
@@ -188,7 +223,9 @@ def _verify_pr_review(api: GitHubAPI, pull: dict) -> None:
         if run.get("head_branch") == head.get("ref")
         and run.get("head_sha", "").lower() == head_sha
     ]
-    release_runs = [run for run in pr_runs if _matches_workflow_path(run, RELEASE_WORKFLOW_PATH)]
+    release_runs = [
+        run for run in pr_runs if _is_release_workflow_run(run, release_workflow_id)
+    ]
     if not release_runs:
         raise GateError("The merged PR head has no Release candidate gates run")
     release_run = max(
@@ -201,8 +238,12 @@ def _verify_pr_review(api: GitHubAPI, pull: dict) -> None:
     # on this exact head must also finish successfully before production promotion.
     latest_by_workflow: dict[int, dict] = {}
     for run in pr_runs:
-        workflow_id = int(run.get("workflow_id", 0))
-        if not workflow_id or _matches_workflow_path(run, RELEASE_WORKFLOW_PATH):
+        if not isinstance(run, dict):
+            continue
+        workflow_id = run.get("workflow_id")
+        if type(workflow_id) is not int or workflow_id <= 0:
+            continue
+        if _is_release_workflow_run(run, release_workflow_id):
             continue
         previous = latest_by_workflow.get(workflow_id)
         if previous is None or (int(run.get("run_number", 0)), int(run.get("run_attempt", 0))) > (
@@ -229,9 +270,10 @@ def validate_release(
     main_sha = main_ref.get("object", {}).get("sha", "").lower()
     if main_sha != source_sha:
         raise GateError("Stale or out-of-order source SHA; only current main may deploy")
-    main_run = _verify_main_run(api, source_sha, expected_main_run_id)
+    release_workflow_id = _canonical_release_workflow_id(api)
+    main_run = _verify_main_run(api, source_sha, expected_main_run_id, release_workflow_id)
     pull = _verify_merged_pr(api, source_sha)
-    _verify_pr_review(api, pull)
+    _verify_pr_review(api, pull, release_workflow_id)
     return {
         "source_sha": source_sha,
         "main_run_id": int(main_run["id"]),

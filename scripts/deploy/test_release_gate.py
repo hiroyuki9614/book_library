@@ -9,6 +9,8 @@ PR_HEAD_SHA = "b" * 40
 RELEASE_PATH = ".github/workflows/release-ci.yml"
 MAIN_RUN_ID = 110
 PR_RUN_ID = 210
+CANONICAL_WORKFLOW_ID = 1
+SPOOF_WORKFLOW_ID = 2
 
 
 class FakeAPI:
@@ -39,6 +41,12 @@ class FakeAPI:
             "run_number": 21,
             "run_attempt": 1,
         }
+        self.canonical_workflow = {
+            "id": CANONICAL_WORKFLOW_ID,
+            "path": RELEASE_PATH,
+        }
+        self.main_runs = [self.main_run]
+        self.pr_runs = [self.pr_run]
         self.pull = {
             "number": 70,
             "merged_at": "2026-11-02T00:00:00Z",
@@ -58,14 +66,19 @@ class FakeAPI:
         ]
         self.main_jobs = {name: "success" for name in REQUIRED_RELEASE_JOBS}
         self.pr_jobs = {name: "success" for name in REQUIRED_RELEASE_JOBS}
+        self.run_jobs = {MAIN_RUN_ID: self.main_jobs, PR_RUN_ID: self.pr_jobs}
 
     def get(self, path):
+        if path == f"/repos/{self.repository}/actions/workflows/release-ci.yml":
+            return self.canonical_workflow
         if path == f"/repos/{self.repository}/git/ref/heads/main":
             return {"object": {"sha": SOURCE_SHA}}
         if "/actions/runs?" in path and "event=push" in path:
-            return {"workflow_runs": [self.main_run]}
-        if path.endswith(f"/actions/runs/{MAIN_RUN_ID}/jobs?per_page=100"):
-            return {"jobs": [{"name": name, "conclusion": result} for name, result in self.main_jobs.items()]}
+            return {"workflow_runs": self.main_runs}
+        if "/actions/runs/" in path and path.endswith("/jobs?per_page=100"):
+            run_id = int(path.split("/actions/runs/", 1)[1].split("/", 1)[0])
+            jobs = self.run_jobs.get(run_id, {})
+            return {"jobs": [{"name": name, "conclusion": result} for name, result in jobs.items()]}
         if f"/commits/{SOURCE_SHA}/pulls?" in path:
             return [self.pull]
         if f"/pulls/70/reviews?" in path:
@@ -73,9 +86,7 @@ class FakeAPI:
             start = (page - 1) * 100
             return self.reviews[start : start + 100]
         if "/actions/runs?" in path and "event=pull_request" in path:
-            return {"workflow_runs": [self.pr_run]}
-        if path.endswith(f"/actions/runs/{PR_RUN_ID}/jobs?per_page=100"):
-            return {"jobs": [{"name": name, "conclusion": result} for name, result in self.pr_jobs.items()]}
+            return {"workflow_runs": self.pr_runs}
         raise AssertionError(f"Unexpected API request: {path}")
 
 
@@ -100,6 +111,69 @@ class ReleaseGateTests(unittest.TestCase):
         proof = validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
 
         self.assertEqual(proof["source_sha"], SOURCE_SHA)
+
+    def test_rejects_spoof_main_run_with_matching_jobs_and_workflow_path_prefix(self):
+        api = FakeAPI()
+        api.main_run["workflow_id"] = SPOOF_WORKFLOW_ID
+        api.main_run["path"] = f"{RELEASE_PATH}@spoof.yml@refs/heads/main"
+
+        with self.assertRaisesRegex(GateError, "No matching Release candidate gates run"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_spoof_pr_run_with_matching_jobs_and_workflow_path_prefix(self):
+        api = FakeAPI()
+        api.pr_run["workflow_id"] = SPOOF_WORKFLOW_ID
+        api.pr_run["path"] = f"{RELEASE_PATH}@spoof.yml@refs/pull/70/merge"
+
+        with self.assertRaisesRegex(GateError, "no Release candidate gates run"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_spoof_release_path_remains_gated_as_an_unrelated_pr_workflow(self):
+        api = FakeAPI()
+        spoof_run = {
+            **api.pr_run,
+            "id": PR_RUN_ID + 1,
+            "workflow_id": SPOOF_WORKFLOW_ID,
+            "path": f"{RELEASE_PATH}@spoof.yml@refs/pull/70/merge",
+            "status": "completed",
+            "conclusion": "failure",
+            "run_number": api.pr_run["run_number"] + 1,
+        }
+        api.pr_runs.append(spoof_run)
+
+        with self.assertRaisesRegex(GateError, "path-focused PR workflow"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_missing_or_malformed_canonical_workflow_id(self):
+        for invalid_workflow in (
+            {"path": RELEASE_PATH},
+            {"id": 0, "path": RELEASE_PATH},
+            {"id": "1", "path": RELEASE_PATH},
+            {"id": True, "path": RELEASE_PATH},
+            {"id": CANONICAL_WORKFLOW_ID, "path": f"{RELEASE_PATH}@spoof.yml"},
+        ):
+            with self.subTest(workflow=invalid_workflow):
+                api = FakeAPI()
+                api.canonical_workflow = invalid_workflow
+                with self.assertRaisesRegex(GateError, "canonical release workflow identity"):
+                    validate_release(api, SOURCE_SHA)
+
+    def test_latest_main_run_selection_ignores_spoof_and_checks_expected_run_id(self):
+        api = FakeAPI()
+        spoof_run = {
+            **api.main_run,
+            "id": 111,
+            "workflow_id": SPOOF_WORKFLOW_ID,
+            "path": f"{RELEASE_PATH}@spoof.yml@refs/heads/main",
+            "run_number": api.main_run["run_number"] + 1,
+        }
+        api.main_runs.append(spoof_run)
+
+        proof = validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+
+        self.assertEqual(proof["main_run_id"], MAIN_RUN_ID)
+        with self.assertRaisesRegex(GateError, "does not match the requested source SHA"):
+            validate_release(api, SOURCE_SHA, expected_main_run_id=spoof_run["id"])
 
     def test_rejects_workflow_path_lookalike_with_ref_suffix(self):
         api = FakeAPI()
