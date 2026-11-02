@@ -101,6 +101,7 @@ PRODUCTION_COMPOSE_FILE=$(python3 -c 'import json,sys; print(json.load(sys.stdin
 PRODUCTION_COMPOSE_OVERRIDE=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["compose_override_file"])' <<<"$SAFE_METADATA")
 EXPECTED_API_BASE_URL=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["expected_api_base_url"])' <<<"$SAFE_METADATA")
 EXPECTED_COMPOSE_CONTRACT_SHA256=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["compose_contract_sha256"])' <<<"$SAFE_METADATA")
+FRONTEND_BOOTSTRAP_MODE=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["frontend_bootstrap_mode"])' <<<"$SAFE_METADATA")
 EXPECTED_NETWORKS_JSON=$(python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["networks"], separators=(",", ":")))' <<<"$SAFE_METADATA")
 unset SAFE_METADATA
 ROLLBACK_REF="belib-frontend:rollback-${IMAGE_ID#sha256:}"
@@ -118,12 +119,13 @@ install -m 700 "$SCRIPT_DIR/kagoya_pull_agent.py" "$LIBEXEC_DIR/kagoya_pull_agen
 install -m 700 "$SCRIPT_DIR/release_gate.py" "$LIBEXEC_DIR/release_gate.py"
 install -m 700 "$SCRIPT_DIR/kagoya_compose.py" "$LIBEXEC_DIR/kagoya_compose.py"
 
-BELIB_EXPECTED_API_BASE_URL="$EXPECTED_API_BASE_URL" BELIB_EXPECTED_COMPOSE_CONTRACT_SHA256="$EXPECTED_COMPOSE_CONTRACT_SHA256" python3 - "$PROJECT" "$PRODUCTION_PROJECT_DIR" "$PRODUCTION_COMPOSE_FILE" "$PRODUCTION_COMPOSE_OVERRIDE" "$PRODUCTION_ENV_FILE" "$EXPECTED_NETWORKS_JSON" "$IMAGE_ID" "$CONFIG_PATH" "$LIBEXEC_DIR" "$STATE_DIR" "$RELEASE_DIR" "$ROLLBACK_REF" <<'PY'
+BELIB_EXPECTED_API_BASE_URL="$EXPECTED_API_BASE_URL" BELIB_EXPECTED_COMPOSE_CONTRACT_SHA256="$EXPECTED_COMPOSE_CONTRACT_SHA256" BELIB_FRONTEND_BOOTSTRAP_MODE="$FRONTEND_BOOTSTRAP_MODE" python3 - "$PROJECT" "$PRODUCTION_PROJECT_DIR" "$PRODUCTION_COMPOSE_FILE" "$PRODUCTION_COMPOSE_OVERRIDE" "$PRODUCTION_ENV_FILE" "$EXPECTED_NETWORKS_JSON" "$IMAGE_ID" "$CONFIG_PATH" "$LIBEXEC_DIR" "$STATE_DIR" "$RELEASE_DIR" "$ROLLBACK_REF" <<'PY'
 import json, os, sys
 project, project_dir, compose_file, override_file, env_file, networks_json, image_id, config_path, libexec, state_dir, release_dir, rollback_ref = sys.argv[1:]
 expected_api_base_url = os.environ.get("BELIB_EXPECTED_API_BASE_URL", "")
 expected_contract_sha256 = os.environ.get("BELIB_EXPECTED_COMPOSE_CONTRACT_SHA256", "")
-if not expected_api_base_url or len(expected_contract_sha256) != 64:
+frontend_bootstrap_mode = os.environ.get("BELIB_FRONTEND_BOOTSTRAP_MODE", "")
+if not expected_api_base_url or len(expected_contract_sha256) != 64 or frontend_bootstrap_mode not in ("exact-sha", "legacy-override-update-required"):
     raise SystemExit("error: approved production Compose metadata is missing")
 config = {
     "repository": "hiroyuki9614/book_library",
@@ -133,6 +135,7 @@ config = {
     "expected_networks": json.loads(networks_json),
     "expected_api_base_url": expected_api_base_url,
     "expected_compose_contract_sha256": expected_contract_sha256,
+    "frontend_bootstrap_mode": frontend_bootstrap_mode,
     "production_env_file": env_file,
     "original_project_dir": project_dir,
     "original_compose_file": compose_file,

@@ -54,6 +54,7 @@ class FakeDocker:
         self.up_targets = []
         self.frontend_compose_overrides = {}
         self.frontend_build_arg_overrides = {}
+        self.replace_frontend_build_args = False
         self.other_service_overrides = {}
         self.migrate_profiles = ["migration"]
 
@@ -130,6 +131,8 @@ class FakeDocker:
                     "restart": "unless-stopped",
                 }
                 frontend["build"]["args"].update(self.frontend_build_arg_overrides)
+                if self.replace_frontend_build_args:
+                    frontend["build"]["args"] = dict(self.frontend_build_arg_overrides)
                 frontend.update(self.frontend_compose_overrides)
                 services = {
                     "db": {},
@@ -348,12 +351,9 @@ class ProductionComposeIdentityTests(unittest.TestCase):
         effective["services"]["nginx"]["image"] = "nginx:approved-host-image"
         effective["services"]["frontend"] = {
             "build": {
-                "args": {
-                    "VCS_REF": "0" * 40,
-                    "VITE_API_BASE_URL": api_base_url,
-                    "VITE_PUBLIC_DEMO_EMAIL": "",
-                    "VITE_PUBLIC_DEMO_PASSWORD": "",
-                },
+                # Match the sanitized live legacy projection: its protected
+                # override pins the current image and only supplies the API URL.
+                "args": {"VITE_API_BASE_URL": api_base_url},
                 "context": str(frontend_dir),
                 "dockerfile": "Dockerfile",
                 "target": "runtime",
@@ -361,7 +361,7 @@ class ProductionComposeIdentityTests(unittest.TestCase):
             "command": None,
             "entrypoint": None,
             "expose": ["8080"],
-            "image": "belib-frontend:" + "0" * 40,
+            "image": "belib-frontend:70d1cc7128bda0d2d5a925a8ca93bf6920693d42",
             "logging": {
                 "driver": "json-file",
                 "options": {"max-file": "3", "max-size": "10m"},
@@ -382,7 +382,10 @@ class ProductionComposeIdentityTests(unittest.TestCase):
         }
         inspected = [{
             "Name": "/belib-production-frontend-1",
-            "Config": {"Labels": labels, "Image": "belib-frontend:existing"},
+            "Config": {
+                "Labels": labels,
+                "Image": "belib-frontend:70d1cc7128bda0d2d5a925a8ca93bf6920693d42",
+            },
             "State": {"Running": True},
             "Image": OLD_ID,
             "NetworkSettings": {"Networks": {"belib-production_default": {}}},
@@ -416,6 +419,20 @@ class ProductionComposeIdentityTests(unittest.TestCase):
             metadata["compose_contract_sha256"],
             compose_contract_sha256(effective, self.project_dir),
         )
+        self.assertEqual(metadata["frontend_bootstrap_mode"], "legacy-override-update-required")
+
+        # A plausible but different tag is not accepted as the current live
+        # legacy override, and the tag is never treated as source provenance.
+        effective["services"]["frontend"]["image"] = "belib-frontend:tampered"
+        with patch("kagoya_compose._run_json", side_effect=resolved_config):
+            with self.assertRaisesRegex(ComposeIdentityError, "not tagged with the exact source SHA"):
+                bootstrap_preflight("belib-production-frontend-1", str(env_file), agent_uid=os.getuid())
+
+        effective["services"]["frontend"]["image"] = inspected[0]["Config"]["Image"]
+        effective["services"]["frontend"]["build"]["args"]["UNAPPROVED_BUILD_ARG"] = "synthetic"
+        with patch("kagoya_compose._run_json", side_effect=resolved_config):
+            with self.assertRaisesRegex(ComposeIdentityError, "legacy frontend override build arguments"):
+                bootstrap_preflight("belib-production-frontend-1", str(env_file), agent_uid=os.getuid())
 
     def test_rejects_added_service_and_unexpected_active_migration(self):
         resolved = self.compose_fixture()
@@ -556,6 +573,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
             "production_env_file": str(self.environment_file),
             "production_compose_override": str(self.production_override),
             "expected_compose_contract_sha256": compose_contract_sha256(active_config, self.checkout),
+            "frontend_bootstrap_mode": "exact-sha",
             "original_project_dir": str(self.project_dir),
             "original_compose_file": str(self.project_dir / "compose.yaml"),
             "release_root": str(self.release_root),
@@ -575,6 +593,20 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 smoke=smoke,
                 main_sha_reader=lambda _config: SOURCE_SHA,
             )
+
+    def test_legacy_bootstrap_blocks_release_before_build_or_switch(self):
+        self.config["frontend_bootstrap_mode"] = "legacy-override-update-required"
+        self.docker.frontend_compose_overrides["image"] = self.docker.current_ref
+        self.docker.frontend_build_arg_overrides = {
+            "VITE_API_BASE_URL": self.config["expected_api_base_url"]
+        }
+        self.docker.replace_frontend_build_args = True
+
+        with self.assertRaisesRegex(DeployError, "bootstrap-only.*exact-SHA frontend contract"):
+            self.run_deploy(lambda _base: None)
+
+        self.assertFalse(any("build" in command for command, _env in self.docker.commands))
+        self.assertEqual(self.docker.up_targets, [])
 
     def test_replayed_success_preserves_pre_switch_rollback_after_state_save_failure(self):
         state_path = Path(self.temporary.name) / "dispatcher-state.json"

@@ -279,6 +279,7 @@ def validate_frontend_service(
     api_base_url: str,
     expected_networks: list[str],
     expected_contract_sha256: str | None = None,
+    legacy_image_ref: str | None = None,
 ) -> None:
     """Keep the frontend build and runtime within its approved no-mount contract."""
     validate_compose_services(resolved)
@@ -291,7 +292,13 @@ def validate_frontend_service(
     }
     if not isinstance(frontend, dict) or set(frontend) != expected_frontend_fields:
         raise ComposeIdentityError("The frontend Compose service adds unsupported runtime capabilities")
-    if frontend.get("image") != f"belib-frontend:{source_sha}":
+    exact_image = frontend.get("image") == f"belib-frontend:{source_sha}"
+    legacy_image = (
+        isinstance(legacy_image_ref, str)
+        and re.fullmatch(r"belib-frontend:[0-9a-f]{40}", legacy_image_ref) is not None
+        and frontend.get("image") == legacy_image_ref
+    )
+    if not exact_image and not legacy_image:
         raise ComposeIdentityError("The frontend Compose image is not tagged with the exact source SHA")
     if frontend.get("command") is not None or frontend.get("entrypoint") is not None:
         raise ComposeIdentityError("The frontend Compose service may not override the reviewed image command")
@@ -324,17 +331,23 @@ def validate_frontend_service(
     ):
         raise ComposeIdentityError("The frontend build must use only the reviewed frontend runtime context")
     args = build.get("args")
-    if not isinstance(args, dict) or set(args) != {
-        "VCS_REF", "VITE_API_BASE_URL", "VITE_PUBLIC_DEMO_EMAIL", "VITE_PUBLIC_DEMO_PASSWORD"
-    }:
-        raise ComposeIdentityError("The frontend build argument set differs from the approved contract")
-    if (
-        args.get("VCS_REF") != source_sha
-        or args.get("VITE_API_BASE_URL") != api_base_url
-        or args.get("VITE_PUBLIC_DEMO_EMAIL") not in ("", None)
-        or args.get("VITE_PUBLIC_DEMO_PASSWORD") not in ("", None)
-    ):
-        raise ComposeIdentityError("The frontend build arguments differ from the operator-approved values")
+    if legacy_image:
+        if not isinstance(args, dict) or set(args) != {"VITE_API_BASE_URL"}:
+            raise ComposeIdentityError("The legacy frontend override build arguments differ from the approved bootstrap shape")
+        if args.get("VITE_API_BASE_URL") != api_base_url:
+            raise ComposeIdentityError("The frontend build arguments differ from the operator-approved values")
+    else:
+        if not isinstance(args, dict) or set(args) != {
+            "VCS_REF", "VITE_API_BASE_URL", "VITE_PUBLIC_DEMO_EMAIL", "VITE_PUBLIC_DEMO_PASSWORD"
+        }:
+            raise ComposeIdentityError("The frontend build argument set differs from the approved contract")
+        if (
+            args.get("VCS_REF") != source_sha
+            or args.get("VITE_API_BASE_URL") != api_base_url
+            or args.get("VITE_PUBLIC_DEMO_EMAIL") not in ("", None)
+            or args.get("VITE_PUBLIC_DEMO_PASSWORD") not in ("", None)
+        ):
+            raise ComposeIdentityError("The frontend build arguments differ from the operator-approved values")
 
     network_refs = frontend.get("networks")
     declared_networks = resolved.get("networks")
@@ -485,6 +498,16 @@ def bootstrap_preflight(container_name: str, production_env_file: str, *, agent_
         api_base_url=api_base_url,
         expected_networks=networks,
         expected_contract_sha256=contract_digest,
+        # A legacy tag is accepted only as a match for the currently running
+        # container's mutable reference. It is never treated as source proof;
+        # the image ID above remains the bootstrap rollback identity.
+        legacy_image_ref=item.get("Config", {}).get("Image"),
+    )
+    frontend_args = effective["services"]["frontend"]["build"]["args"]
+    bootstrap_mode = (
+        "legacy-override-update-required"
+        if "VCS_REF" not in frontend_args
+        else "exact-sha"
     )
     return {
         **identity,
@@ -493,6 +516,7 @@ def bootstrap_preflight(container_name: str, production_env_file: str, *, agent_
         "image_id": item["Image"],
         "expected_api_base_url": api_base_url,
         "compose_contract_sha256": contract_digest,
+        "frontend_bootstrap_mode": bootstrap_mode,
     }
 
 

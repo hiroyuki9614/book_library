@@ -261,6 +261,11 @@ def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) ->
             expected_contract_sha256=config["expected_compose_contract_sha256"],
         )
     except (ComposeIdentityError, KeyError, TypeError) as error:
+        if config.get("frontend_bootstrap_mode") == "legacy-override-update-required":
+            raise DeployError(
+                "Legacy pinned frontend override is bootstrap-only; the protected override must be updated to the exact-SHA frontend contract before any build or switch. "
+                + str(error)
+            ) from None
         raise DeployError(str(error)) from None
 
 
@@ -729,6 +734,7 @@ def main() -> int:
         "production_env_file",
         "production_compose_override",
         "expected_compose_contract_sha256",
+        "frontend_bootstrap_mode",
         "original_project_dir",
         "original_compose_file",
         "expected_api_base_url",
@@ -740,6 +746,8 @@ def main() -> int:
     )
     if any(key not in config for key in required):
         raise DeployError("The local dispatcher configuration is incomplete")
+    if config["frontend_bootstrap_mode"] not in ("exact-sha", "legacy-override-update-required"):
+        raise DeployError("The local frontend bootstrap mode is invalid")
     if args.rollback:
         return rollback_frontend(config)
     return dispatch_once(config)
