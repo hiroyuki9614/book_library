@@ -28,6 +28,7 @@ from kagoya_pull_agent import (
     _load_state,
     _http_get,
     _is_retryable_git_transport_failure,
+    _main_sha,
     _run,
     _retained_image_ref,
     _up_frontend,
@@ -737,6 +738,103 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(saved["last_result"], "success")
         self.assertEqual(self.docker.up_targets, ["frontend"])
         self.assertEqual(self.docker.up_targets.count("frontend"), 1)
+
+    def test_main_ref_transport_failure_classifies_transient_vs_permanent(self):
+        command = ["git", "ls-remote", "--refs", self.config["repo_url"], "refs/heads/main"]
+        with patch(
+            "kagoya_pull_agent._run",
+            return_value=subprocess.CompletedProcess(
+                command, 128, "",
+                "fatal: unable to access remote: Could not resolve host: github.com\\n",
+            ),
+        ) as git:
+            with self.assertRaisesRegex(
+                _DeferredPreSwitchGitTransport, "Transient Git main ref transport failure"
+            ):
+                _main_sha(self.config)
+            git.assert_called_once_with(command, check=False)
+
+        with patch(
+            "kagoya_pull_agent._run",
+            return_value=subprocess.CompletedProcess(command, 128, "", "fatal: Authentication failed\\n"),
+        ):
+            with self.assertRaisesRegex(DeployError, "Command failed: git"):
+                _main_sha(self.config)
+
+        with patch(
+            "kagoya_pull_agent._run",
+            return_value=subprocess.CompletedProcess(command, 0, f"{SOURCE_SHA}\\trefs/heads/main\\n", ""),
+        ):
+            self.assertEqual(_main_sha(self.config), SOURCE_SHA)
+
+    def test_main_ref_recheck_transient_failure_retains_request_until_recovery(self):
+        state_path = Path(self.temporary.name) / "main-ref-recheck-state.json"
+        self.config.update({
+            "state_file": str(state_path),
+            "lock_file": str(Path(self.temporary.name) / "main-ref-recheck.lock"),
+        })
+        initial_state = {
+            "last_request": [0, 0],
+            "last_result": "success",
+            "current_sha": "d" * 40,
+            "current": {"image_id": OLD_ID, "image_ref": f"belib-frontend:{'d' * 40}"},
+            "previous": None,
+        }
+        state_path.write_text(json.dumps(initial_state), encoding="utf-8")
+        request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
+        ref_reads = [
+            SOURCE_SHA,
+            _DeferredPreSwitchGitTransport("Transient Git main ref transport failure"),
+            SOURCE_SHA, SOURCE_SHA, SOURCE_SHA, SOURCE_SHA,
+        ]
+        with (
+            patch("kagoya_pull_agent._requests", return_value=request),
+            patch("kagoya_pull_agent._main_sha", side_effect=ref_reads),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch("kagoya_pull_agent.smoke_test"),
+        ):
+            with self.assertRaisesRegex(DeployError, "Transient Git main ref transport failure"):
+                dispatch_once(self.config)
+            self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), initial_state)
+            self.assertEqual(self.docker.up_targets, [])
+            self.assertEqual(dispatch_once(self.config), 0)
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["last_request"], [12, 1])
+        self.assertEqual(saved["last_result"], "success")
+        self.assertEqual(self.docker.up_targets, ["frontend"])
+
+    def test_main_ref_transport_failure_after_switch_consumes_request(self):
+        state_path = Path(self.temporary.name) / "main-ref-post-switch-state.json"
+        self.config.update({
+            "state_file": str(state_path),
+            "lock_file": str(Path(self.temporary.name) / "main-ref-post-switch.lock"),
+        })
+        request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
+        with (
+            patch("kagoya_pull_agent._requests", return_value=request),
+            patch(
+                "kagoya_pull_agent._main_sha",
+                side_effect=[
+                    SOURCE_SHA, SOURCE_SHA, SOURCE_SHA,
+                    _DeferredPreSwitchGitTransport("synthetic transport outage after switch"),
+                ],
+            ),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch("kagoya_pull_agent.smoke_test"),
+        ):
+            with self.assertRaisesRegex(DeployError, "after the frontend switch"):
+                dispatch_once(self.config)
+            self.assertEqual(dispatch_once(self.config), 0)
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["last_request"], [12, 1])
+        self.assertEqual(saved["last_result"], "failed")
+        self.assertEqual(self.docker.up_targets, ["frontend", "frontend"])
 
     def test_transient_git_fetch_failure_preserves_request_until_fetch_recovers(self):
         state_path = Path(self.temporary.name) / "git-fetch-state.json"
