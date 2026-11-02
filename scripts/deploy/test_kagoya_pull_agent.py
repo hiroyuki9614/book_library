@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -666,6 +667,11 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(self.docker.current_id, NEW_ID)
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), initial_state)
 
+        def fail_if_replay_enters_error_recovery(*_args, **_kwargs):
+            # Replaying an already-switched frontend must not take the failure
+            # synchronization path; retain the real cause in test-only output.
+            self.fail(f"unexpected replay error: {sys.exc_info()[1]!r}")
+
         with (
             patch("kagoya_pull_agent._requests", return_value=request),
             patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
@@ -673,6 +679,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
             patch("kagoya_pull_agent._checkout", return_value=self.checkout),
             patch("kagoya_pull_agent._run", side_effect=self.docker.run),
             patch("kagoya_pull_agent.smoke_test"),
+            patch("kagoya_pull_agent._synchronize_state_after_dispatch_failure", side_effect=fail_if_replay_enters_error_recovery),
         ):
             self.assertEqual(dispatch_once(self.config), 0)
 
