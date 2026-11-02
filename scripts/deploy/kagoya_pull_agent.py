@@ -38,6 +38,59 @@ class _DeferredPreSwitchGate(DeployError):
     """An API outage before any frontend action; leave request unconsumed."""
 
 
+class _DeferredPreSwitchGitTransport(DeployError):
+    """A positively identified Git fetch transport outage before frontend action."""
+
+
+_GIT_NON_RETRYABLE_FAILURE_MARKERS = (
+    "authentication failed",
+    "authentication required",
+    "could not read username",
+    "repository not found",
+    "repository access denied",
+    "permission denied",
+    "access denied",
+    "not a git repository",
+    "does not appear to be a git repository",
+    "couldn't find remote ref",
+    "could not find remote ref",
+    "not our ref",
+    "unadvertised object",
+    "invalid object",
+    "bad object",
+    "corrupt",
+    "corruption",
+    "packfile",
+    "index-pack failed",
+    "unpack failed",
+    "certificate verify failed",
+    "server certificate verification failed",
+    "host key verification failed",
+    "protocol error",
+)
+_GIT_TRANSPORT_FAILURE_PATTERNS = (
+    re.compile(r"\b(?:could not|couldn't) resolve (?:host|proxy)\b"),
+    re.compile(r"\bfailed to connect\b"),
+    re.compile(r"\b(?:connection|operation) (?:timed out|reset|refused|closed)\b"),
+    re.compile(r"\bnetwork is unreachable\b"),
+    re.compile(r"\bno route to host\b"),
+    re.compile(r"\bremote end hung up unexpectedly\b"),
+    re.compile(r"\bearly eof\b"),
+    re.compile(r"\bthe requested url returned error:\s*(?:429|5\d{2})\b"),
+    re.compile(r"\bhttp\s+5\d{2}\b"),
+)
+
+
+def _is_retryable_git_transport_failure(stderr: object) -> bool:
+    """Recognize only explicit network failures from a failed Git fetch."""
+    if not isinstance(stderr, str):
+        return False
+    message = stderr.casefold()
+    if any(marker in message for marker in _GIT_NON_RETRYABLE_FAILURE_MARKERS):
+        return False
+    return any(pattern.search(message) for pattern in _GIT_TRANSPORT_FAILURE_PATTERNS)
+
+
 class _RejectRedirects(HTTPRedirectHandler):
     """Prevent public smoke requests from being redirected to another host."""
 
@@ -169,18 +222,30 @@ def _checkout(config: dict, source_sha: str) -> Path:
         status = _run(["git", "-C", str(checkout), "status", "--porcelain"])
         if status.stdout.strip():
             raise DeployError("The isolated release checkout contains local changes")
-        _run(["git", "-C", str(checkout), "fetch", "--depth=1", "origin", source_sha])
+        _fetch_source(checkout, source_sha)
         _run(["git", "-C", str(checkout), "checkout", "--detach", "FETCH_HEAD"])
     else:
         checkout.mkdir(mode=0o700)
         _run(["git", "-C", str(checkout), "init", "--quiet"])
         _run(["git", "-C", str(checkout), "remote", "add", "origin", config["repo_url"]])
-        _run(["git", "-C", str(checkout), "fetch", "--depth=1", "origin", source_sha])
+        _fetch_source(checkout, source_sha)
         _run(["git", "-C", str(checkout), "checkout", "--detach", "FETCH_HEAD"])
     actual = _run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).stdout.strip().lower()
     if actual != source_sha:
         raise DeployError("The isolated checkout does not match the release SHA")
     return checkout
+
+
+def _fetch_source(checkout: Path, source_sha: str) -> None:
+    argv = ["git", "-C", str(checkout), "fetch", "--depth=1", "origin", source_sha]
+    result = _run(argv, check=False)
+    if result.returncode == 0:
+        return
+    if _is_retryable_git_transport_failure(result.stderr):
+        raise _DeferredPreSwitchGitTransport(
+            "Transient Git fetch transport failure; request retained for next timer run"
+        ) from None
+    raise DeployError(f"Command failed: {Path(argv[0]).name} (exit {result.returncode})")
 
 
 def _http_get(url: str) -> tuple[int, dict[str, str], bytes]:
@@ -375,6 +440,8 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
                 smoke(config["base_url"])
             except Exception:
                 raise DeployError("Frontend smoke failed and the saved frontend rollback also failed") from None
+            if isinstance(error, _DeferredPreSwitchGitTransport):
+                raise DeployError("Frontend deployment failed after the frontend switch") from None
         if isinstance(error, DeployError):
             raise
         raise DeployError("Frontend deployment failed and the prior image was restored") from None
@@ -600,7 +667,7 @@ def dispatch_once(config: dict) -> int:
             if _main_sha(config) != source_sha:
                 raise DeployError("Main advanced before the deployment began")
             result = deploy_frontend(config, source_sha)
-        except _DeferredPreSwitchGate as error:
+        except (_DeferredPreSwitchGate, _DeferredPreSwitchGitTransport) as error:
             # A visible service failure, but no state mutation or deployment.
             # A later timer tick may safely revalidate this pending request.
             raise DeployError(str(error)) from None

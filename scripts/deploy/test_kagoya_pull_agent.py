@@ -22,6 +22,7 @@ from kagoya_compose import (
 )
 from kagoya_pull_agent import (
     DeployError,
+    _DeferredPreSwitchGitTransport,
     _previous_state_record,
     _load_state,
     _http_get,
@@ -704,6 +705,113 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(self.docker.up_targets, ["frontend"])
         self.assertEqual(self.docker.up_targets.count("frontend"), 1)
 
+    def test_transient_git_fetch_failure_preserves_request_until_fetch_recovers(self):
+        state_path = Path(self.temporary.name) / "git-fetch-state.json"
+        self.config.update(
+            {
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "git-fetch.lock"),
+            }
+        )
+        initial_state = {
+            "last_request": [0, 0],
+            "last_result": "success",
+            "current_sha": "d" * 40,
+            "current": {"image_id": OLD_ID, "image_ref": f"belib-frontend:{'d' * 40}"},
+            "previous": None,
+        }
+        state_path.write_text(json.dumps(initial_state), encoding="utf-8")
+        request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
+        (self.checkout / ".git").mkdir()
+        fetch_attempts = 0
+
+        def run_git_then_docker(argv, *, env=None, check=True):
+            nonlocal fetch_attempts
+            if argv and argv[0] == "git":
+                operation = argv[3]
+                if operation == "status":
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if operation == "fetch":
+                    fetch_attempts += 1
+                    if fetch_attempts == 1:
+                        return subprocess.CompletedProcess(
+                            argv,
+                            128,
+                            "",
+                            "fatal: unable to access 'https://github.com/hiroyuki9614/book_library.git/': Could not resolve host: github.com\n",
+                        )
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if operation == "checkout":
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if operation == "rev-parse":
+                    return subprocess.CompletedProcess(argv, 0, f"{SOURCE_SHA}\n", "")
+                raise AssertionError(f"Unexpected Git command: {argv}")
+            return self.docker.run(argv, env=env, check=check)
+
+        with (
+            patch("kagoya_pull_agent._requests", return_value=request),
+            patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent._run", side_effect=run_git_then_docker),
+            patch("kagoya_pull_agent.smoke_test"),
+        ):
+            with self.assertRaisesRegex(DeployError, "Transient Git fetch transport failure"):
+                dispatch_once(self.config)
+            self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), initial_state)
+            self.assertEqual(self.docker.up_targets, [])
+
+            self.assertEqual(dispatch_once(self.config), 0)
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(fetch_attempts, 2)
+        self.assertEqual(saved["last_request"], [12, 1])
+        self.assertEqual(saved["last_result"], "success")
+        self.assertEqual(self.docker.up_targets, ["frontend"])
+
+    def test_permanent_git_fetch_failure_consumes_request(self):
+        state_path = Path(self.temporary.name) / "git-fetch-denied-state.json"
+        self.config.update(
+            {
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "git-fetch-denied.lock"),
+            }
+        )
+        initial_state = {
+            "last_request": [0, 0],
+            "last_result": "success",
+            "current_sha": "d" * 40,
+            "current": {"image_id": OLD_ID, "image_ref": f"belib-frontend:{'d' * 40}"},
+            "previous": None,
+        }
+        state_path.write_text(json.dumps(initial_state), encoding="utf-8")
+        request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
+        (self.checkout / ".git").mkdir()
+
+        def run_permanent_fetch_then_docker(argv, *, env=None, check=True):
+            if argv and argv[0] == "git":
+                operation = argv[3]
+                if operation == "status":
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if operation == "fetch":
+                    return subprocess.CompletedProcess(argv, 128, "", "fatal: bad object\n")
+                raise AssertionError(f"Unexpected Git command: {argv}")
+            return self.docker.run(argv, env=env, check=check)
+
+        with (
+            patch("kagoya_pull_agent._requests", return_value=request),
+            patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent._run", side_effect=run_permanent_fetch_then_docker),
+        ):
+            with self.assertRaisesRegex(DeployError, "Command failed: git"):
+                dispatch_once(self.config)
+            self.assertEqual(dispatch_once(self.config), 0)
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["last_request"], [12, 1])
+        self.assertEqual(saved["last_result"], "failed")
+        self.assertEqual(self.docker.up_targets, [])
+
     def test_permanent_gate_denial_consumes_request_and_never_switches(self):
         state_path = Path(self.temporary.name) / "denied-state.json"
         self.config.update({
@@ -745,6 +853,48 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(saved["last_request"], [12, 1])
         self.assertEqual(saved["last_result"], "failed")
         self.assertEqual(self.docker.up_targets, [])
+
+    def test_transport_exception_after_frontend_switch_is_consumed_and_not_retried(self):
+        state_path = Path(self.temporary.name) / "late-transport-state.json"
+        self.config.update(
+            {
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "late-transport.lock"),
+            }
+        )
+        initial_state = {
+            "last_request": [0, 0],
+            "last_result": "success",
+            "current_sha": "d" * 40,
+            "current": {"image_id": OLD_ID, "image_ref": f"belib-frontend:{'d' * 40}"},
+            "previous": None,
+        }
+        state_path.write_text(json.dumps(initial_state), encoding="utf-8")
+        request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
+        original_up_frontend = _up_frontend
+
+        def switch_then_raise(config, checkout, source_sha, *, image_override=None):
+            original_up_frontend(config, checkout, source_sha, image_override=image_override)
+            if image_override is None:
+                raise _DeferredPreSwitchGitTransport("synthetic late transport failure")
+
+        with (
+            patch("kagoya_pull_agent._requests", return_value=request),
+            patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch("kagoya_pull_agent._up_frontend", side_effect=switch_then_raise),
+            patch("kagoya_pull_agent.smoke_test"),
+        ):
+            with self.assertRaisesRegex(DeployError, "after the frontend switch"):
+                dispatch_once(self.config)
+            self.assertEqual(dispatch_once(self.config), 0)
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["last_request"], [12, 1])
+        self.assertEqual(saved["last_result"], "failed")
+        self.assertEqual(self.docker.up_targets, ["frontend", "frontend"])
 
     def test_failed_automatic_rollback_synchronizes_actual_frontend_state(self):
         state_path = Path(self.temporary.name) / "dispatcher-state.json"
