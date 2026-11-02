@@ -604,7 +604,14 @@ def _synchronize_state_after_dispatch_failure(
 
 
 def _main_sha(config: dict) -> str:
-    result = _run(["git", "ls-remote", "--refs", config["repo_url"], "refs/heads/main"])
+    argv = ["git", "ls-remote", "--refs", config["repo_url"], "refs/heads/main"]
+    result = _run(argv, check=False)
+    if result.returncode:
+        if _is_retryable_git_transport_failure(result.stderr):
+            raise _DeferredPreSwitchGitTransport(
+                "Transient Git main ref transport failure; request retained for next timer run"
+            ) from None
+        raise DeployError(f"Command failed: git (exit {result.returncode})")
     fields = result.stdout.split()
     if len(fields) != 2 or not SOURCE_SHA.fullmatch(fields[0].lower()):
         raise DeployError("The current main SHA could not be read")
