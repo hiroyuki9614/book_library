@@ -659,6 +659,9 @@ class PullAgentDeploymentTests(unittest.TestCase):
             patch("kagoya_pull_agent._validate_network"),
             patch("kagoya_pull_agent._checkout", return_value=self.checkout),
             patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            # Keep this state-persistence regression independent from a real
+            # localhost listener on CI or on the production host.
+            patch("kagoya_pull_agent.smoke_test"),
             patch("kagoya_pull_agent._save_state", side_effect=OSError("synthetic disk failure")),
         ):
             with self.assertRaisesRegex(OSError, "synthetic disk failure"):
