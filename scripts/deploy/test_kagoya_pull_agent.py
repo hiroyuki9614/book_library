@@ -33,6 +33,7 @@ from kagoya_pull_agent import (
     dispatch_once,
     rollback_frontend,
 )
+from release_gate import TransientGitHubAPIError
 
 
 SOURCE_SHA = "a" * 40
@@ -660,6 +661,47 @@ class PullAgentDeploymentTests(unittest.TestCase):
             {"image_id": OLD_ID, "image_ref": retained_old, "source_sha": old_sha},
         )
         self.assertEqual(self.docker.images[retained_old]["Id"], OLD_ID)
+
+    def test_transient_network_failure_preserves_request_for_next_dispatch(self):
+        state_path = Path(self.temporary.name) / "dispatcher-state.json"
+        self.config.update(
+            {
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "dispatcher.lock"),
+            }
+        )
+        initial_state = {
+            "last_request": [0, 0],
+            "last_result": "success",
+            "current_sha": "d" * 40,
+            "current": {"image_id": OLD_ID, "image_ref": f"belib-frontend:{'d' * 40}"},
+            "previous": None,
+        }
+        state_path.write_text(json.dumps(initial_state), encoding="utf-8")
+        request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
+
+        with (
+            patch("kagoya_pull_agent._requests", return_value=request),
+            patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+            patch(
+                "kagoya_pull_agent.validate_release",
+                side_effect=[TransientGitHubAPIError("synthetic transient failure"), None],
+            ),
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch("kagoya_pull_agent.smoke_test"),
+        ):
+            self.assertEqual(dispatch_once(self.config), 0)
+            self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), initial_state)
+            self.assertEqual(self.docker.up_targets, [])
+
+            self.assertEqual(dispatch_once(self.config), 0)
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["last_request"], [12, 1])
+        self.assertEqual(saved["last_result"], "success")
+        self.assertEqual(self.docker.up_targets, ["frontend"])
+        self.assertEqual(self.docker.up_targets.count("frontend"), 1)
 
     def test_failed_automatic_rollback_synchronizes_actual_frontend_state(self):
         state_path = Path(self.temporary.name) / "dispatcher-state.json"

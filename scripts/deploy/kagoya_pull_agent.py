@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from release_gate import GateError, GitHubAPI, validate_release
+from release_gate import GateError, GitHubAPI, TransientGitHubAPIError, validate_release
 from kagoya_compose import (
     ComposeIdentityError,
     validate_frontend_service,
@@ -544,6 +544,8 @@ def _validate_network(config: dict) -> None:
     api = GitHubAPI(repository=config["repository"])
     try:
         validate_release(api, config["request_sha"])
+    except TransientGitHubAPIError:
+        raise
     except GateError as error:
         raise DeployError(str(error)) from None
 
@@ -586,6 +588,10 @@ def dispatch_once(config: dict) -> int:
         config["request_sha"] = source_sha
         try:
             _validate_network(config)
+        except TransientGitHubAPIError:
+            return 0
+
+        try:
             if _main_sha(config) != source_sha:
                 raise DeployError("Main advanced before the deployment began")
             result = deploy_frontend(config, source_sha)

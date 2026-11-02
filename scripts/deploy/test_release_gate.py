@@ -1,7 +1,16 @@
 import unittest
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
+from unittest.mock import patch
 
-from release_gate import GateError, REQUIRED_RELEASE_JOBS, validate_release
+import release_gate
+from release_gate import (
+    GateError,
+    GitHubAPI,
+    REQUIRED_RELEASE_JOBS,
+    TransientGitHubAPIError,
+    validate_release,
+)
 
 
 SOURCE_SHA = "a" * 40
@@ -91,6 +100,25 @@ class FakeAPI:
 
 
 class ReleaseGateTests(unittest.TestCase):
+    def test_github_api_classifies_only_supported_transient_failures(self):
+        failures = [
+            HTTPError("https://api.github.com", 429, "synthetic", {}, None),
+            HTTPError("https://api.github.com", 503, "synthetic", {}, None),
+            URLError("synthetic connection failure"),
+        ]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                with patch.object(release_gate, "urlopen", side_effect=failure):
+                    with self.assertRaises(TransientGitHubAPIError):
+                        GitHubAPI(token="synthetic").get("/synthetic")
+
+    def test_github_api_keeps_permanent_http_failure_terminal(self):
+        failure = HTTPError("https://api.github.com", 403, "synthetic", {}, None)
+        with patch.object(release_gate, "urlopen", side_effect=failure):
+            with self.assertRaises(GateError) as raised:
+                GitHubAPI(token="synthetic").get("/synthetic")
+        self.assertNotIsInstance(raised.exception, TransientGitHubAPIError)
+
     def test_accepts_exact_main_sha_with_green_pr_and_merge_gates(self):
         proof = validate_release(FakeAPI(), SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
         self.assertEqual(

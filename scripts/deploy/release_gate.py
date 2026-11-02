@@ -24,6 +24,10 @@ class GateError(RuntimeError):
     """Raised when a source revision does not satisfy the release gates."""
 
 
+class TransientGitHubAPIError(GateError):
+    """Raised when GitHub cannot be queried reliably yet."""
+
+
 class GitHubAPI:
     def __init__(self, repository: str = REPOSITORY, token: str | None = None) -> None:
         self.repository = repository
@@ -46,8 +50,14 @@ class GitHubAPI:
             with urlopen(request, timeout=30) as response:
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
+            if type(error.code) is int and (error.code == 429 or 500 <= error.code <= 599):
+                raise TransientGitHubAPIError(
+                    f"GitHub API request failed with HTTP {error.code}"
+                ) from None
             raise GateError(f"GitHub API request failed with HTTP {error.code}") from None
-        except (URLError, TimeoutError, json.JSONDecodeError):
+        except (URLError, TimeoutError):
+            raise TransientGitHubAPIError("GitHub API request failed") from None
+        except json.JSONDecodeError:
             raise GateError("GitHub API request failed") from None
 
     def get(self, path: str) -> dict:
