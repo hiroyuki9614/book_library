@@ -73,10 +73,12 @@ services:
     restart: unless-stopped
 
   frontend:
+    image: ${BELIB_FRONTEND_IMAGE:-belib-frontend:${VCS_REF:?VCS_REF must identify the reviewed source commit}}
     build:
       context: ./frontend
       target: runtime
       args:
+        VCS_REF: ${VCS_REF:?VCS_REF must identify the reviewed source commit}
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:?VITE_API_BASE_URL is required}
         VITE_PUBLIC_DEMO_EMAIL: ${VITE_PUBLIC_DEMO_EMAIL:-}
         VITE_PUBLIC_DEMO_PASSWORD: ${VITE_PUBLIC_DEMO_PASSWORD:-}

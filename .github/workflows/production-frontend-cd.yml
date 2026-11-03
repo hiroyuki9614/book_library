@@ -1,0 +1,49 @@
+name: Production frontend CD handoff
+
+on:
+  workflow_run:
+    workflows: [Release candidate gates]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full SHA of the current main commit to replay
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: belib-production-frontend-cd
+  cancel-in-progress: false
+
+jobs:
+  create-deployment-request:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout trusted main workflow code
+        uses: actions/checkout@v4
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
+
+      - name: Validate reviewed SHA and required gates, then publish immutable handoff tag
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: python3 scripts/deploy/create_release_request.py
