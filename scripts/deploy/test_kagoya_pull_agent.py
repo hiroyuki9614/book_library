@@ -42,6 +42,7 @@ from kagoya_pull_agent import (
     _run,
     _retained_image_ref,
     _up_frontend,
+    _validate_public_demo_api_base_url,
     _validate_public_demo_candidate,
     _verify_target_image,
     PUBLIC_DEMO_SIDECAR_MAX_BYTES,
@@ -733,6 +734,28 @@ class PublicDemoValidationTests(unittest.TestCase):
                 with self.assertRaisesRegex(DeployError, "authorization check failed"):
                     _PublicDemoValidationSession().request("GET", "/api/v1/me")
 
+    def test_public_demo_api_base_url_accepts_only_the_fixed_https_origin_shape(self):
+        valid = (
+            PUBLIC_DEMO_VALIDATION_ORIGIN,
+            f"{PUBLIC_DEMO_VALIDATION_ORIGIN}/",
+        )
+        invalid = (
+            "http://belib.hiroyuki9614.com",
+            f"{PUBLIC_DEMO_VALIDATION_ORIGIN}:8443",
+            f"https://user@belib.hiroyuki9614.com",
+            "https://evil.belib.hiroyuki9614.com",
+            f"{PUBLIC_DEMO_VALIDATION_ORIGIN}?next=/api/v1",
+            f"{PUBLIC_DEMO_VALIDATION_ORIGIN}#/api/v1",
+            f"{PUBLIC_DEMO_VALIDATION_ORIGIN}/api",
+        )
+        for value in valid:
+            with self.subTest(value=value):
+                _validate_public_demo_api_base_url({"expected_api_base_url": value})
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(DeployError, "canonical protected HTTPS origin"):
+                    _validate_public_demo_api_base_url({"expected_api_base_url": value})
+
 
 class PullAgentDeploymentTests(unittest.TestCase):
 
@@ -804,7 +827,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
             "original_compose_file": str(self.project_dir / "compose.yaml"),
             "release_root": str(self.release_root),
             "agent_uid": os.getuid(),
-            "expected_api_base_url": "https://api.example.test",
+            "expected_api_base_url": PUBLIC_DEMO_VALIDATION_ORIGIN,
             "base_url": "http://127.0.0.1:8080",
         }
         self.docker = FakeDocker(self.project_dir, self.production_override)
@@ -1002,14 +1025,10 @@ class PullAgentDeploymentTests(unittest.TestCase):
             for argv, env in reversed(self.docker.commands)
             if "up" in argv and env.get("BELIB_FRONTEND_IMAGE") == previous_ref
         )
-        for key in (
-            "COMPOSE_PROFILES",
-            "VCS_REF",
-            "VITE_API_BASE_URL",
-            "VITE_PUBLIC_DEMO_EMAIL",
-            "VITE_PUBLIC_DEMO_PASSWORD",
-        ):
+        for key in ("COMPOSE_PROFILES", "VCS_REF", "VITE_API_BASE_URL"):
             self.assertEqual(rollback_env[key], candidate_up_env[key])
+        self.assertEqual(rollback_env["VITE_PUBLIC_DEMO_EMAIL"], "")
+        self.assertEqual(rollback_env["VITE_PUBLIC_DEMO_PASSWORD"], "")
 
         self.docker.frontend_build_arg_overrides["VITE_API_BASE_URL"] = "https://wrong.example.invalid"
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -1042,6 +1061,85 @@ class PullAgentDeploymentTests(unittest.TestCase):
 
         self.assertTrue(any("build" in argv for argv, _env in self.docker.commands))
         self.assertFalse(any("up" in argv for argv, _env in self.docker.commands))
+
+    def test_public_demo_origin_mismatch_blocks_before_validation_or_switch(self):
+        self.write_public_demo_sidecar()
+        self.config["expected_api_base_url"] = "https://api.example.test"
+        with patch(
+            "kagoya_pull_agent._validate_public_demo_candidate",
+            side_effect=AssertionError("synthetic network must not be attempted"),
+        ):
+            with self.assertRaisesRegex(DeployError, "canonical protected HTTPS origin"):
+                deploy_frontend(
+                    self.config,
+                    SOURCE_SHA,
+                    smoke=lambda _base_url: None,
+                    main_sha_reader=lambda _config: SOURCE_SHA,
+                )
+        self.assertFalse(any("build" in argv or "up" in argv for argv, _env in self.docker.commands))
+
+    def test_manual_rollback_ignores_missing_malformed_and_symlink_sidecars(self):
+        state_path = Path(self.temporary.name) / "rollback-sidecar-state.json"
+        self.config.update(
+            {
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "rollback-sidecar.lock"),
+            }
+        )
+        previous_ref = _retained_image_ref(OLD_ID)
+        self.docker.images[previous_ref] = {"Id": OLD_ID, "Config": {"Labels": {}}}
+        malformed_path = Path(self.temporary.name) / "malformed-rollback-sidecar.json"
+        malformed_path.write_text("{", encoding="utf-8")
+        malformed_path.chmod(0o600)
+        sidecar_target = Path(self.temporary.name) / "rollback-sidecar-target.json"
+        sidecar_target.write_text(json.dumps(self.public_demo_sidecar()), encoding="utf-8")
+        sidecar_target.chmod(0o600)
+        symlink_path = Path(self.temporary.name) / "symlink-rollback-sidecar.json"
+        symlink_path.symlink_to(sidecar_target)
+
+        cases = (
+            Path(self.temporary.name) / "missing-rollback-sidecar.json",
+            malformed_path,
+            symlink_path,
+        )
+        for sidecar_path in cases:
+            with self.subTest(sidecar=sidecar_path.name):
+                self.docker.current_id = NEW_ID
+                self.docker.current_ref = f"belib-frontend:{SOURCE_SHA}"
+                self.config["public_demo_credentials_file"] = str(sidecar_path)
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "last_request": [1, 1],
+                            "last_result": "success",
+                            "current_sha": SOURCE_SHA,
+                            "current": {"image_id": NEW_ID, "image_ref": f"belib-frontend:{SOURCE_SHA}"},
+                            "previous": {"image_id": OLD_ID, "image_ref": previous_ref, "source_sha": None},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                self.docker.commands.clear()
+                self.docker.up_targets.clear()
+                with (
+                    patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+                    patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+                    patch("kagoya_pull_agent.smoke_test"),
+                    patch(
+                        "kagoya_pull_agent._load_public_demo_credentials",
+                        side_effect=AssertionError("rollback must not read the sidecar"),
+                    ),
+                ):
+                    self.assertEqual(rollback_frontend(self.config), 0)
+                rollback_env = next(
+                    env
+                    for argv, env in self.docker.commands
+                    if "up" in argv and env.get("BELIB_FRONTEND_IMAGE") == previous_ref
+                )
+                self.assertEqual(rollback_env["VITE_PUBLIC_DEMO_EMAIL"], "")
+                self.assertEqual(rollback_env["VITE_PUBLIC_DEMO_PASSWORD"], "")
+                self.assertFalse(any("build" in argv for argv, _env in self.docker.commands))
+                self.assertEqual(self.docker.current_id, OLD_ID)
 
     def test_same_sha_sidecar_removal_preserves_deployed_bundle_without_build_or_switch(self):
         self.write_public_demo_sidecar()

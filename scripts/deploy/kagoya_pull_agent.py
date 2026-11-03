@@ -17,6 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
     HTTPSHandler,
@@ -311,6 +312,33 @@ def _load_public_demo_credentials(config: dict) -> tuple[str, str]:
     """Load only the explicitly approved sidecar pair, without validating authority."""
     candidate = _load_public_demo_candidate(config)
     return candidate.pair if candidate is not None else ("", "")
+
+
+def _validate_public_demo_api_base_url(config: dict) -> None:
+    """Bind public-demo credentials to the fixed protected HTTPS origin."""
+    value = config.get("expected_api_base_url")
+    try:
+        parsed = urlsplit(value) if type(value) is str else None
+        port = parsed.port if parsed is not None else None
+    except ValueError:
+        parsed = None
+        port = None
+    expected_hostname = urlsplit(PUBLIC_DEMO_VALIDATION_ORIGIN).hostname
+    if (
+        parsed is None
+        or value != value.strip()
+        or parsed.scheme != "https"
+        or parsed.hostname != expected_hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or "?" in value
+        or "#" in value
+        or parsed.path not in ("", "/")
+    ):
+        raise DeployError(
+            "The public demo API base URL must use the canonical protected HTTPS origin"
+        )
 
 
 def _frontend_compose_env(
@@ -724,6 +752,7 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
     public_demo_credentials = (
         public_demo_candidate.pair if public_demo_candidate is not None else ("", "")
     )
+    _validate_public_demo_api_base_url(config)
     public_demo_identity = (
         _validate_public_demo_candidate(public_demo_candidate)
         if public_demo_candidate is not None
@@ -1078,7 +1107,9 @@ def _rollback_frontend_unlocked(config: dict) -> int:
     source_sha = state.get("current_sha")
     if not current or not previous or not source_sha or not previous.get("image_ref"):
         raise DeployError("No saved frontend-only rollback image is recorded")
-    public_demo_credentials = _load_public_demo_credentials(config)
+    # Manual rollback is no-build and must never read the optional publication
+    # sidecar. The saved immutable image is restored with a blank demo pair.
+    public_demo_credentials = ("", "")
     checkout = _checkout(config, source_sha)
     live = _container(config)
     if live.get("Image") != current.get("image_id"):
