@@ -1,5 +1,7 @@
 import fcntl
 import copy
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 import os
 import subprocess
@@ -44,6 +46,8 @@ SOURCE_SHA = "a" * 40
 OLD_ID = "sha256:" + "b" * 64
 NEW_ID = "sha256:" + "a" * 64
 DEPLOYED_ID = "sha256:" + "c" * 64
+SYNTHETIC_DEMO_EMAIL = "synthetic.demo@example.invalid"
+SYNTHETIC_DEMO_PASSWORD = "synthetic-only-public-password"
 
 
 class FakeDocker:
@@ -117,8 +121,8 @@ class FakeDocker:
                         "args": {
                             "VCS_REF": source_sha,
                             "VITE_API_BASE_URL": (env or {}).get("VITE_API_BASE_URL"),
-                            "VITE_PUBLIC_DEMO_EMAIL": "",
-                            "VITE_PUBLIC_DEMO_PASSWORD": "",
+                            "VITE_PUBLIC_DEMO_EMAIL": (env or {}).get("VITE_PUBLIC_DEMO_EMAIL", ""),
+                            "VITE_PUBLIC_DEMO_PASSWORD": (env or {}).get("VITE_PUBLIC_DEMO_PASSWORD", ""),
                         },
                         "context": str((checkout / "frontend").resolve()),
                         "dockerfile": "Dockerfile",
@@ -683,6 +687,175 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 main_sha_reader=lambda _config: SOURCE_SHA,
             )
 
+    def public_demo_sidecar(self, **overrides):
+        evidence = {
+            "dedicated_general_account": True,
+            "general_role": "general",
+            "admin_api_403": True,
+            "private_book_403": True,
+            "independent_read_only": True,
+            "evidence_ref": "synthetic-owner-read-only-evidence",
+            "verified_at": "2026-11-03T00:00:00Z",
+        }
+        payload = {
+            "schema_version": 1,
+            "publication_intent": "public_general_demo_credentials",
+            "public_display_approved": True,
+            "approval_ref": "synthetic-owner-approval",
+            "email": SYNTHETIC_DEMO_EMAIL,
+            "password": SYNTHETIC_DEMO_PASSWORD,
+            "evidence": evidence,
+        }
+        payload.update(overrides)
+        return payload
+
+    def write_public_demo_sidecar(self, payload=None, *, mode=0o600, name="public-demo-credentials.json"):
+        path = Path(self.temporary.name) / name
+        path.write_text(json.dumps(payload or self.public_demo_sidecar()), encoding="utf-8")
+        path.chmod(mode)
+        self.config["public_demo_credentials_file"] = str(path)
+        return path
+
+    def test_default_and_ambient_public_demo_values_remain_blank(self):
+        self.environment_file.write_text(
+            "VITE_PUBLIC_DEMO_EMAIL=protected-env@example.invalid\n"
+            "VITE_PUBLIC_DEMO_PASSWORD=protected-env-password\n",
+            encoding="utf-8",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "VITE_PUBLIC_DEMO_EMAIL": "ambient@example.invalid",
+                "VITE_PUBLIC_DEMO_PASSWORD": "ambient-password",
+            },
+        ):
+            self.run_deploy(lambda _base_url: None)
+
+        compose_commands = [argv for argv, _env in self.docker.commands if argv[:2] == ["docker", "compose"]]
+        for argv, env in self.docker.commands:
+            if argv[:2] == ["docker", "compose"] and any(
+                operation in argv for operation in ("config", "build", "up")
+            ):
+                self.assertEqual(env["VITE_PUBLIC_DEMO_EMAIL"], "")
+                self.assertEqual(env["VITE_PUBLIC_DEMO_PASSWORD"], "")
+        self.assertTrue(compose_commands)
+
+    def test_owner_approved_synthetic_pair_is_used_for_build_up_and_rollback_without_leaking(self):
+        self.write_public_demo_sidecar()
+        self.config.update(
+            {
+                "state_file": str(Path(self.temporary.name) / "dispatcher-state.json"),
+                "lock_file": str(Path(self.temporary.name) / "dispatcher.lock"),
+            }
+        )
+        self.run_deploy(lambda _base_url: None)
+
+        build_env = next(env for argv, env in self.docker.commands if "build" in argv)
+        candidate_up_env = next(
+            env
+            for argv, env in self.docker.commands
+            if "up" in argv and env.get("BELIB_FRONTEND_IMAGE") == f"belib-frontend:{SOURCE_SHA}"
+        )
+        expected_public_values = {
+            "VITE_PUBLIC_DEMO_EMAIL": SYNTHETIC_DEMO_EMAIL,
+            "VITE_PUBLIC_DEMO_PASSWORD": SYNTHETIC_DEMO_PASSWORD,
+        }
+        for env in (build_env, candidate_up_env):
+            self.assertEqual(
+                {key: env[key] for key in expected_public_values},
+                expected_public_values,
+            )
+
+        previous_ref = _retained_image_ref(OLD_ID)
+        Path(self.config["state_file"]).write_text(
+            json.dumps(
+                {
+                    "last_request": [1, 1],
+                    "last_result": "success",
+                    "current_sha": SOURCE_SHA,
+                    "current": {"image_id": NEW_ID, "image_ref": f"belib-frontend:{SOURCE_SHA}"},
+                    "previous": {"image_id": OLD_ID, "image_ref": previous_ref, "source_sha": None},
+                }
+            ),
+            encoding="utf-8",
+        )
+        with (
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch("kagoya_pull_agent.smoke_test"),
+        ):
+            rollback_result = rollback_frontend(self.config)
+        self.assertEqual(rollback_result, 0)
+        rollback_env = next(
+            env
+            for argv, env in reversed(self.docker.commands)
+            if "up" in argv and env.get("BELIB_FRONTEND_IMAGE") == previous_ref
+        )
+        for key in (
+            "COMPOSE_PROFILES",
+            "VCS_REF",
+            "VITE_API_BASE_URL",
+            "VITE_PUBLIC_DEMO_EMAIL",
+            "VITE_PUBLIC_DEMO_PASSWORD",
+        ):
+            self.assertEqual(rollback_env[key], candidate_up_env[key])
+
+        self.docker.frontend_build_arg_overrides["VITE_API_BASE_URL"] = "https://wrong.example.invalid"
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(DeployError) as raised:
+                self.run_deploy(lambda _base_url: None)
+        self.assertNotIn(SYNTHETIC_DEMO_EMAIL, str(raised.exception) + stdout.getvalue() + stderr.getvalue())
+        self.assertNotIn(SYNTHETIC_DEMO_PASSWORD, str(raised.exception) + stdout.getvalue() + stderr.getvalue())
+
+    def test_public_demo_sidecar_rejects_malformed_unsafe_or_unproven_opt_in(self):
+        cases = []
+        malformed_path = Path(self.temporary.name) / "malformed.json"
+        malformed_path.write_text("{", encoding="utf-8")
+        malformed_path.chmod(0o600)
+        cases.append(("malformed", malformed_path, os.getuid()))
+
+        unsafe_path = self.write_public_demo_sidecar(mode=0o640, name="unsafe.json")
+        cases.append(("unsafe mode", unsafe_path, os.getuid()))
+
+        target_path = Path(self.temporary.name) / "sidecar-target.json"
+        target_path.write_text(json.dumps(self.public_demo_sidecar()), encoding="utf-8")
+        target_path.chmod(0o600)
+        symlink_path = Path(self.temporary.name) / "symlink-sidecar.json"
+        symlink_path.symlink_to(target_path)
+        cases.append(("symlink", symlink_path, os.getuid()))
+
+        wrong_owner_path = self.write_public_demo_sidecar(name="wrong-owner.json")
+        cases.append(("wrong owner", wrong_owner_path, os.getuid() + 1))
+
+        admin_payload = self.public_demo_sidecar()
+        admin_payload["evidence"] = {**admin_payload["evidence"], "general_role": "admin"}
+        admin_path = self.write_public_demo_sidecar(admin_payload, name="admin.json")
+        cases.append(("admin", admin_path, os.getuid()))
+
+        unverified_payload = self.public_demo_sidecar()
+        unverified_payload["evidence"] = {**unverified_payload["evidence"], "private_book_403": False}
+        unverified_path = self.write_public_demo_sidecar(unverified_payload, name="unverified.json")
+        cases.append(("unverified", unverified_path, os.getuid()))
+
+        partial_payload = self.public_demo_sidecar()
+        partial_payload.pop("password")
+        partial_path = self.write_public_demo_sidecar(partial_payload, name="partial.json")
+        cases.append(("partial", partial_path, os.getuid()))
+
+        for label, path, owner_uid in cases:
+            with self.subTest(label=label):
+                self.config["public_demo_credentials_file"] = str(path)
+                self.config["agent_uid"] = owner_uid
+                with self.assertRaises(DeployError) as raised:
+                    self.run_deploy(lambda _base_url: None)
+                self.assertNotIn(SYNTHETIC_DEMO_EMAIL, str(raised.exception))
+                self.assertNotIn(SYNTHETIC_DEMO_PASSWORD, str(raised.exception))
+                self.assertFalse(any("build" in argv or "up" in argv for argv, _env in self.docker.commands))
+                self.docker.commands.clear()
+                self.docker.up_targets.clear()
+        self.config["agent_uid"] = os.getuid()
+
     def test_legacy_bootstrap_blocks_release_before_build_or_switch(self):
         self.config["frontend_bootstrap_mode"] = "legacy-override-update-required"
         self.docker.frontend_compose_overrides["image"] = self.docker.current_ref
@@ -1066,8 +1239,21 @@ class PullAgentDeploymentTests(unittest.TestCase):
         request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
         original_up_frontend = _up_frontend
 
-        def switch_then_raise(config, checkout, source_sha, *, image_override=None):
-            original_up_frontend(config, checkout, source_sha, image_override=image_override)
+        def switch_then_raise(
+            config,
+            checkout,
+            source_sha,
+            *,
+            image_override=None,
+            public_demo_credentials=None,
+        ):
+            original_up_frontend(
+                config,
+                checkout,
+                source_sha,
+                image_override=image_override,
+                public_demo_credentials=public_demo_credentials,
+            )
             if image_override is None:
                 raise _DeferredPreSwitchGitTransport("synthetic late transport failure")
 
@@ -1109,12 +1295,25 @@ class PullAgentDeploymentTests(unittest.TestCase):
         request = [((12, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-12-1")]
         up_calls = 0
 
-        def switch_candidate_then_fail_rollback(config, checkout, source_sha, *, image_override=None):
+        def switch_candidate_then_fail_rollback(
+            config,
+            checkout,
+            source_sha,
+            *,
+            image_override=None,
+            public_demo_credentials=None,
+        ):
             nonlocal up_calls
             up_calls += 1
             if image_override is not None:
                 raise DeployError("synthetic rollback switch failure")
-            return _up_frontend(config, checkout, source_sha, image_override=image_override)
+            return _up_frontend(
+                config,
+                checkout,
+                source_sha,
+                image_override=image_override,
+                public_demo_credentials=public_demo_credentials,
+            )
 
         with (
             patch("kagoya_pull_agent._requests", return_value=request),

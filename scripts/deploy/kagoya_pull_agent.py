@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,27 @@ from kagoya_compose import (
 
 REQUEST_REF = re.compile(r"^refs/tags/belib-deploy-request-([0-9]+)-([0-9]+)$")
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
+PUBLIC_DEMO_SIDECAR_SCHEMA_VERSION = 1
+PUBLIC_DEMO_PUBLICATION_INTENT = "public_general_demo_credentials"
+PUBLIC_DEMO_SIDECAR_MAX_BYTES = 16 * 1024
+PUBLIC_DEMO_SIDECAR_KEYS = {
+    "schema_version",
+    "publication_intent",
+    "public_display_approved",
+    "approval_ref",
+    "email",
+    "password",
+    "evidence",
+}
+PUBLIC_DEMO_EVIDENCE_KEYS = {
+    "dedicated_general_account",
+    "general_role",
+    "admin_api_403",
+    "private_book_403",
+    "independent_read_only",
+    "evidence_ref",
+    "verified_at",
+}
 
 
 class DeployError(RuntimeError):
@@ -124,6 +146,144 @@ def _run_json(argv: list[str], *, env: dict[str, str] | None = None) -> dict | l
         return json.loads(result.stdout)
     except json.JSONDecodeError:
         raise DeployError("A Docker read-back was not valid JSON") from None
+
+
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _safe_nonempty_text(value: object) -> bool:
+    if type(value) is not str or not value:
+        return False
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        return False
+    return True
+
+
+def _reject_public_demo_sidecar() -> None:
+    raise DeployError("The public demo credentials sidecar is invalid")
+
+
+def _validate_public_demo_parent(path: Path, owner_uid: int) -> None:
+    parent = path.parent
+    try:
+        ancestors = (parent, *parent.parents)
+        for directory in ancestors:
+            result = directory.lstat()
+            if not stat.S_ISDIR(result.st_mode):
+                _reject_public_demo_sidecar()
+            if directory == parent and (
+                result.st_uid != owner_uid or stat.S_IMODE(result.st_mode) & 0o077
+            ):
+                _reject_public_demo_sidecar()
+    except DeployError:
+        raise
+    except (OSError, ValueError):
+        raise DeployError("The public demo credentials sidecar directory is unavailable") from None
+
+
+def _load_public_demo_credentials(config: dict) -> tuple[str, str]:
+    """Load only the explicitly approved, private public-demo sidecar."""
+    if "public_demo_credentials_file" not in config:
+        return "", ""
+
+    configured_path = config["public_demo_credentials_file"]
+    if (
+        not isinstance(configured_path, str)
+        or not configured_path
+        or "\x00" in configured_path
+    ):
+        raise DeployError("The public demo credentials sidecar path is invalid")
+    path = Path(configured_path)
+    if not path.is_absolute():
+        raise DeployError("The public demo credentials sidecar path must be absolute")
+    owner_uid = config.get("agent_uid")
+    if type(owner_uid) is not int or owner_uid < 0:
+        raise DeployError("The public demo credentials sidecar owner is invalid")
+
+    try:
+        protected_env = Path(config["production_env_file"]).resolve(strict=False)
+        if path.resolve(strict=False) == protected_env:
+            _reject_public_demo_sidecar()
+    except (KeyError, TypeError, OSError, RuntimeError, ValueError):
+        raise DeployError("The public demo credentials sidecar path is invalid") from None
+
+    _validate_public_demo_parent(path, owner_uid)
+    try:
+        sidecar_stat = path.lstat()
+    except FileNotFoundError:
+        return "", ""
+    except (OSError, ValueError):
+        raise DeployError("The public demo credentials sidecar cannot be read") from None
+    if (
+        not stat.S_ISREG(sidecar_stat.st_mode)
+        or sidecar_stat.st_uid != owner_uid
+        or stat.S_IMODE(sidecar_stat.st_mode) != 0o600
+        or sidecar_stat.st_nlink != 1
+        or sidecar_stat.st_size > PUBLIC_DEMO_SIDECAR_MAX_BYTES
+    ):
+        _reject_public_demo_sidecar()
+
+    try:
+        content = path.read_text(encoding="utf-8")
+        sidecar = json.loads(content, object_pairs_hook=_unique_json_object)
+    except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError):
+        _reject_public_demo_sidecar()
+    if not isinstance(sidecar, dict) or set(sidecar) != PUBLIC_DEMO_SIDECAR_KEYS:
+        _reject_public_demo_sidecar()
+    if (
+        type(sidecar["schema_version"]) is not int
+        or sidecar["schema_version"] != PUBLIC_DEMO_SIDECAR_SCHEMA_VERSION
+        or sidecar["publication_intent"] != PUBLIC_DEMO_PUBLICATION_INTENT
+        or sidecar["public_display_approved"] is not True
+        or not _safe_nonempty_text(sidecar["approval_ref"])
+        or not _safe_nonempty_text(sidecar["email"])
+        or not re.fullmatch(r"[^@\s]+@[^@\s]+", sidecar["email"])
+        or not _safe_nonempty_text(sidecar["password"])
+    ):
+        _reject_public_demo_sidecar()
+
+    evidence = sidecar["evidence"]
+    if not isinstance(evidence, dict) or set(evidence) != PUBLIC_DEMO_EVIDENCE_KEYS:
+        _reject_public_demo_sidecar()
+    if (
+        evidence["dedicated_general_account"] is not True
+        or evidence["general_role"] != "general"
+        or evidence["admin_api_403"] is not True
+        or evidence["private_book_403"] is not True
+        or evidence["independent_read_only"] is not True
+        or not _safe_nonempty_text(evidence["evidence_ref"])
+        or not _safe_nonempty_text(evidence["verified_at"])
+    ):
+        _reject_public_demo_sidecar()
+
+    return sidecar["email"], sidecar["password"]
+
+
+def _frontend_compose_env(
+    config: dict,
+    source_sha: str,
+    public_demo_credentials: tuple[str, str],
+    image_ref: str,
+) -> dict[str, str]:
+    email, password = public_demo_credentials
+    return {
+        "COMPOSE_PROFILES": "",
+        "VCS_REF": source_sha,
+        "BELIB_FRONTEND_IMAGE": image_ref,
+        "VITE_API_BASE_URL": config["expected_api_base_url"],
+        "VITE_PUBLIC_DEMO_EMAIL": email,
+        "VITE_PUBLIC_DEMO_PASSWORD": password,
+    }
 
 
 def _compose_prefix(config: dict, checkout: Path) -> list[str]:
@@ -295,18 +455,23 @@ def _verify_target_image(config: dict, source_sha: str) -> dict:
     return image
 
 
-def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) -> None:
+def _validate_frontend_compose(
+    config: dict,
+    checkout: Path,
+    source_sha: str,
+    *,
+    public_demo_credentials: tuple[str, str] | None = None,
+) -> None:
     """Reject candidate Compose changes that could expand host/runtime authority."""
+    if public_demo_credentials is None:
+        public_demo_credentials = _load_public_demo_credentials(config)
     compose_prefix = _compose_prefix(config, checkout)
-    compose_env = {
-        "COMPOSE_PROFILES": "",
-        "VCS_REF": source_sha,
-        "BELIB_FRONTEND_IMAGE": f"belib-frontend:{source_sha}",
-        # These are build-time public values; do not read demo credentials from the host env.
-        "VITE_PUBLIC_DEMO_EMAIL": "",
-        "VITE_PUBLIC_DEMO_PASSWORD": "",
-        "VITE_API_BASE_URL": config["expected_api_base_url"],
-    }
+    compose_env = _frontend_compose_env(
+        config,
+        source_sha,
+        public_demo_credentials,
+        f"belib-frontend:{source_sha}",
+    )
     resolved = _run_json(compose_prefix + ["config", "--format", "json"], env=compose_env)
     all_profiles = _run_json(
         compose_prefix + ["--profile", "*", "config", "--format", "json"],
@@ -328,6 +493,7 @@ def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) ->
             api_base_url=config["expected_api_base_url"],
             expected_networks=config["expected_networks"],
             expected_contract_sha256=config["expected_compose_contract_sha256"],
+            public_demo_credentials=public_demo_credentials,
         )
     except (ComposeIdentityError, KeyError, TypeError) as error:
         if config.get("frontend_bootstrap_mode") == "legacy-override-update-required":
@@ -368,19 +534,17 @@ def _up_frontend(
     source_sha: str,
     *,
     image_override: str | None = None,
+    public_demo_credentials: tuple[str, str] | None = None,
 ) -> None:
+    if public_demo_credentials is None:
+        public_demo_credentials = _load_public_demo_credentials(config)
     prefix = _compose_prefix(config, checkout)
-    env = {
-        "COMPOSE_PROFILES": "",
-        "VCS_REF": source_sha,
-        "VITE_API_BASE_URL": config["expected_api_base_url"],
-        "VITE_PUBLIC_DEMO_EMAIL": "",
-        "VITE_PUBLIC_DEMO_PASSWORD": "",
-    }
-    if image_override is not None:
-        env["BELIB_FRONTEND_IMAGE"] = image_override
-    else:
-        env["BELIB_FRONTEND_IMAGE"] = f"belib-frontend:{source_sha}"
+    env = _frontend_compose_env(
+        config,
+        source_sha,
+        public_demo_credentials,
+        image_override if image_override is not None else f"belib-frontend:{source_sha}",
+    )
     _run(prefix + ["up", "--detach", "--no-deps", "--no-build", "frontend"], env=env)
 
 
@@ -389,8 +553,14 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
         main_sha_reader = _main_sha
     if smoke is None:
         smoke = smoke_test
+    public_demo_credentials = _load_public_demo_credentials(config)
     checkout = _checkout(config, source_sha)
-    _validate_frontend_compose(config, checkout, source_sha)
+    _validate_frontend_compose(
+        config,
+        checkout,
+        source_sha,
+        public_demo_credentials=public_demo_credentials,
+    )
 
     current = _container(config)
     rollback_ref, original_ref = _retain_live_image(config, current)
@@ -410,16 +580,12 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
 
     _run(
         _compose_prefix(config, checkout) + ["build", "frontend"],
-        env={
-            "COMPOSE_PROFILES": "",
-            "VCS_REF": source_sha,
-            "BELIB_FRONTEND_IMAGE": f"belib-frontend:{source_sha}",
-            # The demo pair is not a CD prerequisite and has not been verified here.
-            # Never expose values from the protected host env file in the public bundle.
-            "VITE_API_BASE_URL": config["expected_api_base_url"],
-            "VITE_PUBLIC_DEMO_EMAIL": "",
-            "VITE_PUBLIC_DEMO_PASSWORD": "",
-        },
+        env=_frontend_compose_env(
+            config,
+            source_sha,
+            public_demo_credentials,
+            f"belib-frontend:{source_sha}",
+        ),
     )
     image = _verify_target_image(config, source_sha)
     if main_sha_reader(config) != source_sha:
@@ -427,7 +593,12 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
     switched = False
     try:
         switched = True
-        _up_frontend(config, checkout, source_sha)
+        _up_frontend(
+            config,
+            checkout,
+            source_sha,
+            public_demo_credentials=public_demo_credentials,
+        )
         _verify_running_image(config, image["Id"], source_sha)
         smoke(config["base_url"])
         if main_sha_reader(config) != source_sha:
@@ -435,7 +606,13 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
     except Exception as error:
         if switched:
             try:
-                _up_frontend(config, checkout, source_sha, image_override=rollback_ref)
+                _up_frontend(
+                    config,
+                    checkout,
+                    source_sha,
+                    image_override=rollback_ref,
+                    public_demo_credentials=public_demo_credentials,
+                )
                 _verify_running_image(config, current["Image"])
                 smoke(config["base_url"])
             except Exception:
@@ -723,6 +900,7 @@ def _rollback_frontend_unlocked(config: dict) -> int:
     source_sha = state.get("current_sha")
     if not current or not previous or not source_sha or not previous.get("image_ref"):
         raise DeployError("No saved frontend-only rollback image is recorded")
+    public_demo_credentials = _load_public_demo_credentials(config)
     checkout = _checkout(config, source_sha)
     live = _container(config)
     if live.get("Image") != current.get("image_id"):
@@ -733,6 +911,7 @@ def _rollback_frontend_unlocked(config: dict) -> int:
             checkout,
             source_sha,
             image_override=previous["image_ref"],
+            public_demo_credentials=public_demo_credentials,
         )
         _verify_running_image(config, previous["image_id"])
         smoke_test(config["base_url"])

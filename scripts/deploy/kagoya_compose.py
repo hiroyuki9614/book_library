@@ -293,6 +293,7 @@ def validate_frontend_service(
     expected_networks: list[str],
     expected_contract_sha256: str | None = None,
     legacy_image_ref: str | None = None,
+    public_demo_credentials: tuple[str, str] = ("", ""),
 ) -> None:
     """Keep the frontend build and runtime within its approved no-mount contract."""
     validate_compose_services(resolved)
@@ -355,10 +356,22 @@ def validate_frontend_service(
         }:
             raise ComposeIdentityError("The frontend build argument set differs from the approved contract")
         if (
+            not isinstance(public_demo_credentials, tuple)
+            or len(public_demo_credentials) != 2
+            or any(type(value) is not str for value in public_demo_credentials)
+        ):
+            raise ComposeIdentityError("The frontend public demo credential shape is invalid")
+        actual_email = args.get("VITE_PUBLIC_DEMO_EMAIL")
+        actual_password = args.get("VITE_PUBLIC_DEMO_PASSWORD")
+        if public_demo_credentials[0] == "" and actual_email is None:
+            actual_email = ""
+        if public_demo_credentials[1] == "" and actual_password is None:
+            actual_password = ""
+        if (
             args.get("VCS_REF") != source_sha
             or args.get("VITE_API_BASE_URL") != api_base_url
-            or args.get("VITE_PUBLIC_DEMO_EMAIL") not in ("", None)
-            or args.get("VITE_PUBLIC_DEMO_PASSWORD") not in ("", None)
+            or actual_email != public_demo_credentials[0]
+            or actual_password != public_demo_credentials[1]
         ):
             raise ComposeIdentityError("The frontend build arguments differ from the operator-approved values")
 

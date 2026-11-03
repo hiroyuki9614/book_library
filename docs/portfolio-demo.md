@@ -175,7 +175,33 @@ If registration partially succeeds, stop and inspect IDs/counts through the prot
 
 The unauthenticated entrypoint is `/login` (visitors to `/` are redirected there). It hides raw role/login-state debug labels. Once the existing production authorization checks below have been independently verified, an operator may explicitly approve displaying **only the restricted general demo account** email and password to all visitors.
 
-Set both `VITE_PUBLIC_DEMO_EMAIL` and `VITE_PUBLIC_DEMO_PASSWORD` when building the frontend. A missing or partial pair hides the credentials; the release artifact build refuses partial configuration. Both values are **public, not secrets**, and will appear as plain text in the browser/compiled bundle. They must never refer to admin/private/other reused credentials. Never copy `PORTFOLIO_ADMIN_PASSWORD`, an operator login, or a real personal password into these variables. Provision/rotate the restricted demo account through a separately reviewed, authorized operation first; re-run the general demo-role / admin-403 / private-book-403 gates before publishing the matching credentials. The UI code change alone does not authorize a production release.
+The KAGOYA dispatcher never sources these values from ambient `VITE_*`, `DEMO_USER_*`, admin, or protected production environment variables. A fresh installation records the absolute sidecar path `public_demo_credentials_file` as `<agent-config-dir>/public-demo-credentials.json`; the sidecar is optional and is not created by the installer. An absent sidecar (or an older config without this key) keeps both build arguments blank. A present sidecar must be a regular, non-symlink file owned by the `agent` user with mode `0600`, in a private directory.
+
+The sidecar has exactly this schema; angle-bracket values are operator-provided placeholders and must not be committed:
+
+```json
+{
+  "schema_version": 1,
+  "publication_intent": "public_general_demo_credentials",
+  "public_display_approved": true,
+  "approval_ref": "<non-secret-owner-approval-reference>",
+  "email": "<dedicated-general-demo-email>",
+  "password": "<dedicated-general-demo-password>",
+  "evidence": {
+    "dedicated_general_account": true,
+    "general_role": "general",
+    "admin_api_403": true,
+    "private_book_403": true,
+    "independent_read_only": true,
+    "evidence_ref": "<non-secret-read-only-evidence-reference>",
+    "verified_at": "<UTC-timestamp>"
+  }
+}
+```
+
+The dispatcher rejects malformed, partial, unapproved, admin-role, unverified, symlinked, wrongly owned, or wrongly permissioned sidecars with no credential values in errors or logs. It snapshots the validated pair and uses the same pair for Compose validation, frontend build, candidate up, automatic rollback, and manual rollback. Both values are **public, not secrets**, and will appear as plain text in the browser/compiled bundle once explicitly approved; they must be dedicated restricted-general credentials, never admin/private/reused credentials. The evidence booleans are owner attestations, not proof by themselves: before populating the sidecar, an authorized owner must independently perform read-only verification of the account's general role, an Admin API `403`, and a private-book `403`, then record only non-secret evidence references. Do not copy `PORTFOLIO_ADMIN_PASSWORD`, an operator login, or a real personal password into the sidecar.
+
+For this change, the current owner cannot recall the demo ID/password and the role-`403`/private-book-`403` evidence remains unverified. Therefore this PR cannot restore live ID/password display. The dedicated publicly shareable general account and independent non-admin evidence must be obtained through the authorized owner workflow first; no fabricated pair, insecure demo admin, credential copy into Git/PR/CI logs, browser session, or production operation is part of this task. The existing frontend display code remains unchanged.
 
 ## 5. Production acceptance still required
 
