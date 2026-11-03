@@ -4,6 +4,7 @@ from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from kagoya_compose import (
@@ -26,6 +28,7 @@ from kagoya_compose import (
 from kagoya_pull_agent import (
     DeployError,
     _DeferredPreSwitchGitTransport,
+    _load_public_demo_credentials,
     _previous_state_record,
     _load_state,
     _http_get,
@@ -35,6 +38,7 @@ from kagoya_pull_agent import (
     _retained_image_ref,
     _up_frontend,
     _verify_target_image,
+    PUBLIC_DEMO_SIDECAR_MAX_BYTES,
     deploy_frontend,
     dispatch_once,
     rollback_frontend,
@@ -740,6 +744,88 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 self.assertEqual(env["VITE_PUBLIC_DEMO_PASSWORD"], "")
         self.assertTrue(compose_commands)
 
+    def test_missing_public_demo_sidecar_is_blank_after_parent_validation(self):
+        missing_path = Path(self.temporary.name) / "missing-public-demo-credentials.json"
+        self.config["public_demo_credentials_file"] = str(missing_path)
+
+        self.assertEqual(_load_public_demo_credentials(self.config), ("", ""))
+
+    def test_public_demo_sidecar_swap_during_open_is_rejected_by_post_open_fstat(self):
+        target_path = self.write_public_demo_sidecar(name="swap-target.json")
+        replacement_path = Path(self.temporary.name) / "swap-replacement.json"
+        replacement_path.write_text(json.dumps(self.public_demo_sidecar()), encoding="utf-8")
+        replacement_path.chmod(0o640)
+        real_open = os.open
+
+        def open_replacement(path, flags, *args, **kwargs):
+            self.assertEqual(Path(path), target_path)
+            return real_open(replacement_path, flags, *args, **kwargs)
+
+        with patch("kagoya_pull_agent.os.open", side_effect=open_replacement) as opened:
+            with patch("kagoya_pull_agent.os.close", wraps=os.close) as closed:
+                with self.assertRaises(DeployError):
+                    _load_public_demo_credentials(self.config)
+
+        flags = opened.call_args.args[1]
+        self.assertTrue(flags & os.O_NOFOLLOW)
+        closed.assert_called_once()
+
+    def test_public_demo_sidecar_rejects_nonregular_oversized_uid_mode_and_nlink(self):
+        nonregular_path = Path(self.temporary.name) / "nonregular"
+        nonregular_path.mkdir()
+        oversized_path = Path(self.temporary.name) / "oversized.json"
+        oversized_path.write_bytes(b"x" * (PUBLIC_DEMO_SIDECAR_MAX_BYTES + 1))
+        oversized_path.chmod(0o600)
+
+        cases = [("nonregular", nonregular_path, None), ("oversized", oversized_path, None)]
+        valid_path = self.write_public_demo_sidecar(name="mocked-stat.json")
+        valid_size = valid_path.stat().st_size
+        regular_mode = stat.S_IFREG | 0o600
+        cases.extend(
+            [
+                (
+                    "uid",
+                    valid_path,
+                    SimpleNamespace(st_mode=regular_mode, st_uid=os.getuid() + 1, st_nlink=1, st_size=valid_size),
+                ),
+                (
+                    "mode",
+                    valid_path,
+                    SimpleNamespace(st_mode=stat.S_IFREG | 0o640, st_uid=os.getuid(), st_nlink=1, st_size=valid_size),
+                ),
+                (
+                    "nlink",
+                    valid_path,
+                    SimpleNamespace(st_mode=regular_mode, st_uid=os.getuid(), st_nlink=2, st_size=valid_size),
+                ),
+            ]
+        )
+
+        for label, path, mocked_stat in cases:
+            with self.subTest(label=label):
+                self.config["public_demo_credentials_file"] = str(path)
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    context = patch("kagoya_pull_agent.os.fstat", return_value=mocked_stat) if mocked_stat else patch(
+                        "kagoya_pull_agent.os.fstat", wraps=os.fstat
+                    )
+                    with context:
+                        with self.assertRaises(DeployError) as raised:
+                            _load_public_demo_credentials(self.config)
+                self.assertNotIn(SYNTHETIC_DEMO_EMAIL, str(raised.exception) + stdout.getvalue() + stderr.getvalue())
+                self.assertNotIn(SYNTHETIC_DEMO_PASSWORD, str(raised.exception) + stdout.getvalue() + stderr.getvalue())
+
+    def test_public_demo_sidecar_rejects_growth_after_fstat_with_bounded_read(self):
+        path = self.write_public_demo_sidecar(name="grown.json")
+        with patch(
+            "kagoya_pull_agent.os.read",
+            return_value=b"x" * (PUBLIC_DEMO_SIDECAR_MAX_BYTES + 1),
+        ) as read:
+            with self.assertRaises(DeployError):
+                _load_public_demo_credentials(self.config)
+
+        self.assertEqual(read.call_args.args[1], PUBLIC_DEMO_SIDECAR_MAX_BYTES + 1)
+
     def test_owner_approved_synthetic_pair_is_used_for_build_up_and_rollback_without_leaking(self):
         self.write_public_demo_sidecar()
         self.config.update(
@@ -808,12 +894,52 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertNotIn(SYNTHETIC_DEMO_EMAIL, str(raised.exception) + stdout.getvalue() + stderr.getvalue())
         self.assertNotIn(SYNTHETIC_DEMO_PASSWORD, str(raised.exception) + stdout.getvalue() + stderr.getvalue())
 
+    def test_same_sha_sidecar_removal_preserves_deployed_bundle_without_build_or_switch(self):
+        self.write_public_demo_sidecar()
+        self.run_deploy(lambda _base_url: None)
+        self.assertEqual(self.docker.current_id, NEW_ID)
+        self.docker.commands.clear()
+        self.docker.up_targets.clear()
+
+        rotated_path = self.write_public_demo_sidecar(
+            self.public_demo_sidecar(
+                email="rotated.synthetic.demo@example.invalid",
+                password="rotated-synthetic-only-public-password",
+            )
+        )
+        rotated_result = self.run_deploy(lambda _base_url: None)
+
+        self.assertTrue(rotated_result["no_op"])
+        self.assertEqual(rotated_result["image_id"], NEW_ID)
+        self.assertEqual(self.docker.current_id, NEW_ID)
+        self.assertFalse(any("build" in argv or "up" in argv for argv, _env in self.docker.commands))
+
+        self.docker.commands.clear()
+        self.docker.up_targets.clear()
+        rotated_path.unlink()
+        removed_result = self.run_deploy(lambda _base_url: None)
+
+        self.assertTrue(removed_result["no_op"])
+        self.assertEqual(removed_result["image_id"], NEW_ID)
+        self.assertEqual(self.docker.current_id, NEW_ID)
+        self.assertFalse(any("build" in argv or "up" in argv for argv, _env in self.docker.commands))
+
     def test_public_demo_sidecar_rejects_malformed_unsafe_or_unproven_opt_in(self):
         cases = []
         malformed_path = Path(self.temporary.name) / "malformed.json"
         malformed_path.write_text("{", encoding="utf-8")
         malformed_path.chmod(0o600)
         cases.append(("malformed", malformed_path, os.getuid()))
+
+        invalid_utf8_path = Path(self.temporary.name) / "invalid-utf8.json"
+        invalid_utf8_path.write_bytes(b"\xff")
+        invalid_utf8_path.chmod(0o600)
+        cases.append(("invalid UTF-8", invalid_utf8_path, os.getuid()))
+
+        duplicate_keys_path = Path(self.temporary.name) / "duplicate-keys.json"
+        duplicate_keys_path.write_text('{"schema_version": 1, "schema_version": 1}', encoding="utf-8")
+        duplicate_keys_path.chmod(0o600)
+        cases.append(("duplicate JSON keys", duplicate_keys_path, os.getuid()))
 
         unsafe_path = self.write_public_demo_sidecar(mode=0o640, name="unsafe.json")
         cases.append(("unsafe mode", unsafe_path, os.getuid()))

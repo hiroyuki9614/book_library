@@ -218,26 +218,52 @@ def _load_public_demo_credentials(config: dict) -> tuple[str, str]:
         raise DeployError("The public demo credentials sidecar path is invalid") from None
 
     _validate_public_demo_parent(path, owner_uid)
+    fd: int | None = None
     try:
-        sidecar_stat = path.lstat()
-    except FileNotFoundError:
-        return "", ""
-    except (OSError, ValueError):
-        raise DeployError("The public demo credentials sidecar cannot be read") from None
-    if (
-        not stat.S_ISREG(sidecar_stat.st_mode)
-        or sidecar_stat.st_uid != owner_uid
-        or stat.S_IMODE(sidecar_stat.st_mode) != 0o600
-        or sidecar_stat.st_nlink != 1
-        or sidecar_stat.st_size > PUBLIC_DEMO_SIDECAR_MAX_BYTES
-    ):
-        _reject_public_demo_sidecar()
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            _reject_public_demo_sidecar()
+        flags = os.O_RDONLY | nofollow
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            return "", ""
+        except (OSError, ValueError):
+            _reject_public_demo_sidecar()
 
-    try:
-        content = path.read_text(encoding="utf-8")
-        sidecar = json.loads(content, object_pairs_hook=_unique_json_object)
+        sidecar_stat = os.fstat(fd)
+        if (
+            not stat.S_ISREG(sidecar_stat.st_mode)
+            or sidecar_stat.st_uid != owner_uid
+            or stat.S_IMODE(sidecar_stat.st_mode) != 0o600
+            or sidecar_stat.st_nlink != 1
+            or sidecar_stat.st_size < 0
+            or sidecar_stat.st_size > PUBLIC_DEMO_SIDECAR_MAX_BYTES
+        ):
+            _reject_public_demo_sidecar()
+
+        content = bytearray()
+        while len(content) <= PUBLIC_DEMO_SIDECAR_MAX_BYTES:
+            chunk = os.read(fd, PUBLIC_DEMO_SIDECAR_MAX_BYTES + 1 - len(content))
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > PUBLIC_DEMO_SIDECAR_MAX_BYTES:
+                _reject_public_demo_sidecar()
+        sidecar = json.loads(
+            bytes(content).decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+        )
     except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError):
         _reject_public_demo_sidecar()
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
     if not isinstance(sidecar, dict) or set(sidecar) != PUBLIC_DEMO_SIDECAR_KEYS:
         _reject_public_demo_sidecar()
     if (
