@@ -1,5 +1,8 @@
 import os
+import re
+import socket
 import stat
+import string
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +11,115 @@ from pathlib import Path
 
 DEPLOY_DIR = Path(__file__).resolve().parent
 INSTALLER = DEPLOY_DIR / "install_kagoya_pull_agent.sh"
+
+
+def _extract_heredoc(source, target, delimiter):
+    match = re.search(
+        rf'^cat >"\${target}" <<(?:\'{delimiter}\'|{delimiter})\n(?P<body>.*?)\n{delimiter}\n',
+        source,
+        re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"could not find {target} heredoc")
+    return match.group("body")
+
+
+def _render_unit_template(source, target, delimiter):
+    template = string.Template(_extract_heredoc(source, target, delimiter))
+    return template.substitute(
+        PYTHON="/usr/bin/python3",
+        LIBEXEC_DIR="/home/agent/.local/libexec/belib-production-cd",
+        CONFIG_PATH="/home/agent/.config/belib-production-cd/config.json",
+        STATE_DIR="/home/agent/.local/state/belib-production-cd",
+        RELEASE_DIR="/home/agent/.local/share/belib-production-cd/releases",
+    )
+
+
+def _parse_unit(unit_text):
+    sections = {}
+    section = None
+    for line in unit_text.splitlines():
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line
+            sections[section] = {}
+            continue
+        if section is None or "=" not in line:
+            raise AssertionError(f"invalid unit line: {line!r}")
+        key, value = line.split("=", 1)
+        if key in sections[section]:
+            raise AssertionError(f"duplicate unit key: {key}")
+        sections[section][key] = value
+    return sections
+
+
+class InstallerSystemdTemplateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.installer_source = INSTALLER.read_text(encoding="utf-8")
+
+    def test_service_template_preserves_contract_and_rootless_socket_compatibility(self):
+        service = _render_unit_template(self.installer_source, "SERVICE_PATH", "EOF")
+        parsed = _parse_unit(service)
+
+        self.assertEqual(
+            parsed,
+            {
+                "[Unit]": {
+                    "Description": "BeLib production frontend release dispatcher",
+                },
+                "[Service]": {
+                    "Type": "oneshot",
+                    "UMask": "0077",
+                    "NoNewPrivileges": "true",
+                    "WorkingDirectory": "/home/agent/.local/share/belib-production-cd/releases",
+                    "ExecStart": (
+                        "/usr/bin/python3 /home/agent/.local/libexec/belib-production-cd/"
+                        "kagoya_pull_agent.py --once --config "
+                        "/home/agent/.config/belib-production-cd/config.json"
+                    ),
+                },
+            },
+        )
+        for directive in ("PrivateTmp", "ProtectSystem", "ReadWritePaths"):
+            self.assertNotIn(directive, parsed["[Service]"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            socket_path = Path(temporary) / "docker.sock"
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(server.close)
+            server.bind(str(socket_path))
+            server.listen(1)
+            self.addCleanup(socket_path.unlink, missing_ok=True)
+            self.assertTrue(stat.S_ISSOCK(os.stat(socket_path).st_mode))
+            self.assertEqual(os.stat(socket_path).st_uid, os.getuid())
+
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(client.close)
+            client.connect(str(socket_path))
+
+    def test_timer_template_keeps_existing_schedule_and_service_binding(self):
+        timer = _render_unit_template(self.installer_source, "TIMER_PATH", "EOF")
+
+        self.assertEqual(
+            _parse_unit(timer),
+            {
+                "[Unit]": {
+                    "Description": "Poll reviewed BeLib production frontend requests",
+                },
+                "[Timer]": {
+                    "OnBootSec": "2min",
+                    "OnUnitActiveSec": "5min",
+                    "RandomizedDelaySec": "30s",
+                    "Persistent": "true",
+                    "Unit": "belib-production-cd.service",
+                },
+                "[Install]": {
+                    "WantedBy": "timers.target",
+                },
+            },
+        )
 
 
 class InstallerLegacyBootstrapTests(unittest.TestCase):
