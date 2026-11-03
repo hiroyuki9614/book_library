@@ -1,3 +1,4 @@
+import json
 import unittest
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
@@ -20,6 +21,64 @@ MAIN_RUN_ID = 110
 PR_RUN_ID = 210
 CANONICAL_WORKFLOW_ID = 1
 SPOOF_WORKFLOW_ID = 2
+OWNER_LOGIN = "hiroyuki9614"
+SOLO_REVIEW_MARKER = "BELIB-SOLO-REVIEW v1"
+SOLO_RELEASE_MARKER = "BELIB-SOLO-RELEASE v1"
+SOLO_REVOKE_MARKER = "BELIB-SOLO-REVOKE v1"
+
+
+def structured_comment(
+    marker,
+    payload,
+    comment_id,
+    *,
+    created_at="2026-11-02T00:00:00Z",
+    updated_at=None,
+    user=None,
+    author_association="OWNER",
+):
+    return {
+        "id": comment_id,
+        "body": f"{marker}\n{json.dumps(payload, sort_keys=True, separators=(',', ':'))}",
+        "created_at": created_at,
+        "updated_at": updated_at if updated_at is not None else created_at,
+        "user": user or {"login": OWNER_LOGIN, "type": "User"},
+        "author_association": author_association,
+    }
+
+
+def solo_comments(*, head_sha=PR_HEAD_SHA, review_comment_id=501, release_comment_id=502):
+    review_payload = {
+        "evidence_sha256": "c" * 64,
+        "head_sha": head_sha,
+        "pr": 70,
+        "repository": "hiroyuki9614/book_library",
+        "result": "PASS",
+        "review_session": "independent-session-20261103",
+        "review_type": "independent-ai",
+        "unresolved_high_findings": 0,
+    }
+    release_payload = {
+        "decision": "RELEASE",
+        "head_sha": head_sha,
+        "pr": 70,
+        "repository": "hiroyuki9614/book_library",
+        "review_comment_id": review_comment_id,
+    }
+    return [
+        structured_comment(
+            SOLO_REVIEW_MARKER,
+            review_payload,
+            review_comment_id,
+            created_at="2026-11-02T00:00:00Z",
+        ),
+        structured_comment(
+            SOLO_RELEASE_MARKER,
+            release_payload,
+            release_comment_id,
+            created_at="2026-11-02T00:01:00Z",
+        ),
+    ]
 
 
 class FakeAPI:
@@ -54,6 +113,10 @@ class FakeAPI:
             "id": CANONICAL_WORKFLOW_ID,
             "path": RELEASE_PATH,
         }
+        self.repository_info = {
+            "full_name": self.repository,
+            "owner": {"login": OWNER_LOGIN, "type": "User"},
+        }
         self.main_runs = [self.main_run]
         self.pr_runs = [self.pr_run]
         self.pull = {
@@ -63,6 +126,7 @@ class FakeAPI:
             "base": {"ref": "main", "repo": {"full_name": self.repository}},
             "head": {"ref": "codex/cd-test", "sha": PR_HEAD_SHA},
             "user": {"login": "author"},
+            "merged_by": {"login": OWNER_LOGIN, "type": "User"},
         }
         self.reviews = [
             {
@@ -76,8 +140,11 @@ class FakeAPI:
         self.main_jobs = {name: "success" for name in REQUIRED_RELEASE_JOBS}
         self.pr_jobs = {name: "success" for name in REQUIRED_RELEASE_JOBS}
         self.run_jobs = {MAIN_RUN_ID: self.main_jobs, PR_RUN_ID: self.pr_jobs}
+        self.comments = []
 
     def get(self, path):
+        if path == f"/repos/{self.repository}":
+            return self.repository_info
         if path == f"/repos/{self.repository}/actions/workflows/release-ci.yml":
             return self.canonical_workflow
         if path == f"/repos/{self.repository}/git/ref/heads/main":
@@ -94,6 +161,10 @@ class FakeAPI:
             page = int(parse_qs(urlsplit(path).query).get("page", ["1"])[0])
             start = (page - 1) * 100
             return self.reviews[start : start + 100]
+        if f"/issues/70/comments?" in path:
+            page = int(parse_qs(urlsplit(path).query).get("page", ["1"])[0])
+            start = (page - 1) * 100
+            return self.comments[start : start + 100]
         if "/actions/runs?" in path and "event=pull_request" in path:
             return {"workflow_runs": self.pr_runs}
         raise AssertionError(f"Unexpected API request: {path}")
@@ -364,6 +435,113 @@ class ReleaseGateTests(unittest.TestCase):
         api = FakeAPI()
         api.pr_run["conclusion"] = "failure"
         with self.assertRaisesRegex(GateError, "Release candidate gates"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_accepts_solo_owner_policy_with_exact_immutable_comments(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+
+        proof = validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+
+        self.assertEqual(proof["pr_head_sha"], PR_HEAD_SHA)
+
+    def test_rejects_solo_policy_when_review_comment_was_edited(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        api.comments[0]["updated_at"] = "2026-11-02T00:02:00Z"
+
+        with self.assertRaisesRegex(GateError, "edited"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_solo_policy_when_release_references_the_wrong_review(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments(review_comment_id=501, release_comment_id=502)
+        release_payload = json.loads(api.comments[1]["body"].split("\n", 1)[1])
+        release_payload["review_comment_id"] = 999
+        api.comments[1]["body"] = (
+            f"{SOLO_RELEASE_MARKER}\n"
+            f"{json.dumps(release_payload, sort_keys=True, separators=(',', ':'))}"
+        )
+
+        with self.assertRaisesRegex(GateError, "reference"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_solo_policy_from_public_lookalike_comment(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        api.comments[0]["user"] = {"login": "public-user", "type": "User"}
+        api.comments[0]["author_association"] = "NONE"
+
+        with self.assertRaisesRegex(GateError, "repository owner"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_solo_policy_when_owner_is_not_the_actual_merger(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        api.pull["merged_by"] = {"login": "different-user", "type": "User"}
+
+        with self.assertRaisesRegex(GateError, "actual merger"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_self_github_approval_in_solo_mode(self):
+        api = FakeAPI()
+        api.pull["user"] = {"login": OWNER_LOGIN}
+        api.reviews = [
+            {
+                "user": {"login": OWNER_LOGIN},
+                "state": "APPROVED",
+                "commit_id": PR_HEAD_SHA,
+                "submitted_at": "2026-11-01T23:00:00Z",
+                "author_association": "OWNER",
+            }
+        ]
+        api.comments = solo_comments()
+
+        with self.assertRaisesRegex(GateError, "self GitHub approval"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_revoked_solo_policy(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        api.comments.append(
+            structured_comment(
+                SOLO_REVOKE_MARKER,
+                {
+                    "comment_id": 501,
+                    "head_sha": PR_HEAD_SHA,
+                    "pr": 70,
+                    "repository": "hiroyuki9614/book_library",
+                },
+                503,
+                created_at="2026-11-02T00:02:00Z",
+            )
+        )
+
+        with self.assertRaisesRegex(GateError, "revoked"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_contradictory_multiple_current_review_comments(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        duplicate = solo_comments(review_comment_id=504, release_comment_id=505)[0]
+        api.comments.insert(1, duplicate)
+
+        with self.assertRaisesRegex(GateError, "multiple"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_stale_solo_policy_for_an_older_pr_head(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments(head_sha="c" * 40)
+
+        with self.assertRaisesRegex(GateError, "exact PR head"):
             validate_release(api, SOURCE_SHA)
 
 

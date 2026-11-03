@@ -34,16 +34,16 @@ Go requires named ownership for release engineering, migration, backup/restore, 
 
 ## Frontend CI/CD handoff
 
-`.github/workflows/release-ci.yml` runs the existing release gates for pull requests and again on each `main` push, so both the reviewed PR head and merged main SHA have exact backend, frontend, reader E2E, and Compose smoke results. `.github/workflows/production-frontend-cd.yml` runs after that main run succeeds. It checks that the SHA is still current `main`, identifies its merged PR, requires an approval from a non-author repository collaborator/owner on the exact PR head, rejects a latest unresolved collaborator/owner changes request, and checks all four release jobs on both the PR head and main merge SHA. It then creates a lightweight `belib-deploy-request-<run-id>-<attempt>` tag pointing to that immutable SHA. Manual replay is limited to the current `main` SHA and uses the same checks. Workflow runs are serialized; stale SHAs are rejected.
+`.github/workflows/release-ci.yml` runs the existing release gates for pull requests and again on each `main` push, so both the reviewed PR head and merged main SHA have exact backend, frontend, reader E2E, and Compose smoke results. `.github/workflows/production-frontend-cd.yml` runs after that main run succeeds. It checks that the SHA is still current `main`, identifies its merged PR, accepts either the existing distinct non-author repository collaborator/owner approval or the bounded solo-owner evidence pair below, rejects a latest unresolved collaborator/owner changes request, and checks all four release jobs on both the PR head and main merge SHA. In solo-owner mode the trusted repository owner must be the actual merger; a GitHub self-approval is never counted. It then creates a lightweight `belib-deploy-request-<run-id>-<attempt>` tag pointing to that immutable SHA. Manual replay is limited to the current `main` SHA and uses the same checks. Workflow runs are serialized; stale SHAs are rejected.
 
 The repository is public, so the owner-side pull dispatcher reads the handoff tag and release evidence through unauthenticated GitHub HTTPS. It needs no GitHub token, SSH key, registry credential, or Actions secret. The Actions workflow uses only its short-lived `GITHUB_TOKEN` to read Actions/PR data and create the handoff tag. The host independently revalidates the exact main SHA, merged PR review, and mandatory jobs before it downloads source.
 
 ### One-time owner activation
 
-The sole-maintainer state cannot satisfy the release rule: a PR author cannot approve their own change, and a public user's approval is not an eligible substitute. The release gate accepts only `OWNER`/`COLLABORATOR` review associations; `main` branch protection must separately require an approving reviewer with write access. Before activation, confirm a distinct reviewer and an enforced `main` protection rule exist. Keep the PR in Draft and do not merge it until one of these owner decisions is complete:
+The release gate keeps the distinct-human path for repositories or releases that have an eligible reviewer, but it does not count a PR author's self-approval or a public user's approval. For this repository's single-maintainer mode, independent AI review evidence and explicit owner release approval are separate CD-verified comments; neither is a formal GitHub human approval. Keep the PR in Draft and do not merge it until the exact-head CI and one of these evidence paths are complete:
 
-1. **Keep the independent-review policy (minimum activation path):** invite one trusted person other than the PR author as a repository collaborator with **Write** permission. They review the exact PR head and approve only after inspection. Configure `main` protection to require one approval, dismiss stale approvals, require the four checks below, require the branch to be up to date, enforce the rule for administrators, and disallow force pushes and branch deletion. The authorized reviewer must be able to approve every future release PR.
-2. **Solo-maintainer policy:** if no separate reviewer can be appointed, the owner must explicitly authorize a replacement policy in writing. Review and implement that policy as a separate focused change, including its release-gate behavior and tests, before changing branch protection or merging. Do not treat self-approval, an admin bypass, or an external public approval as an exception.
+1. **Existing distinct-human path:** a repository collaborator/owner other than the PR author reviews and approves the exact PR head. The gate still requires the latest eligible review history to have no unresolved `CHANGES_REQUESTED`; a self-approval, admin bypass, or external public approval is not a substitute.
+2. **Implemented solo-maintainer path for `hiroyuki9614/book_library`:** the trusted repository owner (`hiroyuki9614`, GitHub `User`, `OWNER` association) must be the actual merger. The owner posts one unedited review comment and one later, distinct, unedited release comment in the exact format below. The review must identify a separately commissioned independent AI session and bounded evidence digest, state `PASS`, and state zero unresolved high findings. The release comment must reference the review comment ID. The gate validates the repository, PR number, full current PR-head SHA, owner identity and association, immutable timestamps (`created_at == updated_at`), canonical JSON shape, comment order, and the absence of revocation or contradictory current-head evidence. Stale comments cannot satisfy the current head; edited, missing, forged, revoked, malformed, or ambiguous evidence denies the release. No comment URL is fetched and no generic `PASS` flag is accepted.
 
 Configure the classic `main` branch protection rule in **Settings → Branches** (branch pattern `main`) with these exact check names from `.github/workflows/release-ci.yml`:
 
@@ -52,9 +52,32 @@ Configure the classic `main` branch protection rule in **Settings → Branches**
 - `Reader Playwright E2E`
 - `Production images, Compose config, and isolated smoke`
 
-Also select **Require a pull request before merging**, **1 required approval**, **Dismiss stale pull request approvals when new commits are pushed**, **Require branches to be up to date before merging**, and apply enforcement to administrators. Leave force pushes and deletion disabled. After saving, verify the rule through **Settings → Branches** or `gh api repos/hiroyuki9614/book_library/branches/main/protection`; do not proceed if the API still returns 404 or any required context/setting is missing.
+For the single-maintainer branch rule, also select **Require a pull request before merging**, **0 required human approvals**, **Require branches to be up to date before merging**, and enforcement for administrators. Keep the existing four exact required CI checks above. Leave force pushes and branch deletion disabled. GitHub's formal human-approval count is zero because the separate independent-AI evidence and explicit owner release approval are verified by the CD gate. Do not administratively change branch protection as part of this code task; when the owner performs the separate activation, verify the rule through **Settings → Branches** or `gh api repos/hiroyuki9614/book_library/branches/main/protection`, and do not proceed if the API still returns 404 or any required context/setting is missing.
 
-For each release PR, keep it Draft until an authorized independent reviewer has reviewed and approved the exact head SHA, the latest collaborator/owner review history has no unresolved `CHANGES_REQUESTED`, and all four exact-head checks succeed. The Actions CD gate and KAGOYA dispatcher then independently require the merged PR head approval plus green checks for both the PR head and exact `main` merge SHA. The handoff is a tag named `belib-deploy-request-<run-id>-<attempt>` that points to that main SHA. A green PR run alone is not deployment evidence.
+For each release PR, keep it Draft until the selected review path has completed, the latest eligible review history has no unresolved `CHANGES_REQUESTED`, and all four exact-head checks succeed. The Actions CD gate and KAGOYA dispatcher then independently require the merged PR head evidence plus green checks for both the PR head and exact `main` merge SHA. The handoff is a tag named `belib-deploy-request-<run-id>-<attempt>` that points to that main SHA. A green PR run alone is not deployment evidence.
+
+#### Solo-owner comment format
+
+These are complete two-line comment bodies; do not add Markdown fences, prose, links, or extra JSON keys. Replace each placeholder with the lowercase full value for the current PR.
+
+```text
+BELIB-SOLO-REVIEW v1
+{"evidence_sha256":"<64 lowercase hex>","head_sha":"<40 lowercase hex>","pr":66,"repository":"hiroyuki9614/book_library","result":"PASS","review_session":"<bounded independent-session-id>","review_type":"independent-ai","unresolved_high_findings":0}
+```
+
+```text
+BELIB-SOLO-RELEASE v1
+{"decision":"RELEASE","head_sha":"<40 lowercase hex>","pr":66,"repository":"hiroyuki9614/book_library","review_comment_id":<review-comment-id>}
+```
+
+The review comment's `review_session` and `evidence_sha256` must refer to the separate fixed-head independent review and its evidence; this task does not create either evidence. To revoke current-head solo evidence, the owner may post an unedited comment using the same identity fields and this exact marker; the CD gate then denies the release:
+
+```text
+BELIB-SOLO-REVOKE v1
+{"comment_id":<comment-id>,"head_sha":"<40 lowercase hex>","pr":66,"repository":"hiroyuki9614/book_library"}
+```
+
+The formal GitHub review record and these comments are different controls: the comments do not manufacture an independent human review, and a GitHub self-approval never satisfies either path.
 
 After merge, the one-time owner bootstrap is run from a clean checkout of reviewed `main` on KAGOYA in the existing `agent` user's owner-native session. That session must expose the same rootless Docker daemon and persistent user systemd manager inspected by the installer. The `ubuntu` CI/supervision user must not impersonate `agent`, access its Docker socket, or install the timer.
 
