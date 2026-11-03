@@ -187,19 +187,11 @@ The sidecar has exactly this schema; angle-bracket values are operator-provided 
   "approval_ref": "<non-secret-owner-approval-reference>",
   "email": "<dedicated-general-demo-email>",
   "password": "<dedicated-general-demo-password>",
-  "evidence": {
-    "dedicated_general_account": true,
-    "general_role": "general",
-    "admin_api_403": true,
-    "private_book_403": true,
-    "independent_read_only": true,
-    "evidence_ref": "<non-secret-read-only-evidence-reference>",
-    "verified_at": "<UTC-timestamp>"
-  }
+  "private_book_id": 123
 }
 ```
 
-The dispatcher rejects malformed, partial, unapproved, admin-role, unverified, symlinked, wrongly owned, or wrongly permissioned sidecars with no credential values in errors or logs. It snapshots the validated pair and uses the same pair for Compose validation, frontend build, candidate up, automatic rollback, and manual rollback. Both values are **public, not secrets**, and will appear as plain text in the browser/compiled bundle once explicitly approved; they must be dedicated restricted-general credentials, never admin/private/reused credentials. The evidence booleans are owner attestations, not proof by themselves: before populating the sidecar, an authorized owner must independently perform read-only verification of the account's general role, an Admin API `403`, and a private-book `403`, then record only non-secret evidence references. Do not copy `PORTFOLIO_ADMIN_PASSWORD`, an operator login, or a real personal password into the sidecar.
+The dispatcher rejects malformed, partial, unapproved, symlinked, wrongly owned, or wrongly permissioned sidecars with no credential values in errors or logs. `private_book_id` must be the one existing protected target selected by the authorized owner; the dispatcher never enumerates private books. Owner-written role/403 flags are not part of the accepted schema and are never evidence. For a present sidecar, the dispatcher uses a fresh cookie jar against the fixed HTTPS origin `https://belib.hiroyuki9614.com` to verify the same candidate's positive-integer `/api/v1/me` identity, exact email, exact `user` role, exact Admin API `403` JSON, and exact protected-book detail `403` JSON. It repeats the check immediately before the candidate switch and rejects identity changes. The pair is kept only in memory for the deployment; rollback remains independent of a new authorization check. Both values are **public, not secrets**, and will appear as plain text in the browser/compiled bundle once explicitly approved; they must be dedicated restricted-general credentials, never admin/private/reused credentials. Do not copy `PORTFOLIO_ADMIN_PASSWORD`, an operator login, or a real personal password into the sidecar.
 
 For this change, the current owner cannot recall the demo ID/password and the role-`403`/private-book-`403` evidence remains unverified. Therefore this PR cannot restore live ID/password display. The dedicated publicly shareable general account and independent non-admin evidence must be obtained through the authorized owner workflow first; no fabricated pair, insecure demo admin, credential copy into Git/PR/CI logs, browser session, or production operation is part of this task. The existing frontend display code remains unchanged.
 

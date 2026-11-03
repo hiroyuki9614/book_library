@@ -13,7 +13,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from kagoya_compose import (
     ComposeIdentityError,
@@ -28,6 +28,11 @@ from kagoya_compose import (
 from kagoya_pull_agent import (
     DeployError,
     _DeferredPreSwitchGitTransport,
+    _PublicDemoCandidate,
+    _PublicDemoIdentity,
+    _PublicDemoValidationSession,
+    PUBLIC_DEMO_VALIDATION_ORIGIN,
+    PUBLIC_DEMO_VALIDATION_TIMEOUT,
     _load_public_demo_credentials,
     _previous_state_record,
     _load_state,
@@ -37,6 +42,7 @@ from kagoya_pull_agent import (
     _run,
     _retained_image_ref,
     _up_frontend,
+    _validate_public_demo_candidate,
     _verify_target_image,
     PUBLIC_DEMO_SIDECAR_MAX_BYTES,
     deploy_frontend,
@@ -605,6 +611,129 @@ class HttpSmokeTests(unittest.TestCase):
         self.assertEqual(CanaryHandler.requests, [])
 
 
+class PublicDemoValidationTests(unittest.TestCase):
+    candidate = _PublicDemoCandidate(
+        SYNTHETIC_DEMO_EMAIL,
+        SYNTHETIC_DEMO_PASSWORD,
+        42,
+    )
+
+    class FakeSession:
+        def __init__(self, responses, *, cookies=True):
+            self.responses = list(responses)
+            self.requests = []
+            self.cookies = [object()] if cookies else []
+
+        def request(self, method, path, *, body=None, retain_statuses=None):
+            self.requests.append((method, path, body))
+            response = self.responses.pop(0)
+            if isinstance(response, BaseException):
+                if isinstance(response, TimeoutError):
+                    raise DeployError("The public demo authorization check failed") from None
+                raise response
+            return response
+
+    @staticmethod
+    def response(status, payload):
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+        return status, body
+
+    def valid_responses(self, *, role="user", email=SYNTHETIC_DEMO_EMAIL, user_id=7):
+        identity = {"id": user_id, "email": email}
+        if role is not None:
+            identity["role"] = role
+        return [
+            self.response(200, {}),
+            self.response(200, identity),
+            self.response(403, {"message": "Administrator role required", "code": "FORBIDDEN"}),
+            self.response(
+                403,
+                {"message": "You do not have permission to view this book", "code": "FORBIDDEN"},
+            ),
+        ]
+
+    def test_valid_candidate_is_bound_to_me_and_both_real_denials(self):
+        fake = self.FakeSession(self.valid_responses())
+        with patch("kagoya_pull_agent._PublicDemoValidationSession", return_value=fake):
+            identity = _validate_public_demo_candidate(self.candidate)
+
+        self.assertEqual(identity, _PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user"))
+        self.assertEqual([request[0:2] for request in fake.requests], [
+            ("POST", "/api/auth/sign-in/email"),
+            ("GET", "/api/v1/me"),
+            ("GET", "/api/v1/admin/books"),
+            ("GET", "/api/v1/books/42"),
+        ])
+        self.assertEqual(
+            json.loads(fake.requests[0][2].decode("utf-8")),
+            {"email": SYNTHETIC_DEMO_EMAIL, "password": SYNTHETIC_DEMO_PASSWORD},
+        )
+
+    def test_identity_and_status_or_body_mismatches_fail_closed_without_secret(self):
+        cases = [
+            ("admin role", self.valid_responses(role="admin")),
+            ("legacy general role", self.valid_responses(role="GENERAL")),
+            ("missing role", self.valid_responses(role=None)),
+            ("unknown role", self.valid_responses(role="unknown")),
+            ("different email", self.valid_responses(email="other@example.invalid")),
+            ("nonpositive id", self.valid_responses(user_id=0)),
+            ("sign-in 401", [self.response(401, {"password": SYNTHETIC_DEMO_PASSWORD})]),
+            ("private 404", self.valid_responses()[:3] + [self.response(404, {})]),
+            ("private 200", self.valid_responses()[:3] + [self.response(200, {"title": "private"})]),
+            (
+                "fake admin 403",
+                [*self.valid_responses()[:2], self.response(403, {"code": "FORBIDDEN"}), self.response(403, {})],
+            ),
+            ("redirect", [self.response(302, {"location": "http://127.0.0.1:9"})]),
+            ("timeout", [TimeoutError("synthetic timeout")]),
+        ]
+        for label, responses in cases:
+            with self.subTest(label=label):
+                fake = self.FakeSession(responses)
+                with patch("kagoya_pull_agent._PublicDemoValidationSession", return_value=fake):
+                    with self.assertRaises(DeployError) as raised:
+                        _validate_public_demo_candidate(self.candidate)
+                self.assertNotIn(SYNTHETIC_DEMO_PASSWORD, str(raised.exception))
+
+    def test_transport_is_fixed_origin_no_proxy_no_redirect_and_bounded_timeout(self):
+        class Response:
+            status = 302
+
+            def __init__(self):
+                self.remaining = b"redirect body"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                body, self.remaining = self.remaining, b""
+                return body
+
+        opener = Mock()
+        opener.open.return_value = Response()
+        with patch("kagoya_pull_agent.build_opener", return_value=opener) as build_opener:
+            with patch("kagoya_pull_agent.ssl.create_default_context"):
+                session = _PublicDemoValidationSession()
+                status, body = session.request("GET", "/api/v1/me")
+
+        self.assertEqual((status, body), (302, b"redirect body"))
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, f"{PUBLIC_DEMO_VALIDATION_ORIGIN}/api/v1/me")
+        self.assertEqual(opener.open.call_args.kwargs["timeout"], PUBLIC_DEMO_VALIDATION_TIMEOUT)
+        handlers = build_opener.call_args.args
+        self.assertEqual(next(handler for handler in handlers if handler.__class__.__name__ == "ProxyHandler").proxies, {})
+        self.assertTrue(any(handler.__class__.__name__ == "_RejectRedirects" for handler in handlers))
+
+        opener.open.side_effect = TimeoutError("synthetic timeout")
+        with patch("kagoya_pull_agent.build_opener", return_value=opener):
+            with patch("kagoya_pull_agent.ssl.create_default_context"):
+                with self.assertRaisesRegex(DeployError, "authorization check failed"):
+                    _PublicDemoValidationSession().request("GET", "/api/v1/me")
+
+
 class PullAgentDeploymentTests(unittest.TestCase):
 
     def test_git_fetch_classifier_rejects_ambiguous_eof_and_integrity_failures(self):
@@ -681,8 +810,13 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.docker = FakeDocker(self.project_dir, self.production_override)
 
     def run_deploy(self, smoke):
-        with patch("kagoya_pull_agent._checkout", return_value=self.checkout), patch(
-            "kagoya_pull_agent._run", side_effect=self.docker.run
+        with (
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch(
+                "kagoya_pull_agent._validate_public_demo_candidate",
+                return_value=_PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user"),
+            ),
         ):
             return deploy_frontend(
                 self.config,
@@ -692,15 +826,6 @@ class PullAgentDeploymentTests(unittest.TestCase):
             )
 
     def public_demo_sidecar(self, **overrides):
-        evidence = {
-            "dedicated_general_account": True,
-            "general_role": "general",
-            "admin_api_403": True,
-            "private_book_403": True,
-            "independent_read_only": True,
-            "evidence_ref": "synthetic-owner-read-only-evidence",
-            "verified_at": "2026-11-03T00:00:00Z",
-        }
         payload = {
             "schema_version": 1,
             "publication_intent": "public_general_demo_credentials",
@@ -708,7 +833,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
             "approval_ref": "synthetic-owner-approval",
             "email": SYNTHETIC_DEMO_EMAIL,
             "password": SYNTHETIC_DEMO_PASSWORD,
-            "evidence": evidence,
+            "private_book_id": 42,
         }
         payload.update(overrides)
         return payload
@@ -894,6 +1019,30 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertNotIn(SYNTHETIC_DEMO_EMAIL, str(raised.exception) + stdout.getvalue() + stderr.getvalue())
         self.assertNotIn(SYNTHETIC_DEMO_PASSWORD, str(raised.exception) + stdout.getvalue() + stderr.getvalue())
 
+    def test_identity_change_after_build_blocks_public_switch(self):
+        self.write_public_demo_sidecar()
+        identities = iter(
+            [
+                _PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user"),
+                _PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "admin"),
+            ]
+        )
+        with (
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch("kagoya_pull_agent._validate_public_demo_candidate", side_effect=lambda _candidate: next(identities)),
+        ):
+            with self.assertRaisesRegex(DeployError, "identity changed"):
+                deploy_frontend(
+                    self.config,
+                    SOURCE_SHA,
+                    smoke=lambda _base_url: None,
+                    main_sha_reader=lambda _config: SOURCE_SHA,
+                )
+
+        self.assertTrue(any("build" in argv for argv, _env in self.docker.commands))
+        self.assertFalse(any("up" in argv for argv, _env in self.docker.commands))
+
     def test_same_sha_sidecar_removal_preserves_deployed_bundle_without_build_or_switch(self):
         self.write_public_demo_sidecar()
         self.run_deploy(lambda _base_url: None)
@@ -954,15 +1103,14 @@ class PullAgentDeploymentTests(unittest.TestCase):
         wrong_owner_path = self.write_public_demo_sidecar(name="wrong-owner.json")
         cases.append(("wrong owner", wrong_owner_path, os.getuid() + 1))
 
-        admin_payload = self.public_demo_sidecar()
-        admin_payload["evidence"] = {**admin_payload["evidence"], "general_role": "admin"}
-        admin_path = self.write_public_demo_sidecar(admin_payload, name="admin.json")
-        cases.append(("admin", admin_path, os.getuid()))
-
-        unverified_payload = self.public_demo_sidecar()
-        unverified_payload["evidence"] = {**unverified_payload["evidence"], "private_book_403": False}
-        unverified_path = self.write_public_demo_sidecar(unverified_payload, name="unverified.json")
-        cases.append(("unverified", unverified_path, os.getuid()))
+        legacy_claims_payload = self.public_demo_sidecar()
+        legacy_claims_payload["evidence"] = {
+            "general_role": "admin",
+            "admin_api_403": True,
+            "private_book_403": True,
+        }
+        legacy_claims_path = self.write_public_demo_sidecar(legacy_claims_payload, name="legacy-claims.json")
+        cases.append(("legacy owner claims", legacy_claims_path, os.getuid()))
 
         partial_payload = self.public_demo_sidecar()
         partial_payload.pop("password")

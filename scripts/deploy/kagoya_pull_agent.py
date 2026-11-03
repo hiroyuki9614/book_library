@@ -4,17 +4,27 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import fcntl
+from http.cookiejar import CookieJar
 import json
 import os
 import re
 import stat
+import ssl
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.request import (
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    HTTPCookieProcessor,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
 from release_gate import GateError, GitHubAPI, TransientGitHubAPIError, validate_release
 from kagoya_compose import (
@@ -32,6 +42,9 @@ SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 PUBLIC_DEMO_SIDECAR_SCHEMA_VERSION = 1
 PUBLIC_DEMO_PUBLICATION_INTENT = "public_general_demo_credentials"
 PUBLIC_DEMO_SIDECAR_MAX_BYTES = 16 * 1024
+PUBLIC_DEMO_VALIDATION_ORIGIN = "https://belib.hiroyuki9614.com"
+PUBLIC_DEMO_VALIDATION_TIMEOUT = 15
+PUBLIC_DEMO_VALIDATION_RESPONSE_MAX_BYTES = 64 * 1024
 PUBLIC_DEMO_SIDECAR_KEYS = {
     "schema_version",
     "publication_intent",
@@ -39,21 +52,30 @@ PUBLIC_DEMO_SIDECAR_KEYS = {
     "approval_ref",
     "email",
     "password",
-    "evidence",
-}
-PUBLIC_DEMO_EVIDENCE_KEYS = {
-    "dedicated_general_account",
-    "general_role",
-    "admin_api_403",
-    "private_book_403",
-    "independent_read_only",
-    "evidence_ref",
-    "verified_at",
+    "private_book_id",
 }
 
 
 class DeployError(RuntimeError):
     """A failed, fail-closed frontend release operation."""
+
+
+@dataclass(frozen=True)
+class _PublicDemoCandidate:
+    email: str
+    password: str
+    private_book_id: int
+
+    @property
+    def pair(self) -> tuple[str, str]:
+        return self.email, self.password
+
+
+@dataclass(frozen=True)
+class _PublicDemoIdentity:
+    id: int
+    email: str
+    role: str
 
 
 class _DeferredPreSwitchGate(DeployError):
@@ -191,10 +213,10 @@ def _validate_public_demo_parent(path: Path, owner_uid: int) -> None:
         raise DeployError("The public demo credentials sidecar directory is unavailable") from None
 
 
-def _load_public_demo_credentials(config: dict) -> tuple[str, str]:
-    """Load only the explicitly approved, private public-demo sidecar."""
+def _load_public_demo_candidate(config: dict) -> _PublicDemoCandidate | None:
+    """Load the opt-in and fixed protected-book target, but do not trust claims."""
     if "public_demo_credentials_file" not in config:
-        return "", ""
+        return None
 
     configured_path = config["public_demo_credentials_file"]
     if (
@@ -229,7 +251,7 @@ def _load_public_demo_credentials(config: dict) -> tuple[str, str]:
         try:
             fd = os.open(path, flags)
         except FileNotFoundError:
-            return "", ""
+            return None
         except (OSError, ValueError):
             _reject_public_demo_sidecar()
 
@@ -278,21 +300,17 @@ def _load_public_demo_credentials(config: dict) -> tuple[str, str]:
     ):
         _reject_public_demo_sidecar()
 
-    evidence = sidecar["evidence"]
-    if not isinstance(evidence, dict) or set(evidence) != PUBLIC_DEMO_EVIDENCE_KEYS:
-        _reject_public_demo_sidecar()
-    if (
-        evidence["dedicated_general_account"] is not True
-        or evidence["general_role"] != "general"
-        or evidence["admin_api_403"] is not True
-        or evidence["private_book_403"] is not True
-        or evidence["independent_read_only"] is not True
-        or not _safe_nonempty_text(evidence["evidence_ref"])
-        or not _safe_nonempty_text(evidence["verified_at"])
-    ):
+    private_book_id = sidecar["private_book_id"]
+    if type(private_book_id) is not int or private_book_id < 1 or private_book_id > (2**53 - 1):
         _reject_public_demo_sidecar()
 
-    return sidecar["email"], sidecar["password"]
+    return _PublicDemoCandidate(sidecar["email"], sidecar["password"], private_book_id)
+
+
+def _load_public_demo_credentials(config: dict) -> tuple[str, str]:
+    """Load only the explicitly approved sidecar pair, without validating authority."""
+    candidate = _load_public_demo_candidate(config)
+    return candidate.pair if candidate is not None else ("", "")
 
 
 def _frontend_compose_env(
@@ -446,6 +464,129 @@ def _http_get(url: str) -> tuple[int, dict[str, str], bytes]:
         raise DeployError("The local production smoke request failed") from None
 
 
+def _read_bounded_response(response, *, retain: bool = True) -> bytes:
+    body = bytearray()
+    while len(body) <= PUBLIC_DEMO_VALIDATION_RESPONSE_MAX_BYTES:
+        chunk = response.read(min(8192, PUBLIC_DEMO_VALIDATION_RESPONSE_MAX_BYTES + 1 - len(body)))
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise DeployError("The public demo authorization response was invalid")
+        if not chunk:
+            break
+        body.extend(chunk)
+        if len(body) > PUBLIC_DEMO_VALIDATION_RESPONSE_MAX_BYTES:
+            raise DeployError("The public demo authorization response was too large")
+    return bytes(body) if retain else b""
+
+
+class _PublicDemoValidationSession:
+    def __init__(self):
+        self.cookies = CookieJar()
+        self.opener = build_opener(
+            ProxyHandler({}),
+            HTTPCookieProcessor(self.cookies),
+            _RejectRedirects(),
+            HTTPSHandler(context=ssl.create_default_context()),
+        )
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: bytes | None = None,
+        retain_statuses: set[int] | None = None,
+    ) -> tuple[int, bytes]:
+        if not path.startswith("/") or "//" in path or "?" in path or "#" in path:
+            raise DeployError("The public demo authorization path is invalid")
+        request = Request(
+            f"{PUBLIC_DEMO_VALIDATION_ORIGIN}{path}",
+            data=body,
+            method=method,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "belib-frontend-cd",
+                "Origin": PUBLIC_DEMO_VALIDATION_ORIGIN,
+                **({"Content-Type": "application/json"} if body is not None else {}),
+            },
+        )
+        try:
+            with self.opener.open(request, timeout=PUBLIC_DEMO_VALIDATION_TIMEOUT) as response:
+                retain = retain_statuses is None or response.status in retain_statuses
+                return response.status, _read_bounded_response(response, retain=retain)
+        except HTTPError as error:
+            try:
+                retain = retain_statuses is None or error.code in retain_statuses
+                body = _read_bounded_response(error, retain=retain)
+            except DeployError:
+                raise
+            return error.code, body
+        except (OSError, URLError, TimeoutError):
+            raise DeployError("The public demo authorization check failed") from None
+
+
+def _public_demo_json(body: bytes) -> dict:
+    try:
+        value = json.loads(body.decode("utf-8"))
+    except (UnicodeError, TypeError, ValueError, json.JSONDecodeError):
+        raise DeployError("The public demo authorization response was invalid") from None
+    if not isinstance(value, dict):
+        raise DeployError("The public demo authorization response was invalid")
+    return value
+
+
+def _validate_public_demo_candidate(candidate: _PublicDemoCandidate) -> _PublicDemoIdentity:
+    """Prove the candidate's identity and denials through one fresh cookie session."""
+    session = _PublicDemoValidationSession()
+    sign_in_status, _ = session.request(
+        "POST",
+        "/api/auth/sign-in/email",
+        retain_statuses=set(),
+        body=json.dumps(
+            {"email": candidate.email, "password": candidate.password},
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    )
+    if sign_in_status != 200 or not list(session.cookies):
+        raise DeployError("The public demo authorization check failed")
+
+    me_status, me_body = session.request("GET", "/api/v1/me")
+    if me_status != 200:
+        raise DeployError("The public demo identity check failed")
+    me = _public_demo_json(me_body)
+    identity_id = me.get("id")
+    identity_email = me.get("email")
+    identity_role = me.get("role")
+    if (
+        type(identity_id) is not int
+        or identity_id < 1
+        or identity_email != candidate.email
+        or identity_role != "user"
+    ):
+        raise DeployError("The public demo identity is not the approved general account")
+    identity = _PublicDemoIdentity(identity_id, identity_email, identity_role)
+
+    admin_status, admin_body = session.request(
+        "GET", "/api/v1/admin/books", retain_statuses={403}
+    )
+    if admin_status != 403 or _public_demo_json(admin_body) != {
+        "message": "Administrator role required",
+        "code": "FORBIDDEN",
+    }:
+        raise DeployError("The public demo Admin API denial check failed")
+
+    private_status, private_body = session.request(
+        "GET",
+        f"/api/v1/books/{candidate.private_book_id}",
+        retain_statuses={403},
+    )
+    if private_status != 403 or _public_demo_json(private_body) != {
+        "message": "You do not have permission to view this book",
+        "code": "FORBIDDEN",
+    }:
+        raise DeployError("The public demo private-book denial check failed")
+    return identity
+
+
 def smoke_test(base_url: str) -> None:
     status, _, login = _http_get(f"{base_url.rstrip('/')}/login")
     if status != 200 or not re.search(rb"<title>\s*BeLib\s*</title>", login, re.IGNORECASE):
@@ -579,7 +720,15 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
         main_sha_reader = _main_sha
     if smoke is None:
         smoke = smoke_test
-    public_demo_credentials = _load_public_demo_credentials(config)
+    public_demo_candidate = _load_public_demo_candidate(config)
+    public_demo_credentials = (
+        public_demo_candidate.pair if public_demo_candidate is not None else ("", "")
+    )
+    public_demo_identity = (
+        _validate_public_demo_candidate(public_demo_candidate)
+        if public_demo_candidate is not None
+        else None
+    )
     checkout = _checkout(config, source_sha)
     _validate_frontend_compose(
         config,
@@ -614,6 +763,9 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
         ),
     )
     image = _verify_target_image(config, source_sha)
+    if public_demo_candidate is not None:
+        if _validate_public_demo_candidate(public_demo_candidate) != public_demo_identity:
+            raise DeployError("The public demo identity changed before the frontend switch")
     if main_sha_reader(config) != source_sha:
         raise DeployError("Main advanced before the frontend switch")
     switched = False
