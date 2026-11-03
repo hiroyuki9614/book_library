@@ -46,6 +46,8 @@ from kagoya_pull_agent import (
     _validate_public_demo_candidate,
     _verify_target_image,
     PUBLIC_DEMO_SIDECAR_MAX_BYTES,
+    PUBLIC_DEMO_ABSENT_SIDECAR_MARKER,
+    PUBLIC_DEMO_SIDECAR_MARKER_VERSION,
     deploy_frontend,
     dispatch_once,
     rollback_frontend,
@@ -54,6 +56,7 @@ from release_gate import GateError, TransientGitHubAPIError
 
 
 SOURCE_SHA = "a" * 40
+NEW_SOURCE_SHA = "c" * 40
 OLD_ID = "sha256:" + "b" * 64
 NEW_ID = "sha256:" + "a" * 64
 DEPLOYED_ID = "sha256:" + "c" * 64
@@ -93,7 +96,13 @@ class FakeDocker:
                             f"{self.current_base_file},{self.production_override}"
                         ),
                         "org.opencontainers.image.revision": (
-                            SOURCE_SHA if self.current_ref == f"belib-frontend:{SOURCE_SHA}" else ""
+                            self.current_ref.removeprefix("belib-frontend:")
+                            if len(self.current_ref.removeprefix("belib-frontend:")) == 40
+                            and all(
+                                character in "0123456789abcdef"
+                                for character in self.current_ref.removeprefix("belib-frontend:")
+                            )
+                            else ""
                         ),
                     },
                 },
@@ -171,9 +180,11 @@ class FakeDocker:
                     }
                 )
             elif "build" in argv:
-                self.images[f"belib-frontend:{SOURCE_SHA}"] = {
-                    "Id": NEW_ID,
-                    "Config": {"Labels": {"org.opencontainers.image.revision": SOURCE_SHA}},
+                source_sha = (env or {})["VCS_REF"]
+                image_id = NEW_ID if source_sha == SOURCE_SHA else DEPLOYED_ID
+                self.images[f"belib-frontend:{source_sha}"] = {
+                    "Id": image_id,
+                    "Config": {"Labels": {"org.opencontainers.image.revision": source_sha}},
                 }
             elif "up" in argv:
                 ref = (env or {}).get("BELIB_FRONTEND_IMAGE", f"belib-frontend:{SOURCE_SHA}")
@@ -868,6 +879,23 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.config["public_demo_credentials_file"] = str(path)
         return path
 
+    def public_demo_sidecar_marker(self, path=None):
+        if path is None:
+            return dict(PUBLIC_DEMO_ABSENT_SIDECAR_MARKER)
+        result = path.stat()
+        return {
+            "version": PUBLIC_DEMO_SIDECAR_MARKER_VERSION,
+            "kind": "file",
+            "uid": result.st_uid,
+            "mode": stat.S_IMODE(result.st_mode),
+            "nlink": result.st_nlink,
+            "dev": result.st_dev,
+            "ino": result.st_ino,
+            "size": result.st_size,
+            "ctime_ns": result.st_ctime_ns,
+            "mtime_ns": result.st_mtime_ns,
+        }
+
     def test_default_and_ambient_public_demo_values_remain_blank(self):
         self.environment_file.write_text(
             "VITE_PUBLIC_DEMO_EMAIL=protected-env@example.invalid\n"
@@ -918,6 +946,46 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertTrue(flags & os.O_NOFOLLOW)
         closed.assert_called_once()
 
+    def test_public_demo_sidecar_same_inode_content_mutation_is_rejected(self):
+        path = self.write_public_demo_sidecar(name="same-inode-mutation.json")
+        original_read = os.read
+        mutated = False
+
+        def mutate_after_read(fd, size):
+            nonlocal mutated
+            content = original_read(fd, size)
+            if content and not mutated:
+                mutated = True
+                path.write_text(json.dumps(self.public_demo_sidecar(password="changed.synthetic")), encoding="utf-8")
+                path.chmod(0o600)
+            return content
+
+        with patch("kagoya_pull_agent.os.read", side_effect=mutate_after_read):
+            with self.assertRaises(DeployError):
+                _load_public_demo_credentials(self.config)
+        self.assertTrue(mutated)
+
+    def test_public_demo_sidecar_atomic_replacement_is_rejected(self):
+        path = self.write_public_demo_sidecar(name="atomic-sidecar.json")
+        replacement = Path(self.temporary.name) / "atomic-replacement.json"
+        replacement.write_text(json.dumps(self.public_demo_sidecar(password="replacement.synthetic")), encoding="utf-8")
+        replacement.chmod(0o600)
+        original_read = os.read
+        replaced = False
+
+        def replace_after_read(fd, size):
+            nonlocal replaced
+            content = original_read(fd, size)
+            if content and not replaced:
+                replaced = True
+                os.replace(replacement, path)
+            return content
+
+        with patch("kagoya_pull_agent.os.read", side_effect=replace_after_read):
+            with self.assertRaises(DeployError):
+                _load_public_demo_credentials(self.config)
+        self.assertTrue(replaced)
+
     def test_public_demo_sidecar_rejects_nonregular_oversized_uid_mode_and_nlink(self):
         nonregular_path = Path(self.temporary.name) / "nonregular"
         nonregular_path.mkdir()
@@ -934,17 +1002,44 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 (
                     "uid",
                     valid_path,
-                    SimpleNamespace(st_mode=regular_mode, st_uid=os.getuid() + 1, st_nlink=1, st_size=valid_size),
+                    SimpleNamespace(
+                        st_mode=regular_mode,
+                        st_uid=os.getuid() + 1,
+                        st_nlink=1,
+                        st_size=valid_size,
+                        st_dev=1,
+                        st_ino=1,
+                        st_ctime_ns=1,
+                        st_mtime_ns=1,
+                    ),
                 ),
                 (
                     "mode",
                     valid_path,
-                    SimpleNamespace(st_mode=stat.S_IFREG | 0o640, st_uid=os.getuid(), st_nlink=1, st_size=valid_size),
+                    SimpleNamespace(
+                        st_mode=stat.S_IFREG | 0o640,
+                        st_uid=os.getuid(),
+                        st_nlink=1,
+                        st_size=valid_size,
+                        st_dev=1,
+                        st_ino=1,
+                        st_ctime_ns=1,
+                        st_mtime_ns=1,
+                    ),
                 ),
                 (
                     "nlink",
                     valid_path,
-                    SimpleNamespace(st_mode=regular_mode, st_uid=os.getuid(), st_nlink=2, st_size=valid_size),
+                    SimpleNamespace(
+                        st_mode=regular_mode,
+                        st_uid=os.getuid(),
+                        st_nlink=2,
+                        st_size=valid_size,
+                        st_dev=1,
+                        st_ino=1,
+                        st_ctime_ns=1,
+                        st_mtime_ns=1,
+                    ),
                 ),
             ]
         )
@@ -982,7 +1077,27 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 "lock_file": str(Path(self.temporary.name) / "dispatcher.lock"),
             }
         )
-        self.run_deploy(lambda _base_url: None)
+        with (
+            patch("kagoya_pull_agent._requests", return_value=[
+                ((1, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-1-1")
+            ]),
+            patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch(
+                "kagoya_pull_agent._validate_public_demo_candidate",
+                return_value=_PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user"),
+            ),
+            patch("kagoya_pull_agent.smoke_test"),
+        ):
+            self.assertEqual(dispatch_once(self.config), 0)
+
+        saved_state = Path(self.config["state_file"]).read_text(encoding="utf-8")
+        self.assertNotIn(SYNTHETIC_DEMO_EMAIL, saved_state)
+        self.assertNotIn(SYNTHETIC_DEMO_PASSWORD, saved_state)
+        self.assertNotIn("public_demo_fingerprint", saved_state)
+        self.assertIn("public_demo_sidecar_marker", saved_state)
 
         build_env = next(env for argv, env in self.docker.commands if "build" in argv)
         candidate_up_env = next(
@@ -1141,35 +1256,184 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 self.assertFalse(any("build" in argv for argv, _env in self.docker.commands))
                 self.assertEqual(self.docker.current_id, OLD_ID)
 
-    def test_same_sha_sidecar_removal_preserves_deployed_bundle_without_build_or_switch(self):
-        self.write_public_demo_sidecar()
+    def test_same_sha_unchanged_sidecar_is_noop_but_rotation_and_removal_fail_closed(self):
+        sidecar_path = self.write_public_demo_sidecar()
+        original_sidecar_marker = self.public_demo_sidecar_marker(sidecar_path)
         self.run_deploy(lambda _base_url: None)
         self.assertEqual(self.docker.current_id, NEW_ID)
+        state_path = Path(self.temporary.name) / "same-sha-state.json"
+        self.config.update(
+            {
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "same-sha.lock"),
+            }
+        )
+        state_path.write_text(
+            json.dumps(
+                {
+                    "last_request": [1, 1],
+                    "last_result": "success",
+                    "current_sha": SOURCE_SHA,
+                    "current": {
+                        "image_id": NEW_ID,
+                        "image_ref": f"belib-frontend:{SOURCE_SHA}",
+                    },
+                    "previous": {
+                        "image_id": OLD_ID,
+                        "image_ref": _retained_image_ref(OLD_ID),
+                        "source_sha": None,
+                    },
+                    "public_demo_sidecar_marker": original_sidecar_marker,
+                    "previous_public_demo_sidecar_marker": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def dispatch(request_id):
+            with (
+                patch("kagoya_pull_agent._requests", return_value=[
+                    (request_id, SOURCE_SHA, f"refs/tags/belib-deploy-request-{request_id[0]}-{request_id[1]}")
+                ]),
+                patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+                patch("kagoya_pull_agent._validate_network"),
+                patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+                patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+                patch(
+                    "kagoya_pull_agent._validate_public_demo_candidate",
+                    return_value=_PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user"),
+                ),
+                patch("kagoya_pull_agent.smoke_test"),
+            ):
+                return dispatch_once(self.config)
+
         self.docker.commands.clear()
         self.docker.up_targets.clear()
+        self.assertEqual(dispatch((2, 1)), 0)
+        self.assertEqual(self.docker.current_id, NEW_ID)
+        self.assertFalse(any("build" in argv or "up" in argv for argv, _env in self.docker.commands))
 
-        rotated_path = self.write_public_demo_sidecar(
+        self.write_public_demo_sidecar(
             self.public_demo_sidecar(
                 email="rotated.synthetic.demo@example.invalid",
                 password="rotated-synthetic-only-public-password",
             )
         )
-        rotated_result = self.run_deploy(lambda _base_url: None)
-
-        self.assertTrue(rotated_result["no_op"])
-        self.assertEqual(rotated_result["image_id"], NEW_ID)
+        self.docker.commands.clear()
+        self.docker.up_targets.clear()
+        with self.assertRaisesRegex(DeployError, "new main source SHA"):
+            dispatch((3, 1))
         self.assertEqual(self.docker.current_id, NEW_ID)
         self.assertFalse(any("build" in argv or "up" in argv for argv, _env in self.docker.commands))
+        failed_state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(failed_state["public_demo_sidecar_marker"], original_sidecar_marker)
+        self.assertIsNone(failed_state["previous_public_demo_sidecar_marker"])
 
         self.docker.commands.clear()
         self.docker.up_targets.clear()
-        rotated_path.unlink()
-        removed_result = self.run_deploy(lambda _base_url: None)
-
-        self.assertTrue(removed_result["no_op"])
-        self.assertEqual(removed_result["image_id"], NEW_ID)
+        Path(self.config["public_demo_credentials_file"]).unlink()
+        with self.assertRaisesRegex(DeployError, "new main source SHA"):
+            dispatch((4, 1))
         self.assertEqual(self.docker.current_id, NEW_ID)
         self.assertFalse(any("build" in argv or "up" in argv for argv, _env in self.docker.commands))
+
+    def test_new_source_sha_authorized_request_can_publish_rotated_sidecar(self):
+        original_sidecar_path = self.write_public_demo_sidecar()
+        self.run_deploy(lambda _base_url: None)
+        state_path = Path(self.temporary.name) / "new-release-state.json"
+        self.config.update(
+            {
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "new-release.lock"),
+            }
+        )
+        state_path.write_text(
+            json.dumps(
+                {
+                    "last_request": [1, 1],
+                    "last_result": "success",
+                    "current_sha": SOURCE_SHA,
+                    "current": {
+                        "image_id": NEW_ID,
+                        "image_ref": f"belib-frontend:{SOURCE_SHA}",
+                    },
+                    "previous": {
+                        "image_id": OLD_ID,
+                        "image_ref": _retained_image_ref(OLD_ID),
+                        "source_sha": None,
+                    },
+                    "public_demo_sidecar_marker": self.public_demo_sidecar_marker(original_sidecar_path),
+                    "previous_public_demo_sidecar_marker": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        new_checkout = self.release_root / NEW_SOURCE_SHA
+        new_checkout.mkdir()
+        (new_checkout / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+        (new_checkout / "frontend").mkdir()
+        (new_checkout / "frontend" / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        self.write_public_demo_sidecar(
+            self.public_demo_sidecar(
+                email="rotated.synthetic.demo@example.invalid",
+                password="rotated-synthetic-only-public-password",
+            )
+        )
+        with (
+            patch("kagoya_pull_agent._requests", return_value=[
+                ((5, 1), NEW_SOURCE_SHA, "refs/tags/belib-deploy-request-5-1")
+            ]),
+            patch("kagoya_pull_agent._main_sha", return_value=NEW_SOURCE_SHA),
+            patch("kagoya_pull_agent._validate_network"),
+            patch("kagoya_pull_agent._checkout", return_value=new_checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch(
+                "kagoya_pull_agent._validate_public_demo_candidate",
+                return_value=_PublicDemoIdentity(7, "rotated.synthetic.demo@example.invalid", "user"),
+            ),
+            patch("kagoya_pull_agent.smoke_test"),
+        ):
+            self.assertEqual(dispatch_once(self.config), 0)
+
+        self.assertEqual(self.docker.current_id, DEPLOYED_ID)
+        self.assertIn("frontend", self.docker.up_targets)
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["current_sha"], NEW_SOURCE_SHA)
+        self.assertEqual(saved["public_demo_sidecar_marker"], self.public_demo_sidecar_marker(original_sidecar_path))
+
+    def test_same_sha_without_recorded_sidecar_marker_fails_closed(self):
+        state_path = Path(self.temporary.name) / "unknown-marker-state.json"
+        self.config.update(
+            {
+                "state_file": str(state_path),
+                "lock_file": str(Path(self.temporary.name) / "unknown-marker.lock"),
+            }
+        )
+        state_path.write_text(
+            json.dumps(
+                {
+                    "last_request": [1, 1],
+                    "last_result": "success",
+                    "current_sha": SOURCE_SHA,
+                    "current": {
+                        "image_id": NEW_ID,
+                        "image_ref": f"belib-frontend:{SOURCE_SHA}",
+                    },
+                    "previous": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.write_public_demo_sidecar()
+        with (
+            patch("kagoya_pull_agent._requests", return_value=[
+                ((2, 1), SOURCE_SHA, "refs/tags/belib-deploy-request-2-1")
+            ]),
+            patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
+        ):
+            with self.assertRaisesRegex(DeployError, "cannot be proven"):
+                dispatch_once(self.config)
+        self.assertFalse(self.docker.up_targets)
 
     def test_public_demo_sidecar_rejects_malformed_unsafe_or_unproven_opt_in(self):
         cases = []
@@ -1242,7 +1506,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertFalse(any("build" in command for command, _env in self.docker.commands))
         self.assertEqual(self.docker.up_targets, [])
 
-    def test_replayed_success_preserves_pre_switch_rollback_after_state_save_failure(self):
+    def test_state_save_failure_does_not_allow_unproven_same_sha_noop(self):
         state_path = Path(self.temporary.name) / "dispatcher-state.json"
         self.config.update(
             {
@@ -1278,11 +1542,6 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(self.docker.current_id, NEW_ID)
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), initial_state)
 
-        def fail_if_replay_enters_error_recovery(*_args, **_kwargs):
-            # Replaying an already-switched frontend must not take the failure
-            # synchronization path; retain the real cause in test-only output.
-            self.fail(f"unexpected replay error: {sys.exc_info()[1]!r}")
-
         with (
             patch("kagoya_pull_agent._requests", return_value=request),
             patch("kagoya_pull_agent._main_sha", return_value=SOURCE_SHA),
@@ -1290,13 +1549,14 @@ class PullAgentDeploymentTests(unittest.TestCase):
             patch("kagoya_pull_agent._checkout", return_value=self.checkout),
             patch("kagoya_pull_agent._run", side_effect=self.docker.run),
             patch("kagoya_pull_agent.smoke_test"),
-            patch("kagoya_pull_agent._synchronize_state_after_dispatch_failure", side_effect=fail_if_replay_enters_error_recovery),
         ):
-            self.assertEqual(dispatch_once(self.config), 0)
+            with self.assertRaisesRegex(DeployError, "cannot be proven"):
+                dispatch_once(self.config)
 
         saved = json.loads(state_path.read_text(encoding="utf-8"))
         retained_old = _retained_image_ref(OLD_ID)
         self.assertEqual(saved["last_request"], [12, 1])
+        self.assertEqual(saved["last_result"], "failed")
         self.assertEqual(saved["current"]["image_id"], NEW_ID)
         self.assertEqual(
             saved["previous"],
@@ -2027,7 +2287,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 rollback_state_read.set()
             return original_load_state(config)
 
-        def deploy_while_paused(_config, source_sha):
+        def deploy_while_paused(_config, source_sha, **_kwargs):
             self.assertEqual(source_sha, next_sha)
             dispatch_entered.set()
             if not allow_dispatch_to_finish.wait(timeout=5):
@@ -2037,6 +2297,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 "image_ref": next_ref,
                 "previous_image_id": NEW_ID,
                 "previous_image_ref": dispatch_previous_ref,
+                "public_demo_sidecar_marker": dict(PUBLIC_DEMO_ABSENT_SIDECAR_MARKER),
                 "no_op": False,
             }
 
@@ -2177,6 +2438,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(rolled_back_state["preserved_metadata"], "synthetic")
 
     def test_manual_rollback_round_trip_preserves_each_image_source_sha(self):
+        sidecar_path = self.write_public_demo_sidecar()
         state_path = Path(self.temporary.name) / "dispatcher-state.json"
         old_sha = "b" * 40
         current_ref = f"belib-frontend:{SOURCE_SHA}"
@@ -2191,6 +2453,8 @@ class PullAgentDeploymentTests(unittest.TestCase):
                     "current_sha": SOURCE_SHA,
                     "current": current,
                     "previous": previous,
+                    "public_demo_sidecar_marker": self.public_demo_sidecar_marker(sidecar_path),
+                    "previous_public_demo_sidecar_marker": dict(PUBLIC_DEMO_ABSENT_SIDECAR_MARKER),
                 }
             ),
             encoding="utf-8",
@@ -2219,6 +2483,11 @@ class PullAgentDeploymentTests(unittest.TestCase):
             first = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(first["current_sha"], old_sha)
             self.assertEqual(first["previous"]["source_sha"], SOURCE_SHA)
+            self.assertEqual(first["public_demo_sidecar_marker"], dict(PUBLIC_DEMO_ABSENT_SIDECAR_MARKER))
+            self.assertEqual(
+                first["previous_public_demo_sidecar_marker"],
+                self.public_demo_sidecar_marker(sidecar_path),
+            )
             self.assertEqual(rollback_frontend(self.config), 0)
 
         restored = json.loads(state_path.read_text(encoding="utf-8"))
@@ -2226,6 +2495,11 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertEqual(restored["current"]["image_id"], NEW_ID)
         self.assertEqual(restored["previous"]["image_id"], OLD_ID)
         self.assertEqual(restored["previous"]["source_sha"], old_sha)
+        self.assertEqual(
+            restored["public_demo_sidecar_marker"],
+            self.public_demo_sidecar_marker(sidecar_path),
+        )
+        self.assertEqual(restored["previous_public_demo_sidecar_marker"], dict(PUBLIC_DEMO_ABSENT_SIDECAR_MARKER))
 
     def test_manual_rollback_verification_failure_records_observed_runtime(self):
         state_path = Path(self.temporary.name) / "dispatcher-state.json"

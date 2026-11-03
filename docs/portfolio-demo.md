@@ -197,6 +197,8 @@ For this change, the current owner cannot recall the demo ID/password and the ro
 
 The canonical API-origin check also applies when the sidecar is absent: the blank-demo path remains available, but a frontend candidate with a different API origin is rejected before build or switch.
 
+Public-demo credentials are compiled into the static Vite bundle and cannot be retroactively erased by changing or removing the sidecar. The deployment state therefore records only a non-secret identity marker for the validated sidecar file, including an explicit absent marker, permits a same-SHA no-op only for unchanged, proven provenance, and fails closed on rotation, removal, unsafe sidecars, or an unproven legacy state. A new public pair requires a legitimate new `main` source SHA and a newly authorized GitHub Actions deployment request; fail-closed handling does not purge already-published static Vite credentials.
+
 ## 5. Production acceptance still required
 
 Before deployment approval, capture counts/IDs only before and after and verify:

@@ -46,6 +46,23 @@ PUBLIC_DEMO_SIDECAR_MAX_BYTES = 16 * 1024
 PUBLIC_DEMO_VALIDATION_ORIGIN = "https://belib.hiroyuki9614.com"
 PUBLIC_DEMO_VALIDATION_TIMEOUT = 15
 PUBLIC_DEMO_VALIDATION_RESPONSE_MAX_BYTES = 64 * 1024
+PUBLIC_DEMO_SIDECAR_MARKER_VERSION = 1
+PUBLIC_DEMO_SIDECAR_MARKER_KEYS = {
+    "version",
+    "kind",
+    "uid",
+    "mode",
+    "nlink",
+    "dev",
+    "ino",
+    "size",
+    "ctime_ns",
+    "mtime_ns",
+}
+PUBLIC_DEMO_ABSENT_SIDECAR_MARKER = {
+    "version": PUBLIC_DEMO_SIDECAR_MARKER_VERSION,
+    "kind": "absent",
+}
 PUBLIC_DEMO_SIDECAR_KEYS = {
     "schema_version",
     "publication_intent",
@@ -55,6 +72,7 @@ PUBLIC_DEMO_SIDECAR_KEYS = {
     "password",
     "private_book_id",
 }
+_MISSING = object()
 
 
 class DeployError(RuntimeError):
@@ -77,6 +95,12 @@ class _PublicDemoIdentity:
     id: int
     email: str
     role: str
+
+
+@dataclass(frozen=True)
+class _PublicDemoSource:
+    candidate: _PublicDemoCandidate | None
+    marker: dict
 
 
 class _DeferredPreSwitchGate(DeployError):
@@ -214,10 +238,59 @@ def _validate_public_demo_parent(path: Path, owner_uid: int) -> None:
         raise DeployError("The public demo credentials sidecar directory is unavailable") from None
 
 
-def _load_public_demo_candidate(config: dict) -> _PublicDemoCandidate | None:
-    """Load the opt-in and fixed protected-book target, but do not trust claims."""
+def _public_demo_stat_marker(result: os.stat_result, owner_uid: int) -> dict:
+    """Return only verified identity metadata for one opened sidecar inode."""
+    try:
+        values = {
+            "uid": result.st_uid,
+            "mode": stat.S_IMODE(result.st_mode),
+            "nlink": result.st_nlink,
+            "dev": result.st_dev,
+            "ino": result.st_ino,
+            "size": result.st_size,
+            "ctime_ns": result.st_ctime_ns,
+            "mtime_ns": result.st_mtime_ns,
+        }
+    except AttributeError:
+        _reject_public_demo_sidecar()
+    if (
+        type(owner_uid) is not int
+        or any(type(value) is not int for value in values.values())
+        or values["uid"] != owner_uid
+        or values["mode"] != 0o600
+        or values["nlink"] != 1
+        or values["size"] < 0
+    ):
+        _reject_public_demo_sidecar()
+    return {
+        "version": PUBLIC_DEMO_SIDECAR_MARKER_VERSION,
+        "kind": "file",
+        **values,
+    }
+
+
+def _valid_public_demo_marker(value: object) -> bool:
+    if value == PUBLIC_DEMO_ABSENT_SIDECAR_MARKER:
+        return True
+    if not isinstance(value, dict) or set(value) != PUBLIC_DEMO_SIDECAR_MARKER_KEYS:
+        return False
+    if (
+        type(value["version"]) is not int
+        or value["version"] != PUBLIC_DEMO_SIDECAR_MARKER_VERSION
+        or value["kind"] != "file"
+    ):
+        return False
+    return all(type(value[key]) is int for key in PUBLIC_DEMO_SIDECAR_MARKER_KEYS - {"version", "kind"}) and (
+        value["mode"] == 0o600
+        and value["nlink"] == 1
+        and value["size"] >= 0
+    )
+
+
+def _load_public_demo_source(config: dict) -> _PublicDemoSource:
+    """Read one validated sidecar through one fd and retain its identity marker."""
     if "public_demo_credentials_file" not in config:
-        return None
+        return _PublicDemoSource(None, dict(PUBLIC_DEMO_ABSENT_SIDECAR_MARKER))
 
     configured_path = config["public_demo_credentials_file"]
     if (
@@ -252,19 +325,15 @@ def _load_public_demo_candidate(config: dict) -> _PublicDemoCandidate | None:
         try:
             fd = os.open(path, flags)
         except FileNotFoundError:
-            return None
+            return _PublicDemoSource(None, dict(PUBLIC_DEMO_ABSENT_SIDECAR_MARKER))
         except (OSError, ValueError):
             _reject_public_demo_sidecar()
 
         sidecar_stat = os.fstat(fd)
-        if (
-            not stat.S_ISREG(sidecar_stat.st_mode)
-            or sidecar_stat.st_uid != owner_uid
-            or stat.S_IMODE(sidecar_stat.st_mode) != 0o600
-            or sidecar_stat.st_nlink != 1
-            or sidecar_stat.st_size < 0
-            or sidecar_stat.st_size > PUBLIC_DEMO_SIDECAR_MAX_BYTES
-        ):
+        if not stat.S_ISREG(sidecar_stat.st_mode):
+            _reject_public_demo_sidecar()
+        before_marker = _public_demo_stat_marker(sidecar_stat, owner_uid)
+        if before_marker["size"] > PUBLIC_DEMO_SIDECAR_MAX_BYTES:
             _reject_public_demo_sidecar()
 
         content = bytearray()
@@ -275,6 +344,21 @@ def _load_public_demo_candidate(config: dict) -> _PublicDemoCandidate | None:
             content.extend(chunk)
             if len(content) > PUBLIC_DEMO_SIDECAR_MAX_BYTES:
                 _reject_public_demo_sidecar()
+        after_stat = os.fstat(fd)
+        if not stat.S_ISREG(after_stat.st_mode):
+            _reject_public_demo_sidecar()
+        after_marker = _public_demo_stat_marker(after_stat, owner_uid)
+        if after_marker != before_marker or len(content) != after_marker["size"]:
+            _reject_public_demo_sidecar()
+        try:
+            path_stat = os.stat(path, follow_symlinks=False)
+            if not stat.S_ISREG(path_stat.st_mode):
+                _reject_public_demo_sidecar()
+            path_marker = _public_demo_stat_marker(path_stat, owner_uid)
+        except (OSError, ValueError):
+            _reject_public_demo_sidecar()
+        if path_marker != after_marker:
+            _reject_public_demo_sidecar()
         sidecar = json.loads(
             bytes(content).decode("utf-8"),
             object_pairs_hook=_unique_json_object,
@@ -305,13 +389,27 @@ def _load_public_demo_candidate(config: dict) -> _PublicDemoCandidate | None:
     if type(private_book_id) is not int or private_book_id < 1 or private_book_id > (2**53 - 1):
         _reject_public_demo_sidecar()
 
-    return _PublicDemoCandidate(sidecar["email"], sidecar["password"], private_book_id)
+    return _PublicDemoSource(
+        _PublicDemoCandidate(sidecar["email"], sidecar["password"], private_book_id),
+        after_marker,
+    )
+
+
+def _load_public_demo_candidate(config: dict) -> _PublicDemoCandidate | None:
+    return _load_public_demo_source(config).candidate
 
 
 def _load_public_demo_credentials(config: dict) -> tuple[str, str]:
     """Load only the explicitly approved sidecar pair, without validating authority."""
-    candidate = _load_public_demo_candidate(config)
+    candidate = _load_public_demo_source(config).candidate
     return candidate.pair if candidate is not None else ("", "")
+
+
+def _set_optional_state_value(state: dict, key: str, value: object) -> None:
+    if value is _MISSING:
+        state.pop(key, None)
+    else:
+        state[key] = value
 
 
 def _validate_public_demo_api_base_url(config: dict) -> None:
@@ -743,12 +841,22 @@ def _up_frontend(
     _run(prefix + ["up", "--detach", "--no-deps", "--no-build", "frontend"], env=env)
 
 
-def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reader=None) -> dict:
+def deploy_frontend(
+    config: dict,
+    source_sha: str,
+    *,
+    smoke=None,
+    main_sha_reader=None,
+    public_demo_source: _PublicDemoSource | None = None,
+    active_public_demo_marker: dict | None = None,
+) -> dict:
     if main_sha_reader is None:
         main_sha_reader = _main_sha
     if smoke is None:
         smoke = smoke_test
-    public_demo_candidate = _load_public_demo_candidate(config)
+    if public_demo_source is None:
+        public_demo_source = _load_public_demo_source(config)
+    public_demo_candidate = public_demo_source.candidate
     public_demo_credentials = (
         public_demo_candidate.pair if public_demo_candidate is not None else ("", "")
     )
@@ -767,8 +875,16 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
     )
 
     current = _container(config)
-    rollback_ref, original_ref = _retain_live_image(config, current)
     if current.get("Config", {}).get("Image") == f"belib-frontend:{source_sha}":
+        if (
+            not _valid_public_demo_marker(active_public_demo_marker)
+            or active_public_demo_marker != public_demo_source.marker
+        ):
+            raise DeployError(
+                "The active frontend public-demo sidecar provenance cannot be proven unchanged; "
+                "a new main source SHA and authorized deployment request are required"
+            )
+        rollback_ref, _original_ref = _retain_live_image(config, current)
         image = _verify_target_image(config, source_sha)
         if current["Image"] == image.get("Id"):
             _verify_running_image(config, image["Id"], source_sha)
@@ -779,8 +895,11 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
                 "image_ref": f"belib-frontend:{source_sha}",
                 "previous_image_id": current["Image"],
                 "previous_image_ref": rollback_ref,
+                "public_demo_sidecar_marker": public_demo_source.marker,
                 "no_op": True,
             }
+
+    rollback_ref, original_ref = _retain_live_image(config, current)
 
     _run(
         _compose_prefix(config, checkout) + ["build", "frontend"],
@@ -836,6 +955,7 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
         "previous_image_id": current["Image"],
         "previous_image_ref": rollback_ref,
         "previous_original_ref": original_ref,
+        "public_demo_sidecar_marker": public_demo_source.marker,
         "no_op": False,
     }
 
@@ -931,6 +1051,7 @@ def _synchronize_state_after_dispatch_failure(
     """Record the actual frontend after a failed request, or fail closed as unknown."""
     prior_current = state.get("current")
     prior_source_sha = state.get("current_sha")
+    prior_public_demo_marker = state.get("public_demo_sidecar_marker", _MISSING)
     try:
         live = _container(config)
         image_id = live.get("Image")
@@ -940,6 +1061,8 @@ def _synchronize_state_after_dispatch_failure(
     except Exception:
         state["current"] = None
         state["current_sha"] = None
+        _set_optional_state_value(state, "public_demo_sidecar_marker", _MISSING)
+        _set_optional_state_value(state, "previous_public_demo_sidecar_marker", _MISSING)
         state["last_result"] = "deployment failed; live image is unknown"
     else:
         labels = live.get("Config", {}).get("Labels") or {}
@@ -953,6 +1076,15 @@ def _synchronize_state_after_dispatch_failure(
         else:
             state["current_sha"] = None
 
+        if isinstance(prior_current, dict) and prior_current.get("image_id") == image_id:
+            _set_optional_state_value(
+                state,
+                "public_demo_sidecar_marker",
+                prior_public_demo_marker,
+            )
+        else:
+            _set_optional_state_value(state, "public_demo_sidecar_marker", _MISSING)
+
         prior_image_id = prior_current.get("image_id") if isinstance(prior_current, dict) else None
         if prior_image_id and prior_image_id != image_id:
             prior_image_ref = _retained_image_ref(prior_image_id)
@@ -965,6 +1097,18 @@ def _synchronize_state_after_dispatch_failure(
                 if retained
                 else None
             )
+            if retained:
+                _set_optional_state_value(
+                    state,
+                    "previous_public_demo_sidecar_marker",
+                    prior_public_demo_marker,
+                )
+            else:
+                _set_optional_state_value(state, "previous_public_demo_sidecar_marker", _MISSING)
+        elif prior_image_id and prior_image_id == image_id:
+            # The failed request did not change the live image; preserve the
+            # already-recorded rollback image and its sidecar provenance marker.
+            pass
         elif not prior_image_id and previous_request == (0, 0):
             bootstrap_image_id = config.get("bootstrap_image_id")
             bootstrap_ref = config.get("bootstrap_rollback_ref")
@@ -979,6 +1123,9 @@ def _synchronize_state_after_dispatch_failure(
                     if retained
                     else None
                 )
+            _set_optional_state_value(state, "previous_public_demo_sidecar_marker", _MISSING)
+        else:
+            _set_optional_state_value(state, "previous_public_demo_sidecar_marker", _MISSING)
         state["last_result"] = "failed"
 
     try:
@@ -1010,6 +1157,25 @@ def _validate_network(config: dict) -> None:
         raise
     except GateError as error:
         raise DeployError(str(error)) from None
+
+
+def _same_sha_public_demo_marker(state: dict, source_sha: str, marker: dict) -> dict | None:
+    """Require unchanged sidecar provenance before allowing a same-SHA no-op."""
+    if state.get("current_sha") != source_sha:
+        return None
+    current = state.get("current")
+    saved_marker = state.get("public_demo_sidecar_marker", _MISSING)
+    if (
+        not isinstance(current, dict)
+        or not current.get("image_id")
+        or not _valid_public_demo_marker(saved_marker)
+        or saved_marker != marker
+    ):
+        raise DeployError(
+            "The active frontend public-demo sidecar provenance cannot be proven unchanged; "
+            "a new main source SHA and authorized deployment request are required"
+        )
+    return marker
 
 
 def _lock_path(config: dict) -> Path:
@@ -1049,6 +1215,10 @@ def dispatch_once(config: dict) -> int:
 
         config["request_sha"] = source_sha
         try:
+            public_demo_source = _load_public_demo_source(config)
+            active_public_demo_marker = _same_sha_public_demo_marker(
+                state, source_sha, public_demo_source.marker
+            )
             try:
                 _validate_network(config)
             except TransientGitHubAPIError:
@@ -1057,7 +1227,12 @@ def dispatch_once(config: dict) -> int:
                 ) from None
             if _main_sha(config) != source_sha:
                 raise DeployError("Main advanced before the deployment began")
-            result = deploy_frontend(config, source_sha)
+            result = deploy_frontend(
+                config,
+                source_sha,
+                public_demo_source=public_demo_source,
+                active_public_demo_marker=active_public_demo_marker,
+            )
         except (_DeferredPreSwitchGate, _DeferredPreSwitchGitTransport) as error:
             # A visible service failure, but no state mutation or deployment.
             # A later timer tick may safely revalidate this pending request.
@@ -1075,6 +1250,13 @@ def dispatch_once(config: dict) -> int:
             raise DeployError("The deployment request failed closed") from None
 
         previous = _previous_state_record(config, state, result)
+        prior_public_demo_marker = state.get("public_demo_sidecar_marker", _MISSING)
+        if result.get("no_op") and previous is not None:
+            saved_current = state.get("current")
+            if isinstance(saved_current, dict) and saved_current.get("image_id") == result["image_id"]:
+                prior_public_demo_marker = state.get(
+                    "previous_public_demo_sidecar_marker", _MISSING
+                )
         state.update(
             {
                 "last_request": list(request_id),
@@ -1084,6 +1266,15 @@ def dispatch_once(config: dict) -> int:
                 "previous": previous,
             }
         )
+        state["public_demo_sidecar_marker"] = result["public_demo_sidecar_marker"]
+        if previous is None:
+            _set_optional_state_value(state, "previous_public_demo_sidecar_marker", _MISSING)
+        else:
+            _set_optional_state_value(
+                state,
+                "previous_public_demo_sidecar_marker",
+                prior_public_demo_marker,
+            )
         _save_state(config, state)
         print(f"Deployed frontend main@{source_sha} image={result['image_id']} no_op={result['no_op']}")
         return 0
@@ -1110,6 +1301,8 @@ def _rollback_frontend_unlocked(config: dict) -> int:
     # Manual rollback is no-build and must never read the optional publication
     # sidecar. The saved immutable image is restored with a blank demo pair.
     public_demo_credentials = ("", "")
+    prior_public_demo_marker = state.get("public_demo_sidecar_marker", _MISSING)
+    previous_public_demo_marker = state.get("previous_public_demo_sidecar_marker", _MISSING)
     checkout = _checkout(config, source_sha)
     live = _container(config)
     if live.get("Image") != current.get("image_id"):
@@ -1127,6 +1320,16 @@ def _rollback_frontend_unlocked(config: dict) -> int:
         prior_current = {**current, "source_sha": source_sha}
         state["current"], state["previous"] = previous, prior_current
         state["current_sha"] = previous.get("source_sha")
+        _set_optional_state_value(
+            state,
+            "public_demo_sidecar_marker",
+            previous_public_demo_marker,
+        )
+        _set_optional_state_value(
+            state,
+            "previous_public_demo_sidecar_marker",
+            prior_public_demo_marker,
+        )
         state["last_result"] = "manual frontend rollback"
         _save_state(config, state)
     except Exception as error:
@@ -1136,6 +1339,8 @@ def _rollback_frontend_unlocked(config: dict) -> int:
             prior_current=current,
             intended_current=previous,
             prior_source_sha=source_sha,
+            prior_public_demo_marker=prior_public_demo_marker,
+            intended_public_demo_marker=previous_public_demo_marker,
         )
         if isinstance(error, DeployError):
             raise
@@ -1151,6 +1356,8 @@ def _synchronize_state_after_rollback_failure(
     prior_current: dict,
     intended_current: dict,
     prior_source_sha: str,
+    prior_public_demo_marker: object = _MISSING,
+    intended_public_demo_marker: object = _MISSING,
 ) -> None:
     """Record the observed runtime, or mark it unknown, before failing closed."""
     try:
@@ -1169,10 +1376,30 @@ def _synchronize_state_after_rollback_failure(
             state["current"] = intended_current
             state["previous"] = recorded_prior_current
             state["current_sha"] = intended_current.get("source_sha")
+            _set_optional_state_value(
+                state,
+                "public_demo_sidecar_marker",
+                intended_public_demo_marker,
+            )
+            _set_optional_state_value(
+                state,
+                "previous_public_demo_sidecar_marker",
+                prior_public_demo_marker,
+            )
         elif image_id == prior_current.get("image_id"):
             state["current"] = recorded_prior_current
             state["previous"] = intended_current
             state["current_sha"] = prior_source_sha
+            _set_optional_state_value(
+                state,
+                "public_demo_sidecar_marker",
+                prior_public_demo_marker,
+            )
+            _set_optional_state_value(
+                state,
+                "previous_public_demo_sidecar_marker",
+                intended_public_demo_marker,
+            )
         else:
             image_ref = live.get("Config", {}).get("Image")
             labels = live.get("Config", {}).get("Labels") or {}
@@ -1181,6 +1408,8 @@ def _synchronize_state_after_rollback_failure(
             state["current"] = {"image_id": image_id, "image_ref": image_ref}
             state["previous"] = intended_current
             state["current_sha"] = revision if SOURCE_SHA.fullmatch(revision) else None
+            _set_optional_state_value(state, "public_demo_sidecar_marker", _MISSING)
+            _set_optional_state_value(state, "previous_public_demo_sidecar_marker", _MISSING)
         state["last_result"] = "manual frontend rollback verification failed"
 
     try:
