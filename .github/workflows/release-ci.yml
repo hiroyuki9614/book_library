@@ -161,7 +161,31 @@ jobs:
         run: |
           echo "VCS_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           VCS_REF=$(git rev-parse HEAD) docker compose --file compose.yaml config --quiet
+      - name: Reproduce private-checkout public asset permissions
+        run: |
+          chmod 0600 frontend/public/favicon.svg
+          test "$(stat -c '%a' frontend/public/favicon.svg)" = "600"
       - name: Build production images
         run: docker compose --file compose.yaml build
+      - name: Verify public runtime assets for unprivileged Nginx
+        run: |
+          frontend_image="$(docker compose --file compose.yaml config --format json | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["frontend"]["image"])')"
+          test -n "$frontend_image"
+          test "$frontend_image" != "null"
+          docker run --rm \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --user 101:101 \
+            --entrypoint /bin/sh \
+            "$frontend_image" \
+            -ec '
+              favicon=/usr/share/nginx/html/favicon.svg
+              index=/usr/share/nginx/html/index.html
+              test -r "$favicon"
+              test -r "$index"
+              test "$(stat -c "%a" "$favicon")" = "644"
+            '
       - name: Isolated API and UI smoke
         run: bash scripts/ci/isolated-smoke.sh
