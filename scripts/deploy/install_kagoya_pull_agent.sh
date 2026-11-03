@@ -159,6 +159,8 @@ os.chmod(config_path, 0o600)
 PY
 
 PYTHON=$(command -v python3)
+# PrivateTmp, ProtectSystem, and ReadWritePaths break rootless Docker's UID-owned
+# socket visibility; UMask and NoNewPrivileges remain safe.
 cat >"$SERVICE_PATH" <<EOF
 [Unit]
 Description=BeLib production frontend release dispatcher
@@ -167,9 +169,6 @@ Description=BeLib production frontend release dispatcher
 Type=oneshot
 UMask=0077
 NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ReadWritePaths=$STATE_DIR $RELEASE_DIR
 WorkingDirectory=$RELEASE_DIR
 ExecStart=$PYTHON $LIBEXEC_DIR/kagoya_pull_agent.py --once --config $CONFIG_PATH
 EOF
