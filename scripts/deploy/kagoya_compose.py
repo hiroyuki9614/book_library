@@ -220,6 +220,13 @@ def _normalize_project_path(value: str, project_dir: Path) -> str:
     return "$PROJECT/" + relative.as_posix()
 
 
+def _canonical_bind_source(value: str, project_dir: Path) -> str:
+    source = Path(value)
+    if not source.is_absolute():
+        source = project_dir / source
+    return str(source.resolve(strict=False))
+
+
 def _contract_projection(resolved: dict, project_directory: str | Path) -> dict:
     project_dir = Path(project_directory).resolve(strict=True)
     services = resolved["services"]
@@ -234,11 +241,17 @@ def _contract_projection(resolved: dict, project_directory: str | Path) -> dict:
             if isinstance(build.get("context"), str):
                 build["context"] = _normalize_project_path(build["context"], project_dir)
             args = build.get("args")
-            if isinstance(args, dict) and "VCS_REF" in args:
-                args["VCS_REF"] = "$SOURCE_SHA"
+            if isinstance(args, dict):
+                # This provenance-only arg is dormant for protected services:
+                # CD builds and starts only the frontend. Preserve every other
+                # build arg and remove an empty map so absent and VCS_REF-only
+                # build metadata have the same protected projection.
+                args.pop("VCS_REF", None)
+                if not args:
+                    build.pop("args", None)
         for mount in service.get("volumes", []) or []:
             if isinstance(mount, dict) and mount.get("type") == "bind" and isinstance(mount.get("source"), str):
-                mount["source"] = _normalize_project_path(mount["source"], project_dir)
+                mount["source"] = _canonical_bind_source(mount["source"], project_dir)
     return {
         "services": protected_services,
         "top_level": {

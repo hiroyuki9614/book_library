@@ -294,6 +294,67 @@ class ProductionComposeIdentityTests(unittest.TestCase):
             compose_contract_sha256(effective, self.project_dir),
         )
 
+    def test_protected_projection_ignores_only_backend_vcs_ref_and_preserves_other_build_args(self):
+        approved = self.compose_fixture(self.project_dir)
+        approved["services"]["backend"]["build"].pop("args")
+        candidate = copy.deepcopy(approved)
+        candidate["services"]["backend"]["build"]["args"] = {"VCS_REF": SOURCE_SHA}
+
+        approved_digest = compose_contract_sha256(approved, self.project_dir)
+        self.assertEqual(
+            approved_digest,
+            compose_contract_sha256(candidate, self.project_dir),
+        )
+        validate_candidate_protected_contract(candidate, self.project_dir, approved_digest)
+
+        approved_with_other_arg = copy.deepcopy(approved)
+        approved_with_other_arg["services"]["backend"]["build"]["args"] = {"KEEP": "same"}
+        candidate_with_other_arg = copy.deepcopy(approved_with_other_arg)
+        candidate_with_other_arg["services"]["backend"]["build"]["args"] = {
+            "KEEP": "same",
+            "VCS_REF": SOURCE_SHA,
+        }
+        other_arg_digest = compose_contract_sha256(approved_with_other_arg, self.project_dir)
+        validate_candidate_protected_contract(
+            candidate_with_other_arg,
+            self.project_dir,
+            other_arg_digest,
+        )
+
+        candidate_with_other_arg["services"]["backend"]["build"]["args"]["KEEP"] = "changed"
+        with self.assertRaisesRegex(ComposeIdentityError, "candidate changes protected services"):
+            validate_candidate_protected_contract(
+                candidate_with_other_arg,
+                self.project_dir,
+                other_arg_digest,
+            )
+
+    def test_protected_projection_compares_canonical_bind_identity_across_checkouts(self):
+        isolated_checkout = Path(self.temporary.name) / "isolated-release"
+        isolated_checkout.mkdir()
+        shared_mount = self.project_dir / ".deployment" / "nginx-default.conf"
+        shared_mount.parent.mkdir(exist_ok=True)
+        shared_mount.write_text("synthetic nginx config\n", encoding="utf-8")
+
+        approved = self.compose_fixture(self.project_dir)
+        candidate = self.compose_fixture(isolated_checkout)
+        for resolved in (approved, candidate):
+            resolved["services"]["nginx"]["volumes"][0]["source"] = str(shared_mount)
+
+        approved_digest = compose_contract_sha256(approved, self.project_dir)
+        self.assertEqual(
+            approved_digest,
+            compose_contract_sha256(candidate, isolated_checkout),
+        )
+        validate_candidate_protected_contract(candidate, isolated_checkout, approved_digest)
+
+        relocated_mount = isolated_checkout / ".deployment" / "nginx-default.conf"
+        relocated_mount.parent.mkdir()
+        relocated_mount.write_text("different synthetic nginx config\n", encoding="utf-8")
+        candidate["services"]["nginx"]["volumes"][0]["source"] = str(relocated_mount)
+        with self.assertRaisesRegex(ComposeIdentityError, "candidate changes protected services"):
+            validate_candidate_protected_contract(candidate, isolated_checkout, approved_digest)
+
     def test_candidate_must_match_frozen_effective_contract_for_all_protected_parts(self):
         approved = self.compose_fixture(self.project_dir)
         approved["services"]["backend"]["image"] = "belib-backend:approved-host-image"
@@ -311,6 +372,7 @@ class ProductionComposeIdentityTests(unittest.TestCase):
         mutations = (
             ("backend image", lambda candidate: candidate["services"]["backend"].update(image="belib-backend:changed")),
             ("R2 setting", lambda candidate: candidate["services"]["backend"]["environment"].update(R2_BUCKET_NAME="changed-bucket")),
+            ("backend build arg", lambda candidate: candidate["services"]["backend"]["build"]["args"].update(UNAPPROVED="changed")),
             ("book-file mount", lambda candidate: candidate["services"]["backend"]["volumes"][0].update(source="other-volume")),
             ("database", lambda candidate: candidate["services"]["db"]["environment"].update(POSTGRES_PASSWORD="changed")),
             ("nginx image", lambda candidate: candidate["services"]["nginx"].update(image="nginx:changed")),
