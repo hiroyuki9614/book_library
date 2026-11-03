@@ -119,15 +119,28 @@ class FakeAPI:
         }
         self.main_runs = [self.main_run]
         self.pr_runs = [self.pr_run]
-        self.pull = {
+        self.pull_summary = {
             "number": 70,
+            "state": "closed",
             "merged_at": "2026-11-02T00:00:00Z",
             "merge_commit_sha": SOURCE_SHA,
             "base": {"ref": "main", "repo": {"full_name": self.repository}},
             "head": {"ref": "codex/cd-test", "sha": PR_HEAD_SHA},
-            "user": {"login": "author"},
+            "user": {"login": "author", "type": "User"},
+            "author_association": "CONTRIBUTOR",
+        }
+        self.pull = {
+            "number": 70,
+            "state": "closed",
+            "merged_at": "2026-11-02T00:00:00Z",
+            "merge_commit_sha": SOURCE_SHA,
+            "base": {"ref": "main", "repo": {"full_name": self.repository}},
+            "head": {"ref": "codex/cd-test", "sha": PR_HEAD_SHA},
+            "user": {"login": "author", "type": "User"},
+            "author_association": "CONTRIBUTOR",
             "merged_by": {"login": OWNER_LOGIN, "type": "User"},
         }
+        self.detail_requests = []
         self.reviews = [
             {
                 "user": {"login": "reviewer"},
@@ -156,7 +169,10 @@ class FakeAPI:
             jobs = self.run_jobs.get(run_id, {})
             return {"jobs": [{"name": name, "conclusion": result} for name, result in jobs.items()]}
         if f"/commits/{SOURCE_SHA}/pulls?" in path:
-            return [self.pull]
+            return [self.pull_summary]
+        if path == f"/repos/{self.repository}/pulls/70":
+            self.detail_requests.append(path)
+            return self.pull
         if f"/pulls/70/reviews?" in path:
             page = int(parse_qs(urlsplit(path).query).get("page", ["1"])[0])
             start = (page - 1) * 100
@@ -191,7 +207,8 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertNotIsInstance(raised.exception, TransientGitHubAPIError)
 
     def test_accepts_exact_main_sha_with_green_pr_and_merge_gates(self):
-        proof = validate_release(FakeAPI(), SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+        api = FakeAPI()
+        proof = validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
         self.assertEqual(
             proof,
             {
@@ -201,6 +218,60 @@ class ReleaseGateTests(unittest.TestCase):
                 "pr_head_sha": PR_HEAD_SHA,
             },
         )
+        self.assertNotIn("merged_by", api.pull_summary)
+        self.assertEqual(api.detail_requests, [f"/repos/{api.repository}/pulls/70"])
+
+    def test_rejects_non_positive_or_non_integer_summary_pr_number_before_detail_fetch(self):
+        for number in (0, -1, True, "70", "70/other"):
+            with self.subTest(number=number):
+                api = FakeAPI()
+                api.pull_summary["number"] = number
+                with self.assertRaisesRegex(GateError, "merged PR identity"):
+                    validate_release(api, SOURCE_SHA)
+                self.assertEqual(api.detail_requests, [])
+
+    def test_rejects_missing_pull_request_detail(self):
+        api = FakeAPI()
+        api.pull = None
+
+        with self.assertRaisesRegex(GateError, "pull-request detail"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_inconsistent_pull_request_detail(self):
+        cases = (
+            ("number", 71, "pull-request detail PR number"),
+            ("merge_commit_sha", "c" * 40, "merge commit"),
+            ("head", {"ref": "codex/cd-test", "sha": "c" * 40}, "head SHA"),
+            ("base", {"ref": "release", "repo": {"full_name": FakeAPI.repository}}, "base ref"),
+            ("user", {"login": "different-author", "type": "User"}, "author identity"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                api = FakeAPI()
+                api.pull[field] = value
+                with self.assertRaisesRegex(GateError, message):
+                    validate_release(api, SOURCE_SHA)
+
+    def test_rejects_unmerged_or_invalidly_timestamped_pull_request_detail(self):
+        for field, value in (
+            ("state", "open"),
+            ("merged_at", None),
+            ("merged_at", "not-a-github-timestamp"),
+        ):
+            with self.subTest(field=field, value=value):
+                api = FakeAPI()
+                api.pull[field] = value
+                with self.assertRaisesRegex(GateError, "merged PR detail"):
+                    validate_release(api, SOURCE_SHA)
+
+    def test_rejects_detail_merger_without_inventing_owner_identity(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        del api.pull["merged_by"]
+
+        with self.assertRaisesRegex(GateError, "actual merger"):
+            validate_release(api, SOURCE_SHA)
 
     def test_accepts_documented_workflow_path_ref_suffix_for_main_and_pr_runs(self):
         api = FakeAPI()
@@ -316,6 +387,7 @@ class ReleaseGateTests(unittest.TestCase):
     def test_rejects_author_approval_even_on_exact_head(self):
         api = FakeAPI()
         api.pull["user"]["login"] = "reviewer"
+        api.pull_summary["user"]["login"] = "reviewer"
         with self.assertRaisesRegex(GateError, "No non-author approval applies"):
             validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
 
@@ -491,6 +563,7 @@ class ReleaseGateTests(unittest.TestCase):
     def test_rejects_self_github_approval_in_solo_mode(self):
         api = FakeAPI()
         api.pull["user"] = {"login": OWNER_LOGIN}
+        api.pull_summary["user"] = {"login": OWNER_LOGIN, "type": "User"}
         api.reviews = [
             {
                 "user": {"login": OWNER_LOGIN},

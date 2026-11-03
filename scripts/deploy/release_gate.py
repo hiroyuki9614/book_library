@@ -173,23 +173,173 @@ def _verify_main_run(
     return run
 
 
+def _is_full_sha(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 40 and all(
+        char in "0123456789abcdef" for char in value.lower()
+    )
+
+
+def _is_positive_int(value: object) -> bool:
+    return type(value) is int and value > 0
+
+
+def _is_github_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", value
+    ):
+        return False
+    try:
+        datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return False
+    return True
+
+
+def _verify_matching_github_identity(
+    summary_identity: object, detail_identity: object, label: str
+) -> None:
+    if not isinstance(summary_identity, dict) or not isinstance(detail_identity, dict):
+        raise GateError(f"The pull-request detail {label} identity is missing or invalid")
+    summary_login = summary_identity.get("login")
+    detail_login = detail_identity.get("login")
+    if (
+        not isinstance(summary_login, str)
+        or not summary_login
+        or not isinstance(detail_login, str)
+        or not detail_login
+    ):
+        raise GateError(f"The pull-request detail {label} identity is missing or invalid")
+    if summary_login != detail_login:
+        raise GateError(f"The pull-request detail {label} identity does not match the summary")
+    for identity_field in ("id", "node_id", "type"):
+        summary_value = summary_identity.get(identity_field)
+        detail_value = detail_identity.get(identity_field)
+        if (
+            summary_value is not None
+            and detail_value is not None
+            and summary_value != detail_value
+        ):
+            raise GateError(f"The pull-request detail {label} identity does not match the summary")
+
+
+def _pull_base_identity(pull: dict) -> tuple[object, object]:
+    base = pull.get("base")
+    if not isinstance(base, dict):
+        return None, None
+    repository = base.get("repo")
+    if not isinstance(repository, dict):
+        return None, None
+    return base.get("ref"), repository.get("full_name")
+
+
+def _verify_merged_pr_detail(
+    api: GitHubAPI, summary: dict, source_sha: str, pull_number: int
+) -> dict:
+    detail = api.get(f"/repos/{api.repository}/pulls/{pull_number}")
+    if not isinstance(detail, dict):
+        raise GateError("The pull-request detail is missing or invalid")
+    if detail.get("number") != pull_number:
+        raise GateError("The pull-request detail PR number does not match the summary")
+
+    summary_merged_at = summary.get("merged_at")
+    detail_merged_at = detail.get("merged_at")
+    if (
+        detail.get("state") != "closed"
+        or not _is_github_timestamp(summary_merged_at)
+        or not _is_github_timestamp(detail_merged_at)
+        or detail_merged_at != summary_merged_at
+    ):
+        raise GateError("The merged PR detail has invalid merged status or timestamp")
+
+    summary_base_ref, summary_base_repository = _pull_base_identity(summary)
+    detail_base_ref, detail_base_repository = _pull_base_identity(detail)
+    if (
+        summary_base_ref != "main"
+        or summary_base_repository != api.repository
+        or detail_base_ref != "main"
+        or detail_base_repository != api.repository
+        or detail_base_ref != summary_base_ref
+        or detail_base_repository != summary_base_repository
+    ):
+        raise GateError("The pull-request detail base ref or repository is inconsistent")
+
+    summary_merge_sha = summary.get("merge_commit_sha")
+    detail_merge_sha = detail.get("merge_commit_sha")
+    if (
+        not _is_full_sha(summary_merge_sha)
+        or summary_merge_sha.lower() != source_sha
+        or not _is_full_sha(detail_merge_sha)
+        or detail_merge_sha.lower() != source_sha
+        or detail_merge_sha.lower() != summary_merge_sha.lower()
+    ):
+        raise GateError("The pull-request detail merge commit SHA is inconsistent")
+
+    summary_head = summary.get("head")
+    detail_head = detail.get("head")
+    if (
+        not isinstance(summary_head, dict)
+        or not isinstance(detail_head, dict)
+        or not _is_full_sha(summary_head.get("sha"))
+        or not _is_full_sha(detail_head.get("sha"))
+        or not isinstance(summary_head.get("ref"), str)
+        or not summary_head.get("ref")
+        or not isinstance(detail_head.get("ref"), str)
+        or not detail_head.get("ref")
+        or detail_head.get("sha").lower() != summary_head.get("sha").lower()
+        or detail_head.get("ref") != summary_head.get("ref")
+    ):
+        raise GateError("The pull-request detail head SHA or ref is inconsistent")
+
+    _verify_matching_github_identity(summary.get("user"), detail.get("user"), "author")
+    for pull_object in (summary, detail):
+        association = pull_object.get("author_association")
+        if association is not None and (
+            not isinstance(association, str) or not association
+        ):
+            raise GateError("The pull-request detail author association is invalid")
+    if (
+        summary.get("author_association") is not None
+        and detail.get("author_association") is not None
+        and summary.get("author_association") != detail.get("author_association")
+    ):
+        raise GateError("The pull-request detail author association is inconsistent")
+
+    summary_merged_by = summary.get("merged_by")
+    detail_merged_by = detail.get("merged_by")
+    if summary_merged_by is not None:
+        _verify_matching_github_identity(summary_merged_by, detail_merged_by, "merger")
+    elif detail_merged_by is not None:
+        if not isinstance(detail_merged_by, dict) or not isinstance(
+            detail_merged_by.get("login"), str
+        ) or not detail_merged_by.get("login"):
+            raise GateError("The pull-request detail merger identity is invalid")
+
+    return detail
+
+
 def _verify_merged_pr(api: GitHubAPI, source_sha: str) -> dict:
     associated = api.get(
         f"/repos/{api.repository}/commits/{source_sha}/pulls?per_page=100"
     )
+    if not isinstance(associated, list) or any(
+        not isinstance(pull, dict) for pull in associated
+    ):
+        raise GateError("The associated pull-request response is invalid")
     matches = [
         pull
         for pull in associated
-        if pull.get("base", {}).get("ref") == "main"
-        and pull.get("base", {}).get("repo", {}).get("full_name") == api.repository
-        and pull.get("merged_at")
-        and pull.get("merge_commit_sha", "").lower() == source_sha
+        if _pull_base_identity(pull) == ("main", api.repository)
+        and _is_github_timestamp(pull.get("merged_at"))
+        and pull.get("state") in (None, "closed")
+        and _is_full_sha(pull.get("merge_commit_sha"))
+        and pull.get("merge_commit_sha").lower() == source_sha
     ]
     if len(matches) != 1:
         raise GateError("The source SHA is not the merge commit of exactly one main PR")
-    if type(matches[0].get("number")) is not int or matches[0]["number"] <= 0:
+    pull_number = matches[0].get("number")
+    if not _is_positive_int(pull_number):
         raise GateError("The merged PR identity is missing or invalid")
-    return matches[0]
+    return _verify_merged_pr_detail(api, matches[0], source_sha, pull_number)
 
 
 def _pull_request_reviews(api: GitHubAPI, pull_number: int) -> list[dict]:
@@ -220,16 +370,6 @@ def _pull_request_comments(api: GitHubAPI, pull_number: int) -> list[dict]:
         if len(response) < 100:
             return comments
     raise GateError("The pull-request comment history exceeds the validation limit")
-
-
-def _is_full_sha(value: object) -> bool:
-    return isinstance(value, str) and len(value) == 40 and all(
-        char in "0123456789abcdef" for char in value.lower()
-    )
-
-
-def _is_positive_int(value: object) -> bool:
-    return type(value) is int and value > 0
 
 
 def _parse_github_timestamp(value: object) -> datetime:
