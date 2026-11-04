@@ -1,4 +1,4 @@
-"""Offline safety tests. No Docker/socket/network/production access."""
+"""Offline tests for the read-only BeLib runtime snapshot validator."""
 
 import contextlib
 import io
@@ -13,108 +13,165 @@ except ImportError:
     from belib_runtime_preflight import assess, main
 
 HEAD = "1f41e1feafd0ae7aa333f4c2b676c563f00fc764"
+PROJECT = "belib-production"
+VOLUME = "belib-production_postgres-data"
+NETWORK = "belib-production_default"
 
 
-def complete_evidence():
+def healthy_snapshot():
     return {
-        "schema_version": 1,
-        "source": {"repository": "hiroyuki9614/book_library", "head": HEAD,
-                   "work_prompt_document_id": "63ef369e-efce-4546-b643-8d27302dc801",
-                   "github_identity_readback": True},
-        "operator": {"principal": "agent", "uid": 1002, "host": "v133-18-43-217-vir"},
-        "runtime": {"rootless": True, "docker_service_enabled": True,
-                    "linger_enabled": True, "runc_container_state_consistent": True,
-                    "postgres_old_process_confirmed_absent": True,
-                    "shared_docker_impact_inventory_complete": True,
-                    "memory_pressure_root_cause_addressed": True},
-        "services": {name: {"restart": "unless-stopped", "image_id_retained": True}
-                     for name in ("db", "backend", "frontend", "nginx")},
-        "postgres_volume": {"name": "belib-production_postgres-data", "exists": True,
-                            "identity_pinned": True, "data_integrity_verified": True},
-        "backup": {"postgres_volume": "belib-production_postgres-data",
-                   "checksum_verified": True, "restore_drill_verified": True},
-        "protected_storage": {"r2_objects_unchanged_verified": True,
-                              "private_access_verified": True},
-        "coordination": {"other_projects_considered": True,
-                         "owner_approved_cross_project_effects": True,
-                         "existing_cd_lock_respected": True, "rollback_rehearsed": True},
+        "schema_version": 2,
+        "source": {
+            "repository": "hiroyuki9614/book_library",
+            "head": HEAD,
+            "work_prompt_document_id": "63ef369e-efce-4546-b643-8d27302dc801",
+        },
+        "runtime": {
+            "rootless": True,
+            "docker_task_runc_consistent": True,
+            "shared_inventory_complete": True,
+            "namespace_error": False,
+            "other_project_impact": "none",
+            "old_db_process_access": "confirmed_absent",
+        },
+        "services": {
+            name: {
+                "project": PROJECT,
+                "service": name,
+                "container_id": f"{index:012x}",
+                "state": "running",
+                "health": "healthy",
+                "restart": "unless-stopped",
+                "image_id": f"sha256:{index:064x}",
+                "networks": [NETWORK],
+                "volumes": [VOLUME] if name == "db" else [],
+            }
+            for index, name in enumerate(("db", "backend", "frontend", "nginx"), 1)
+        },
+        "postgres_volume": {
+            "name": VOLUME,
+            "exists": True,
+            "identity": "a" * 64,
+        },
     }
 
 
 class ReadOnlyPreflightTests(unittest.TestCase):
-    def check_block(self, mutate, code):
-        e = complete_evidence()
-        mutate(e)
-        result = assess(e, HEAD)
-        self.assertEqual(result["decision"], "BLOCKED")
-        self.assertIn(code, result["reason_codes"])
-        self.assertEqual(result["authorization"], "NONE")
-        self.assertFalse(result["mutation_attempted"])
-        self.assertFalse(result["safe_to_repair"])
+    def assert_shared_failure(self, snapshot, reason):
+        report = assess(snapshot, HEAD)
+        self.assertEqual(report["decision"], "SHARED_RUNTIME_RECOVERY_REQUIRED")
+        self.assertIn(reason, report["reason_codes"])
+        self.assertEqual(report["authorization"], "NONE")
+        self.assertFalse(report["mutation_attempted"])
+        self.assertFalse(report["safe_to_repair"])
 
-    def test_complete_is_only_readiness_for_review(self):
-        r = assess(complete_evidence(), HEAD)
-        self.assertEqual(r["decision"], "READY_FOR_OWNER_REVIEW")
-        self.assertEqual(r["authorization"], "NONE")
-        self.assertFalse(r["safe_to_repair"])
+    def test_healthy_snapshot_is_only_ready_for_owner_review(self):
+        report = assess(healthy_snapshot(), HEAD)
+        self.assertEqual(report["decision"], "READY_FOR_OWNER_REVIEW")
+        self.assertEqual(report["authorization"], "NONE")
+        self.assertFalse(report["mutation_attempted"])
+        self.assertFalse(report["safe_to_repair"])
 
-    def test_current_oci_mismatch_blocks(self):
-        self.check_block(lambda e: e["runtime"].update(runc_container_state_consistent=False),
-                         "RUNC_STATE_AMBIGUOUS")
+    def test_ordinary_stopped_container_blocks(self):
+        evidence = healthy_snapshot()
+        evidence["services"]["frontend"]["state"] = "exited"
+        report = assess(evidence, HEAD)
+        self.assertEqual(report["decision"], "NORMAL_CONTAINER_STOPPED")
+        self.assertEqual(report["authorization"], "NONE")
+        self.assertFalse(report["mutation_attempted"])
 
-    def test_postgres_process_ambiguity_blocks(self):
-        self.check_block(lambda e: e["runtime"].update(postgres_old_process_confirmed_absent=False),
-                         "OLD_DB_PROCESS_UNVERIFIED")
+    def test_database_unhealthy_blocks(self):
+        evidence = healthy_snapshot()
+        evidence["services"]["db"]["health"] = "unhealthy"
+        report = assess(evidence, HEAD)
+        self.assertEqual(report["decision"], "SERVICE_UNHEALTHY")
+        self.assertIn("SERVICE_DB_NOT_HEALTHY", report["reason_codes"])
+        self.assertEqual(report["authorization"], "NONE")
+        self.assertFalse(report["mutation_attempted"])
 
-    def test_cross_project_approval_missing_blocks(self):
-        self.check_block(lambda e: e["coordination"].update(owner_approved_cross_project_effects=False),
-                         "CROSS_PROJECT_APPROVAL_MISSING")
+    def test_duplicate_container_ids_block(self):
+        evidence = healthy_snapshot()
+        evidence["services"]["nginx"]["container_id"] = evidence["services"]["db"]["container_id"]
+        self.assert_shared_failure(evidence, "DUPLICATE_CONTAINER_ID")
 
-    def test_backup_wrong_volume_blocks(self):
-        self.check_block(lambda e: e["backup"].update(postgres_volume="other"),
-                         "BACKUP_VOLUME_MISMATCH")
+    def test_task_runc_mismatch_blocks(self):
+        evidence = healthy_snapshot()
+        evidence["runtime"]["docker_task_runc_consistent"] = False
+        self.assert_shared_failure(evidence, "OCI_STATE_MISMATCH")
 
-    def test_backup_restore_missing_blocks(self):
-        self.check_block(lambda e: e["backup"].update(restore_drill_verified=False),
-                         "BACKUP_RESTORE_UNVERIFIED")
+    def test_other_project_impact_blocks(self):
+        evidence = healthy_snapshot()
+        evidence["runtime"]["other_project_impact"] = "affected"
+        self.assert_shared_failure(evidence, "OTHER_PROJECT_IMPACT")
 
-    def test_source_stale_blocks(self):
-        self.check_block(lambda e: e["source"].update(head="0"*40),
-                         "SOURCE_HEAD_MISMATCH")
+    def test_wrong_database_volume_identity_blocks(self):
+        evidence = healthy_snapshot()
+        evidence["services"]["db"]["volumes"] = ["other-project_data"]
+        self.assert_shared_failure(evidence, "SERVICE_DB_VOLUME_MISMATCH")
 
-    def test_omitted_services_blocks(self):
-        self.check_block(lambda e: e["services"].pop("nginx"), "SERVICE_INVENTORY_MISMATCH")
+    def test_namespace_error_blocks(self):
+        evidence = healthy_snapshot()
+        evidence["runtime"]["namespace_error"] = True
+        self.assert_shared_failure(evidence, "NAMESPACE_ERROR")
 
-    def test_oom_unresolved_blocks(self):
-        self.check_block(lambda e: e["runtime"].update(memory_pressure_root_cause_addressed=False),
-                         "OOM_RECURRENCE_UNRESOLVED")
+    def test_unknown_old_database_process_state_blocks(self):
+        evidence = healthy_snapshot()
+        evidence["runtime"]["old_db_process_access"] = "unknown"
+        self.assert_shared_failure(evidence, "OLD_DB_PROCESS_ACCESS_UNKNOWN")
 
-    def test_r2_privacy_unverified_blocks(self):
-        self.check_block(lambda e: e["protected_storage"].update(private_access_verified=False),
-                         "R2_PRIVACY_UNVERIFIED")
+    def test_service_without_health_status_is_unhealthy(self):
+        evidence = healthy_snapshot()
+        evidence["services"]["backend"]["health"] = "not_configured"
+        report = assess(evidence, HEAD)
+        self.assertEqual(report["decision"], "SERVICE_UNHEALTHY")
+        self.assertIn("SERVICE_BACKEND_NOT_HEALTHY", report["reason_codes"])
 
-    def test_wrong_owner_blocks(self):
-        self.check_block(lambda e: e["operator"].update(uid=0), "WRONG_RUNTIME_OWNER")
+    def test_unexpected_fields_and_secret_are_not_reflected(self):
+        evidence = healthy_snapshot()
+        evidence["operator_supplied_command"] = "docker rm secret-should-not-appear"
+        evidence["token"] = "secret-should-not-appear"
+        report = assess(evidence, HEAD)
+        self.assertEqual(report["decision"], "PREFLIGHT_EVIDENCE_INVALID")
+        encoded = json.dumps(report)
+        self.assertNotIn("secret-should-not-appear", encoded)
+        self.assertIn("SNAPSHOT_FIELDS_INVALID", report["reason_codes"])
 
-    def test_input_secrets_never_reflected(self):
-        e = complete_evidence()
-        e["secret_token"] = "must-not-appear-123"
-        self.assertNotIn("must-not-appear-123", json.dumps(assess(e, HEAD)))
-
-    def test_cli_missing_file_fails_closed(self):
+    def test_cli_invalid_file_fails_closed_without_echoing_input(self):
         with contextlib.redirect_stdout(io.StringIO()) as stdout:
-            code = main(["--evidence", "/nonexistent/file.json", "--expected-head", HEAD])
+            code = main(["--evidence", "/nonexistent/snapshot.json", "--expected-head", HEAD])
         self.assertEqual(code, 30)
-        self.assertEqual(json.loads(stdout.getvalue())["decision"], "PREFLIGHT_ERROR")
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["decision"], "PREFLIGHT_EVIDENCE_INVALID")
+        self.assertEqual(report["authorization"], "NONE")
 
-    def test_cli_valid_but_incomplete_fails_closed(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "safe.json"
-            path.write_text('{"schema_version":1,"token":"hidden"}', encoding="utf-8")
+    def test_cli_rejects_unknown_command_or_path_options(self):
+        for option, value in (("--container", "anything"), ("--shell", "id")):
+            with contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(io.StringIO()):
+                code = main(["--evidence", "/tmp/snapshot.json", "--expected-head", HEAD, option, value])
+            self.assertEqual(code, 30)
+            self.assertEqual(
+                json.loads(stdout.getvalue())["decision"], "PREFLIGHT_EVIDENCE_INVALID"
+            )
+
+    def test_cli_does_not_treat_shell_metacharacters_in_path_as_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            literal = Path(directory) / "$(touch SHOULD_NOT_EXIST).json"
             with contextlib.redirect_stdout(io.StringIO()) as stdout:
-                code = main(["--evidence", str(path), "--expected-head", HEAD])
-            self.assertEqual(code, 20)
-            self.assertNotIn("hidden", stdout.getvalue())
+                code = main(["--evidence", str(literal), "--expected-head", HEAD])
+            self.assertEqual(code, 30)
+            self.assertFalse((Path(directory) / "SHOULD_NOT_EXIST").exists())
+            self.assertEqual(json.loads(stdout.getvalue())["authorization"], "NONE")
+
+    def test_non_object_snapshot_is_invalid_evidence(self):
+        report = assess([], HEAD)
+        self.assertEqual(report["decision"], "PREFLIGHT_EVIDENCE_INVALID")
+        self.assertIn("SNAPSHOT_NOT_OBJECT", report["reason_codes"])
+
+    def test_snapshot_never_authenticates_claimed_source(self):
+        evidence = healthy_snapshot()
+        report = assess(evidence, HEAD)
+        self.assertIn("not evidence authentication", report["note"])
+        self.assertEqual(report["authorization"], "NONE")
 
 
 if __name__ == "__main__":
