@@ -30,19 +30,35 @@ elif [[ "$recovery_rehearsal" == "github-hosted-v1" ]]; then
   api_url="http://127.0.0.1:8080"
   ui_url="http://127.0.0.1:8080"
 
-  if [[ -n "$(docker ps -q --no-trunc)" ]]; then
+  if ! running_containers="$(docker ps -q --no-trunc)"; then
+    echo "Refusing recovery rehearsal: cannot verify the runner container inventory" >&2
+    exit 1
+  fi
+  if [[ -n "$running_containers" ]]; then
     echo "Refusing recovery rehearsal: unexpected containers are already running" >&2
     exit 1
   fi
-  if [[ -n "$(docker ps -aq --filter label=com.docker.compose.project=belib-production)" ]]; then
+  if ! production_containers="$(docker ps -aq --filter label=com.docker.compose.project=belib-production)"; then
+    echo "Refusing recovery rehearsal: cannot verify the production project inventory" >&2
+    exit 1
+  fi
+  if [[ -n "$production_containers" ]]; then
     echo "Refusing recovery rehearsal: production project containers exist on this runner" >&2
     exit 1
   fi
-  if [[ -n "$(docker volume ls -q --filter label=com.docker.compose.project="$project")" ]]; then
+  if ! project_volumes="$(docker volume ls -q --filter label=com.docker.compose.project="$project")"; then
+    echo "Refusing recovery rehearsal: cannot verify synthetic project volumes" >&2
+    exit 1
+  fi
+  if [[ -n "$project_volumes" ]]; then
     echo "Refusing recovery rehearsal: this CI project already has volumes" >&2
     exit 1
   fi
-  if [[ -n "$(docker network ls -q --filter name="^$network$")" ]]; then
+  if ! project_networks="$(docker network ls -q --filter name="^$network$")"; then
+    echo "Refusing recovery rehearsal: cannot verify synthetic project network" >&2
+    exit 1
+  fi
+  if [[ -n "$project_networks" ]]; then
     echo "Refusing recovery rehearsal: this CI project already has a network" >&2
     exit 1
   fi
@@ -189,11 +205,18 @@ wait_service_running() {
 }
 
 wait_for_http_recovery() {
-  local attempt health ui
+  local attempt health ui health_body
   for attempt in {1..60}; do
-    health="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$api_url/health" || true)"
-    ui="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$ui_url/" || true)"
-    [[ "$health" == 200 && "$ui" =~ ^2[0-9][0-9]$ ]] && return 0
+    health_body="$(mktemp)"
+    health="$(curl --silent --show-error --connect-timeout 3 --max-time 5 --output "$health_body" --write-out '%{http_code}' "$api_url/health" || true)"
+    ui="$(curl --silent --show-error --connect-timeout 3 --max-time 5 --output /dev/null --write-out '%{http_code}' "$ui_url/" || true)"
+    if [[ "$health" == 200 && "$ui" =~ ^2[0-9][0-9]$ ]] \
+      && grep -Eiq '"status"[[:space:]]*:[[:space:]]*"ok"' "$health_body" \
+      && grep -Eiq '"service"[[:space:]]*:[[:space:]]*"belib-api"' "$health_body"; then
+      rm -f "$health_body"
+      return 0
+    fi
+    rm -f "$health_body"
     sleep 2
   done
   echo "Synthetic API/UI did not recover on loopback" >&2

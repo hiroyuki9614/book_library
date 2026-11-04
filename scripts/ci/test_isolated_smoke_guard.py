@@ -27,6 +27,7 @@ class IsolatedSmokeGuardTests(unittest.TestCase):
             """#!/usr/bin/env bash
 set -eu
 printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [[ "${FAKE_FAIL_DOCKER_QUERY:-}" == "$*" ]]; then exit 42; fi
 case "$*" in
   "ps -q --no-trunc") printf '%s\\n' "$FAKE_RUNNING_CONTAINERS" ;;
   "ps -aq --filter label=com.docker.compose.project=belib-production") printf '%s\\n' "$FAKE_PRODUCTION_CONTAINERS" ;;
@@ -47,6 +48,7 @@ esac
             "FAKE_PRODUCTION_CONTAINERS": "",
             "FAKE_PROJECT_VOLUMES": "",
             "FAKE_PROJECT_NETWORKS": "",
+            "FAKE_FAIL_DOCKER_QUERY": "",
             "BELIB_CI_RECOVERY_REHEARSAL": "github-hosted-v1",
             "RUNNER_ENVIRONMENT": "github-hosted",
             "GITHUB_ACTIONS": "true",
@@ -84,6 +86,19 @@ esac
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("does not accept caller-selected", result.stderr)
             self.assertEqual(self.logged_docker_calls(), [])
+            self.log.unlink(missing_ok=True)
+
+    def test_docker_inventory_query_errors_fail_closed(self):
+        queries = (
+            "ps -q --no-trunc",
+            "ps -aq --filter label=com.docker.compose.project=belib-production",
+            "volume ls -q --filter label=com.docker.compose.project=belib-recovery-ci-123-1",
+            "network ls -q --filter name=^belib-recovery-ci-123-1_default$",
+        )
+        for query in queries:
+            result = self.run_guard(FAKE_FAIL_DOCKER_QUERY=query)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(self.logged_docker_calls(), list(queries[: queries.index(query) + 1]))
             self.log.unlink(missing_ok=True)
 
     def test_rejects_unexpected_running_container_before_compose(self):

@@ -139,6 +139,7 @@ jobs:
   production-compose:
     name: Production images, Compose config, and isolated smoke
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [backend, frontend, reader-e2e]
     env:
       POSTGRES_USER: ci
