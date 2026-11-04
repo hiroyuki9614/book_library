@@ -129,6 +129,34 @@ describe('PdfReader navigation, outline, and progress', () => {
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 	});
 
+	test('places title, save state, outline and display settings in the header with reading controls below the page', async () => {
+		const { getByRole, getByTestId } = await render(<PdfReader bookId={7} bookTitle='A long PDF title' pageTurnDirection='ltr' />);
+
+		const header = getByRole('banner');
+		await expect.element(header).toHaveTextContent('A long PDF title');
+		await expect.element(getByRole('button', { name: '目次' })).toBeInTheDocument();
+		await expect.element(getByRole('button', { name: '表示設定' })).toBeInTheDocument();
+		await expect.element(header).toHaveTextContent('読書位置を保存済み');
+		await expect.element(getByTestId('pdf-reader-footer')).toHaveTextContent('2 / 5 ページ 40%');
+	});
+
+	test('hides footer navigation from interaction and assistive technology while the mobile menu is open', async () => {
+		const { getByRole, getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		const footer = getByTestId('pdf-reader-footer');
+		await expect.element(footer).not.toHaveAttribute('inert');
+		await expect.element(footer).not.toHaveAttribute('aria-hidden');
+
+		await getByRole('button', { name: '操作メニューを開く' }).click();
+		await expect.element(getByRole('dialog', { name: '操作メニュー' }).getByRole('spinbutton')).toHaveValue(2);
+		await expect.element(footer).toHaveAttribute('inert');
+		await expect.element(footer).toHaveAttribute('aria-hidden', 'true');
+
+		await getByRole('button', { name: '閉じる' }).click();
+		await expect.element(footer).not.toHaveAttribute('inert');
+		await expect.element(footer).not.toHaveAttribute('aria-hidden');
+		await expect.element(footer.getByRole('spinbutton')).toHaveValue(2);
+	});
+
 	test('階層アウトラインを表示して対応ページへ移動し、目次を閉じる', async () => {
 		const { getByRole } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await getByRole('button', { name: '目次' }).click();

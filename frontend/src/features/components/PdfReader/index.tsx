@@ -160,18 +160,15 @@ const usePageNavigation = ({ bookId, documentId, initialPage, pageTurnDirection 
 type PageNavigationModel = ReturnType<typeof usePageNavigation>;
 
 const PageNavigation = ({ navigation }: { navigation: PageNavigationModel }) => (
-		<div className='flex flex-col items-center gap-1'>
-			<CommandButton
-				pageTurnDirection={navigation.pageTurnDirection}
-				prevResolved={navigation.previousCommand}
-				nextResolved={navigation.nextCommand}
-				state={navigation.state}
-				pageInput={navigation.pageInput}
-				setPageInput={navigation.setPageInput}
-				handleGoToPage={navigation.handleGoToPage}
-			/>
-			<ReadingSaveStatus status={navigation.status} retry={navigation.retry} />
-		</div>
+	<CommandButton
+		pageTurnDirection={navigation.pageTurnDirection}
+		prevResolved={navigation.previousCommand}
+		nextResolved={navigation.nextCommand}
+		state={navigation.state}
+		pageInput={navigation.pageInput}
+		setPageInput={navigation.setPageInput}
+		handleGoToPage={navigation.handleGoToPage}
+	/>
 );
 
 function getBookmarkPage(bookmark: PdfBookmarkObject) {
@@ -483,17 +480,30 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, curren
 	);
 };
 
-function ReaderWorkspace({ bookId, documentId, initialPage, pageTurnDirection, mobileMenuOpen, onMobileMenuChange }: { bookId: number; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection; mobileMenuOpen: boolean; onMobileMenuChange: (open: boolean) => void }) {
+function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, pageTurnDirection, restoreError, mobileMenuOpen, onMobileMenuChange }: { bookId: number; bookTitle?: string; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection; restoreError: boolean; mobileMenuOpen: boolean; onMobileMenuChange: (open: boolean) => void }) {
 	const [tocOpen, setTocOpen] = useState(false);
 	const [mobileTocOpen, setMobileTocOpen] = useState(false);
+	const [settingsOpen, setSettingsOpen] = useState(false);
 	const navigation = usePageNavigation({ bookId, documentId, initialPage, pageTurnDirection });
 	return (
 		<div className='flex h-full flex-col'>
-			<div className='mb-1 hidden shrink-0 flex-wrap items-center justify-center gap-2 border-b py-1 sm:mb-2 sm:py-2 md:flex'>
-				<ZoomToolbar documentId={documentId} />
-				<PdfTableOfContents documentId={documentId} open={tocOpen} onOpenChange={setTocOpen} />
-				<PageNavigation navigation={navigation} />
-			</div>
+			<header className='flex shrink-0 items-center gap-1 border-b px-1 py-1 sm:gap-2 sm:px-3 sm:py-2'>
+				<Link to='/' className='inline-flex min-h-11 shrink-0 items-center rounded-md px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'>本棚に戻る</Link>
+				<span className='min-w-0 flex-1 truncate px-1 text-center text-sm font-medium text-foreground'>{bookTitle || 'PDFリーダー'}</span>
+				<div className='max-w-[7rem] shrink md:max-w-none'><ReadingSaveStatus status={navigation.status} retry={navigation.retry} /></div>
+				<div className='hidden shrink-0 items-center gap-2 md:flex'>
+					<PdfTableOfContents documentId={documentId} open={tocOpen} onOpenChange={setTocOpen} />
+					<Sheet open={settingsOpen} onOpenChange={setSettingsOpen}>
+						<SheetTrigger asChild><Button type='button' variant='outline' className='min-h-11 px-3'>表示設定</Button></SheetTrigger>
+						<SheetContent side='right' className='w-[min(88vw,22rem)] [&>button]:size-11'>
+							<SheetHeader><SheetTitle>表示設定</SheetTitle><SheetDescription>PDFの拡大率を調整します。</SheetDescription></SheetHeader>
+							<div className='pt-4'><ZoomToolbar documentId={documentId} compact /></div>
+						</SheetContent>
+					</Sheet>
+				</div>
+				<Button type='button' variant='outline' className='min-h-11 shrink-0 px-3 md:hidden' aria-label='操作メニューを開く' onClick={() => onMobileMenuChange(true)}>メニュー</Button>
+			</header>
+			{restoreError && <p role='alert' className='shrink-0 px-3 py-1 text-xs'>保存位置を取得できませんでした。先頭から表示しています。</p>}
 			<Sheet open={mobileMenuOpen} onOpenChange={onMobileMenuChange}>
 				<SheetContent side='right' className='w-[min(88vw,22rem)] p-0 duration-[240ms] motion-reduce:duration-0 [&>button]:size-11'>
 					<SheetHeader className='shrink-0 border-b pr-16'>
@@ -502,7 +512,7 @@ function ReaderWorkspace({ bookId, documentId, initialPage, pageTurnDirection, m
 					</SheetHeader>
 					<div className='no-scrollbar min-h-0 flex-1 overflow-y-auto p-4'>
 						<div className='flex flex-col gap-3'>
-							<ZoomToolbar documentId={documentId} compact />
+							<section aria-label='表示設定'><h3 className='mb-2 font-medium'>表示設定</h3><ZoomToolbar documentId={documentId} compact /></section>
 							<PageNavigation navigation={navigation} />
 							<Button type='button' variant='outline' className='min-h-11 w-full justify-start' aria-expanded={mobileTocOpen} onClick={() => setMobileTocOpen((open) => !open)}>目次</Button>
 							{mobileTocOpen && <PdfTableOfContents inline documentId={documentId} open={mobileTocOpen} onOpenChange={setMobileTocOpen} />}
@@ -510,9 +520,13 @@ function ReaderWorkspace({ bookId, documentId, initialPage, pageTurnDirection, m
 					</div>
 				</SheetContent>
 			</Sheet>
-			<div className='min-h-0 flex-1 overflow-hidden'>
+			<main tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white outline-none'>
 				<PdfViewport documentId={documentId} pageTurnDirection={pageTurnDirection} navigationDisabled={tocOpen || mobileMenuOpen} currentPage={navigation.state.currentPage} totalPages={navigation.state.totalPages} />
-			</div>
+			</main>
+			<footer data-testid='pdf-reader-footer' aria-hidden={mobileMenuOpen ? true : undefined} inert={mobileMenuOpen || undefined} className='flex shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t bg-white px-2 py-1 sm:px-4'>
+				<div className='hidden md:block'><ZoomToolbar documentId={documentId} /></div>
+				<PageNavigation navigation={navigation} />
+			</footer>
 		</div>
 	);
 }
@@ -560,48 +574,29 @@ function PdfReader({ bookId, bookTitle, pageTurnDirection = 'ltr' }: { bookId: n
 
 	if (isLoading || !engine || !documentData || initialPage === null) {
 		return (
-			<div className='overflow-hidden rounded-lg border border-gray-300 bg-white dark:border-gray-700 dark:bg-gray-900'>
-				<div className='flex h-[400px] items-center justify-center'>
-					<div className='flex items-center gap-2 text-gray-500 dark:text-gray-400'>
-						<span className='text-sm'>Loading PDF Engine...</span>
-					</div>
-				</div>
+			<div className='flex h-[100dvh] items-center justify-center bg-white text-muted-foreground' role='status'>
+				<span className='text-sm'>PDFリーダーを読み込んでいます…</span>
 			</div>
 		);
 	}
 
 	return (
-		<div className='flex h-[100dvh] flex-col bg-background text-foreground'>
-			<header className='flex shrink-0 items-center border-b p-2 sm:p-3'>
-				<Link
-					to='/'
-					className='inline-flex min-h-11 items-center rounded-md px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
-				>
-					本棚に戻る
-				</Link>
-				<span className='min-w-0 flex-1 truncate px-2 text-center text-sm font-medium text-foreground'>{bookTitle || 'PDFリーダー'}</span>
-				<Button type='button' variant='outline' className='min-h-11 shrink-0 px-3 md:hidden' aria-label='操作メニューを開く' onClick={() => setMobileMenuOpen(true)}>メニュー</Button>
-			</header>
-			{restoreError && (
-				<p role='alert' className='text-xs'>
-					保存位置を取得できませんでした。先頭から表示しています。
-				</p>
-			)}
-			<main tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white px-0 outline-none sm:px-4'>
+		<div className='flex h-[100dvh] flex-col bg-white text-foreground'>
+			<div className='min-h-0 flex-1'>
 				<EmbedPDF engine={engine} plugins={plugins}>
 					{({ activeDocumentId }) =>
 						activeDocumentId && (
 							<DocumentContent documentId={activeDocumentId}>
 								{({ isLoaded }) =>
 									isLoaded && (
-										<ReaderWorkspace key={activeDocumentId} bookId={bookId} documentId={activeDocumentId} initialPage={initialPage} pageTurnDirection={pageTurnDirection} mobileMenuOpen={mobileMenuOpen} onMobileMenuChange={setMobileMenuOpen} />
+										<ReaderWorkspace key={activeDocumentId} bookId={bookId} bookTitle={bookTitle} documentId={activeDocumentId} initialPage={initialPage} pageTurnDirection={pageTurnDirection} restoreError={restoreError} mobileMenuOpen={mobileMenuOpen} onMobileMenuChange={setMobileMenuOpen} />
 									)
 								}
 							</DocumentContent>
 						)
 					}
 				</EmbedPDF>
-			</main>
+			</div>
 		</div>
 	);
 }

@@ -126,6 +126,31 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		}
 	});
 
+	test('compact header keeps save and navigation controls while the footer owns position and spread controls', async () => {
+		const { getByRole, getByTestId } = await render(<EpubReader bookId={7} bookTitle='A long EPUB title that should truncate' pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(runtime.rendition.display).toHaveBeenCalled());
+		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));
+		await waitForInitialRestore();
+		const relocatedHandler = renditionHandler<(value: { start: { cfi: string; href?: string; index?: number; displayed?: { page: number; total: number } }; atStart?: boolean }) => void>(runtime, 'relocated');
+		relocatedHandler?.({ start: { cfi: 'epubcfi(/6/2!/4/1:0)', href: 'chapter-1.xhtml', index: 0, displayed: { page: 1, total: 1 } }, atStart: true });
+
+		const header = getByRole('banner');
+		await expect.element(header).toHaveTextContent('読書位置を保存済み');
+		await expect.element(getByRole('button', { name: '目次' })).toBeInTheDocument();
+		await expect.element(getByRole('button', { name: '表示設定' })).toBeInTheDocument();
+		await expect.element(header).not.toHaveTextContent('章内ページ:');
+		const footer = getByTestId('epub-reader-footer');
+		await expect.element(footer).toHaveTextContent('章内ページ: 1 / 1');
+		await expect.element(footer).toHaveTextContent('本文位置: 1 / 4');
+		await expect.element(footer).toHaveTextContent('0%');
+		await expect.element(footer.getByRole('progressbar', { name: 'EPUB読書進捗' })).toBeInTheDocument();
+		await expect.element(getByRole('combobox', { name: 'ページ表示方法' })).toBeInTheDocument();
+
+		await getByRole('button', { name: '表示設定' }).click();
+		await expect.element(getByRole('dialog')).toBeInTheDocument();
+		await expect.element(getByRole('dialog').getByRole('combobox', { name: 'ページ表示方法' })).toBeInTheDocument();
+	});
+
 	test('relocated時にCFIとcompleted状態をReadingInfoへ保存する', async () => {
 		await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.on).toHaveBeenCalledWith('relocated', expect.any(Function)));

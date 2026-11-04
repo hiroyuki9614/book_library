@@ -99,12 +99,24 @@ async function ready(page: Page) {
 	logReady('visible text ready');
 }
 async function progress(page: Page) {
-	const label = await page.locator('label[for="reading-progress"]').innerText();
+	const footer = page.getByTestId('epub-reader-footer');
+	await expect(footer).toBeVisible();
+	const label = await footer.innerText();
 	const screen = label.match(/章内ページ:\s*(\d+)\s*\/\s*(\d+)（第(\d+)節）/);
-	const location = label.match(/本文位置:\s*(\d+)\s*\/\s*(\d+)/);
+	const location = label.match(/本文位置:\s*(\d+)\s*\/\s*(\d+)（約1600文字単位）/);
 	expect(screen, 'screen page must be readable').not.toBeNull();
-	expect(location, 'character location must be readable').not.toBeNull();
-	return { page: Number(screen![1]), section: Number(screen![3]), location: Number(location![1]) };
+	expect(location, 'generated character location must be readable').not.toBeNull();
+	const pageNumber = Number(screen![1]);
+	const screenTotal = Number(screen![2]);
+	const section = Number(screen![3]);
+	const locationNumber = Number(location![1]);
+	const locationTotal = Number(location![2]);
+	expect(pageNumber, 'chapter screen page must be positive').toBeGreaterThan(0);
+	expect(pageNumber, 'chapter screen page must not exceed its section total').toBeLessThanOrEqual(screenTotal);
+	expect(section, 'chapter section must be positive').toBeGreaterThan(0);
+	expect(locationNumber, 'generated character location must be positive').toBeGreaterThan(0);
+	expect(locationNumber, 'generated character location must not exceed its total').toBeLessThanOrEqual(locationTotal);
+	return { page: pageNumber, section, location: locationNumber };
 }
 async function move(page: Page, name = '次のページへ', timeout = 5000) {
 	const before = await cfi(page);
