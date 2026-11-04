@@ -514,6 +514,53 @@ safe_runtime_receipt() {
   printf 'id=%s image=%s project=%s service=%s restart=%s mounts_sha256=%s' \
     "$id" "$image" "$project_label" "$service_label" "$restart" "$mounts_hash"
 }
+safe_mount_diff() {
+  local before_record="$1" after_record="$2"
+  printf '%s\0%s\0' "$before_record" "$after_record" | python3 -c '
+import json
+import sys
+
+try:
+    records = sys.stdin.buffer.read().split(b"\0")
+    if len(records) != 3 or records[-1] != b"":
+        raise ValueError("invalid receipt frame")
+    before, after = (
+        json.loads(record.split(b"|", 5)[5]) for record in records[:2]
+    )
+except (IndexError, json.JSONDecodeError, TypeError, ValueError):
+    print("mount field differences unavailable (invalid Docker mount receipt)")
+    raise SystemExit(0)
+
+differences = []
+docker_mount_fields = {
+    "Type", "Name", "Source", "Destination", "Driver", "Mode", "RW", "Propagation"
+}
+
+def compare(path, left, right):
+    if isinstance(left, dict) and isinstance(right, dict):
+        for key in sorted(left.keys() | right.keys(), key=str):
+            # Only known Docker mount field names are safe to expose in CI output.
+            safe_key = key if key in docker_mount_fields else "<other-field>"
+            child = f"{path}.{safe_key}"
+            if key not in left or key not in right:
+                differences.append(child)
+            else:
+                compare(child, left[key], right[key])
+    elif isinstance(left, list) and isinstance(right, list):
+        if len(left) != len(right):
+            differences.append(f"{path}.count")
+        for index, (old, new) in enumerate(zip(left, right)):
+            compare(f"{path}[{index}]", old, new)
+    elif left != right:
+        differences.append(path)
+
+compare("Mounts", before, after)
+if differences:
+    print("mount field differences: " + ", ".join(differences))
+else:
+    print("mount field differences: none (serialized receipt changed)")
+'
+}
 safe_volume_receipt() {
   local record="$1" name driver created_at project_label logical_name
   IFS='|' read -r name driver created_at project_label logical_name <<<"$record"
@@ -531,6 +578,7 @@ for service in "${services[@]}"; do
     echo "Post-daemon-restart container receipt changed: $service" >&2
     echo "Before: $(safe_runtime_receipt "$before_record")" >&2
     echo "After:  $(safe_runtime_receipt "${runtime_records[$service]}")" >&2
+    echo "$(safe_mount_diff "$before_record" "${runtime_records[$service]}")" >&2
   fi
 done
 for volume in postgres-data book-files; do

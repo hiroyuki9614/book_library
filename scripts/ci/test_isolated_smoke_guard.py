@@ -9,6 +9,7 @@ import os
 import re
 import select
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -242,6 +243,63 @@ esac
         self.assertIn('echo "Observed network receipt: $observed"', source)
         self.assertNotIn('echo "Before: $before_record"', source)
         self.assertNotIn('echo "After:  ${runtime_records[$service]}"', source)
+
+    def test_mount_difference_diagnostic_names_fields_without_values(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        function = re.search(
+            r"(?ms)^safe_mount_diff\(\) \{\n.*?^\}(?=\nsafe_volume_receipt)", source
+        )
+        self.assertIsNotNone(function)
+        harness = "\n".join(
+            (
+                "set -euo pipefail",
+                function.group(0),
+                "safe_mount_diff \"$1\" \"$2\"",
+            )
+        )
+        before = (
+            'a|sha256:img|project|nginx|unless-stopped|'
+            '[{"Type":"bind","Source":"/secret/belib/nginx.conf",'
+            '"Destination":"/etc/nginx/conf.d/default.conf","Mode":"ro","RW":false}]'
+        )
+        after = before.replace("/secret/belib/nginx.conf", "/secret/changed/nginx.conf")
+        python_argv_log = self.root / "python-argv.log"
+        python_wrapper = self.bin_dir / "python3"
+        python_wrapper.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "printf '%s\\n' \"$@\" > \"$FAKE_PYTHON_ARGV_LOG\"\n"
+            "exec \"$REAL_PYTHON\" \"$@\"\n",
+            encoding="utf-8",
+        )
+        python_wrapper.chmod(0o755)
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{self.bin_dir}:{env['PATH']}",
+                "FAKE_PYTHON_ARGV_LOG": str(python_argv_log),
+                "REAL_PYTHON": sys.executable,
+            }
+        )
+        result = subprocess.run(
+            ["bash", "-c", harness, "mount-diff", before, after],
+            cwd=ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Mounts[0].Source", result.stdout)
+        self.assertNotIn("/secret", result.stdout + result.stderr)
+        self.assertNotIn("nginx.conf", result.stdout + result.stderr)
+        python_argv = python_argv_log.read_text(encoding="utf-8")
+        self.assertIn("-c", python_argv)
+        self.assertNotIn(before, python_argv)
+        self.assertNotIn(after, python_argv)
+        self.assertNotIn("/secret", python_argv)
+        self.assertIn('runtime_records[nginx]}" == "$baseline_nginx"', source)
 
     def test_docker_inventory_query_errors_fail_closed(self):
         queries = (
