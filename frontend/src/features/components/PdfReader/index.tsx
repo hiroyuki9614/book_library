@@ -523,7 +523,7 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, pageTurnD
 			<main tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white outline-none'>
 				<PdfViewport documentId={documentId} pageTurnDirection={pageTurnDirection} navigationDisabled={tocOpen || mobileMenuOpen} currentPage={navigation.state.currentPage} totalPages={navigation.state.totalPages} />
 			</main>
-			<footer data-testid='pdf-reader-footer' className='flex shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t bg-white px-2 py-1 sm:px-4'>
+			<footer data-testid='pdf-reader-footer' aria-hidden={mobileMenuOpen ? true : undefined} inert={mobileMenuOpen || undefined} className='flex shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t bg-white px-2 py-1 sm:px-4'>
 				<div className='hidden md:block'><ZoomToolbar documentId={documentId} /></div>
 				<PageNavigation navigation={navigation} />
 			</footer>

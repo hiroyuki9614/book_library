@@ -73,15 +73,40 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	expect((await fileResponse).headers()['content-type']).toContain('application/pdf');
 
 	const mobileControls = (await page.evaluate(() => innerWidth)) < 768;
+	const pdfFooter = page.getByTestId('pdf-reader-footer');
+	const footerPageInput = pdfFooter.getByRole('spinbutton');
+	const pdfFooterProgress = pdfFooter.locator('output[aria-live="polite"]');
+	const operationMenu = page.getByRole('dialog', { name: '操作メニュー' });
+	const menuPageInput = operationMenu.getByRole('spinbutton');
+	const menuProgress = operationMenu.locator('output[aria-live="polite"]');
 	if (mobileControls) {
+		for (const width of [320, 393]) {
+			await page.setViewportSize({ width, height: 851 });
+			await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
+			await expect(operationMenu.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
+			await expect(menuPageInput).toHaveValue('1', { timeout: 30_000 });
+			await expect(menuProgress).toHaveText('1 / 2 ページ 50%');
+			await expect(pdfFooter).toHaveAttribute('aria-hidden', 'true');
+			await expect(pdfFooter).toHaveAttribute('inert');
+			await expect(menuPageInput).toBeEnabled();
+			await expect(operationMenu.getByRole('button', { name: '前のページへ', exact: true })).toBeDisabled();
+			await expect(operationMenu.getByRole('button', { name: '次のページへ', exact: true })).toBeEnabled();
+			await page.getByRole('button', { name: '閉じる', exact: true }).click();
+			await expect(pdfFooter).not.toHaveAttribute('aria-hidden');
+			await expect(pdfFooter).not.toHaveAttribute('inert');
+			await expect(footerPageInput).toHaveValue('1');
+			await expect(pdfFooterProgress).toHaveText('1 / 2 ページ 50%');
+			await expect(pdfFooter.getByRole('button', { name: '前のページへ', exact: true })).toBeDisabled();
+			await expect(pdfFooter.getByRole('button', { name: '次のページへ', exact: true })).toBeEnabled();
+		}
 		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
-		await expect(page.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
+		await expect(operationMenu.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
 	}
-	const pageInput = page.getByRole('spinbutton');
-	const pdfFooterProgress = page.getByTestId('pdf-reader-footer').locator('output[aria-live="polite"]');
-	await expect(pageInput).toHaveValue('1', { timeout: 30_000 });
-	await expect(pdfFooterProgress).toBeVisible();
-	await expect(pdfFooterProgress).toHaveText('1 / 2 ページ 50%');
+	if (!mobileControls) {
+		await expect(footerPageInput).toHaveValue('1', { timeout: 30_000 });
+		await expect(pdfFooterProgress).toBeVisible();
+		await expect(pdfFooterProgress).toHaveText('1 / 2 ページ 50%');
+	}
 	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 30_000 });
 	await page.getByRole('button', { name: '目次' }).click();
 	await expect(page.getByRole('button', { name: 'First chapter' })).toBeVisible();
@@ -110,8 +135,8 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	expect(viewportBounds).not.toBeNull();
 	if (mobileControls) {
 		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
-		await expect(page.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
-		await page.getByRole('button', { name: '次のページへ', exact: true }).click();
+		await expect(operationMenu.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
+		await operationMenu.getByRole('button', { name: '次のページへ', exact: true }).click();
 	} else {
 		// Locator hit testing waits until the closing TOC overlay releases pointer input.
 		// Stay inside the page content rather than the vertical scrollbar gutter;
@@ -119,17 +144,26 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		await viewport.click({ position: { x: viewportBounds!.width * 0.9, y: viewportBounds!.height / 2 } });
 	}
 	if (mobileControls) await page.getByRole('button', { name: '閉じる', exact: true }).click();
-	if (!mobileControls) await expect(pageInput).toHaveValue('2');
 	if (mobileControls) {
 		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
-		await expect(page.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
+		await expect(operationMenu.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
+		await expect(menuPageInput).toHaveValue('2');
+		await expect(menuProgress).toHaveText('2 / 2 ページ 100%');
+		await expect(pdfFooter).toHaveAttribute('aria-hidden', 'true');
+		await expect(pdfFooter).toHaveAttribute('inert');
+	} else {
+		await expect(footerPageInput).toHaveValue('2');
 	}
-	await expect(page.getByRole('spinbutton')).toHaveValue('2');
 	await expect.poll(shown).toBe(2);
 	expect((await page.locator('[data-pdf-page="2"] img').screenshot()).equals(firstImage)).toBe(false);
+	if (mobileControls) await page.getByRole('button', { name: '閉じる', exact: true }).click();
+	await expect(pdfFooter).not.toHaveAttribute('aria-hidden');
+	await expect(pdfFooter).not.toHaveAttribute('inert');
+	await expect(footerPageInput).toHaveValue('2');
 	await expect(pdfFooterProgress).toBeVisible();
 	await expect(pdfFooterProgress).toHaveText('2 / 2 ページ 100%');
-	if (mobileControls) await page.getByRole('button', { name: '閉じる', exact: true }).click();
+	await expect(pdfFooter.getByRole('button', { name: '前のページへ', exact: true })).toBeEnabled();
+	await expect(pdfFooter.getByRole('button', { name: '次のページへ', exact: true })).toBeDisabled();
 	const savedResponse = await saveResponse;
 	expect(savedResponse.request().postDataJSON()).toEqual({ currentPage: 2, readStatus: 'completed' });
 	expect(savedResponse.status()).toBe(200);
@@ -203,7 +237,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	if ((await page.evaluate(() => innerWidth)) < 768) {
 		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
 	}
-	await expect(page.getByRole('spinbutton')).toHaveValue('2', { timeout: 30_000 });
+	await expect(footerPageInput).toHaveValue('2', { timeout: 30_000 });
 	await expect.poll(shown).toBe(2);
 	await expect(page.locator('[data-pdf-page="2"] img')).toBeVisible();
 });
