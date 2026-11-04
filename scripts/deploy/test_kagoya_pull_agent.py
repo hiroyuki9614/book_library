@@ -31,6 +31,7 @@ from kagoya_pull_agent import (
     _PublicDemoCandidate,
     _PublicDemoIdentity,
     _PublicDemoValidationSession,
+    PUBLIC_DEMO_SHELF_PATH,
     PUBLIC_DEMO_VALIDATION_ORIGIN,
     PUBLIC_DEMO_VALIDATION_TIMEOUT,
     _load_public_demo_credentials,
@@ -62,6 +63,7 @@ NEW_ID = "sha256:" + "a" * 64
 DEPLOYED_ID = "sha256:" + "c" * 64
 SYNTHETIC_DEMO_EMAIL = "synthetic.demo@example.invalid"
 SYNTHETIC_DEMO_PASSWORD = "synthetic-only-public-password"
+SYNTHETIC_DEMO_SHELF_IDS = (4, 5)
 
 
 class FakeDocker:
@@ -627,7 +629,6 @@ class PublicDemoValidationTests(unittest.TestCase):
     candidate = _PublicDemoCandidate(
         SYNTHETIC_DEMO_EMAIL,
         SYNTHETIC_DEMO_PASSWORD,
-        42,
     )
 
     class FakeSession:
@@ -658,23 +659,28 @@ class PublicDemoValidationTests(unittest.TestCase):
             self.response(200, {}),
             self.response(200, identity),
             self.response(403, {"message": "Administrator role required", "code": "FORBIDDEN"}),
-            self.response(
-                403,
-                {"message": "You do not have permission to view this book", "code": "FORBIDDEN"},
-            ),
+            self.response(200, {
+                "total": 2,
+                "page": 1,
+                "limit": 100,
+                "books": [{"id": 4}, {"id": 5}],
+            }),
         ]
 
-    def test_valid_candidate_is_bound_to_me_and_both_real_denials(self):
+    def test_valid_candidate_is_bound_to_me_admin_denial_and_exact_public_shelf(self):
         fake = self.FakeSession(self.valid_responses())
         with patch("kagoya_pull_agent._PublicDemoValidationSession", return_value=fake):
             identity = _validate_public_demo_candidate(self.candidate)
 
-        self.assertEqual(identity, _PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user"))
+        self.assertEqual(
+            identity,
+            _PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user", SYNTHETIC_DEMO_SHELF_IDS),
+        )
         self.assertEqual([request[0:2] for request in fake.requests], [
             ("POST", "/api/auth/sign-in/email"),
             ("GET", "/api/v1/me"),
             ("GET", "/api/v1/admin/books"),
-            ("GET", "/api/v1/books/42"),
+            ("GET", PUBLIC_DEMO_SHELF_PATH),
         ])
         self.assertEqual(
             json.loads(fake.requests[0][2].decode("utf-8")),
@@ -690,11 +696,73 @@ class PublicDemoValidationTests(unittest.TestCase):
             ("different email", self.valid_responses(email="other@example.invalid")),
             ("nonpositive id", self.valid_responses(user_id=0)),
             ("sign-in 401", [self.response(401, {"password": SYNTHETIC_DEMO_PASSWORD})]),
-            ("private 404", self.valid_responses()[:3] + [self.response(404, {})]),
-            ("private 200", self.valid_responses()[:3] + [self.response(200, {"title": "private"})]),
+            (
+                "shelf additional book",
+                self.valid_responses()[:3] + [self.response(200, {
+                    "total": 2, "page": 1, "limit": 100,
+                    "books": [{"id": 4}, {"id": 5}, {"id": 6}],
+                })],
+            ),
+            (
+                "shelf one book",
+                self.valid_responses()[:3] + [self.response(200, {
+                    "total": 2, "page": 1, "limit": 100, "books": [{"id": 4}],
+                })],
+            ),
+            (
+                "shelf empty",
+                self.valid_responses()[:3] + [self.response(200, {
+                    "total": 2, "page": 1, "limit": 100, "books": [],
+                })],
+            ),
+            (
+                "shelf total mismatch",
+                self.valid_responses()[:3] + [self.response(200, {
+                    "total": 3, "page": 1, "limit": 100,
+                    "books": [{"id": 4}, {"id": 5}],
+                })],
+            ),
+            (
+                "shelf duplicate",
+                self.valid_responses()[:3] + [self.response(200, {
+                    "total": 2, "page": 1, "limit": 100,
+                    "books": [{"id": 4}, {"id": 4}],
+                })],
+            ),
+            (
+                "shelf over limit",
+                self.valid_responses()[:3] + [self.response(200, {
+                    "total": 2, "page": 1, "limit": 101,
+                    "books": [{"id": 4}, {"id": 5}],
+                })],
+            ),
+            (
+                "shelf ambiguous page",
+                self.valid_responses()[:3] + [self.response(200, {
+                    "total": 2, "page": 2, "limit": 100,
+                    "books": [{"id": 4}, {"id": 5}],
+                })],
+            ),
+            ("shelf 401", self.valid_responses()[:3] + [self.response(401, {})]),
+            ("shelf 403", self.valid_responses()[:3] + [self.response(403, {})]),
+            ("shelf 500", self.valid_responses()[:3] + [self.response(500, {})]),
+            ("shelf invalid JSON", self.valid_responses()[:3] + [self.response(200, b"{")]),
+            (
+                "shelf oversize",
+                self.valid_responses()[:3]
+                + [self.response(200, b"x" * (64 * 1024 + 1))],
+            ),
             (
                 "fake admin 403",
                 [*self.valid_responses()[:2], self.response(403, {"code": "FORBIDDEN"}), self.response(403, {})],
+            ),
+            (
+                "admin 200",
+                [*self.valid_responses()[:2], self.response(200, {}), self.response(200, {})],
+            ),
+            (
+                "admin 401",
+                [*self.valid_responses()[:2], self.response(401, {}), self.response(200, {})],
             ),
             ("redirect", [self.response(302, {"location": "http://127.0.0.1:9"})]),
             ("timeout", [TimeoutError("synthetic timeout")]),
@@ -849,7 +917,9 @@ class PullAgentDeploymentTests(unittest.TestCase):
             patch("kagoya_pull_agent._run", side_effect=self.docker.run),
             patch(
                 "kagoya_pull_agent._validate_public_demo_candidate",
-                return_value=_PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user"),
+                return_value=_PublicDemoIdentity(
+                    7, SYNTHETIC_DEMO_EMAIL, "user", SYNTHETIC_DEMO_SHELF_IDS
+                ),
             ),
         ):
             return deploy_frontend(
@@ -867,7 +937,6 @@ class PullAgentDeploymentTests(unittest.TestCase):
             "approval_ref": "synthetic-owner-approval",
             "email": SYNTHETIC_DEMO_EMAIL,
             "password": SYNTHETIC_DEMO_PASSWORD,
-            "private_book_id": 42,
         }
         payload.update(overrides)
         return payload
@@ -1087,7 +1156,9 @@ class PullAgentDeploymentTests(unittest.TestCase):
             patch("kagoya_pull_agent._run", side_effect=self.docker.run),
             patch(
                 "kagoya_pull_agent._validate_public_demo_candidate",
-                return_value=_PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user"),
+                return_value=_PublicDemoIdentity(
+                    7, SYNTHETIC_DEMO_EMAIL, "user", SYNTHETIC_DEMO_SHELF_IDS
+                ),
             ),
             patch("kagoya_pull_agent.smoke_test"),
         ):
@@ -1157,8 +1228,32 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.write_public_demo_sidecar()
         identities = iter(
             [
-                _PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user"),
-                _PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "admin"),
+                _PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user", SYNTHETIC_DEMO_SHELF_IDS),
+                _PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "admin", SYNTHETIC_DEMO_SHELF_IDS),
+            ]
+        )
+        with (
+            patch("kagoya_pull_agent._checkout", return_value=self.checkout),
+            patch("kagoya_pull_agent._run", side_effect=self.docker.run),
+            patch("kagoya_pull_agent._validate_public_demo_candidate", side_effect=lambda _candidate: next(identities)),
+        ):
+            with self.assertRaisesRegex(DeployError, "identity changed"):
+                deploy_frontend(
+                    self.config,
+                    SOURCE_SHA,
+                    smoke=lambda _base_url: None,
+                    main_sha_reader=lambda _config: SOURCE_SHA,
+                )
+
+        self.assertTrue(any("build" in argv for argv, _env in self.docker.commands))
+        self.assertFalse(any("up" in argv for argv, _env in self.docker.commands))
+
+    def test_public_shelf_change_after_build_blocks_public_switch(self):
+        self.write_public_demo_sidecar()
+        identities = iter(
+            [
+                _PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user", SYNTHETIC_DEMO_SHELF_IDS),
+                _PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user", (4, 6)),
             ]
         )
         with (
@@ -1301,7 +1396,9 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 patch("kagoya_pull_agent._run", side_effect=self.docker.run),
                 patch(
                     "kagoya_pull_agent._validate_public_demo_candidate",
-                    return_value=_PublicDemoIdentity(7, SYNTHETIC_DEMO_EMAIL, "user"),
+                    return_value=_PublicDemoIdentity(
+                        7, SYNTHETIC_DEMO_EMAIL, "user", SYNTHETIC_DEMO_SHELF_IDS
+                    ),
                 ),
                 patch("kagoya_pull_agent.smoke_test"),
             ):
@@ -1389,7 +1486,12 @@ class PullAgentDeploymentTests(unittest.TestCase):
             patch("kagoya_pull_agent._run", side_effect=self.docker.run),
             patch(
                 "kagoya_pull_agent._validate_public_demo_candidate",
-                return_value=_PublicDemoIdentity(7, "rotated.synthetic.demo@example.invalid", "user"),
+                return_value=_PublicDemoIdentity(
+                    7,
+                    "rotated.synthetic.demo@example.invalid",
+                    "user",
+                    SYNTHETIC_DEMO_SHELF_IDS,
+                ),
             ),
             patch("kagoya_pull_agent.smoke_test"),
         ):
@@ -1473,6 +1575,14 @@ class PullAgentDeploymentTests(unittest.TestCase):
         }
         legacy_claims_path = self.write_public_demo_sidecar(legacy_claims_payload, name="legacy-claims.json")
         cases.append(("legacy owner claims", legacy_claims_path, os.getuid()))
+
+        legacy_private_book_payload = self.public_demo_sidecar()
+        legacy_private_book_payload["private_book_id"] = 42
+        legacy_private_book_path = self.write_public_demo_sidecar(
+            legacy_private_book_payload,
+            name="legacy-private-book-schema.json",
+        )
+        cases.append(("legacy private-book schema", legacy_private_book_path, os.getuid()))
 
         partial_payload = self.public_demo_sidecar()
         partial_payload.pop("password")

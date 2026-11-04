@@ -46,6 +46,8 @@ PUBLIC_DEMO_SIDECAR_MAX_BYTES = 16 * 1024
 PUBLIC_DEMO_VALIDATION_ORIGIN = "https://belib.hiroyuki9614.com"
 PUBLIC_DEMO_VALIDATION_TIMEOUT = 15
 PUBLIC_DEMO_VALIDATION_RESPONSE_MAX_BYTES = 64 * 1024
+PUBLIC_DEMO_SHELF_PATH = "/api/v1/books?limit=100"
+PUBLIC_DEMO_EXPECTED_SHELF_IDS = frozenset({4, 5})
 PUBLIC_DEMO_SIDECAR_MARKER_VERSION = 1
 PUBLIC_DEMO_SIDECAR_MARKER_KEYS = {
     "version",
@@ -70,7 +72,6 @@ PUBLIC_DEMO_SIDECAR_KEYS = {
     "approval_ref",
     "email",
     "password",
-    "private_book_id",
 }
 _MISSING = object()
 
@@ -83,7 +84,6 @@ class DeployError(RuntimeError):
 class _PublicDemoCandidate:
     email: str
     password: str
-    private_book_id: int
 
     @property
     def pair(self) -> tuple[str, str]:
@@ -95,6 +95,7 @@ class _PublicDemoIdentity:
     id: int
     email: str
     role: str
+    shelf_ids: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -385,12 +386,8 @@ def _load_public_demo_source(config: dict) -> _PublicDemoSource:
     ):
         _reject_public_demo_sidecar()
 
-    private_book_id = sidecar["private_book_id"]
-    if type(private_book_id) is not int or private_book_id < 1 or private_book_id > (2**53 - 1):
-        _reject_public_demo_sidecar()
-
     return _PublicDemoSource(
-        _PublicDemoCandidate(sidecar["email"], sidecar["password"], private_book_id),
+        _PublicDemoCandidate(sidecar["email"], sidecar["password"]),
         after_marker,
     )
 
@@ -622,7 +619,12 @@ class _PublicDemoValidationSession:
         body: bytes | None = None,
         retain_statuses: set[int] | None = None,
     ) -> tuple[int, bytes]:
-        if not path.startswith("/") or "//" in path or "?" in path or "#" in path:
+        if (
+            not path.startswith("/")
+            or "//" in path
+            or "#" in path
+            or ("?" in path and path != PUBLIC_DEMO_SHELF_PATH)
+        ):
             raise DeployError("The public demo authorization path is invalid")
         request = Request(
             f"{PUBLIC_DEMO_VALIDATION_ORIGIN}{path}",
@@ -651,6 +653,8 @@ class _PublicDemoValidationSession:
 
 
 def _public_demo_json(body: bytes) -> dict:
+    if not isinstance(body, (bytes, bytearray)) or len(body) > PUBLIC_DEMO_VALIDATION_RESPONSE_MAX_BYTES:
+        raise DeployError("The public demo authorization response was too large")
     try:
         value = json.loads(body.decode("utf-8"))
     except (UnicodeError, TypeError, ValueError, json.JSONDecodeError):
@@ -660,8 +664,40 @@ def _public_demo_json(body: bytes) -> dict:
     return value
 
 
+def _public_demo_shelf_ids(body: bytes) -> tuple[int, ...]:
+    shelf = _public_demo_json(body)
+    total = shelf.get("total")
+    page = shelf.get("page")
+    limit = shelf.get("limit")
+    books = shelf.get("books")
+    if (
+        type(total) is not int
+        or total != len(PUBLIC_DEMO_EXPECTED_SHELF_IDS)
+        or type(page) is not int
+        or page != 1
+        or type(limit) is not int
+        or limit != 100
+        or not isinstance(books, list)
+        or len(books) > limit
+    ):
+        raise DeployError("The public demo shelf check failed")
+
+    shelf_ids: list[int] = []
+    for book in books:
+        if not isinstance(book, dict) or type(book.get("id")) is not int or book["id"] < 1:
+            raise DeployError("The public demo shelf check failed")
+        shelf_ids.append(book["id"])
+    if (
+        len(shelf_ids) != len(PUBLIC_DEMO_EXPECTED_SHELF_IDS)
+        or len(set(shelf_ids)) != len(shelf_ids)
+        or set(shelf_ids) != PUBLIC_DEMO_EXPECTED_SHELF_IDS
+    ):
+        raise DeployError("The public demo shelf check failed")
+    return tuple(sorted(shelf_ids))
+
+
 def _validate_public_demo_candidate(candidate: _PublicDemoCandidate) -> _PublicDemoIdentity:
-    """Prove the candidate's identity and denials through one fresh cookie session."""
+    """Prove the candidate identity, admin denial, and exact public shelf in one fresh session."""
     session = _PublicDemoValidationSession()
     sign_in_status, _ = session.request(
         "POST",
@@ -689,8 +725,6 @@ def _validate_public_demo_candidate(candidate: _PublicDemoCandidate) -> _PublicD
         or identity_role != "user"
     ):
         raise DeployError("The public demo identity is not the approved general account")
-    identity = _PublicDemoIdentity(identity_id, identity_email, identity_role)
-
     admin_status, admin_body = session.request(
         "GET", "/api/v1/admin/books", retain_statuses={403}
     )
@@ -700,17 +734,11 @@ def _validate_public_demo_candidate(candidate: _PublicDemoCandidate) -> _PublicD
     }:
         raise DeployError("The public demo Admin API denial check failed")
 
-    private_status, private_body = session.request(
-        "GET",
-        f"/api/v1/books/{candidate.private_book_id}",
-        retain_statuses={403},
-    )
-    if private_status != 403 or _public_demo_json(private_body) != {
-        "message": "You do not have permission to view this book",
-        "code": "FORBIDDEN",
-    }:
-        raise DeployError("The public demo private-book denial check failed")
-    return identity
+    shelf_status, shelf_body = session.request("GET", PUBLIC_DEMO_SHELF_PATH)
+    if shelf_status != 200:
+        raise DeployError("The public demo shelf check failed")
+    shelf_ids = _public_demo_shelf_ids(shelf_body)
+    return _PublicDemoIdentity(identity_id, identity_email, identity_role, shelf_ids)
 
 
 def smoke_test(base_url: str) -> None:
