@@ -8,7 +8,6 @@ import argparse
 import json
 import re
 import sys
-from pathlib import Path
 
 PROJECT = "belib-production"
 NETWORK = "belib-production_default"
@@ -59,8 +58,11 @@ def assess(snapshot, expected_head):
     ):
         require(_is_bool(runtime.get(key)), f"{reason}_UNKNOWN")
     require(runtime.get("rootless") is True, "ROOTLESS_UNVERIFIED")
+    storage_driver = runtime.get("storage_driver")
+    require(isinstance(storage_driver, str) and storage_driver in {"local", "r2"}, "STORAGE_DRIVER_INVALID")
     require(
-        runtime.get("error_class") in {
+        isinstance(runtime.get("error_class"), str)
+        and runtime.get("error_class") in {
             "none", "duplicate_container_id", "docker_task_runc_mismatch", "namespace_error"
         },
         "RUNTIME_ERROR_CLASS_INVALID",
@@ -94,12 +96,26 @@ def assess(snapshot, expected_head):
         )
         if isinstance(container_id, str) and CONTAINER_ID.fullmatch(container_id):
             ids.append(container_id)
-        states = [item.get(key) for key in ("docker_state", "task_state", "runc_state")]
-        allowed_states = {"running", "exited", "created", "paused", "restarting", "dead", "removing", "unknown"}
-        for key, state in zip(("docker_state", "task_state", "runc_state"), states):
-            require(isinstance(state, str) and state in allowed_states, f"SERVICE_{name.upper()}_{key.upper()}_INVALID")
-        require(states[0] == states[1] == states[2] and states[0] != "unknown", "OCI_STATE_MISMATCH")
-        require(item.get("docker_state") == "running", f"SERVICE_{name.upper()}_NOT_RUNNING")
+        docker_state = item.get("docker_state")
+        task_state = item.get("task_state")
+        runc_state = item.get("runc_state")
+        require(docker_state in {"running", "exited"} if isinstance(docker_state, str) else False,
+                f"SERVICE_{name.upper()}_DOCKER_STATE_INVALID")
+        require(task_state in {"running", "stopped", "absent"} if isinstance(task_state, str) else False,
+                f"SERVICE_{name.upper()}_TASK_STATE_INVALID")
+        require(runc_state in {"running", "stopped", "absent"} if isinstance(runc_state, str) else False,
+                f"SERVICE_{name.upper()}_RUNC_STATE_INVALID")
+        states_agree = (
+            docker_state == task_state == runc_state == "running"
+            or (docker_state == "exited" and task_state in {"stopped", "absent"}
+                and runc_state in {"stopped", "absent"})
+        )
+        require(states_agree, "OCI_STATE_MISMATCH")
+        require(docker_state == "running", f"SERVICE_{name.upper()}_NOT_RUNNING")
+        for plane in ("task", "runc"):
+            runtime_id = item.get(f"{plane}_container_id")
+            expected_runtime_id = container_id if states_agree and docker_state == "running" else None
+            require(runtime_id == expected_runtime_id, f"SERVICE_{name.upper()}_RUNTIME_ID_MISMATCH")
         require(
             isinstance(item.get("health"), str)
             and item.get("health") in {"healthy", "unhealthy", "starting", "not_configured", "none"},
@@ -116,7 +132,10 @@ def assess(snapshot, expected_head):
         )
         require(expected_image_id == observed_image_id, f"SERVICE_{name.upper()}_IMAGE_ID_MISMATCH")
         require(item.get("networks") == [NETWORK], f"SERVICE_{name.upper()}_NETWORK_MISMATCH")
-        expected_volumes = [DB_VOLUME] if name == "db" else ([BOOK_VOLUME] if name == "backend" else [])
+        expected_volumes = (
+            [DB_VOLUME] if name == "db" else
+            ([BOOK_VOLUME] if name == "backend" and storage_driver == "local" else [])
+        )
         require(item.get("volumes") == expected_volumes, f"SERVICE_{name.upper()}_VOLUME_MISMATCH")
     require(len(ids) == len(set(ids)), "DUPLICATE_CONTAINER_ID")
 
@@ -155,7 +174,7 @@ def assess(snapshot, expected_head):
         and set(runtime)
         == {
             "rootless", "shared_inventory_complete", "namespace_error",
-            "other_project_impact", "old_db_process_access", "error_class",
+            "other_project_impact", "old_db_process_access", "error_class", "storage_driver",
         },
         "RUNTIME_FIELDS_INVALID",
     )
@@ -171,6 +190,7 @@ def assess(snapshot, expected_head):
             and set(item)
             == {
                 "project", "service", "container_id", "docker_state", "task_state", "runc_state",
+                "task_container_id", "runc_container_id",
                 "health", "restart", "expected_image_id", "observed_image_id", "networks", "volumes",
             },
             f"SERVICE_{name.upper()}_FIELDS_INVALID",
@@ -179,10 +199,10 @@ def assess(snapshot, expected_head):
     shared_issue = any(
         reason in {
             "ROOTLESS_UNVERIFIED", "OCI_STATE_MISMATCH", "SHARED_INVENTORY_INCOMPLETE",
-            "NAMESPACE_ERROR", "OTHER_PROJECT_IMPACT", "OLD_DB_PROCESS_ACCESS_UNKNOWN",
+            "NAMESPACE_ERROR", "OTHER_PROJECT_IMPACT", "OLD_DB_PROCESS_ACCESS_UNKNOWN", "STORAGE_DRIVER_INVALID",
             "DUPLICATE_CONTAINER_ID", "RUNTIME_ERROR_REPORTED", "OCI_STATE_MISMATCH",
         }
-        or reason.endswith(("_PROJECT_MISMATCH", "_IDENTITY_MISMATCH", "_NETWORK_MISMATCH", "_VOLUME_MISMATCH", "_RESTART_MISMATCH", "_IMAGE_ID_INVALID", "_IMAGE_ID_MISMATCH", "_NAME_MISMATCH", "_MISSING"))
+        or reason.endswith(("_PROJECT_MISMATCH", "_IDENTITY_MISMATCH", "_NETWORK_MISMATCH", "_VOLUME_MISMATCH", "_RESTART_MISMATCH", "_IMAGE_ID_INVALID", "_IMAGE_ID_MISMATCH", "_NAME_MISMATCH", "_MISSING", "_RUNTIME_ID_MISMATCH"))
         for reason in issues
     )
     invalid_input = any(
@@ -227,17 +247,18 @@ class _SafeArgumentParser(argparse.ArgumentParser):
         raise ValueError("invalid arguments") from None
 
 
-def main(argv=None):
+def main(argv=None, *, stdin=None):
     parser = _SafeArgumentParser(description=__doc__)
-    parser.add_argument("--evidence", required=True, type=Path, help="Sanitized JSON snapshot")
     parser.add_argument("--expected-head", required=True, help="40-character reviewed source commit")
     try:
         args = parser.parse_args(argv)
-        if args.evidence.is_symlink() or not args.evidence.is_file():
+        source = stdin if stdin is not None else sys.stdin.buffer
+        raw = source.read(64 * 1024 + 1)
+        if len(raw) > 64 * 1024:
             raise ValueError
-        if args.evidence.stat().st_size > 64 * 1024:
-            raise ValueError
-        snapshot = json.loads(args.evidence.read_text(encoding="utf-8"))
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        snapshot = json.loads(raw.decode("utf-8"))
         report = assess(snapshot, args.expected_head)
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         report = {
