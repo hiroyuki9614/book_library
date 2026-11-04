@@ -519,16 +519,49 @@ safe_mount_diff() {
   printf '%s\0%s\0' "$before_record" "$after_record" | python3 -c '
 import json
 import sys
+from collections import Counter
+
+def reject_non_json_constant(value):
+    raise ValueError("invalid JSON constant")
+
+def reject_json_number(value):
+    raise ValueError("numeric JSON value is not valid in a Docker mount receipt")
+
+def reject_duplicate_object_properties(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object property")
+        result[key] = value
+    return result
 
 try:
     records = sys.stdin.buffer.read().split(b"\0")
     if len(records) != 3 or records[-1] != b"":
         raise ValueError("invalid receipt frame")
     before, after = (
-        json.loads(record.split(b"|", 5)[5]) for record in records[:2]
+        json.loads(
+            record.split(b"|", 5)[5],
+            parse_constant=reject_non_json_constant,
+            parse_int=reject_json_number,
+            parse_float=reject_json_number,
+            object_pairs_hook=reject_duplicate_object_properties,
+        )
+        for record in records[:2]
+    )
+    if not isinstance(before, list) or not isinstance(after, list):
+        raise ValueError("mount receipt is not an array")
+    if not all(isinstance(mount, dict) for mount in before + after):
+        raise ValueError("mount receipt contains a non-object entry")
+    canonical = lambda mounts: Counter(
+        json.dumps(mount, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        for mount in mounts
     )
 except (IndexError, json.JSONDecodeError, TypeError, ValueError):
     print("mount field differences unavailable (invalid Docker mount receipt)")
+    raise SystemExit(1)
+
+if canonical(before) == canonical(after):
     raise SystemExit(0)
 
 differences = []
@@ -558,8 +591,18 @@ compare("Mounts", before, after)
 if differences:
     print("mount field differences: " + ", ".join(differences))
 else:
-    print("mount field differences: none (serialized receipt changed)")
+    print("mount field differences: entries changed")
+raise SystemExit(1)
 '
+}
+same_runtime_identity() {
+  local before_record="$1" after_record="$2"
+  local before_id before_image before_project before_service before_restart before_mounts
+  local after_id after_image after_project after_service after_restart after_mounts
+  IFS='|' read -r before_id before_image before_project before_service before_restart before_mounts <<<"$before_record"
+  IFS='|' read -r after_id after_image after_project after_service after_restart after_mounts <<<"$after_record"
+  [[ "$before_id|$before_image|$before_project|$before_service|$before_restart" == \
+    "$after_id|$after_image|$after_project|$after_service|$after_restart" ]]
 }
 safe_volume_receipt() {
   local record="$1" name driver created_at project_label logical_name
@@ -567,6 +610,7 @@ safe_volume_receipt() {
   printf 'name=%s driver=%s created_at=%s project=%s logical_name=%s' \
     "$name" "$driver" "$created_at" "$project_label" "$logical_name"
 }
+runtime_identity_changed=false
 for service in "${services[@]}"; do
   case "$service" in
     db) before_record="$baseline_db" ;;
@@ -574,11 +618,14 @@ for service in "${services[@]}"; do
     frontend) before_record="$baseline_frontend" ;;
     nginx) before_record="$baseline_nginx" ;;
   esac
-  if [[ "${runtime_records[$service]}" != "$before_record" ]]; then
+  mount_diff=""
+  if ! same_runtime_identity "$before_record" "${runtime_records[$service]}" \
+    || ! mount_diff="$(safe_mount_diff "$before_record" "${runtime_records[$service]}")"; then
+    runtime_identity_changed=true
     echo "Post-daemon-restart container receipt changed: $service" >&2
     echo "Before: $(safe_runtime_receipt "$before_record")" >&2
     echo "After:  $(safe_runtime_receipt "${runtime_records[$service]}")" >&2
-    echo "$(safe_mount_diff "$before_record" "${runtime_records[$service]}")" >&2
+    [[ -z "$mount_diff" ]] || echo "$mount_diff" >&2
   fi
 done
 for volume in postgres-data book-files; do
@@ -592,8 +639,7 @@ for volume in postgres-data book-files; do
     echo "After:  $(safe_volume_receipt "${volume_records[$volume]}")" >&2
   fi
 done
-[[ "${runtime_records[db]}" == "$baseline_db" && "${runtime_records[backend]}" == "$baseline_backend" \
-  && "${runtime_records[frontend]}" == "$baseline_frontend" && "${runtime_records[nginx]}" == "$baseline_nginx" \
+[[ "$runtime_identity_changed" == false \
   && "${volume_records[postgres-data]}" == "$baseline_postgres_volume" \
   && "${volume_records[book-files]}" == "$baseline_books_volume" ]] || {
   echo "Container, image, or named volume identity changed after daemon restart" >&2

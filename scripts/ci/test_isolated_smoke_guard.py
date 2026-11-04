@@ -5,6 +5,7 @@ systemctl, a daemon socket, or a real service.
 """
 
 import ast
+import json
 import os
 import re
 import select
@@ -247,7 +248,7 @@ esac
     def test_mount_difference_diagnostic_names_fields_without_values(self):
         source = SCRIPT.read_text(encoding="utf-8")
         function = re.search(
-            r"(?ms)^safe_mount_diff\(\) \{\n.*?^\}(?=\nsafe_volume_receipt)", source
+            r"(?ms)^safe_mount_diff\(\) \{\n.*?^\}(?=\nsame_runtime_identity)", source
         )
         self.assertIsNotNone(function)
         harness = "\n".join(
@@ -257,12 +258,19 @@ esac
                 "safe_mount_diff \"$1\" \"$2\"",
             )
         )
-        before = (
-            'a|sha256:img|project|nginx|unless-stopped|'
+        before_mounts = (
             '[{"Type":"bind","Source":"/secret/belib/nginx.conf",'
-            '"Destination":"/etc/nginx/conf.d/default.conf","Mode":"ro","RW":false}]'
+            '"Destination":"/etc/nginx/conf.d/default.conf","Mode":"ro","RW":false},'
+            '{"Type":"volume","Name":"books","Source":"/var/lib/books",'
+            '"Destination":"/books","Mode":"rw","RW":true}]'
         )
-        after = before.replace("/secret/belib/nginx.conf", "/secret/changed/nginx.conf")
+        reordered_mounts = (
+            '[{"Type":"volume","Name":"books","Source":"/var/lib/books",'
+            '"Destination":"/books","Mode":"rw","RW":true},'
+            '{"RW":false,"Mode":"ro","Destination":"/etc/nginx/conf.d/default.conf",'
+            '"Source":"/secret/belib/nginx.conf","Type":"bind"}]'
+        )
+        before = f"a|sha256:img|project|nginx|unless-stopped|{before_mounts}"
         python_argv_log = self.root / "python-argv.log"
         python_wrapper = self.bin_dir / "python3"
         python_wrapper.write_text(
@@ -281,25 +289,105 @@ esac
                 "REAL_PYTHON": sys.executable,
             }
         )
-        result = subprocess.run(
-            ["bash", "-c", harness, "mount-diff", before, after],
-            cwd=ROOT,
-            env=env,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        def compare_pair(before_mounts, after_mounts):
+            before_record = f"a|sha256:img|project|nginx|unless-stopped|{before_mounts}"
+            after_record = f"a|sha256:img|project|nginx|unless-stopped|{after_mounts}"
+            return subprocess.run(
+                ["bash", "-c", harness, "mount-diff", before_record, after_record],
+                cwd=ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+        def compare(after_mounts):
+            return compare_pair(before_mounts, after_mounts)
+
+        result = compare(reordered_mounts)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Mounts[0].Source", result.stdout)
-        self.assertNotIn("/secret", result.stdout + result.stderr)
-        self.assertNotIn("nginx.conf", result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+
+        mounts = json.loads(before_mounts)
+        for field, changed_value in (
+            ("Source", "/secret/changed/nginx.conf"),
+            ("Destination", "/etc/nginx/changed.conf"),
+            ("Type", "volume"),
+            ("Mode", "rw"),
+            ("RW", True),
+        ):
+            with self.subTest(field=field):
+                changed_mounts = json.loads(before_mounts)
+                changed_mounts[0][field] = changed_value
+                result = compare(json.dumps(changed_mounts))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"Mounts[0].{field}", result.stdout)
+                self.assertNotIn("/secret", result.stdout + result.stderr)
+                self.assertNotIn("nginx.conf", result.stdout + result.stderr)
+
+        result = compare(json.dumps(mounts[:1]))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Mounts.count", result.stdout)
+        result = compare(json.dumps(mounts + [mounts[0]]))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Mounts.count", result.stdout)
+        for malformed_mounts in ('[{"Type":"bind"', '[{"Type":NaN}]'):
+            with self.subTest(malformed_mounts=malformed_mounts):
+                result = compare(malformed_mounts)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid Docker mount receipt", result.stdout)
+
+        numeric_mounts = (
+            '[{"Type":"bind","x-private-marker":1e999}]',
+            '[{"Type":"bind","x-private-marker":9e999}]',
+            '[{"Type":"bind","x-private-marker":3.141592653589793}]',
+            '[{"Type":"bind","x-private-marker":314159265358979323846}]',
+        )
+        for malformed_mounts in numeric_mounts:
+            with self.subTest(malformed_mounts=malformed_mounts):
+                result = compare(malformed_mounts)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(
+                    result.stdout,
+                    "mount field differences unavailable (invalid Docker mount receipt)\n",
+                )
+                self.assertEqual(result.stderr, "")
+                self.assertNotIn("x-private-marker", result.stdout + result.stderr)
+                for numeric_value in ("1e999", "9e999", "3.141592653589793", "314159265358979323846"):
+                    self.assertNotIn(numeric_value, result.stdout + result.stderr)
+
+        duplicate_property_cases = (
+            (
+                '[{"Source":"/secret/old-source"}]',
+                '[{"Source":"/secret/new-source","Source":"/secret/old-source"}]',
+                ("/secret/new-source", "/secret/old-source"),
+            ),
+            (
+                '[{"Type":"bind","x-private-marker":"old-value"}]',
+                '[{"Type":"bind","x-private-marker":"new-value",'
+                '"x-private-marker":"old-value"}]',
+                ("x-private-marker", "new-value", "old-value"),
+            ),
+        )
+        for before_receipt, after_receipt, private_values in duplicate_property_cases:
+            with self.subTest(after_receipt=after_receipt):
+                result = compare_pair(before_receipt, after_receipt)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(
+                    result.stdout,
+                    "mount field differences unavailable (invalid Docker mount receipt)\n",
+                )
+                self.assertEqual(result.stderr, "")
+                for private_value in private_values:
+                    self.assertNotIn(private_value, result.stdout + result.stderr)
         python_argv = python_argv_log.read_text(encoding="utf-8")
         self.assertIn("-c", python_argv)
         self.assertNotIn(before, python_argv)
-        self.assertNotIn(after, python_argv)
+        self.assertNotIn(reordered_mounts, python_argv)
         self.assertNotIn("/secret", python_argv)
-        self.assertIn('runtime_records[nginx]}" == "$baseline_nginx"', source)
+        self.assertIn("runtime_identity_changed=false", source)
+        self.assertIn('[[ "$runtime_identity_changed" == false \\', source)
 
     def test_docker_inventory_query_errors_fail_closed(self):
         queries = (
