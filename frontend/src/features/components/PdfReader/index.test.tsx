@@ -129,6 +129,17 @@ describe('PdfReader navigation, outline, and progress', () => {
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 	});
 
+	test('places title, save state, outline and display settings in the header with reading controls below the page', async () => {
+		const { getByRole, getByTestId } = await render(<PdfReader bookId={7} bookTitle='A long PDF title' pageTurnDirection='ltr' />);
+
+		const header = getByRole('banner');
+		await expect.element(header).toHaveTextContent('A long PDF title');
+		await expect.element(getByRole('button', { name: '目次' })).toBeInTheDocument();
+		await expect.element(getByRole('button', { name: '表示設定' })).toBeInTheDocument();
+		await expect.element(header).toHaveTextContent('読書位置を保存済み');
+		await expect.element(getByTestId('pdf-reader-footer')).toHaveTextContent('2 / 5 ページ 40%');
+	});
+
 	test('階層アウトラインを表示して対応ページへ移動し、目次を閉じる', async () => {
 		const { getByRole } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await getByRole('button', { name: '目次' }).click();
