@@ -25,7 +25,39 @@ test('admin sample registration, deletion denies new reading, restore, and perma
   data: { currentPage: 2, readStatus: 'completed' },
  })).status()).toBe(200);
  const publicRow = page.getByRole('row').filter({ hasText: meta.pdfTitle });
+ await expect(publicRow).toBeVisible();
+ // Capture actual pre-delete responses, then deliver them after the mutation.
+ // The API and database remain real; only response delivery is delayed.
+ let releaseStale!: () => void;
+ const release = new Promise<void>((resolve) => { releaseStale = resolve; });
+ let snapshotReady!: () => void;
+ const snapshot = new Promise<void>((resolve) => { snapshotReady = resolve; });
+ let heldActive = false;
+ let heldDeleted = false;
+ let delivered = 0;
+ await page.route('**/api/v1/admin/books?state=*', async (route) => {
+  const state = new URL(route.request().url()).searchParams.get('state');
+  const hold = state === 'active' ? !heldActive : !heldDeleted;
+  if (!hold) { await route.continue(); return; }
+  if (state === 'active') heldActive = true; else heldDeleted = true;
+  const response = await route.fetch();
+  if (state === 'active') snapshotReady();
+  await release;
+  await route.fulfill({ response });
+  delivered++;
+ });
+ await page.getByRole('button', { name: '削除済み', exact: true }).click();
+ await page.getByRole('button', { name: '通常書籍', exact: true }).click();
+ await snapshot;
  await publicRow.getByRole('button', { name: '削除', exact: true }).click();
+ await expect(publicRow).toHaveCount(0);
+ releaseStale();
+ await expect.poll(() => delivered).toBe(2);
+ await page.unroute('**/api/v1/admin/books?state=*');
+ const refreshed = page.waitForResponse((r) => r.url().endsWith('/api/v1/admin/books?state=active'));
+ await page.reload();
+ const refreshedBooks = await (await refreshed).json();
+ expect(refreshedBooks.books.some((book: { id: number }) => book.id === meta.pdfBookId)).toBe(false);
  await expect(publicRow).toHaveCount(0);
  for (const suffix of ['', '/file', '/reading-info']) {
   const r = await page.request.get(api + '/api/v1/books/' + meta.pdfBookId + suffix);

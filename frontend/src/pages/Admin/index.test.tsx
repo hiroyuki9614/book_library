@@ -116,7 +116,7 @@ import Admin from './index';
 const uncategorized = { id: 1, name: '未分類', displayOrder: 0, isActive: true };
 const techCategory = { id: 17, name: '技術書', displayOrder: 1, isActive: true };
 
-const activeBook = {
+const activeBook: AdminBook = {
 	id: 10,
 	title: '保存済みPDF',
 	authorName: null,
@@ -248,7 +248,10 @@ describe('Admin persisted book management', () => {
 	});
 
 	test('通常書籍を論理削除し、削除済み一覧から復元できる', async () => {
-		mocks.fetchAdminBooks.mockImplementation(async (state: string) => (state === 'deleted' ? [deletedBook] : [activeBook]));
+		let deleted = false;
+  mocks.softDeleteAdminBook.mockImplementation(async () => { deleted = true; return { id: 10, deletedAt: deletedBook.deletedAt }; });
+  mocks.restoreAdminBook.mockImplementation(async () => { deleted = false; return { id: 10, deletedAt: null }; });
+  mocks.fetchAdminBooks.mockImplementation(async (state: string) => state === 'deleted' ? (deleted ? [deletedBook] : []) : (deleted ? [] : [activeBook]));
 		const { getByRole, getByText } = await render(<Admin />);
 
 		await vi.waitFor(() => expect(mocks.fetchAdminBooks).toHaveBeenCalledWith('active'));
@@ -300,8 +303,9 @@ describe('Admin persisted book management', () => {
 
 test('permanent deletion requires confirmation and only exists in the deleted list', async () => {
  mocks.fetchAdminCategories.mockResolvedValue([uncategorized, techCategory]);
- mocks.fetchAdminBooks.mockImplementation(async (state: string) => state === 'deleted' ? [deletedBook] : [activeBook]);
- mocks.permanentlyDeleteAdminBook.mockResolvedValue({ id: 10, permanentlyDeleted: true });
+ let purged = false;
+ mocks.fetchAdminBooks.mockImplementation(async (state: string) => state === 'deleted' ? (purged ? [] : [deletedBook]) : [activeBook]);
+ mocks.permanentlyDeleteAdminBook.mockImplementation(async () => { purged = true; return { id: 10, permanentlyDeleted: true }; });
  const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
  const { getByRole, getByText } = await render(<Admin />);
  await expect.element(getByRole('button', { name: '完全削除', exact: true })).not.toBeInTheDocument();
@@ -312,4 +316,38 @@ test('permanent deletion requires confirmation and only exists in the deleted li
  await vi.waitFor(() => expect(mocks.permanentlyDeleteAdminBook).toHaveBeenCalledWith(10));
  await expect.element(getByText('該当する書籍はありません。')).toBeInTheDocument();
  expect(confirm).toHaveBeenCalledTimes(2);
+});
+
+test('a delayed pre-delete list must not resurrect a deleted book', async () => {
+ vi.resetAllMocks();
+ mocks.fetchAdminCategories.mockResolvedValue([uncategorized, techCategory]);
+ let finishActive!: (books: AdminBook[]) => void;
+ mocks.fetchAdminBooks
+  .mockResolvedValueOnce([activeBook])
+  .mockImplementationOnce(() => new Promise(() => {}))
+  .mockImplementationOnce(() => new Promise<AdminBook[]>((resolve) => { finishActive = resolve; }))
+  .mockResolvedValue([]);
+ mocks.softDeleteAdminBook.mockResolvedValue({ id: 10, deletedAt: '2026-11-04T14:00:00.000Z' });
+ const { getByRole, getByText } = await render(<Admin />);
+ await expect.element(getByText('保存済みPDF', { exact: true })).toBeInTheDocument();
+ await getByRole('button', { name: '削除済み', exact: true }).click();
+ await getByRole('button', { name: '通常書籍', exact: true }).click();
+ await getByRole('button', { name: '削除', exact: true }).click();
+ await vi.waitFor(() => expect(mocks.softDeleteAdminBook).toHaveBeenCalledWith(10));
+ await expect.element(getByText('保存済みPDF', { exact: true })).not.toBeInTheDocument();
+ finishActive([activeBook]);
+ await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+ await expect.element(getByText('保存済みPDF', { exact: true })).not.toBeInTheDocument();
+});
+
+test('a successful write response cannot hide a server list that still contains the book', async () => {
+ vi.resetAllMocks();
+ mocks.fetchAdminCategories.mockResolvedValue([uncategorized, techCategory]);
+ mocks.fetchAdminBooks.mockResolvedValue([activeBook]);
+ mocks.softDeleteAdminBook.mockResolvedValue({ id: 10, deletedAt: '2026-11-04T14:00:00.000Z' });
+ const { getByRole, getByText } = await render(<Admin />);
+ await expect.element(getByText('保存済みPDF', { exact: true })).toBeInTheDocument();
+ await getByRole('button', { name: '削除', exact: true }).click();
+ await expect.element(getByRole('alert')).toHaveTextContent('削除後の状態を確認できません');
+ await expect.element(getByText('保存済みPDF', { exact: true })).toBeInTheDocument();
 });

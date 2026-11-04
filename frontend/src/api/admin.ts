@@ -143,7 +143,7 @@ export function resetAdminUserPassword(userId: number, password: string): Promis
 }
 
 export async function fetchAdminBooks(state: AdminBookState = 'active'): Promise<AdminBook[]> {
-	const response = await apiFetch<{ books: AdminBook[] }>(`/api/v1/admin/books?state=${state}`);
+	const response = await apiFetch<{ books: AdminBook[] }>(`/api/v1/admin/books?state=${state}`, { cache: 'no-store' });
 	return response.books;
 }
 
