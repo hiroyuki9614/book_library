@@ -29,6 +29,7 @@ set -eu
 printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
 if [[ "${FAKE_FAIL_DOCKER_QUERY:-}" == "$*" ]]; then exit 42; fi
 case "$*" in
+  "context inspect --format {{.Endpoints.docker.Host}}") printf '%s\\n' "$FAKE_DOCKER_ENDPOINT" ;;
   "ps -q --no-trunc") printf '%s\\n' "$FAKE_RUNNING_CONTAINERS" ;;
   "ps -aq --filter label=com.docker.compose.project=belib-production") printf '%s\\n' "$FAKE_PRODUCTION_CONTAINERS" ;;
   "volume ls -q --filter label=com.docker.compose.project=belib-recovery-ci-123-1") printf '%s\\n' "$FAKE_PROJECT_VOLUMES" ;;
@@ -49,6 +50,7 @@ esac
             "FAKE_PROJECT_VOLUMES": "",
             "FAKE_PROJECT_NETWORKS": "",
             "FAKE_FAIL_DOCKER_QUERY": "",
+            "FAKE_DOCKER_ENDPOINT": "unix:///var/run/docker.sock",
             "BELIB_CI_RECOVERY_REHEARSAL": "github-hosted-v1",
             "RUNNER_ENVIRONMENT": "github-hosted",
             "GITHUB_ACTIONS": "true",
@@ -88,6 +90,36 @@ esac
             self.assertEqual(self.logged_docker_calls(), [])
             self.log.unlink(missing_ok=True)
 
+    def test_rejects_docker_endpoint_override_environment_before_docker(self):
+        for field, value in (
+            ("DOCKER_HOST", "tcp://remote.example:2376"),
+            ("DOCKER_CONTEXT", "remote"),
+            ("DOCKER_TLS", "1"),
+            ("DOCKER_TLS_VERIFY", "1"),
+            ("DOCKER_CERT_PATH", "/tmp/docker-certs"),
+            ("DOCKER_CONFIG", "/tmp/docker-config"),
+        ):
+            result = self.run_guard(**{field: value})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Docker endpoint override", result.stderr)
+            self.assertEqual(self.logged_docker_calls(), [])
+            self.log.unlink(missing_ok=True)
+
+    def test_rejects_nonlocal_or_unavailable_docker_context_before_inventory(self):
+        for updates in (
+            {"FAKE_DOCKER_ENDPOINT": "tcp://remote.example:2376"},
+            {"FAKE_FAIL_DOCKER_QUERY": "context inspect --format {{.Endpoints.docker.Host}}"},
+        ):
+            result = self.run_guard(**updates)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("runner-local socket", result.stderr)
+            self.assertEqual(
+                self.logged_docker_calls(),
+                ["context inspect --format {{.Endpoints.docker.Host}}"],
+            )
+            self.assertNotIn("remote.example", result.stdout + result.stderr)
+            self.log.unlink(missing_ok=True)
+
     def test_docker_inventory_query_errors_fail_closed(self):
         queries = (
             "ps -q --no-trunc",
@@ -98,14 +130,21 @@ esac
         for query in queries:
             result = self.run_guard(FAKE_FAIL_DOCKER_QUERY=query)
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(self.logged_docker_calls(), list(queries[: queries.index(query) + 1]))
+            self.assertEqual(
+                self.logged_docker_calls(),
+                ["context inspect --format {{.Endpoints.docker.Host}}"]
+                + list(queries[: queries.index(query) + 1]),
+            )
             self.log.unlink(missing_ok=True)
 
     def test_rejects_unexpected_running_container_before_compose(self):
         result = self.run_guard(FAKE_RUNNING_CONTAINERS="unexpected-container-id")
         self.assertNotEqual(result.returncode, 0)
         calls = self.logged_docker_calls()
-        self.assertEqual(calls, ["ps -q --no-trunc"])
+        self.assertEqual(
+            calls,
+            ["context inspect --format {{.Endpoints.docker.Host}}", "ps -q --no-trunc"],
+        )
         self.assertNotIn("attacker-compose.yml", result.stdout + result.stderr)
 
     def test_rejects_existing_production_container_before_compose(self):
@@ -114,6 +153,7 @@ esac
         self.assertEqual(
             self.logged_docker_calls(),
             [
+                "context inspect --format {{.Endpoints.docker.Host}}",
                 "ps -q --no-trunc",
                 "ps -aq --filter label=com.docker.compose.project=belib-production",
             ],
@@ -125,6 +165,7 @@ esac
         self.assertEqual(
             self.logged_docker_calls(),
             [
+                "context inspect --format {{.Endpoints.docker.Host}}",
                 "ps -q --no-trunc",
                 "ps -aq --filter label=com.docker.compose.project=belib-production",
                 "volume ls -q --filter label=com.docker.compose.project=belib-recovery-ci-123-1",
@@ -138,6 +179,7 @@ esac
         self.assertEqual(
             self.logged_docker_calls(),
             [
+                "context inspect --format {{.Endpoints.docker.Host}}",
                 "ps -q --no-trunc",
                 "ps -aq --filter label=com.docker.compose.project=belib-production",
                 "volume ls -q --filter label=com.docker.compose.project=belib-recovery-ci-123-1",

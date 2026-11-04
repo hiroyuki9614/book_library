@@ -24,6 +24,17 @@ elif [[ "$recovery_rehearsal" == "github-hosted-v1" ]]; then
     echo "Recovery rehearsal does not accept caller-selected Compose paths, projects, or URLs" >&2
     exit 1
   fi
+  for docker_override in DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_CONFIG; do
+    if [[ -n "${!docker_override:-}" ]]; then
+      echo "Recovery rehearsal rejects Docker endpoint override environment" >&2
+      exit 1
+    fi
+  done
+  if ! docker_endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null)" \
+    || [[ "$docker_endpoint" != "unix:///var/run/docker.sock" ]]; then
+    echo "Refusing recovery rehearsal: Docker context is not the runner-local socket" >&2
+    exit 1
+  fi
   compose_file="compose.yaml"
   project="belib-recovery-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
   network="${project}_default"
