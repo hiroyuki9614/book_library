@@ -430,7 +430,7 @@ test('B reader EPUB mobile chrome stays inside the viewport without overlapping 
 		expect(layout.footerBox.top, `EPUB ${width}px footer overlaps main`).toBeGreaterThanOrEqual(layout.mainBox.bottom - 2);
 		expect(layout.mainBox.left, `EPUB ${width}px main starts outside the viewport`).toBeGreaterThanOrEqual(-2);
 		expect(layout.mainBox.right, `EPUB ${width}px main ends outside the viewport`).toBeLessThanOrEqual(width + 2);
-		expect(layout.mainBox.height, `EPUB ${width}px reading surface too small`).toBeGreaterThan(400);
+		expect(layout.mainBox.height, `EPUB ${width}px reading surface too small`).toBeGreaterThanOrEqual(0.60 * layout.viewportHeight);
 		expect(layout.footerBox.bottom, `EPUB ${width}px footer outside screen`).toBeLessThanOrEqual(layout.viewportHeight + 2);
 
 		await page.getByRole('button', { name: '表示設定', exact: true }).click();
