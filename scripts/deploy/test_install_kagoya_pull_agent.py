@@ -121,6 +121,16 @@ class InstallerSystemdTemplateTests(unittest.TestCase):
             },
         )
 
+    def test_config_schema_records_only_the_absolute_sidecar_location(self):
+        self.assertIn(
+            'PUBLIC_DEMO_CREDENTIALS_FILE="$(realpath -m -- "$CONFIG_DIR/public-demo-credentials.json")"',
+            self.installer_source,
+        )
+        self.assertIn(
+            '"public_demo_credentials_file": public_demo_credentials_file,',
+            self.installer_source,
+        )
+
 
 class InstallerLegacyBootstrapTests(unittest.TestCase):
     def test_legacy_override_refuses_before_image_or_timer_changes(self):
