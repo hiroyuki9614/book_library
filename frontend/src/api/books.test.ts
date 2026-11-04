@@ -14,7 +14,7 @@ describe('books API client', () => {
 				JSON.stringify({
 					total: 1,
 					page: 1,
-					limit: 20,
+					limit: 100,
 					books: [
 						{
 							id: 1,
@@ -37,7 +37,36 @@ describe('books API client', () => {
 		await expect(fetchBooks()).resolves.toMatchObject([
 			{ id: 1, title: 'Phase 3 PDF', author: 'BeLib', status: 'Reading', fileType: 'pdf', progressPercentage: 40 },
 		]);
-		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/books', expect.objectContaining({ credentials: 'include' }));
+		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/books?page=1&limit=100', expect.objectContaining({ credentials: 'include' }));
+	});
+
+	test('一覧APIを100件ずつページングして101冊目以降も画面へ渡す', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		const makeBook = (id: number) => ({
+			id,
+			title: `Book ${id}`,
+			authorName: 'BeLib',
+			category: { id: 1, name: '技術書' },
+			readStatus: 'reading',
+			progressPercentage: id === 101 ? 100 : null,
+			hasFile: false,
+			fileType: null,
+			createdAt: '2026-08-01T00:00:00.000Z',
+			updatedAt: '2026-08-01T00:00:00.000Z',
+		});
+		vi.spyOn(globalThis, 'fetch')
+			.mockResolvedValueOnce(new Response(JSON.stringify({ total: 101, page: 1, limit: 100, books: Array.from({ length: 100 }, (_, index) => makeBook(index + 1)) }), {
+				headers: { 'Content-Type': 'application/json' },
+			}))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ total: 101, page: 2, limit: 100, books: [makeBook(101)] }), {
+				headers: { 'Content-Type': 'application/json' },
+			}));
+
+		const books = await fetchBooks();
+
+		expect(books).toHaveLength(101);
+		expect(books.at(-1)).toMatchObject({ id: 101, progressPercentage: 100 });
+		expect(fetch).toHaveBeenNthCalledWith(2, 'http://localhost:3000/api/v1/books?page=2&limit=100', expect.objectContaining({ credentials: 'include' }));
 	});
 
 	test('PDF file APIをcookie付きで呼び出しBlobを返す', async () => {

@@ -155,6 +155,37 @@ describe('book state routes', () => {
 		expect(await get.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading' });
 	});
 
+	test('権限のあるreading-info GETはヒントなしで互換動作する', async () => {
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '3', progressPercentage: 25, readStatus: 'reading' });
+
+		const response = await app.request('/1/reading-info');
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ bookId: 1, currentPage: 3, progressPercentage: 25, readStatus: 'reading' });
+	});
+
+	test('権限のないreading-infoは不一致ヒントがあっても403を優先する', async () => {
+		mocks.permissionFindUnique.mockResolvedValue(null);
+
+		const response = await app.request('/1/reading-info', { headers: { 'X-BeLib-User-Id': '8' } });
+
+		expect(response.status).toBe(403);
+		expect(await response.json()).toMatchObject({ code: 'FORBIDDEN' });
+		expect(mocks.readingInfoFindUnique).not.toHaveBeenCalled();
+	});
+
+	test('PATCHは明示された不一致ヒントを権限確認後に409で拒否する', async () => {
+		const response = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: { ...JSON_READING_HEADERS, 'X-BeLib-User-Id': '8' },
+			body: JSON.stringify({ currentPage: 3, progressPercentage: 25 }),
+		});
+
+		expect(response.status).toBe(409);
+		expect(await response.json()).toMatchObject({ code: 'READING_SESSION_MISMATCH' });
+		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
+	});
+
 	test('PDF最終ページをcompletedとして保存でき、currentPage互換を維持する', async () => {
 		mocks.readingInfoUpsert.mockResolvedValue({ currentPosition: '12', progressPercentage: 100, readStatus: 'completed' });
 

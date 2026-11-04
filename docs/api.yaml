@@ -153,8 +153,8 @@ paths:
         numeric currentPositionの場合は互換用currentPageにも復元する。
         progressPercentageはIssue #90のowner-requested exceptionとして、現在ユーザーの
         ReadingInfoに保存したreader計測スナップショットから返す。未読は0、読了は100、
-        読書中で有効なreader計測値がない場合はnull。X-BeLib-User-Idは現在のCookie
-        sessionと一致することをbackendが検証する。
+        読書中で有効なreader計測値がない場合はnull。X-BeLib-User-Idは互換用の任意の
+        hintであり、GETでは省略できる。
       responses:
         '200':
           description: Reading info
@@ -168,8 +168,6 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/BookNotFound'
-        '409':
-          $ref: '#/components/responses/ReadingSessionMismatch'
         '500':
           $ref: '#/components/responses/InternalError'
     patch:
@@ -179,8 +177,9 @@ paths:
         currentPageは既存PDF caller互換。
         progressPercentageはreaderが有効なcurrent/totalから計算できた0〜100の整数、
         または計測不能を表すnull。Issue #90のowner-requested exceptionとして既存の
-        ReadingInfoへ保存する。省略時は既存値を保持する。X-BeLib-User-Idが現在のCookie
-        sessionと一致しない保存は拒否する。
+        ReadingInfoへ保存する。省略時は既存値を保持する。X-BeLib-User-Idが指定された場合に
+        現在のCookie sessionと一致しない保存は拒否する。hintの照合は書籍の存在と
+        RoleBookPermissionの確認後に行い、hintを省略した既存callerも受け入れる。
         readStatusを省略した場合はreading。明示値はreadingまたはcompleted。
       requestBody:
         required: true
@@ -414,8 +413,8 @@ components:
     ReadingSessionUserId:
       name: X-BeLib-User-Id
       in: header
-      required: true
-      description: Expected authenticated user ID. The backend compares it with the Better Auth Cookie session before reading-info access or mutation.
+      required: false
+      description: Optional expected authenticated user ID hint. PATCH rejects an explicitly mismatched hint after book permission authorization; GET does not require it.
       schema:
         type: integer
         minimum: 1

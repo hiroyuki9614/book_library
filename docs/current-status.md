@@ -138,7 +138,7 @@ Current behavior:
 - books are filtered by `RoleBookPermission` and logical deletion state.
 - list/detail/file/reading-info use the same role-based authorization boundary.
 - list joins only the current user's `ReadingInfo` and returns the persisted `readStatus`.
-- list supports `page`, `limit`, `q`, and `categoryId`.
+- list supports `page`, `limit`, `q`, and `categoryId`; the Home client retrieves all authorized pages in batches capped at 100 records so its summary is not limited to the first page.
 - `q` searches title and author name case-insensitively and is limited to 100 characters.
 - `categoryId` must be a positive integer.
 - EPUB is preferred when both supported file formats exist.
@@ -193,7 +193,7 @@ PDF displays the current page, total pages, and percentage from EmbedPDF scroll 
 - PDF uses the matching EmbedPDF bookmark plugin and its existing PDFium engine. PDFs without an outline explicitly report that no table of contents is present.
 - `Book.pageTurnDirection` is included in the frontend book contract and passed to both readers as the common `ltr` / `rtl` direction source.
 - Both readers use approximately the outer 15% as tap navigation. Pointer travel, long press, multi-touch, existing text selection, links and interactive controls are excluded. EPUB listeners are installed inside each epub.js iframe through content hooks, de-duplicated per document, removed with the view, and fully cleaned up on reader teardown.
-- ReadingInfo writes are delayed briefly during ordinary navigation and serialized; the final PDF page and epub.js `atEnd` retain the existing immediate completed transition. The frontend binds reading-info GET/PATCH requests to the expected user ID, and the backend rejects a missing or mismatched binding before book/permission lookup; the save hook clears stale pending payloads when the authenticated account changes, preventing queued or retried writes from crossing accounts.
+- ReadingInfo writes are delayed briefly during ordinary navigation and serialized; the final PDF page and epub.js `atEnd` retain the existing immediate completed transition. Standalone readers may omit `X-BeLib-User-Id`; authenticated frontend saves include it as an optional account hint, and the backend checks an explicitly mismatched PATCH hint only after book permission authorization, preserving `403` for unauthorized books. The save hook keeps queues scoped by account and clears stale pending payloads when the authenticated account changes, preventing queued or retried writes from crossing accounts.
 - Physical i5 GUI-browser acceptance is the release gate for this reader repair and is not replaced by headless or mobile emulation. Android hardware acceptance is tracked and reported separately; it is not a blocker for this approved release path.
 - The 2026-10-28 reader branch (`6c4c6d0`) is historical reference work. The current 2026-10-31 candidate applies the accepted Paper & Navy EPUB surface on the real `ReaderPage -> EpubReader` route, keeps the viewer full-width with a 16px iframe text inset at every viewport, and preserves existing menus and the book title. Its local harness/browser checks pass; production and physical i5 acceptance remain incomplete. See the candidate record for exact scope and blockers.
 

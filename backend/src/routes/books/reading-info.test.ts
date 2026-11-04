@@ -76,13 +76,24 @@ describe('reading-info API', () => {
 	test('GETは認証済みで権限のあるユーザー自身の現在ページを返す', async () => {
 		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '3', progressPercentage: 25, readStatus: 'reading' });
 
-		const response = await app.request('/1/reading-info', { headers: READING_HEADERS });
+		const response = await app.request('/1/reading-info');
 
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 25, readStatus: 'reading' });
 		expect(mocks.readingInfoFindUnique).toHaveBeenCalledWith({
 			where: { userId_bookId: { userId: 7, bookId: 1 } },
 		});
+	});
+
+	test('PATCHはヒントなしの既存callerを受け入れる', async () => {
+		const response = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ currentPage: 3, progressPercentage: 25 }),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ bookId: 1, currentPage: 3, progressPercentage: 25, readStatus: 'reading' });
 	});
 
 	test('GETはReadingInfo未作成時に1ページ目を返す', async () => {
@@ -153,14 +164,15 @@ describe('reading-info API', () => {
 
 		expect(response.status).toBe(409);
 		expect(await response.json()).toMatchObject({ code: 'READING_SESSION_MISMATCH' });
-		expect(mocks.bookFindUnique).not.toHaveBeenCalled();
+		expect(mocks.bookFindUnique).toHaveBeenCalled();
+		expect(mocks.permissionFindUnique).toHaveBeenCalled();
 		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
 	});
 
 	test('閲覧権限がないユーザーはreading-infoを403で拒否される', async () => {
 		mocks.permissionFindUnique.mockResolvedValue(null);
 
-		const response = await app.request('/1/reading-info', { headers: READING_HEADERS });
+		const response = await app.request('/1/reading-info', { headers: { 'X-BeLib-User-Id': '8' } });
 
 		expect(response.status).toBe(403);
 		expect(await response.json()).toMatchObject({ code: 'FORBIDDEN' });

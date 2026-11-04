@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { auth } from '../../lib/auth.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
-import { matchesReadingSessionUser, normalizeProgressPercentage, normalizeReadStatus, persistReadingInfo, READING_SESSION_USER_HEADER, toReadingInfoResponse, toReadingProgress } from './readingProgress.js';
+import { hasReadingSessionUserMismatch, normalizeProgressPercentage, normalizeReadStatus, persistReadingInfo, READING_SESSION_USER_HEADER, toReadingInfoResponse, toReadingProgress } from './readingProgress.js';
 
 const app = new Hono<PrismaVariables>();
 type BooksContext = Context<PrismaVariables>;
@@ -90,12 +90,9 @@ function parseBookId(raw: string | undefined) {
 	return Number.isSafeInteger(value) ? value : null;
 }
 
-async function getAuthorizedReadingContext(c: BooksContext, bookId: number) {
+async function getAuthorizedReadingContext(c: BooksContext, bookId: number, requireReadingSession = false) {
 	const user = await getAuthenticatedUser(c);
 	if (!user) return { response: jsonError(c, 401, 'Authentication required', 'UNAUTHORIZED') };
-	if (!matchesReadingSessionUser(c.req.header(READING_SESSION_USER_HEADER), user.id)) {
-		return { response: jsonError(c, 409, 'Reading request is bound to a different authenticated user', 'READING_SESSION_MISMATCH') };
-	}
 
 	const prisma = c.get('prisma');
 	const book = await prisma.book.findUnique({ where: { id: bookId }, select: { id: true, deletedAt: true } });
@@ -106,6 +103,9 @@ async function getAuthorizedReadingContext(c: BooksContext, bookId: number) {
 		select: { id: true },
 	});
 	if (!permission) return { response: jsonError(c, 403, 'You do not have permission to view this book', 'FORBIDDEN') };
+	if (requireReadingSession && hasReadingSessionUserMismatch(c.req.header(READING_SESSION_USER_HEADER), user.id)) {
+		return { response: jsonError(c, 409, 'Reading request is bound to a different authenticated user', 'READING_SESSION_MISMATCH') };
+	}
 
 	return { prisma, userId: user.id };
 }
@@ -184,7 +184,7 @@ app.patch('/:bookId/reading-info', async (c) => {
 	try {
 		const bookId = parseBookId(c.req.param('bookId'));
 		if (!bookId) return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
-		const result = await getAuthorizedReadingContext(c, bookId);
+		const result = await getAuthorizedReadingContext(c, bookId, true);
 		if ('response' in result) return result.response;
 
 		let body: unknown;

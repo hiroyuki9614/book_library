@@ -47,6 +47,25 @@ describe('Home reading evidence', () => {
 		expect(container.textContent).toContain('70%（計測済み2/3冊）');
 	});
 
+	test('averages a measured book beyond the first 20 authorized books', async () => {
+		const manyBooks: Book[] = Array.from({ length: 21 }, (_, index) => ({
+			id: 100 + index,
+			title: `書籍${index + 1}`,
+			author: '著者',
+			category: 'Frontend',
+			status: 'Reading',
+			fileType: 'epub',
+			currentPage: 0,
+			progressPercentage: index === 20 ? 100 : null,
+		}));
+		mocks.useBooks.mockReturnValue({ books: manyBooks, isLoading: false, isError: false });
+
+		const { container } = await render(<Home />);
+
+		expect(container.textContent).toContain('100%（計測済み1/21冊）');
+		expect(container.textContent).not.toContain('未計測（計測済み0/21冊）');
+	});
+
 	test('does not represent initial loading as an empty library', async () => {
 		mocks.useBooks.mockReturnValue({ books: [], isLoading: true, isError: false });
 		const { container } = await render(<Home />);

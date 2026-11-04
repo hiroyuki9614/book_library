@@ -16,8 +16,13 @@ export type BookDetails = {
 };
 
 type BooksResponse = {
+	total: number;
+	page: number;
+	limit: number;
 	books: BookDetails[];
 };
+
+const BOOKS_PAGE_LIMIT = 100;
 
 function toFrontendBook(book: BookDetails): Book {
 	const status = book.readStatus[0].toUpperCase() + book.readStatus.slice(1) as Book['status'];
@@ -38,8 +43,17 @@ function toFrontendBook(book: BookDetails): Book {
 }
 
 export async function fetchBooks() {
-	const response = await apiFetch<BooksResponse>('/api/v1/books');
-	return response.books.map(toFrontendBook);
+	const books: Book[] = [];
+	let page = 1;
+
+	while (true) {
+		const response = await apiFetch<BooksResponse>(`/api/v1/books?page=${page}&limit=${BOOKS_PAGE_LIMIT}`);
+		books.push(...response.books.map(toFrontendBook));
+		if (response.books.length === 0 || books.length >= response.total) break;
+		page += 1;
+	}
+
+	return books;
 }
 
 export async function fetchBook(bookId: number) {

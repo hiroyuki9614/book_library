@@ -22,6 +22,10 @@ export function matchesReadingSessionUser(value: string | undefined, userId: num
 	return parseReadingSessionUserId(value) === userId;
 }
 
+export function hasReadingSessionUserMismatch(value: string | undefined, userId: number) {
+	return value !== undefined && !matchesReadingSessionUser(value, userId);
+}
+
 export function normalizeReadStatus(value: string | null | undefined): ReadStatus {
 	return value === 'reading' || value === 'completed' ? value : 'unread';
 }

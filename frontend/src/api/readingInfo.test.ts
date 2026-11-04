@@ -79,6 +79,27 @@ describe('reading-info API client', () => {
 		);
 	});
 
+	test('standalone readerはユーザーヒントなしでGET/PATCHを実際に送信する', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		vi.spyOn(globalThis, 'fetch')
+			.mockResolvedValueOnce(new Response(JSON.stringify({ bookId: 7, currentPosition: null, currentPage: 1, progressPercentage: 0, readStatus: 'unread' }), {
+				status: 200,
+				headers: { 'Content-Type': 'application/json' },
+			}))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ bookId: 7, currentPosition: '4', currentPage: 4, progressPercentage: 40, readStatus: 'reading' }), {
+				status: 200,
+				headers: { 'Content-Type': 'application/json' },
+			}));
+
+		await expect(fetchReadingInfo(7)).resolves.toMatchObject({ currentPage: 1, readStatus: 'unread' });
+		await expect(saveReadingInfo(7, 4)).resolves.toMatchObject({ currentPage: 4, readStatus: 'reading' });
+		expect(fetch).toHaveBeenNthCalledWith(1, 'http://localhost:3000/api/v1/books/7/reading-info', expect.objectContaining({ headers: {} }));
+		expect(fetch).toHaveBeenNthCalledWith(2, 'http://localhost:3000/api/v1/books/7/reading-info', expect.objectContaining({
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ currentPage: 4, readStatus: 'reading' }),
+		}));
+	});
+
 	test('ユーザーごとに同じ書籍の保存キューを分離する', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		let release!: () => void;

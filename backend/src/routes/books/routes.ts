@@ -5,7 +5,7 @@ import { Readable } from 'node:stream';
 import { auth } from '../../lib/auth.js';
 import { BookStorageNotFoundError, getBookFileAccess } from '../../lib/bookStorage.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
-import { matchesReadingSessionUser, normalizeProgressPercentage, normalizeReadStatus, persistReadingInfo, READING_SESSION_USER_HEADER, toReadingInfoResponse, toReadingProgress, type ReadingProgressRecord } from './readingProgress.js';
+import { hasReadingSessionUserMismatch, normalizeProgressPercentage, normalizeReadStatus, persistReadingInfo, READING_SESSION_USER_HEADER, toReadingInfoResponse, toReadingProgress, type ReadingProgressRecord } from './readingProgress.js';
 
 const app = new Hono<PrismaVariables>();
 
@@ -143,11 +143,16 @@ async function getAuthorizedBook(c: BooksContext, bookId: number, requireReading
 	if (!user) {
 		return { response: jsonError(c, 401, 'Authentication required', 'UNAUTHORIZED') };
 	}
-	if (requireReadingSession && !matchesReadingSessionUser(c.req.header(READING_SESSION_USER_HEADER), user.id)) {
+
+	const result = await getBookForAuthorizedUser(c, bookId, user.id, user.roleId);
+	if ('response' in result) {
+		return result;
+	}
+	if (requireReadingSession && hasReadingSessionUserMismatch(c.req.header(READING_SESSION_USER_HEADER), user.id)) {
 		return { response: jsonError(c, 409, 'Reading request is bound to a different authenticated user', 'READING_SESSION_MISMATCH') };
 	}
 
-	return getBookForAuthorizedUser(c, bookId, user.id, user.roleId);
+	return result;
 }
 
 app.get('/', async (c) => {
@@ -194,7 +199,7 @@ app.get('/:bookId/reading-info', async (c) => {
 			return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
 		}
 
-		const result = await getAuthorizedBook(c, bookId, true);
+		const result = await getAuthorizedBook(c, bookId);
 		if ('response' in result) {
 			return result.response;
 		}

@@ -236,21 +236,42 @@ describe('MVP API contract RED tests based on docs/api.yaml', () => {
 
 	describe('reading info APIs', () => {
 		test('GET /api/v1/books/{bookId}/reading-info は自分の読書進捗を返す', async () => {
-			const response = await app.request('/api/v1/books/1/reading-info', { method: 'GET', headers: { ...AUTH_HEADERS, 'X-BeLib-User-Id': '1' } });
+			const response = await app.request('/api/v1/books/1/reading-info', { method: 'GET', headers: AUTH_HEADERS });
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
 			expect(body).toMatchObject({ bookId: 1, currentPage: 1, progressPercentage: 0, readStatus: 'unread' });
 		});
 
+		test('GET /api/v1/books/{bookId}/reading-info は不一致ヒントがあっても権限なしを403で返す', async () => {
+			const response = await app.request('/api/v1/books/2/reading-info', {
+				method: 'GET',
+				headers: { ...AUTH_HEADERS, 'X-BeLib-User-Id': '2' },
+			});
+
+			expect(response.status).toBe(403);
+			expect(await expectJsonObject(response)).toMatchObject({ code: 'FORBIDDEN' });
+		});
+
 		test('PATCH /api/v1/books/{bookId}/reading-info はcurrentPageを保存してreadingを返す', async () => {
 			const response = await app.request('/api/v1/books/1/reading-info', {
 				method: 'PATCH',
-				headers: { ...JSON_HEADERS, 'X-BeLib-User-Id': '1' },
+				headers: JSON_HEADERS,
 				body: JSON.stringify({ currentPage: 3 }),
 			});
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
 			expect(body).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: null, readStatus: 'reading' });
+		});
+
+		test('PATCH /api/v1/books/{bookId}/reading-info は明示された不一致ヒントを409で拒否する', async () => {
+			const response = await app.request('/api/v1/books/1/reading-info', {
+				method: 'PATCH',
+				headers: { ...JSON_HEADERS, 'X-BeLib-User-Id': '2' },
+				body: JSON.stringify({ currentPage: 3 }),
+			});
+
+			expect(response.status).toBe(409);
+			expect(await expectJsonObject(response)).toMatchObject({ code: 'READING_SESSION_MISMATCH' });
 		});
 
 		test('PATCH /api/v1/books/{bookId}/reading-info はcompletedを明示保存できる', async () => {
