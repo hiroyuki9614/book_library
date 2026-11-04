@@ -1,211 +1,125 @@
-# BeLib
+# BeLib — EPUB・PDFをブラウザで読める個人ライブラリ
 
-BeLib は、認証・ロール別閲覧権限・読書進捗を備えた個人向け EPUB / PDF ライブラリです。管理者の個人蔵書と、一般ユーザーへ公開するデモ書籍を同じライブラリ内で権限分離します。
+**React / TypeScript × Hono × PostgreSQL で開発した、認証・アクセス制御付きの読書Webアプリです。**
 
-## 現在できること
+電子書籍をただ一覧表示するだけでなく、「誰がその本を閲覧できるか」「読みかけの位置をどう復元するか」「ファイルを安全に配信するか」を、フロントエンドからAPI・DB・テストまで一つのアプリとして実装しました。
 
-- Better Auth のCookieセッションでログイン
-- `GET /api/v1/me` によるユーザー/ロール取得
-- `RoleBookPermission` に基づく一覧・検索・詳細・ファイル・読書位置の認可
-- EPUB/PDFの保護配信（local stream / R2署名URL）
-- PDFページとEPUB CFIのPostgreSQL保存・復元
-- 未認証401 / 権限なし403
-- 管理者向けEPUB/PDF登録、明示的な全ユーザー公開 / 管理者限定設定
-- 管理者向け書籍・カテゴリ・一般ユーザー管理の主要経路
-- Vitestと実PostgreSQL + Better Auth Cookie + Playwrightによる認証・認可・読書経路E2E
+**[Webデモを見る](https://belib.hiroyuki9614.com/login)** · [画面イメージ](#画面イメージ) · [技術的な工夫](#技術的な工夫) · [ソース・設計資料](#ソース設計資料)
 
-書籍ファイル保存はstorage driver経由です。ローカル開発/E2Eでは明示的にlocal storageを使用し、production候補では `BOOK_FILE_STORAGE_DRIVER=r2` によりCloudflare R2へ保存できます。R2閲覧はbackendで認証・権限確認後、1時間有効の署名URL情報を返し、frontendがcredentialsなしで取得します。本番切替とブラウザCORS検証は運用承認が必要です。
+> **デモの稼働状況（2026年11月4日）**：現在、本番環境の障害を調査しています。接続できない場合は、以下のスクリーンショットとソースコードから実装内容をご覧ください。復旧後、この注記を更新します。
 
-## ポートフォリオデモ
+## どんなアプリか
 
-ログイン画面を採用面接向けの入口として整え、一般ユーザーには公開デモ作品だけを表示します。公開サインアップは無効です。デモアカウントは非公開の運用コマンドで作成し、資格情報をGitへ保存しません。公開許可された一般ユーザーのデモID/PWだけは、別途フロントエンドの `VITE_PUBLIC_DEMO_EMAIL` と `VITE_PUBLIC_DEMO_PASSWORD` を両方指定するとログインページに表示できます（未設定時は非表示）。この2値はビルド成果物内で誰でも閲覧できるため、管理者アカウントや非公開の認証情報には絶対に使用しないでください。共有アカウントでは読書位置も共有されることを画面に明示しています。
+個人のEPUB・PDFを登録・整理し、ブラウザで読むためのWebアプリです。管理者だけが閲覧できる蔵書と、一般ユーザーに公開する書籍を、サーバー側の権限判定で分離しています。
 
-既存蔵書のadmin限定化、青空文庫の出典確認・EPUB/PDF生成・保護Admin API登録、本番前の停止条件は [Portfolio demo runbook](docs/portfolio-demo.md) を参照してください。本番DB・本番R2・デプロイを変更せずに、read-only preflightとdry-runまで実施できます。
+| 主な機能 | 実装内容 |
+| --- | --- |
+| ログイン | Better Auth のCookieセッションを利用した認証 |
+| 書籍管理 | EPUB/PDFの登録、タイトル・著者検索、カテゴリでの絞り込み |
+| 閲覧制御 | ロール別の書籍一覧・詳細・ファイル取得の制御。未認証は401、権限なしは403 |
+| ブラウザ読書 | EPUBリーダーとPDFリーダー。目次・ページ移動に対応 |
+| 続きから読む | PDFのページ番号とEPUBのCFIをPostgreSQLに保存・復元 |
+| ファイル配信 | 認証・認可後に、保護されたローカルファイルまたはCloudflare R2の署名URLで配信 |
 
-![BeLib portfolio demo login](docs/images/portfolio-demo-login.jpg)
+## 画面イメージ
 
-![General-user shelf containing public demo books](docs/images/portfolio-demo-shelf.jpg)
+<details open>
+<summary>ログイン画面・一般ユーザー向け本棚</summary>
 
-## まだ未完成の主な項目
+![BeLibのログイン画面](docs/images/portfolio-demo-login.jpg)
 
-- Cloudflare R2のlive credential/CORS/production cutoverと閲覧中URL自動再発行
-- ポートフォリオデモの本番read-only preflight、バックアップ/復元証拠、承認付き権限切替
-- 青空文庫生成物の目視確認と本番R2への承認付き登録
-- 本番R2 CORSを含むEPUB/PDFブラウザE2E
-- 完全削除
-- ファイル差し替え
-- 閲覧中のR2署名URL自動再発行（現在は読み込み時にBlob化）
+![公開許可された書籍だけを表示する一般ユーザーの本棚](docs/images/portfolio-demo-shelf.jpg)
 
-詳細は `docs/current-status.md` と `docs/requirements.md` を参照してください。
+</details>
 
-## 技術スタック
+一般ユーザー向けデモでは、管理者の個人蔵書を見せない設計です。公開サインアップは無効で、デモ用認証情報と管理者の認証情報を分離しています。
 
-### Frontend
+## 担当した領域
 
-- React 19 / TypeScript / Vite / React Router
-- Tailwind CSS / shadcn/ui
-- TanStack Query
-- React Hook Form / Zod
-- EmbedPDF / React Reader
+**個人開発のポートフォリオ**として、画面実装に加えてAPI、データモデル、認証・認可、読書状態の保存、テスト、本番運用・CI/CDの整備に取り組んでいます。
 
-### Backend
+| 領域 | 主な技術・実装 |
+| --- | --- |
+| フロントエンド | React 19、TypeScript、Vite、React Router、Tailwind CSS、shadcn/ui、TanStack Query |
+| バックエンド | Node.js、Hono、TypeScript、Better Auth、OpenAPI |
+| データベース | PostgreSQL、Prisma、マイグレーション |
+| ファイル保存 | Cloudflare R2、署名付きURL、ローカル開発用ストレージ |
+| 品質保証 | Vitest、Playwright、実PostgreSQLを用いたE2E |
+| 運用 | Docker Compose、GitHub Actions、段階的なデプロイと切り戻しの仕組み |
 
-- Node.js / Hono / TypeScript
-- Better Auth
-- Prisma / PostgreSQL
-- OpenAPI / Scalar
+## 技術的な工夫
 
-### Test / Development
+**1. UIだけに依存しないアクセス制御**
 
-- Vitest / Playwright
-- Docker / Docker Compose / pgAdmin4
+書籍ごとの閲覧可否は、DBの `RoleBookPermission` を基にバックエンドで判定します。書籍一覧だけでなく、詳細・ファイル取得・読書位置のAPIにも同じ権限境界を適用しています。管理画面を隠すだけでは防げない直接APIアクセスも検証対象にしています。
 
-## Source of truth
+**2. フォーマットが異なる読書位置を一つの仕組みで管理**
 
-- プロジェクトルール: `AGENTS.md`
-- 正式要件: `docs/requirements.md`
-- 現在状態: `docs/current-status.md`
-- 実装済みHTTP契約: `docs/api.yaml`
-- DB構造: `backend/prisma/schema.prisma`
-- DB説明: `docs/database.md`
-- MVP実行計画: `docs/mvp_plan.md`
-- 画面方針: `docs/design.md`
+PDFはページ番号、EPUBはCFI（電子書籍内の位置情報）を保存します。再ログイン・再読み込み時にPostgreSQL上の進捗を取得して復元するため、単なるブラウザ内状態では終わらない実装です。
 
-DB構造は常に `schema.prisma` を優先します。
+**3. 書籍データを公開ディレクトリに置かない**
 
-## ローカル開発
+ファイルはバックエンドで認証・権限確認してから配信します。R2では期限付き署名URLを利用し、R2の秘密鍵をフロントエンドに渡しません。
 
-依存関係:
+**4. 認証を含む実際の利用経路をテスト**
+
+単体テストに加え、Playwrightでログイン、公開書籍の閲覧、管理者限定書籍へのアクセス拒否、EPUB/PDFの進捗保存・復元を確認しています。CIではフロントエンド、バックエンド、Reader E2E、Compose構成の4系統を扱います。
+
+## 構成イメージ
+
+```text
+React / TypeScript（本棚・管理画面・EPUB/PDF Reader）
+               |
+               v
+Hono / Node.js（認証・ロール別認可・REST API）
+        |                         |
+        v                         v
+PostgreSQL / Prisma         保護ファイルストレージ
+（ユーザー・書籍・進捗）     （local / Cloudflare R2）
+```
+
+## 現在の実装範囲と今後の課題
+
+認証、権限別の書籍表示、保護されたEPUB/PDFの読書、進捗保存・復元という主要な利用経路は実装しています。一方で、すべての機能が完成済みというわけではありません。
+
+今後の課題は、R2署名URLの閲覧中の自動更新、ファイル差し替え・完全削除、管理機能の拡充、本番デモの継続的な受入検証などです。**CI成功と本番の稼働・リリース承認は別の条件として管理**しています。
+
+## ソース・設計資料
+
+- [実装の現在地と未対応事項](docs/current-status.md)
+- [要件定義](docs/requirements.md)
+- [API仕様（OpenAPI）](docs/api.yaml)
+- [DB設計](docs/database.md) / [Prismaスキーマ](backend/prisma/schema.prisma)
+- [デモ環境と安全な公開手順](docs/portfolio-demo.md)
+- [開発ルール](AGENTS.md)
+
+## 開発者向け：ローカル起動とテスト
+
+Node.js、npm、Docker Compose、PostgreSQLを使います。環境変数の値は `.env.example` を参照し、秘密情報をGitに保存しないでください。
 
 ```bash
 npm install
 npm install --prefix backend
 npm install --prefix frontend
-```
-
-開発サーバー:
-
-```bash
 npm run dev
 ```
 
 - Frontend: `http://localhost:5173`
-- Backend local: `http://localhost:3000`
-- Backend Docker: `http://localhost:3001`
-
-環境変数は各 `.env.example` を参照し、実値をGitへコミットしないでください。local driverでは `BOOK_FILE_STORAGE_ROOT`、R2 driverでは `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET_NAME` を使用します。
-
-## Fresh環境のセットアップ
-
-READMEだけを入口にfresh環境を作る場合は、task-ownedのPostgreSQLを起動し、committed migration、Prisma Client、開発用seedを順に適用します。seed用パスワードはローカルで設定し、Gitへ保存しないでください。
-
-```bash
-cp .env.example .env.development
-# .env.development の POSTGRES_PASSWORD、DATABASE_URL、BETTER_AUTH_SECRET、
-# SEED_USER_PASSWORD、SEED_ADMIN_PASSWORD をローカル値へ設定する
-docker compose --env-file .env.development -f docker-compose.dev.yml up -d db
-
-npm install
-npm install --prefix backend
-npm install --prefix frontend
-
-set -a
-. ./.env.development
-set +a
-
-(cd backend && npx prisma generate && npx prisma migrate deploy && npx prisma db seed)
-npm run dev
-```
-
-seedを使わず初期管理者だけを作る場合は、`INITIAL_ADMIN_EMAIL`、`INITIAL_ADMIN_NAME`、`INITIAL_ADMIN_PASSWORD` を設定して次を実行します。
-
-```bash
-npm --prefix backend run create:initial-admin
-```
-
-DBを破棄して再現する場合は、同じCompose projectで起動したtask-ownedリソースに対してだけ次を実行します。
-
-```bash
-docker compose --env-file .env.development -f docker-compose.dev.yml down -v
-```
-
-Prismaの現在schema確認:
-
-```bash
-cd backend
-npx prisma validate
-```
-
-新規環境はcommitted migrationだけで再現できます。`backend` の `verify:file-hash-migration` は列契約、Prisma read/write、重複hash拒否を確認します。非空の既存DBへ適用する場合は、実ファイル内容からのhash backfill方針を先に確定してください。
-
-## テスト / Build
+- Backend: `http://localhost:3000`
+- task-owned DBの作成、Prisma migration、seed、E2E用データの準備は [現在の構成・ルール](docs/current-status.md) とリポジトリ内の `.env.example` / `docker-compose.dev.yml` を参照してください。
 
 ```bash
 npm test
 npm run build:backend
 npm run build:frontend
-```
 
-個別:
-
-```bash
+# 個別テスト
 npm --prefix backend test
 npm --prefix frontend test
 npm --prefix frontend run test:e2e
 ```
 
-## Portfolio EPUB/PDF demo / browser E2E
-
-E2Eは、一般ユーザーへ公開するEPUB/PDF 2冊とadmin限定の既存蔵書相当1冊をtask-owned DB/storageへ作成します。`E2E_DATABASE_URL` は必ず `_e2e` で終わるDB名にし、実値は環境変数だけに設定してください。
-
-```bash
-mkdir -p .tmp/e2e-book-files
-docker compose --env-file .env.development -f docker-compose.dev.yml exec -T db \
-  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-  -c "CREATE DATABASE booklib_demo_e2e OWNER $POSTGRES_USER;"
-
-export E2E_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/booklib_demo_e2e"
-export E2E_ADMIN_EMAIL="phase-c-admin@example.test"
-export E2E_ADMIN_NAME="Phase C Admin"
-export E2E_ADMIN_PASSWORD="replace-with-a-local-password"
-export E2E_MVP_PASSWORD="replace-with-a-local-password"
-export E2E_BOOK_FILE_STORAGE_ROOT="$(pwd)/.tmp/e2e-book-files"
-export E2E_MVP_METADATA_PATH="$(pwd)/.tmp/e2e-metadata.json"
-# 生成済みの青空文庫2冊でreaderも確認する場合のみ指定
-export E2E_AOZORA_MANIFEST_PATH="$(pwd)/.tmp/aozora-demo/manifest.generated.json"
-
-npm --prefix frontend run test:e2e
-```
-
-このdemoは、一般ユーザーが公開2冊だけを一覧・検索できること、admin限定本の詳細・ファイル・進捗GET/PATCHと管理APIを拒否されること、adminは全冊を見られること、保護PDFページとEPUB CFIを保存・復元できることを確認します。`E2E_CAPTURE_PORTFOLIO_SCREENSHOTS=true` を指定した実行では、非公開書籍を含まないログイン/本棚画像を `docs/images/` へ更新します。
-
-同じtask-owned E2E DBとstorageでdemoを再実行する場合は、fixtureが既存roleとPDFを再利用しないため、先に次を実行します。
-
-```bash
-docker compose --env-file .env.development -f docker-compose.dev.yml exec -T db \
-  psql -U "$POSTGRES_USER" -d postgres \
-  -c 'DROP DATABASE IF EXISTS booklib_demo_e2e WITH (FORCE);' \
-  -c "CREATE DATABASE booklib_demo_e2e OWNER $POSTGRES_USER;"
-find .tmp/e2e-book-files -type f -delete
-rm -f .tmp/e2e-metadata.json
-```
-
-## 現在のMVP完了判定
-
-現在の「MVPコア VERIFIED」は次の縦切りを意味します。
-
-```text
-login
-→ permissioned book list
-→ role-filtered EPUB/PDF shelf
-→ protected reader
-→ PDF page / EPUB CFI move
-→ PostgreSQL save
-→ reload
-→ restore
-```
-
-これは `docs/requirements.md` の正式MVP全項目完了を意味しません。正式MVPは、残るストレージ・公開範囲・管理・EPUB等の受け入れ条件を満たした時点で完了とします。
+本番DB/R2のデータや管理者アカウントを、テスト・デモ用途で流用しません。
 
 ## License
 
