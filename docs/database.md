@@ -26,6 +26,7 @@
 - `BookFile.fileHash` はunique
 - `ReadingInfo.currentPosition` はnullable text
 - `ReadingInfo.progressPercentage` はreaderが有効な位置と総量を計測できた場合のnullable整数（0〜100）
+- `ReadingInfo.progressPercentage` はIssue #90の§6.8例外として、セッションをまたぐ本棚・ホーム表示用の派生スナップショットだけを保持する。総ページ数やEPUB location総数、読書履歴は追加しない
 - `ReadingInfo.readStatus` のdefaultは `unread`
 - `ReadingInfo` は `userId + bookId` でunique
 - `RoleBookPermission` は `roleId + bookId` でunique

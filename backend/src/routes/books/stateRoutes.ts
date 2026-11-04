@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { auth } from '../../lib/auth.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
-import { normalizeProgressPercentage, normalizeReadStatus, persistReadingInfo, toReadingInfoResponse, toReadingProgress } from './readingProgress.js';
+import { matchesReadingSessionUser, normalizeProgressPercentage, normalizeReadStatus, persistReadingInfo, READING_SESSION_USER_HEADER, toReadingInfoResponse, toReadingProgress } from './readingProgress.js';
 
 const app = new Hono<PrismaVariables>();
 type BooksContext = Context<PrismaVariables>;
@@ -32,7 +32,7 @@ type BookListRecord = {
 	readingInfos: ReadingInfoRecord[];
 };
 
-function jsonError(c: BooksContext, status: 400 | 401 | 403 | 404 | 500, message: string, code: string) {
+function jsonError(c: BooksContext, status: 400 | 401 | 403 | 404 | 409 | 500, message: string, code: string) {
 	return c.json({ message, code }, status);
 }
 
@@ -93,6 +93,9 @@ function parseBookId(raw: string | undefined) {
 async function getAuthorizedReadingContext(c: BooksContext, bookId: number) {
 	const user = await getAuthenticatedUser(c);
 	if (!user) return { response: jsonError(c, 401, 'Authentication required', 'UNAUTHORIZED') };
+	if (!matchesReadingSessionUser(c.req.header(READING_SESSION_USER_HEADER), user.id)) {
+		return { response: jsonError(c, 409, 'Reading request is bound to a different authenticated user', 'READING_SESSION_MISMATCH') };
+	}
 
 	const prisma = c.get('prisma');
 	const book = await prisma.book.findUnique({ where: { id: bookId }, select: { id: true, deletedAt: true } });

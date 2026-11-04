@@ -8,6 +8,20 @@ export type ReadingProgressRecord = {
 	readStatus?: string | null;
 };
 
+export const READING_SESSION_USER_HEADER = 'X-BeLib-User-Id';
+
+export function parseReadingSessionUserId(value: string | undefined) {
+	if (!value) return null;
+	const normalized = value.trim();
+	if (!/^[1-9]\d*$/.test(normalized)) return null;
+	const userId = Number(normalized);
+	return Number.isSafeInteger(userId) ? userId : null;
+}
+
+export function matchesReadingSessionUser(value: string | undefined, userId: number) {
+	return parseReadingSessionUserId(value) === userId;
+}
+
 export function normalizeReadStatus(value: string | null | undefined): ReadStatus {
 	return value === 'reading' || value === 'completed' ? value : 'unread';
 }

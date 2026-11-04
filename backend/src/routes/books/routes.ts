@@ -5,7 +5,7 @@ import { Readable } from 'node:stream';
 import { auth } from '../../lib/auth.js';
 import { BookStorageNotFoundError, getBookFileAccess } from '../../lib/bookStorage.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
-import { normalizeProgressPercentage, normalizeReadStatus, persistReadingInfo, toReadingInfoResponse, toReadingProgress, type ReadingProgressRecord } from './readingProgress.js';
+import { matchesReadingSessionUser, normalizeProgressPercentage, normalizeReadStatus, persistReadingInfo, READING_SESSION_USER_HEADER, toReadingInfoResponse, toReadingProgress, type ReadingProgressRecord } from './readingProgress.js';
 
 const app = new Hono<PrismaVariables>();
 
@@ -35,7 +35,7 @@ type BookWithRelations = {
 type BookFileRecord = BookWithRelations['bookFiles'][number];
 type SupportedBookFileType = 'epub' | 'pdf';
 
-function jsonError(c: BooksContext, status: 400 | 401 | 403 | 404 | 500, message: string, code: string) {
+function jsonError(c: BooksContext, status: 400 | 401 | 403 | 404 | 409 | 500, message: string, code: string) {
 	return c.json({ message, code }, status);
 }
 
@@ -138,10 +138,13 @@ async function getBookForAuthorizedUser(c: BooksContext, bookId: number, userId:
 	return { book, prisma, userId };
 }
 
-async function getAuthorizedBook(c: BooksContext, bookId: number) {
+async function getAuthorizedBook(c: BooksContext, bookId: number, requireReadingSession = false) {
 	const user = await getAuthenticatedUser(c);
 	if (!user) {
 		return { response: jsonError(c, 401, 'Authentication required', 'UNAUTHORIZED') };
+	}
+	if (requireReadingSession && !matchesReadingSessionUser(c.req.header(READING_SESSION_USER_HEADER), user.id)) {
+		return { response: jsonError(c, 409, 'Reading request is bound to a different authenticated user', 'READING_SESSION_MISMATCH') };
 	}
 
 	return getBookForAuthorizedUser(c, bookId, user.id, user.roleId);
@@ -191,7 +194,7 @@ app.get('/:bookId/reading-info', async (c) => {
 			return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
 		}
 
-		const result = await getAuthorizedBook(c, bookId);
+		const result = await getAuthorizedBook(c, bookId, true);
 		if ('response' in result) {
 			return result.response;
 		}
@@ -213,7 +216,7 @@ app.patch('/:bookId/reading-info', async (c) => {
 			return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
 		}
 
-		const result = await getAuthorizedBook(c, bookId);
+		const result = await getAuthorizedBook(c, bookId, true);
 		if ('response' in result) {
 			return result.response;
 		}

@@ -69,11 +69,14 @@ beforeEach(() => {
 	mocks.readingInfoUpdateMany.mockResolvedValue({ count: 1 });
 });
 
+const READING_HEADERS = { 'X-BeLib-User-Id': '7' };
+const JSON_READING_HEADERS = { ...READING_HEADERS, 'Content-Type': 'application/json' };
+
 describe('reading-info API', () => {
 	test('GETは認証済みで権限のあるユーザー自身の現在ページを返す', async () => {
 		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '3', progressPercentage: 25, readStatus: 'reading' });
 
-		const response = await app.request('/1/reading-info');
+		const response = await app.request('/1/reading-info', { headers: READING_HEADERS });
 
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 25, readStatus: 'reading' });
@@ -85,7 +88,7 @@ describe('reading-info API', () => {
 	test('GETはReadingInfo未作成時に1ページ目を返す', async () => {
 		mocks.readingInfoFindUnique.mockResolvedValue(null);
 
-		const response = await app.request('/1/reading-info');
+		const response = await app.request('/1/reading-info', { headers: READING_HEADERS });
 
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({ bookId: 1, currentPosition: null, currentPage: 1, progressPercentage: 0, readStatus: 'unread' });
@@ -95,7 +98,7 @@ describe('reading-info API', () => {
 
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
+			headers: JSON_READING_HEADERS,
 			body: JSON.stringify({ currentPage: 3, progressPercentage: 25 }),
 		});
 
@@ -111,7 +114,7 @@ describe('reading-info API', () => {
 	test('PATCHは正の整数でないcurrentPageを400で拒否する', async () => {
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
+			headers: JSON_READING_HEADERS,
 			body: JSON.stringify({ currentPage: 0 }),
 		});
 
@@ -123,7 +126,7 @@ describe('reading-info API', () => {
 	test('PATCHは範囲外のprogressPercentageを400で拒否する', async () => {
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
+			headers: JSON_READING_HEADERS,
 			body: JSON.stringify({ currentPage: 3, progressPercentage: 101 }),
 		});
 
@@ -141,10 +144,23 @@ describe('reading-info API', () => {
 		expect(await response.json()).toMatchObject({ code: 'UNAUTHORIZED' });
 	});
 
+	test('別アカウントに紐づくreading-info保存はDBへ到達せず409で拒否される', async () => {
+		const response = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: { 'X-BeLib-User-Id': '8', 'Content-Type': 'application/json' },
+			body: JSON.stringify({ currentPage: 3, progressPercentage: 25 }),
+		});
+
+		expect(response.status).toBe(409);
+		expect(await response.json()).toMatchObject({ code: 'READING_SESSION_MISMATCH' });
+		expect(mocks.bookFindUnique).not.toHaveBeenCalled();
+		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
+	});
+
 	test('閲覧権限がないユーザーはreading-infoを403で拒否される', async () => {
 		mocks.permissionFindUnique.mockResolvedValue(null);
 
-		const response = await app.request('/1/reading-info');
+		const response = await app.request('/1/reading-info', { headers: READING_HEADERS });
 
 		expect(response.status).toBe(403);
 		expect(await response.json()).toMatchObject({ code: 'FORBIDDEN' });

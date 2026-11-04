@@ -145,13 +145,16 @@ paths:
   /books/{bookId}/reading-info:
     parameters:
       - $ref: '#/components/parameters/BookId'
+      - $ref: '#/components/parameters/ReadingSessionUserId'
     get:
       summary: 現在ユーザーの読書情報を取得
       description: |
         currentPositionはPDFではページ番号文字列、EPUBではCFIを保持できる。
         numeric currentPositionの場合は互換用currentPageにも復元する。
-        progressPercentageは現在ユーザーのReadingInfoから返す。未読は0、読了は100、
-        読書中で有効なreader計測値がない場合はnull。
+        progressPercentageはIssue #90のowner-requested exceptionとして、現在ユーザーの
+        ReadingInfoに保存したreader計測スナップショットから返す。未読は0、読了は100、
+        読書中で有効なreader計測値がない場合はnull。X-BeLib-User-Idは現在のCookie
+        sessionと一致することをbackendが検証する。
       responses:
         '200':
           description: Reading info
@@ -165,6 +168,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/BookNotFound'
+        '409':
+          $ref: '#/components/responses/ReadingSessionMismatch'
         '500':
           $ref: '#/components/responses/InternalError'
     patch:
@@ -173,7 +178,9 @@ paths:
         currentPageまたはcurrentPositionのどちらか一方だけを受け取る。
         currentPageは既存PDF caller互換。
         progressPercentageはreaderが有効なcurrent/totalから計算できた0〜100の整数、
-        または計測不能を表すnull。省略時は既存値を保持する。
+        または計測不能を表すnull。Issue #90のowner-requested exceptionとして既存の
+        ReadingInfoへ保存する。省略時は既存値を保持する。X-BeLib-User-Idが現在のCookie
+        sessionと一致しない保存は拒否する。
         readStatusを省略した場合はreading。明示値はreadingまたはcompleted。
       requestBody:
         required: true
@@ -198,6 +205,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/BookNotFound'
+        '409':
+          $ref: '#/components/responses/ReadingSessionMismatch'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -402,6 +411,15 @@ components:
         type: integer
         minimum: 1
 
+    ReadingSessionUserId:
+      name: X-BeLib-User-Id
+      in: header
+      required: true
+      description: Expected authenticated user ID. The backend compares it with the Better Auth Cookie session before reading-info access or mutation.
+      schema:
+        type: integer
+        minimum: 1
+
   responses:
     InvalidRequest:
       description: Invalid request
@@ -435,6 +453,12 @@ components:
             $ref: '#/components/schemas/Error'
     Conflict:
       description: Duplicate file content or one-file-per-book conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ReadingSessionMismatch:
+      description: The request's expected reading user does not match the authenticated Cookie session.
       content:
         application/json:
           schema:
@@ -562,7 +586,7 @@ components:
           minimum: 0
           maximum: 100
           nullable: true
-          description: Persisted reader-derived percentage, or null when an in-progress position has not been measured.
+          description: Nullable reader-derived snapshot persisted per user and book for the Issue #90 §6.8 exception; null when an in-progress position has not been measured.
         readStatus:
           type: string
           enum: [unread, reading, completed]

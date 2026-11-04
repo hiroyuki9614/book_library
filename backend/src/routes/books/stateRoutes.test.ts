@@ -68,6 +68,9 @@ beforeEach(() => {
 	mocks.readingInfoUpdateMany.mockResolvedValue({ count: 1 });
 });
 
+const READING_HEADERS = { 'X-BeLib-User-Id': '7' };
+const JSON_READING_HEADERS = { ...READING_HEADERS, 'Content-Type': 'application/json' };
+
 describe('book state routes', () => {
 	test('一覧は現在ユーザーのReadingInfoをreadStatusへ反映する', async () => {
 		mocks.bookCount.mockResolvedValue(1);
@@ -136,7 +139,7 @@ describe('book state routes', () => {
 
 		const patch = await app.request('/1/reading-info', {
 			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
+			headers: JSON_READING_HEADERS,
 			body: JSON.stringify({ currentPosition: cfi, progressPercentage: 42, readStatus: 'reading' }),
 		});
 		expect(patch.status).toBe(200);
@@ -148,7 +151,7 @@ describe('book state routes', () => {
 		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
 
 		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: cfi, progressPercentage: 42, readStatus: 'reading' });
-		const get = await app.request('/1/reading-info');
+		const get = await app.request('/1/reading-info', { headers: READING_HEADERS });
 		expect(await get.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading' });
 	});
 
@@ -157,7 +160,7 @@ describe('book state routes', () => {
 
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
+			headers: JSON_READING_HEADERS,
 			body: JSON.stringify({ currentPage: 12, readStatus: 'completed' }),
 		});
 
@@ -176,7 +179,7 @@ describe('book state routes', () => {
 
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
+			headers: JSON_READING_HEADERS,
 			body: JSON.stringify({ currentPage: 3, readStatus: 'reading' }),
 		});
 

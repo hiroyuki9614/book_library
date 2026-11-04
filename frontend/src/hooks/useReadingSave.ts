@@ -7,6 +7,7 @@ export function useReadingSave(bookId: number, userId?: number) {
 	const version = useRef(0);
 	const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 	const pending = useRef(false);
+	const previousUserId = useRef(userId);
 	const flush = useCallback(() => {
 		if (timer.current) clearTimeout(timer.current);
 		if (!pending.current || !latest.current) return;
@@ -21,6 +22,15 @@ export function useReadingSave(bookId: number, userId?: number) {
 			() => { if (version.current === attempt) setStatus('error'); },
 		);
 	}, [bookId, userId]);
+	useEffect(() => {
+		if (previousUserId.current === userId) return;
+		if (timer.current) clearTimeout(timer.current);
+		latest.current = null;
+		pending.current = false;
+		++version.current;
+		setStatus('saved');
+		previousUserId.current = userId;
+	}, [userId]);
 	useEffect(() => {
 		const unregister = registerReadingFlush(bookId, flush, userId);
 		const visibility = () => { if (document.hidden) flush(); };

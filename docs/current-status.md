@@ -18,13 +18,18 @@ column alignment, empty-state colspan, and loading skeleton cell counts remain
 covered by focused frontend tests.
 
 `ReadingInfo.progressPercentage` is now a nullable 0–100 integer persisted per
-user and book. Authorized list/detail/reading-info responses map unread to 0,
-completed to 100, and an unmeasured in-progress record to null. PDF saves a
-rounded current-page/total-page percentage when both values are valid; EPUB
-saves a generated-location percentage when the current location and generated
-total are valid. Home averages only non-null percentages and displays the
-measured-book denominator. This is a candidate-only source change; no
-production database, storage, or deployment action was performed.
+user and book under the Issue #90 owner-requested exception recorded in
+requirements §6.8. Derived-only shelf percentages are not honest across reload:
+PDF `currentPosition` stores only the current page while the total page count
+is known only to the reader runtime, and an EPUB CFI is an anchor rather than a
+numeric position; persisting total-page or EPUB-location metadata would be a
+speculative schema expansion. Authorized list/detail/reading-info responses map
+unread to 0, completed to 100, and an unmeasured in-progress record to null.
+PDF saves a rounded current-page/total-page percentage when both values are
+valid; EPUB saves a generated-location percentage when the current location
+and generated total are valid. Home averages only non-null percentages and
+displays the measured-book denominator. This is a candidate-only source
+change; no production database, storage, or deployment action was performed.
 
 ## 2026-11-04 stale admin-list follow-up
 
@@ -148,7 +153,7 @@ Known authorization requirement drift:
 ## ReadingInfo
 
 `ReadingInfo.currentPosition VARCHAR(255)` is used without a schema migration for both formats.
-`ReadingInfo.progressPercentage INTEGER` is nullable and stores the per-user PDF/EPUB reader measurement when valid.
+`ReadingInfo.progressPercentage INTEGER` is nullable and stores the per-user PDF/EPUB reader measurement when valid; it is the narrow §6.8 exception for Issue #90, not a total-page/location-history table.
 
 PDF request example:
 
@@ -188,7 +193,7 @@ PDF displays the current page, total pages, and percentage from EmbedPDF scroll 
 - PDF uses the matching EmbedPDF bookmark plugin and its existing PDFium engine. PDFs without an outline explicitly report that no table of contents is present.
 - `Book.pageTurnDirection` is included in the frontend book contract and passed to both readers as the common `ltr` / `rtl` direction source.
 - Both readers use approximately the outer 15% as tap navigation. Pointer travel, long press, multi-touch, existing text selection, links and interactive controls are excluded. EPUB listeners are installed inside each epub.js iframe through content hooks, de-duplicated per document, removed with the view, and fully cleaned up on reader teardown.
-- ReadingInfo writes are delayed briefly during ordinary navigation and serialized; the final PDF page and epub.js `atEnd` retain the existing immediate completed transition.
+- ReadingInfo writes are delayed briefly during ordinary navigation and serialized; the final PDF page and epub.js `atEnd` retain the existing immediate completed transition. The frontend binds reading-info GET/PATCH requests to the expected user ID, and the backend rejects a missing or mismatched binding before book/permission lookup; the save hook clears stale pending payloads when the authenticated account changes, preventing queued or retried writes from crossing accounts.
 - Physical i5 GUI-browser acceptance is the release gate for this reader repair and is not replaced by headless or mobile emulation. Android hardware acceptance is tracked and reported separately; it is not a blocker for this approved release path.
 - The 2026-10-28 reader branch (`6c4c6d0`) is historical reference work. The current 2026-10-31 candidate applies the accepted Paper & Navy EPUB surface on the real `ReaderPage -> EpubReader` route, keeps the viewer full-width with a 16px iframe text inset at every viewport, and preserves existing menus and the book title. Its local harness/browser checks pass; production and physical i5 acceptance remain incomplete. See the candidate record for exact scope and blockers.
 
