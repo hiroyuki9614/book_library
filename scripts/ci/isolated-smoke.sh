@@ -168,7 +168,7 @@ capture_runtime() {
   for service in "${services[@]}"; do
     id="$(docker compose --project-name "$project" --file "$compose_file" ps --quiet "$service")"
     [[ "$id" =~ ^[0-9a-f]{12,64}$ ]] || { echo "Missing fixed CI service container: $service" >&2; return 1; }
-    record="$(docker inspect --format '{{.Id}}|{{.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.HostConfig.RestartPolicy.Name}}|{{range .Mounts}}{{.Type}}:{{.Name}}:{{.Destination}};{{end}}' "$id")"
+    record="$(docker inspect --format '{{.Id}}|{{.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.HostConfig.RestartPolicy.Name}}|{{json .Mounts}}' "$id")"
     IFS='|' read -r actual_id actual_image project_label service_label restart mount_record <<<"$record"
     [[ "$actual_id" =~ ^[0-9a-f]{64}$ && "$actual_image" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Incomplete immutable service identity: $service" >&2; return 1; }
     [[ "$project_label" == "$project" && "$service_label" == "$service" && "$restart" == "unless-stopped" ]] || {
