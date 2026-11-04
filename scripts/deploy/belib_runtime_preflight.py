@@ -112,10 +112,15 @@ def assess(snapshot, expected_head):
         )
         require(states_agree, "OCI_STATE_MISMATCH")
         require(docker_state == "running", f"SERVICE_{name.upper()}_NOT_RUNNING")
-        for plane in ("task", "runc"):
+        for plane, plane_state in (("task", task_state), ("runc", runc_state)):
             runtime_id = item.get(f"{plane}_container_id")
-            expected_runtime_id = container_id if states_agree and docker_state == "running" else None
-            require(runtime_id == expected_runtime_id, f"SERVICE_{name.upper()}_RUNTIME_ID_MISMATCH")
+            if plane_state == "running":
+                id_matches = runtime_id == container_id
+            elif plane_state == "absent":
+                id_matches = runtime_id is None
+            else:  # stopped: runtime may retain the matching container identity
+                id_matches = runtime_id is None or runtime_id == container_id
+            require(id_matches, f"SERVICE_{name.upper()}_RUNTIME_ID_MISMATCH")
         require(
             isinstance(item.get("health"), str)
             and item.get("health") in {"healthy", "unhealthy", "starting", "not_configured", "none"},
@@ -210,7 +215,8 @@ def assess(snapshot, expected_head):
             "SNAPSHOT_NOT_OBJECT", "SCHEMA_INVALID", "EXPECTED_HEAD_INVALID",
             "SOURCE_INVALID", "SOURCE_REPOSITORY_MISMATCH", "SOURCE_HEAD_MISMATCH",
             "WORK_PROMPT_ID_MISMATCH", "RUNTIME_INVALID", "SERVICE_INVENTORY_INVALID",
-            "SERVICE_INVENTORY_MISMATCH", "VOLUME_INVENTORY_INVALID", "VOLUME_INVENTORY_MISMATCH", "SNAPSHOT_FIELDS_INVALID",
+            "SERVICE_INVENTORY_MISMATCH", "VOLUME_INVENTORY_INVALID", "VOLUME_INVENTORY_MISMATCH",
+            "STORAGE_DRIVER_INVALID", "SNAPSHOT_FIELDS_INVALID",
             "SOURCE_FIELDS_INVALID", "RUNTIME_FIELDS_INVALID", "VOLUME_FIELDS_INVALID", "RUNTIME_ERROR_CLASS_INVALID",
         }
         or reason.endswith(("_FIELDS_INVALID", "_CONTAINER_ID_INVALID", "_STATE_INVALID", "_HEALTH_INVALID", "_IMAGE_ID_INVALID"))

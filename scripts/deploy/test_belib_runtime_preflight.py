@@ -107,6 +107,19 @@ class ReadOnlyPreflightTests(unittest.TestCase):
                        task_container_id=None, runc_container_id=None)
         self.assertEqual(assess(evidence, HEAD)["decision"], "NORMAL_CONTAINER_STOPPED")
 
+    def test_stopped_task_runc_with_matching_ids_is_normal_stop(self):
+        evidence = healthy_snapshot()
+        service = evidence["services"]["db"]
+        service.update(docker_state="exited", task_state="stopped", runc_state="stopped")
+        self.assertEqual(assess(evidence, HEAD)["decision"], "NORMAL_CONTAINER_STOPPED")
+
+    def test_stopped_task_runc_with_wrong_id_is_shared_conflict(self):
+        evidence = healthy_snapshot()
+        service = evidence["services"]["db"]
+        service.update(docker_state="exited", task_state="stopped", runc_state="stopped",
+                       task_container_id="f" * 12)
+        self.assert_shared_failure(evidence, "SERVICE_DB_RUNTIME_ID_MISMATCH")
+
     def test_exited_docker_with_live_task_runc_is_shared_conflict(self):
         evidence = healthy_snapshot()
         service = evidence["services"]["db"]
@@ -117,6 +130,13 @@ class ReadOnlyPreflightTests(unittest.TestCase):
         evidence = healthy_snapshot()
         evidence["services"]["db"]["task_container_id"] = "f" * 12
         self.assert_shared_failure(evidence, "SERVICE_DB_RUNTIME_ID_MISMATCH")
+
+    def test_unknown_storage_driver_is_invalid_evidence(self):
+        evidence = healthy_snapshot()
+        evidence["runtime"]["storage_driver"] = "bogus"
+        report = assess(evidence, HEAD)
+        self.assertEqual(report["decision"], "PREFLIGHT_EVIDENCE_INVALID")
+        self.assertIn("STORAGE_DRIVER_INVALID", report["reason_codes"])
 
     def test_r2_storage_does_not_attach_book_files_to_backend(self):
         evidence = healthy_snapshot()
