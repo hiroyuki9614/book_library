@@ -78,8 +78,10 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		await expect(page.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
 	}
 	const pageInput = page.getByRole('spinbutton');
+	const pdfFooterProgress = page.getByTestId('pdf-reader-footer').locator('output[aria-live="polite"]');
 	await expect(pageInput).toHaveValue('1', { timeout: 30_000 });
-	await expect(page.locator('output[aria-live="polite"]:visible')).toHaveText('1 / 2 ページ 50%');
+	await expect(pdfFooterProgress).toBeVisible();
+	await expect(pdfFooterProgress).toHaveText('1 / 2 ページ 50%');
 	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 30_000 });
 	await page.getByRole('button', { name: '目次' }).click();
 	await expect(page.getByRole('button', { name: 'First chapter' })).toBeVisible();
@@ -125,7 +127,8 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	await expect(page.getByRole('spinbutton')).toHaveValue('2');
 	await expect.poll(shown).toBe(2);
 	expect((await page.locator('[data-pdf-page="2"] img').screenshot()).equals(firstImage)).toBe(false);
-	await expect(page.locator('output[aria-live="polite"]:visible')).toHaveText('2 / 2 ページ 100%');
+	await expect(pdfFooterProgress).toBeVisible();
+	await expect(pdfFooterProgress).toHaveText('2 / 2 ページ 100%');
 	if (mobileControls) await page.getByRole('button', { name: '閉じる', exact: true }).click();
 	const savedResponse = await saveResponse;
 	expect(savedResponse.request().postDataJSON()).toEqual({ currentPage: 2, readStatus: 'completed' });
@@ -213,7 +216,7 @@ test('demo user opens protected EPUB and persists/restores a CFI', async ({ page
 	await expect(page).toHaveURL(`/reader/${metadata.epubBookId}`);
 	expect((await fileResponse).headers()['content-type']).toContain('application/epub+zip');
 	await expect(page.getByRole('button', { name: '目次' })).toBeVisible({ timeout: 30_000 });
-	await expect(page.getByText(/本文位置: \d+ \/ \d+/)).toBeVisible();
+	await expect(page.getByTestId('epub-reader-footer').getByText(/本文位置: \d+ \/ \d+/)).toBeVisible();
 	await page.getByRole('button', { name: '目次' }).click();
 	await expect(page.getByRole('button', { name: '第一節' })).toBeVisible();
 	await page.getByRole('button', { name: '第一章' }).click();
