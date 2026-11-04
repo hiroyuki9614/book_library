@@ -362,6 +362,94 @@ test('B reader desktop chrome stays inside the viewport without overlapping cont
 	}
 });
 
+test('B reader EPUB mobile chrome stays inside the viewport without overlapping controls', async ({ page }) => {
+	await page.setViewportSize({ width: 393, height: 851 });
+	await login(page, metadata.demoEmail);
+	await page.goto(`/reader/${metadata.epubBookId}`);
+
+	const footer = page.getByTestId('epub-reader-footer');
+	await expect(footer).toBeVisible({ timeout: 45_000 });
+	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
+
+	for (const [width, height] of [[320, 640], [393, 851]] as const) {
+		await page.setViewportSize({ width, height });
+		await expect(page.getByRole('button', { name: '目次', exact: true })).toBeVisible();
+		await expect(page.getByRole('button', { name: '表示設定', exact: true })).toBeVisible();
+		await expect(footer.getByRole('combobox', { name: 'ページ表示方法' })).toBeVisible();
+		// Wait for responsive layout/resize observers, without reading internal reader state.
+		await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+		const layout = await footer.evaluate((footerElement) => {
+			const root = footerElement.parentElement!;
+			const box = (element: Element) => {
+				const r = element.getBoundingClientRect();
+				return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
+			};
+			const headerElement = root.querySelector('header')!;
+			const mainElement = root.querySelector('main')!;
+			const headerBox = box(headerElement);
+			const mainBox = box(mainElement);
+			const footerBox = box(footerElement);
+			const findOverlaps = (area: Element) => {
+				const controls = [...area.querySelectorAll<HTMLElement>('a, button, input')].map((element) => ({
+					name: element.getAttribute('aria-label') || element.textContent?.trim().slice(0, 40) || element.tagName,
+					box: box(element),
+				})).filter(({ box: r }) => r.width > 0 && r.height > 0);
+				const collisions: string[] = [];
+				for (let i = 0; i < controls.length; i++) {
+					for (let j = i + 1; j < controls.length; j++) {
+						const a = controls[i], b = controls[j];
+						if (Math.min(a.box.right, b.box.right) - Math.max(a.box.left, b.box.left) > 1
+						&& Math.min(a.box.bottom, b.box.bottom) - Math.max(a.box.top, b.box.top) > 1) {
+							collisions.push(`${a.name} / ${b.name}`);
+						}
+					}
+				}
+				return collisions;
+			};
+			return {
+				viewportWidth: window.innerWidth,
+				viewportHeight: window.innerHeight,
+				pageScrollWidth: document.documentElement.scrollWidth,
+				headerBox,
+				mainBox,
+				footerBox,
+				headerScrollWidth: headerElement.scrollWidth,
+				headerClientWidth: headerElement.clientWidth,
+				footerScrollWidth: footerElement.scrollWidth,
+				footerClientWidth: footerElement.clientWidth,
+				headerOverlaps: findOverlaps(headerElement),
+				footerOverlaps: findOverlaps(footerElement),
+			};
+		});
+		expect(layout.pageScrollWidth, `EPUB ${width}px document horizontally overflowed`).toBeLessThanOrEqual(width + 2);
+		expect(layout.headerScrollWidth, `EPUB ${width}px header horizontally overflowed`).toBeLessThanOrEqual(layout.headerClientWidth + 2);
+		expect(layout.footerScrollWidth, `EPUB ${width}px footer horizontally overflowed`).toBeLessThanOrEqual(layout.footerClientWidth + 2);
+		expect(layout.headerOverlaps, `EPUB ${width}px header controls collided`).toEqual([]);
+		expect(layout.footerOverlaps, `EPUB ${width}px footer controls collided`).toEqual([]);
+		expect(layout.mainBox.top, `EPUB ${width}px main overlaps header`).toBeGreaterThanOrEqual(layout.headerBox.bottom - 2);
+		expect(layout.footerBox.top, `EPUB ${width}px footer overlaps main`).toBeGreaterThanOrEqual(layout.mainBox.bottom - 2);
+		expect(layout.mainBox.left, `EPUB ${width}px main starts outside the viewport`).toBeGreaterThanOrEqual(-2);
+		expect(layout.mainBox.right, `EPUB ${width}px main ends outside the viewport`).toBeLessThanOrEqual(width + 2);
+		expect(layout.mainBox.height, `EPUB ${width}px reading surface too small`).toBeGreaterThan(400);
+		expect(layout.footerBox.bottom, `EPUB ${width}px footer outside screen`).toBeLessThanOrEqual(layout.viewportHeight + 2);
+
+		await page.getByRole('button', { name: '表示設定', exact: true }).click();
+		const settings = page.getByRole('heading', { name: '表示設定', exact: true });
+		await expect(settings).toBeVisible();
+		const settingsSpread = page.getByRole('combobox', { name: 'ページ表示方法' });
+		await expect(settingsSpread).toBeVisible();
+		await settingsSpread.click();
+		await expect(page.getByRole('option', { name: '常に単ページ', exact: true })).toBeVisible();
+		await page.keyboard.press('Escape');
+		await page.keyboard.press('Escape');
+		await expect(settings).toBeHidden();
+
+		await page.getByRole('button', { name: '目次', exact: true }).click();
+		await expect(page.getByRole('navigation', { name: 'EPUB目次' })).toBeVisible();
+		await page.keyboard.press('Escape');
+	}
+});
+
 test('admin sees private and demo books', async ({ page }) => {
 	await login(page, adminEmail, adminPassword);
 	await expect(page.getByText(metadata.pdfTitle, { exact: true })).toBeVisible();
