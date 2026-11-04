@@ -279,30 +279,78 @@ crash_owned_service() {
 
   # The cgroup must identify the exact synthetic container. Once opened,
   # pidfd_send_signal cannot signal a recycled host PID.
-  sudo python3 - "$host_pid" "$expected_id" <<'PYCRASH'
+  # Pin the init PID; check Docker's exact live receipt again *after* opening
+  # the pidfd, so a recycled PID or unrelated auto-restart cannot pass.
+  sudo python3 - "$host_pid" "$expected_id" "$expected_image" "$restart_count" "$started_at" <<'PYCRASH'
 import os
 from pathlib import Path
+import select
 import signal
+import subprocess
 import sys
 
-pid, expected_id = int(sys.argv[1]), sys.argv[2]
-if len(expected_id) != 64 or not all(c in "0123456789abcdef" for c in expected_id):
-    raise SystemExit("Refusing synthetic crash: container ID is invalid")
+pid, expected_id, expected_image, restart_count, started_at = (
+    int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+)
+if (
+    os.uname().sysname != "Linux"
+    or not hasattr(os, "pidfd_open")
+    or not hasattr(signal, "pidfd_send_signal")
+    or len(expected_id) != 64
+    or not all(c in "0123456789abcdef" for c in expected_id)
+):
+    raise SystemExit("Refusing synthetic crash: platform or container identity unsupported")
+
+def proc_start_ticks():
+    record = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    return record.rsplit(")", 1)[1].strip().split()[19]
+
 try:
+    ticks_before = proc_start_ticks()
     fd = os.pidfd_open(pid, 0)
-except (OSError, AttributeError):
-    raise SystemExit("Refusing synthetic crash: cannot pin container init PID")
+except (OSError, AttributeError, IndexError, ValueError):
+    raise SystemExit("Refusing synthetic crash: cannot pin and fingerprint container init")
 try:
     try:
         cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
-    except OSError:
-        raise SystemExit("Refusing synthetic crash: cannot verify container cgroup")
-    if expected_id not in cgroup:
-        raise SystemExit("Refusing synthetic crash: process cgroup does not match owned container")
+        proc_status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+        ticks_after = proc_start_ticks()
+    except (OSError, IndexError, ValueError):
+        raise SystemExit("Refusing synthetic crash: process identity unreadable")
+    ns_lines = [line.split()[1:] for line in proc_status.splitlines() if line.startswith("NSpid:")]
+    if (
+        ticks_before != ticks_after
+        or expected_id not in cgroup
+        or len(ns_lines) != 1
+        or len(ns_lines[0]) < 2
+        or ns_lines[0][0] != str(pid)
+        or ns_lines[0][-1] != "1"
+    ):
+        raise SystemExit("Refusing synthetic crash: cgroup/PID1/start-time identity changed")
+
+    # Fixed local Unix socket: no production/remote Docker context is consulted.
+    check = subprocess.run(
+        [
+            "docker", "--host", "unix:///var/run/docker.sock", "inspect", "--format",
+            "{{.Id}}|{{.Image}}|{{.State.Pid}}|{{.State.Running}}|{{.State.StartedAt}}|{{.RestartCount}}",
+            expected_id,
+        ],
+        check=False, capture_output=True, text=True, timeout=5,
+    )
+    observed = check.stdout.strip().split("|")
+    if check.returncode != 0 or observed != [
+        expected_id, expected_image, str(pid), "true", started_at, restart_count
+    ]:
+        raise SystemExit("Refusing synthetic crash: Docker live init/restart receipt changed")
+
     try:
         signal.pidfd_send_signal(fd, signal.SIGKILL)
-    except (OSError, AttributeError):
-        raise SystemExit("Refusing synthetic crash: pidfd SIGKILL was not delivered")
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+        if not poller.poll(10000):
+            raise SystemExit("Refusing synthetic crash: intended init exit not observed")
+    except OSError:
+        raise SystemExit("Refusing synthetic crash: pinned init crash could not be proven")
 finally:
     os.close(fd)
 PYCRASH
