@@ -18,9 +18,11 @@ BeLib は、認証・ロール別閲覧権限・読書進捗を備えた個人�
 
 ## ポートフォリオデモ
 
-ログイン画面を採用面接向けの入口として整え、一般ユーザーには公開デモ作品だけを表示します。公開サインアップは無効です。デモアカウントは非公開の運用コマンドで作成し、資格情報をGitへ保存しません。公開許可された一般ユーザーのデモID/PWだけは、別途フロントエンドの `VITE_PUBLIC_DEMO_EMAIL` と `VITE_PUBLIC_DEMO_PASSWORD` を両方指定するとログインページに表示できます（未設定時は非表示）。この2値はビルド成果物内で誰でも閲覧できるため、管理者アカウントや非公開の認証情報には絶対に使用しないでください。共有アカウントでは読書位置も共有されることを画面に明示しています。
+ログイン画面には管理者・一般ユーザーのデモ用ID/PW欄と、フォームへ入力するボタンがあります。デモ用の一般ユーザーには公開作品だけを表示します。公開サインアップは無効です。
 
-既存蔵書のadmin限定化、青空文庫の出典確認・EPUB/PDF生成・保護Admin API登録、本番前の停止条件は [Portfolio demo runbook](docs/portfolio-demo.md) を参照してください。本番DB・本番R2・デプロイを変更せずに、read-only preflightとdry-runまで実施できます。
+公開する資格情報は、この用途で新しく作成したデモアカウント専用です。既存管理者や個人のパスワードを流用せず、資格情報はGitへ保存しません。一般ユーザー用は `VITE_PUBLIC_DEMO_EMAIL` / `VITE_PUBLIC_DEMO_PASSWORD`、管理者用は `VITE_PUBLIC_DEMO_ADMIN_EMAIL` / `VITE_PUBLIC_DEMO_ADMIN_PASSWORD` を使い、各ペアが両方揃った場合のみ表示します。管理者デモは通常の管理者権限を持ちます。
+
+本番CDでは既定で公開値を空にし、所有者が明示した公開専用設定と、同じ資格情報による実ログイン・ロール確認を通った場合だけビルドへ渡します。共有アカウントでは読書位置も共有されます。運用手順は [Portfolio demo runbook](docs/portfolio-demo.md) を参照してください。
 
 ![BeLib portfolio demo login](docs/images/portfolio-demo-login.jpg)
 

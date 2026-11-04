@@ -31,6 +31,10 @@ describe('Login flow', () => {
 	beforeEach(() => {
 		vi.resetAllMocks();
 		vi.unstubAllEnvs();
+		vi.stubEnv('VITE_PUBLIC_DEMO_EMAIL', '');
+		vi.stubEnv('VITE_PUBLIC_DEMO_PASSWORD', '');
+		vi.stubEnv('VITE_PUBLIC_DEMO_ADMIN_EMAIL', '');
+		vi.stubEnv('VITE_PUBLIC_DEMO_ADMIN_PASSWORD', '');
 	});
 
 	test('ログイン成功後にセッションを再取得して認証済みページへ遷移する', async () => {
@@ -149,7 +153,30 @@ describe('Login flow', () => {
 			</authContext.Provider>,
 		);
 
-		await expect.element(getByText(/現在公開準備中/)).toBeInTheDocument();
+		await expect.element(getByText('一般ユーザーデモアカウントは現在公開準備中です。')).toBeInTheDocument();
 		await expect.element(getByText('demo@example.test')).not.toBeInTheDocument();
+	});
+
+	test('管理者と一般ユーザーのID/PWを表示し、選んだ情報をフォームに入力する', async () => {
+		vi.stubEnv('VITE_PUBLIC_DEMO_EMAIL', 'user-demo@example.test');
+		vi.stubEnv('VITE_PUBLIC_DEMO_PASSWORD', 'user-demo-password');
+		vi.stubEnv('VITE_PUBLIC_DEMO_ADMIN_EMAIL', 'admin-demo@example.test');
+		vi.stubEnv('VITE_PUBLIC_DEMO_ADMIN_PASSWORD', 'admin-demo-password');
+		const { getByText, getByLabelText } = await render(
+			<authContext.Provider value={{ user: null, isPending: false, isAuthenticated: false, role: null, refreshAuth: vi.fn(), signOut: vi.fn(), logout: vi.fn() }}>
+				<MemoryRouter><Login /></MemoryRouter>
+			</authContext.Provider>,
+		);
+		await expect.element(getByText('admin-demo@example.test')).toBeInTheDocument();
+		await expect.element(getByText('admin-demo-password')).toBeInTheDocument();
+		await expect.element(getByText('user-demo@example.test')).toBeInTheDocument();
+		await expect.element(getByText('user-demo-password')).toBeInTheDocument();
+		await getByText('管理者のID/PWを入力').click();
+		await expect.element(getByLabelText('ユーザーID')).toHaveValue('admin-demo@example.test');
+		await expect.element(getByLabelText('パスワード', { exact: true })).toHaveValue('admin-demo-password');
+		await getByText('一般ユーザーのID/PWを入力').click();
+		await expect.element(getByLabelText('ユーザーID')).toHaveValue('user-demo@example.test');
+		await expect.element(getByLabelText('パスワード', { exact: true })).toHaveValue('user-demo-password');
+		expect(authClient.signIn.email).not.toHaveBeenCalled();
 	});
 });
