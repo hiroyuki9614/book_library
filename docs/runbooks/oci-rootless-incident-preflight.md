@@ -1,0 +1,23 @@
+# BeLib rootless Docker/OCI incident: non-mutating readiness checklist
+
+This runbook is a narrow **evidence checklist, not an automated repair**. The incident on 2026-11-04 affected BeLib production, BeLib preview and OdoTrack in the same `agent` UID 1002 rootless Docker daemon. At 10:52 JST, systemd logged that an OOM killer terminated a process in `docker.service`. The daemon restart left Docker and `runc` disagreeing about several container states; Docker reports BeLib PostgreSQL exited while the OCI state can still report it running. Do not infer from a stale `runc` PID that the old DB process is alive or dead.
+
+## Preservation hold
+
+Keep named volume `belib-production_postgres-data`, protected file storage, R2, all retained images and known rollback identities untouched. Never run `docker compose down -v`, `docker rm`, `docker system prune`, DB initialization/migration/restore, `runc delete`, shim cleanup, daemon restart, or host reboot as a response to this document. Do not reconfigure another project's containers. Do not use an alternate user, sudo, SSH, or connector to overcome a permission denial. Existing BeLib CI/CD timer and its approval gates are independent and must not be recreated or disabled here.
+
+A shared daemon restart, OCI state cleanup or host reboot can affect OdoTrack and BeLib concurrently: obtain an **independent, explicit owner decision** after an impact inventory and rollback/backup check. BeLib-only incident permission does not confer that authority. Before recreating PostgreSQL, independently establish that no old process can access the existing data directory and that the approved recovery method can preserve the data. If the process-inspection route is denied, stop that operation; do not substitute an evasive command.
+
+## Offline evidence validation
+
+The script `scripts/deploy/belib_runtime_preflight.py` never invokes Docker, `runc`, `systemctl`, `ps`, network calls or any mutation. An authorized operator independently collects and sanitizes a small JSON document; do not include credentials, environment variables, tokens, private logs, book titles, object keys, DB dumps or filesystem paths. Never treat a self-reported boolean as cryptographic evidence or approval. Keep primary receipts in approved private evidence stores.
+
+Use `python3 scripts/deploy/belib_runtime_preflight.py --evidence SANITIZED.json --expected-head REVIEWED_BOOK_LIBRARY_MAIN_SHA`. The program emits only allowlisted non-secret reason codes. Exit 20 is `BLOCKED`; exit 30 is `PREFLIGHT_ERROR`; exit 0 is **only** `READY_FOR_OWNER_REVIEW`, never permission to perform a repair or proof of live recovery. All outcomes explicitly report `authorization=NONE`, `mutation_attempted=false` and `safe_to_repair=false`.
+
+The JSON keys are `schema_version=1`, `source` (repository, head, work_prompt_document_id, github_identity_readback), `operator` (principal, uid, host), `runtime` (rootless, docker_service_enabled, linger_enabled, runc_container_state_consistent, postgres_old_process_confirmed_absent, shared_docker_impact_inventory_complete, memory_pressure_root_cause_addressed), `services` (exactly db/backend/frontend/nginx, each restart and image_id_retained), `postgres_volume` (name, exists, identity_pinned, data_integrity_verified), `backup` (postgres_volume, checksum_verified, restore_drill_verified), `protected_storage` (r2_objects_unchanged_verified, private_access_verified), and `coordination` (other_projects_considered, owner_approved_cross_project_effects, existing_cd_lock_respected, rollback_rehearsed). Unknown or absent values fail closed. All `true` claims require **independent** upstream receipts; do not set them for the sake of making the tool return zero.
+
+Run offline unit tests: `python3 -m unittest discover -s scripts/deploy -p 'test_belib_runtime_preflight.py' -v`. This is repository-only verification and does not prove container restart, PostgreSQL durability, R2 access controls or host reboot recovery.
+
+## Recovery acceptance — tracked separately
+
+Only the approved `agent` owner-native operational channel may perform BeLib-scoped, reversible changes after a live preflight and valid evidence. Confirm all four containers, `/health`, `/login`, favicon and unauthenticated protected API behavior; pinned volume identity and DB compatibility; private R2 continuity; crash recovery in an isolated disposable environment; docker.service/linger boot configuration; and two later stable observations. A real host reboot or impact to OdoTrack requires separate owner authorization. PR #75 remains a separate release gate: do not deploy or merge it to disguise an incident.
