@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderHook } from 'vitest-browser-react';
-import { expect, test, vi } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import type { ReactNode } from 'react';
 const m = vi.hoisted(() => ({ fetchBook: vi.fn() }));
 vi.mock('@/api/books', () => ({ fetchBook: m.fetchBook }));
 import useBook from './useBook';
+afterEach(() => vi.resetAllMocks());
 test('a cached book is not readable while its current permission is being checked', async () => {
  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
  client.setQueryData(['books', 8], { id: 8, title: 'Previously readable', fileType: 'pdf' });
@@ -17,5 +18,33 @@ test('a cached book is not readable while its current permission is being checke
  reject(new Error('API request failed: 404'));
  await expect.poll(() => Boolean(result.current.error)).toBe(true);
  expect(result.current.book).toBeNull();
- client.clear();
+});
+
+test('an authorized open reader survives a later background permission rejection', async () => {
+ const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+ const book = { id: 8, title: 'Open publication', fileType: 'pdf' };
+ m.fetchBook.mockResolvedValueOnce(book);
+ const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+ const { result } = await renderHook(() => useBook(8), { wrapper });
+ await expect.poll(() => result.current.isLoading).toBe(false);
+ expect(result.current.book).toEqual(book);
+ m.fetchBook.mockRejectedValue(new Error('API request failed: 404'));
+ await client.invalidateQueries({ queryKey: ['books', 8] });
+ expect(result.current.book).toEqual(book);
+ expect(result.current.isLoading).toBe(false);
+ expect(result.current.error).toBeNull();
+});
+
+test('changing book ids clears the previous entry even when returning before the next request finishes', async () => {
+ const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+ m.fetchBook.mockResolvedValueOnce({ id: 8, title: 'Previously open' });
+ const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+ const hook = await renderHook((id: number = 8) => useBook(id), { wrapper, initialProps: 8 });
+ await expect.poll(() => hook.result.current.isLoading).toBe(false);
+ m.fetchBook.mockImplementation(() => new Promise(() => {}));
+ await hook.rerender(9);
+ expect(hook.result.current.book).toBeNull();
+ await hook.rerender(8);
+ expect(hook.result.current.book).toBeNull();
+ expect(hook.result.current.isLoading).toBe(true);
 });

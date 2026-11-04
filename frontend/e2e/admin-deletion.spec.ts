@@ -19,11 +19,11 @@ test('admin sample registration, deletion denies new reading, restore, and perma
  // Prime the real shelf and reader caches before deleting from the same SPA.
  await page.getByText(meta.pdfTitle, { exact: true }).click();
  await expect(page.getByRole('spinbutton')).toHaveValue('1', { timeout: 30_000 });
- const saved = page.waitForResponse((r) => r.url().endsWith('/api/v1/books/' + meta.pdfBookId + '/reading-info') && r.request().method() === 'PATCH' && r.request().postDataJSON()?.currentPage === 2);
- await page.getByRole('spinbutton').fill('2');
- await page.getByRole('spinbutton').press('Enter');
- expect((await saved).status()).toBe(200);
  await page.getByRole('link', { name: '書籍管理', exact: true }).click();
+ // Seed reading state through the real API; reader navigation is tested separately.
+ expect((await page.request.patch(api + '/api/v1/books/' + meta.pdfBookId + '/reading-info', {
+  data: { currentPage: 2, readStatus: 'completed' },
+ })).status()).toBe(200);
  const publicRow = page.getByRole('row').filter({ hasText: meta.pdfTitle });
  await publicRow.getByRole('button', { name: '削除', exact: true }).click();
  await expect(publicRow).toHaveCount(0);
