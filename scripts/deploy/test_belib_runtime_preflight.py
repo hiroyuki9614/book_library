@@ -28,7 +28,7 @@ def healthy_snapshot():
         },
         "runtime": {
             "rootless": True,
-            "docker_task_runc_consistent": True,
+            "error_class": "none",
             "shared_inventory_complete": True,
             "namespace_error": False,
             "other_project_impact": "none",
@@ -39,19 +39,31 @@ def healthy_snapshot():
                 "project": PROJECT,
                 "service": name,
                 "container_id": f"{index:012x}",
-                "state": "running",
+                "docker_state": "running",
+                "task_state": "running",
+                "runc_state": "running",
                 "health": "healthy",
                 "restart": "unless-stopped",
-                "image_id": f"sha256:{index:064x}",
+                "expected_image_id": f"sha256:{index:064x}",
+                "observed_image_id": f"sha256:{index:064x}",
                 "networks": [NETWORK],
-                "volumes": [VOLUME] if name == "db" else [],
+                "volumes": [VOLUME] if name == "db" else (["belib-production_book-files"] if name == "backend" else []),
             }
             for index, name in enumerate(("db", "backend", "frontend", "nginx"), 1)
         },
-        "postgres_volume": {
-            "name": VOLUME,
-            "exists": True,
-            "identity": "a" * 64,
+        "volumes": {
+            "postgres": {
+                "name": VOLUME,
+                "exists": True,
+                "expected_identity": "a" * 64,
+                "observed_identity": "a" * 64,
+            },
+            "book_files": {
+                "name": "belib-production_book-files",
+                "exists": True,
+                "expected_identity": "b" * 64,
+                "observed_identity": "b" * 64,
+            },
         },
     }
 
@@ -74,7 +86,9 @@ class ReadOnlyPreflightTests(unittest.TestCase):
 
     def test_ordinary_stopped_container_blocks(self):
         evidence = healthy_snapshot()
-        evidence["services"]["frontend"]["state"] = "exited"
+        evidence["services"]["frontend"]["docker_state"] = "exited"
+        evidence["services"]["frontend"]["task_state"] = "exited"
+        evidence["services"]["frontend"]["runc_state"] = "exited"
         report = assess(evidence, HEAD)
         self.assertEqual(report["decision"], "NORMAL_CONTAINER_STOPPED")
         self.assertEqual(report["authorization"], "NONE")
@@ -96,8 +110,34 @@ class ReadOnlyPreflightTests(unittest.TestCase):
 
     def test_task_runc_mismatch_blocks(self):
         evidence = healthy_snapshot()
-        evidence["runtime"]["docker_task_runc_consistent"] = False
+        evidence["services"]["db"]["runc_state"] = "exited"
         self.assert_shared_failure(evidence, "OCI_STATE_MISMATCH")
+
+    def test_wrong_but_valid_image_digest_blocks(self):
+        evidence = healthy_snapshot()
+        evidence["services"]["backend"]["observed_image_id"] = "sha256:" + "f" * 64
+        self.assert_shared_failure(evidence, "SERVICE_BACKEND_IMAGE_ID_MISMATCH")
+
+    def test_wrong_but_valid_database_volume_identity_blocks(self):
+        evidence = healthy_snapshot()
+        evidence["volumes"]["postgres"]["observed_identity"] = "c" * 64
+        self.assert_shared_failure(evidence, "VOLUME_POSTGRES_IDENTITY_MISMATCH")
+
+    def test_wrong_book_files_volume_identity_blocks(self):
+        evidence = healthy_snapshot()
+        evidence["volumes"]["book_files"]["observed_identity"] = "d" * 64
+        self.assert_shared_failure(evidence, "VOLUME_BOOK_FILES_IDENTITY_MISMATCH")
+
+    def test_missing_book_files_volume_blocks(self):
+        evidence = healthy_snapshot()
+        evidence["volumes"]["book_files"]["exists"] = False
+        self.assert_shared_failure(evidence, "VOLUME_BOOK_FILES_MISSING")
+
+    def test_duplicate_runtime_id_event_blocks_with_unique_service_ids(self):
+        evidence = healthy_snapshot()
+        evidence["runtime"]["error_class"] = "duplicate_container_id"
+        self.assertTrue(len({s["container_id"] for s in evidence["services"].values()}) == 4)
+        self.assert_shared_failure(evidence, "RUNTIME_ERROR_REPORTED")
 
     def test_other_project_impact_blocks(self):
         evidence = healthy_snapshot()
@@ -166,6 +206,17 @@ class ReadOnlyPreflightTests(unittest.TestCase):
         report = assess([], HEAD)
         self.assertEqual(report["decision"], "PREFLIGHT_EVIDENCE_INVALID")
         self.assertIn("SNAPSHOT_NOT_OBJECT", report["reason_codes"])
+
+    def test_malformed_state_and_health_values_fail_closed(self):
+        for field in ("docker_state", "health"):
+            evidence = healthy_snapshot()
+            evidence["services"]["db"][field] = ["running"]
+            self.assertEqual(assess(evidence, HEAD)["decision"], "PREFLIGHT_EVIDENCE_INVALID")
+
+    def test_invalid_head_type_fails_closed(self):
+        report = assess(healthy_snapshot(), [])
+        self.assertEqual(report["decision"], "PREFLIGHT_EVIDENCE_INVALID")
+        self.assertIn("EXPECTED_HEAD_INVALID", report["reason_codes"])
 
     def test_snapshot_never_authenticates_claimed_source(self):
         evidence = healthy_snapshot()

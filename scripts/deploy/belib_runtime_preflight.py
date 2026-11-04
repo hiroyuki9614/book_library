@@ -13,6 +13,7 @@ from pathlib import Path
 PROJECT = "belib-production"
 NETWORK = "belib-production_default"
 DB_VOLUME = "belib-production_postgres-data"
+BOOK_VOLUME = "belib-production_book-files"
 SERVICES = ("db", "backend", "frontend", "nginx")
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -37,7 +38,7 @@ def assess(snapshot, expected_head):
             issues.append(reason)
 
     require(snapshot.get("schema_version") == 2, "SCHEMA_INVALID")
-    require(bool(SHA40.fullmatch(expected_head or "")), "EXPECTED_HEAD_INVALID")
+    require(isinstance(expected_head, str) and bool(SHA40.fullmatch(expected_head)), "EXPECTED_HEAD_INVALID")
 
     source = snapshot.get("source")
     if not isinstance(source, dict):
@@ -53,13 +54,18 @@ def assess(snapshot, expected_head):
         issues.append("RUNTIME_INVALID")
     for key, reason in (
         ("rootless", "ROOTLESS_UNVERIFIED"),
-        ("docker_task_runc_consistent", "OCI_STATE_MISMATCH"),
         ("shared_inventory_complete", "SHARED_INVENTORY_INCOMPLETE"),
         ("namespace_error", "NAMESPACE_ERROR"),
     ):
         require(_is_bool(runtime.get(key)), f"{reason}_UNKNOWN")
     require(runtime.get("rootless") is True, "ROOTLESS_UNVERIFIED")
-    require(runtime.get("docker_task_runc_consistent") is True, "OCI_STATE_MISMATCH")
+    require(
+        runtime.get("error_class") in {
+            "none", "duplicate_container_id", "docker_task_runc_mismatch", "namespace_error"
+        },
+        "RUNTIME_ERROR_CLASS_INVALID",
+    )
+    require(runtime.get("error_class") == "none", "RUNTIME_ERROR_REPORTED")
     require(runtime.get("shared_inventory_complete") is True, "SHARED_INVENTORY_INCOMPLETE")
     require(runtime.get("namespace_error") is False, "NAMESPACE_ERROR")
     require(runtime.get("other_project_impact") == "none", "OTHER_PROJECT_IMPACT")
@@ -88,41 +94,56 @@ def assess(snapshot, expected_head):
         )
         if isinstance(container_id, str) and CONTAINER_ID.fullmatch(container_id):
             ids.append(container_id)
+        states = [item.get(key) for key in ("docker_state", "task_state", "runc_state")]
+        allowed_states = {"running", "exited", "created", "paused", "restarting", "dead", "removing", "unknown"}
+        for key, state in zip(("docker_state", "task_state", "runc_state"), states):
+            require(isinstance(state, str) and state in allowed_states, f"SERVICE_{name.upper()}_{key.upper()}_INVALID")
+        require(states[0] == states[1] == states[2] and states[0] != "unknown", "OCI_STATE_MISMATCH")
+        require(item.get("docker_state") == "running", f"SERVICE_{name.upper()}_NOT_RUNNING")
         require(
-            item.get("state") in {"running", "exited", "created", "paused", "restarting", "dead", "removing"},
-            f"SERVICE_{name.upper()}_STATE_INVALID",
-        )
-        require(item.get("state") == "running", f"SERVICE_{name.upper()}_NOT_RUNNING")
-        require(
-            item.get("health") in {"healthy", "unhealthy", "starting", "not_configured", "none"},
+            isinstance(item.get("health"), str)
+            and item.get("health") in {"healthy", "unhealthy", "starting", "not_configured", "none"},
             f"SERVICE_{name.upper()}_HEALTH_INVALID",
         )
         require(item.get("health") == "healthy", f"SERVICE_{name.upper()}_NOT_HEALTHY")
         require(item.get("restart") == "unless-stopped", f"SERVICE_{name.upper()}_RESTART_MISMATCH")
+        expected_image_id = item.get("expected_image_id")
+        observed_image_id = item.get("observed_image_id")
         require(
-            isinstance(item.get("image_id"), str) and bool(IMAGE_ID.fullmatch(item["image_id"])),
+            isinstance(expected_image_id, str) and bool(IMAGE_ID.fullmatch(expected_image_id))
+            and isinstance(observed_image_id, str) and bool(IMAGE_ID.fullmatch(observed_image_id)),
             f"SERVICE_{name.upper()}_IMAGE_ID_INVALID",
         )
+        require(expected_image_id == observed_image_id, f"SERVICE_{name.upper()}_IMAGE_ID_MISMATCH")
         require(item.get("networks") == [NETWORK], f"SERVICE_{name.upper()}_NETWORK_MISMATCH")
-        expected_volumes = [DB_VOLUME] if name == "db" else []
+        expected_volumes = [DB_VOLUME] if name == "db" else ([BOOK_VOLUME] if name == "backend" else [])
         require(item.get("volumes") == expected_volumes, f"SERVICE_{name.upper()}_VOLUME_MISMATCH")
     require(len(ids) == len(set(ids)), "DUPLICATE_CONTAINER_ID")
 
-    volume = snapshot.get("postgres_volume")
-    if not isinstance(volume, dict):
-        volume = {}
-        issues.append("POSTGRES_VOLUME_INVALID")
-    require(volume.get("name") == DB_VOLUME, "POSTGRES_VOLUME_IDENTITY_MISMATCH")
-    require(volume.get("exists") is True, "POSTGRES_VOLUME_MISSING")
-    require(
-        isinstance(volume.get("identity"), str)
-        and bool(re.fullmatch(r"[0-9a-f]{64}", volume["identity"])),
-        "POSTGRES_VOLUME_IDENTITY_UNKNOWN",
-    )
+    volumes = snapshot.get("volumes")
+    if not isinstance(volumes, dict):
+        volumes = {}
+        issues.append("VOLUME_INVENTORY_INVALID")
+    require(set(volumes) == {"postgres", "book_files"}, "VOLUME_INVENTORY_MISMATCH")
+    for key, name in (("postgres", DB_VOLUME), ("book_files", BOOK_VOLUME)):
+        volume = volumes.get(key)
+        if not isinstance(volume, dict):
+            issues.append(f"VOLUME_{key.upper()}_INVALID")
+            continue
+        require(volume.get("name") == name, f"VOLUME_{key.upper()}_NAME_MISMATCH")
+        require(volume.get("exists") is True, f"VOLUME_{key.upper()}_MISSING")
+        expected_identity = volume.get("expected_identity")
+        observed_identity = volume.get("observed_identity")
+        require(
+            isinstance(expected_identity, str) and bool(re.fullmatch(r"[0-9a-f]{64}", expected_identity))
+            and isinstance(observed_identity, str) and bool(re.fullmatch(r"[0-9a-f]{64}", observed_identity)),
+            f"VOLUME_{key.upper()}_IDENTITY_INVALID",
+        )
+        require(expected_identity == observed_identity, f"VOLUME_{key.upper()}_IDENTITY_MISMATCH")
 
     # Unknown or extra fields are rejected so arbitrary paths, commands, or secrets
     # cannot be accidentally reflected or accepted as evidence.
-    expected_keys = {"schema_version", "source", "runtime", "services", "postgres_volume"}
+    expected_keys = {"schema_version", "source", "runtime", "services", "volumes"}
     require(set(snapshot) == expected_keys, "SNAPSHOT_FIELDS_INVALID")
     require(
         isinstance(source, dict)
@@ -133,13 +154,14 @@ def assess(snapshot, expected_head):
         isinstance(runtime, dict)
         and set(runtime)
         == {
-            "rootless", "docker_task_runc_consistent", "shared_inventory_complete",
-            "namespace_error", "other_project_impact", "old_db_process_access",
+            "rootless", "shared_inventory_complete", "namespace_error",
+            "other_project_impact", "old_db_process_access", "error_class",
         },
         "RUNTIME_FIELDS_INVALID",
     )
     require(
-        isinstance(volume, dict) and set(volume) == {"name", "exists", "identity"},
+        isinstance(volumes, dict) and set(volumes) == {"postgres", "book_files"}
+        and all(isinstance(v, dict) and set(v) == {"name", "exists", "expected_identity", "observed_identity"} for v in volumes.values()),
         "VOLUME_FIELDS_INVALID",
     )
     for name in SERVICES:
@@ -148,8 +170,8 @@ def assess(snapshot, expected_head):
             isinstance(item, dict)
             and set(item)
             == {
-                "project", "service", "container_id", "state", "health", "restart",
-                "image_id", "networks", "volumes",
+                "project", "service", "container_id", "docker_state", "task_state", "runc_state",
+                "health", "restart", "expected_image_id", "observed_image_id", "networks", "volumes",
             },
             f"SERVICE_{name.upper()}_FIELDS_INVALID",
         )
@@ -158,10 +180,9 @@ def assess(snapshot, expected_head):
         reason in {
             "ROOTLESS_UNVERIFIED", "OCI_STATE_MISMATCH", "SHARED_INVENTORY_INCOMPLETE",
             "NAMESPACE_ERROR", "OTHER_PROJECT_IMPACT", "OLD_DB_PROCESS_ACCESS_UNKNOWN",
-            "DUPLICATE_CONTAINER_ID", "POSTGRES_VOLUME_IDENTITY_MISMATCH",
-            "POSTGRES_VOLUME_MISSING", "POSTGRES_VOLUME_IDENTITY_UNKNOWN",
+            "DUPLICATE_CONTAINER_ID", "RUNTIME_ERROR_REPORTED", "OCI_STATE_MISMATCH",
         }
-        or reason.endswith(("_PROJECT_MISMATCH", "_IDENTITY_MISMATCH", "_NETWORK_MISMATCH", "_VOLUME_MISMATCH", "_RESTART_MISMATCH", "_IMAGE_ID_INVALID"))
+        or reason.endswith(("_PROJECT_MISMATCH", "_IDENTITY_MISMATCH", "_NETWORK_MISMATCH", "_VOLUME_MISMATCH", "_RESTART_MISMATCH", "_IMAGE_ID_INVALID", "_IMAGE_ID_MISMATCH", "_NAME_MISMATCH", "_MISSING"))
         for reason in issues
     )
     invalid_input = any(
@@ -169,8 +190,8 @@ def assess(snapshot, expected_head):
             "SNAPSHOT_NOT_OBJECT", "SCHEMA_INVALID", "EXPECTED_HEAD_INVALID",
             "SOURCE_INVALID", "SOURCE_REPOSITORY_MISMATCH", "SOURCE_HEAD_MISMATCH",
             "WORK_PROMPT_ID_MISMATCH", "RUNTIME_INVALID", "SERVICE_INVENTORY_INVALID",
-            "SERVICE_INVENTORY_MISMATCH", "POSTGRES_VOLUME_INVALID", "SNAPSHOT_FIELDS_INVALID",
-            "SOURCE_FIELDS_INVALID", "RUNTIME_FIELDS_INVALID", "VOLUME_FIELDS_INVALID",
+            "SERVICE_INVENTORY_MISMATCH", "VOLUME_INVENTORY_INVALID", "VOLUME_INVENTORY_MISMATCH", "SNAPSHOT_FIELDS_INVALID",
+            "SOURCE_FIELDS_INVALID", "RUNTIME_FIELDS_INVALID", "VOLUME_FIELDS_INVALID", "RUNTIME_ERROR_CLASS_INVALID",
         }
         or reason.endswith(("_FIELDS_INVALID", "_CONTAINER_ID_INVALID", "_STATE_INVALID", "_HEALTH_INVALID", "_IMAGE_ID_INVALID"))
         for reason in issues
@@ -195,7 +216,7 @@ def assess(snapshot, expected_head):
         "authorization": "NONE",
         "mutation_attempted": False,
         "safe_to_repair": False,
-        "expected_head": expected_head if SHA40.fullmatch(expected_head or "") else None,
+        "expected_head": expected_head if isinstance(expected_head, str) and SHA40.fullmatch(expected_head) else None,
         "reason_codes": sorted(set(issues)),
         "note": "Untrusted snapshot only; readiness is not evidence authentication or owner authorization.",
     }
