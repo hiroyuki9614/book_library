@@ -4,6 +4,8 @@ import RenderInput from '@/components/RenderInput';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import * as z from 'zod';
+import { useEffect } from 'react';
+import type { PublicDemoCredentials } from '@/lib/public-demo-credentials';
 
 type LoginFormValues = z.infer<typeof formSchema>;
 
@@ -12,7 +14,7 @@ const formSchema = z.object({
 	passwordInput: z.string().min(8, 'パスワードは8文字以上で入力してください。'),
 });
 
-function Login({ onSubmit, isPending }: { onSubmit: (values: LoginFormValues) => void | Promise<void>; isPending: boolean }) {
+function Login({ onSubmit, isPending, demoCredentials }: { onSubmit: (values: LoginFormValues) => void | Promise<void>; isPending: boolean; demoCredentials?: PublicDemoCredentials }) {
 	const form = useForm<LoginFormValues>({
 		resolver: zodResolver(formSchema),
 		defaultValues: {
@@ -20,6 +22,12 @@ function Login({ onSubmit, isPending }: { onSubmit: (values: LoginFormValues) =>
 			passwordInput: '',
 		},
 	});
+	const { setValue } = form;
+	useEffect(() => {
+		if (!demoCredentials) return;
+		setValue('userInput', demoCredentials.email, { shouldValidate: true });
+		setValue('passwordInput', demoCredentials.password, { shouldValidate: true });
+	}, [demoCredentials, setValue]);
 
 	const formItems = [
 		{

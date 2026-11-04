@@ -179,6 +179,28 @@ Set both `VITE_PUBLIC_DEMO_EMAIL` and `VITE_PUBLIC_DEMO_PASSWORD` when building 
 
 ## 5. Production acceptance still required
 
+### Login cards for both roles
+
+The login page has separate administrator and general-user demo cards. Each pair
+is displayed only when both corresponding build values are present. A missing
+pair displays that role's preparation message. The input button fills the existing
+login form without submitting it; normal authentication and authorization remain
+unchanged.
+
+The general-user pair remains `VITE_PUBLIC_DEMO_EMAIL` /
+`VITE_PUBLIC_DEMO_PASSWORD`. The separately named administrator pair is
+`VITE_PUBLIC_DEMO_ADMIN_EMAIL` / `VITE_PUBLIC_DEMO_ADMIN_PASSWORD` and is supported
+by the frontend and its Dockerfile only for an isolated demo environment with no
+private books or real users. These public build inputs never fall back to
+`PORTFOLIO_ADMIN_*`, `INITIAL_ADMIN_*`, or other operator credentials. The current
+production Compose/CD route does not forward the administrator pair. This UI
+support does not make the existing private-library administrator suitable for
+publication or authorize a production CD policy change.
+
+Do not publish either unverified pair. The existing production credential opt-in
+work and its acceptance gates remain separate; no account provisioning, password
+reset, DB/storage change, or live publication is implied by the login cards.
+
 Before deployment approval, capture counts/IDs only before and after and verify:
 
 - unauthenticated list/detail return 401;

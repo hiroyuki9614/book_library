@@ -22,6 +22,8 @@ BeLib は、認証・ロール別閲覧権限・読書進捗を備えた個人�
 
 既存蔵書のadmin限定化、青空文庫の出典確認・EPUB/PDF生成・保護Admin API登録、本番前の停止条件は [Portfolio demo runbook](docs/portfolio-demo.md) を参照してください。本番DB・本番R2・デプロイを変更せずに、read-only preflightとdry-runまで実施できます。
 
+ログイン画面には管理者・一般ユーザーのデモ欄があり、設定済みのID/PWはボタンでフォームへ入力できます。管理者用の `VITE_PUBLIC_DEMO_ADMIN_EMAIL` / `VITE_PUBLIC_DEMO_ADMIN_PASSWORD` は、私有蔵書や実ユーザーを含まない隔離デモ環境専用です。既存本番の管理者情報を流用しないでください。現在の本番CDは管理者用の値を渡しません。
+
 ![BeLib portfolio demo login](docs/images/portfolio-demo-login.jpg)
 
 ![General-user shelf containing public demo books](docs/images/portfolio-demo-shelf.jpg)
