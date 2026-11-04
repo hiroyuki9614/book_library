@@ -173,33 +173,19 @@ If registration partially succeeds, stop and inspect IDs/counts through the prot
 
 ## Optional: publish intentionally public demo login credentials
 
-The unauthenticated entrypoint is `/login` (visitors to `/` are redirected there). It hides raw role/login-state debug labels. Once the existing production authorization checks below have been independently verified, an operator may explicitly approve displaying **only the restricted general demo account** email and password to all visitors.
+The unauthenticated entrypoint is `/login`. The login page has separate administrator and general-user demo cards. Each pair is shown only when both corresponding public build values are present. The input buttons fill the existing form without submitting or changing authentication.
 
-Set both `VITE_PUBLIC_DEMO_EMAIL` and `VITE_PUBLIC_DEMO_PASSWORD` when building the frontend. A missing or partial pair hides the credentials; the release artifact build refuses partial configuration. Both values are **public, not secrets**, and will appear as plain text in the browser/compiled bundle. They must never refer to admin/private/other reused credentials. Never copy `PORTFOLIO_ADMIN_PASSWORD`, an operator login, or a real personal password into these variables. Provision/rotate the restricted demo account through a separately reviewed, authorized operation first; re-run the general demo-role / admin-403 / private-book-403 gates before publishing the matching credentials. The UI code change alone does not authorize a production release.
+The owner requested a **new administrator dedicated to public demonstration** on 2026-11-04, followed by publication of that new account's credentials. This supersedes the previous general-user-only publication scope for that dedicated identity; it does not authorize publication of an existing private administrator password. The new demo administrator has the existing full `admin` role, including the ability to view and manage all books. Creating a different administrator does not isolate the library or reduce its privileges.
+
+Provision the new administrator through the existing `createInitialAdmin` implementation in the approved running backend, with an actual same-database private backup and same-ID/role/login readback. Never reset or promote an existing account to reuse it as this public identity. General-user creation uses the protected Admin API. Keep all passwords and cookies outside Git/logs/argv.
+
+For the reviewed owner-side CD, create the fixed mode-0600 file `~/.config/belib-production-cd/public-demo-accounts.json` below the owner-only config directory. Its complete schema is `schema_version: 1`, `intentionally_public: true`, and `admin` / `user` objects, each with `email`, `password`, and positive integer `user_id`. The values are deliberately public once deployed. Only set `publish_demo_accounts: true` in the protected dispatcher config after the new accounts have been verified and publication is authorized. The default remains disabled; ambient `VITE_*`, production env secrets and `INITIAL_ADMIN_*` / `PORTFOLIO_ADMIN_*` are never publication sources.
+
+Before building and again before switching the frontend, the dispatcher signs in to the fixed existing backend using the exact candidate pairs, checks active same-ID/email/role, checks admin API 200 for the administrator and 403 for the general user, then signs out verification sessions. Failed authentication stops the release without alternate credentials or account changes. The file is read using no-follow, bounded regular-file/owner/mode checks. Its SHA-256 is bound to the built image label; a different file at the same source SHA is rejected instead of silently accepting an old image. A later file edit/removal does not revoke a previously published static bundle: credential rotation/removal needs a new reviewed source release and account/session handling.
+
+The frontend build variables are `VITE_PUBLIC_DEMO_EMAIL` / `VITE_PUBLIC_DEMO_PASSWORD` and `VITE_PUBLIC_DEMO_ADMIN_EMAIL` / `VITE_PUBLIC_DEMO_ADMIN_PASSWORD`. The reviewed Compose frontend build must forward them plus `PUBLIC_DEMO_ACCOUNTS_SHA256`; only the frontend build arguments in the existing protected override may be aligned with these values. Preserve its backup, protected-service digest and exact image/source/rollback gates. No backend deployment, storage change or migration is part of this login release.
 
 ## 5. Production acceptance still required
-
-### Login cards for both roles
-
-The login page has separate administrator and general-user demo cards. Each pair
-is displayed only when both corresponding build values are present. A missing
-pair displays that role's preparation message. The input button fills the existing
-login form without submitting it; normal authentication and authorization remain
-unchanged.
-
-The general-user pair remains `VITE_PUBLIC_DEMO_EMAIL` /
-`VITE_PUBLIC_DEMO_PASSWORD`. The separately named administrator pair is
-`VITE_PUBLIC_DEMO_ADMIN_EMAIL` / `VITE_PUBLIC_DEMO_ADMIN_PASSWORD` and is supported
-by the frontend and its Dockerfile only for an isolated demo environment with no
-private books or real users. These public build inputs never fall back to
-`PORTFOLIO_ADMIN_*`, `INITIAL_ADMIN_*`, or other operator credentials. The current
-production Compose/CD route does not forward the administrator pair. This UI
-support does not make the existing private-library administrator suitable for
-publication or authorize a production CD policy change.
-
-Do not publish either unverified pair. The existing production credential opt-in
-work and its acceptance gates remain separate; no account provisioning, password
-reset, DB/storage change, or live publication is implied by the login cards.
 
 Before deployment approval, capture counts/IDs only before and after and verify:
 

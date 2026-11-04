@@ -293,6 +293,7 @@ def validate_frontend_service(
     expected_networks: list[str],
     expected_contract_sha256: str | None = None,
     legacy_image_ref: str | None = None,
+    expected_public_demo_args: dict[str, str] | None = None,
 ) -> None:
     """Keep the frontend build and runtime within its approved no-mount contract."""
     validate_compose_services(resolved)
@@ -350,17 +351,18 @@ def validate_frontend_service(
         if args.get("VITE_API_BASE_URL") != api_base_url:
             raise ComposeIdentityError("The frontend build arguments differ from the operator-approved values")
     else:
-        if not isinstance(args, dict) or set(args) != {
-            "VCS_REF", "VITE_API_BASE_URL", "VITE_PUBLIC_DEMO_EMAIL", "VITE_PUBLIC_DEMO_PASSWORD"
-        }:
-            raise ComposeIdentityError("The frontend build argument set differs from the approved contract")
-        if (
-            args.get("VCS_REF") != source_sha
-            or args.get("VITE_API_BASE_URL") != api_base_url
-            or args.get("VITE_PUBLIC_DEMO_EMAIL") not in ("", None)
-            or args.get("VITE_PUBLIC_DEMO_PASSWORD") not in ("", None)
-        ):
-            raise ComposeIdentityError("The frontend build arguments differ from the operator-approved values")
+        public_args = {key: '' for key in ('VITE_PUBLIC_DEMO_EMAIL', 'VITE_PUBLIC_DEMO_PASSWORD', 'VITE_PUBLIC_DEMO_ADMIN_EMAIL', 'VITE_PUBLIC_DEMO_ADMIN_PASSWORD', 'PUBLIC_DEMO_ACCOUNTS_SHA256')}
+        if expected_public_demo_args is not None:
+            if set(expected_public_demo_args) != set(public_args):
+                raise ComposeIdentityError('The expected public demo argument set is invalid')
+            public_args = expected_public_demo_args
+        old_keys = {'VCS_REF', 'VITE_API_BASE_URL', 'VITE_PUBLIC_DEMO_EMAIL', 'VITE_PUBLIC_DEMO_PASSWORD'}
+        new_keys = old_keys | {'VITE_PUBLIC_DEMO_ADMIN_EMAIL', 'VITE_PUBLIC_DEMO_ADMIN_PASSWORD', 'PUBLIC_DEMO_ACCOUNTS_SHA256'}
+        if not isinstance(args, dict) or set(args) not in (old_keys, new_keys):
+            raise ComposeIdentityError('The frontend build argument set differs from the approved contract')
+        if (args.get('VCS_REF') != source_sha or args.get('VITE_API_BASE_URL') != api_base_url
+                or any((args.get(key) or '') != value for key, value in public_args.items())):
+            raise ComposeIdentityError('The frontend build arguments differ from the operator-approved values')
 
     network_refs = frontend.get("networks")
     declared_networks = resolved.get("networks")
@@ -461,6 +463,9 @@ def bootstrap_preflight(container_name: str, production_env_file: str, *, agent_
             "BELIB_FRONTEND_IMAGE": f"belib-frontend:{PROBE_SHA}",
             "VITE_PUBLIC_DEMO_EMAIL": "",
             "VITE_PUBLIC_DEMO_PASSWORD": "",
+            "VITE_PUBLIC_DEMO_ADMIN_EMAIL": "",
+            "VITE_PUBLIC_DEMO_ADMIN_PASSWORD": "",
+            "PUBLIC_DEMO_ACCOUNTS_SHA256": "",
         }
     )
     project_dir = Path(identity["project_dir"])

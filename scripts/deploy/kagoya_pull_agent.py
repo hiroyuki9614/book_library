@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from public_demo_accounts import PublicDemoError, empty_build_args, load_accounts, verify_accounts
 from release_gate import GateError, GitHubAPI, TransientGitHubAPIError, validate_release
 from kagoya_compose import (
     ComposeIdentityError,
@@ -292,7 +293,13 @@ def _verify_target_image(config: dict, source_sha: str) -> dict:
         or labels.get("org.opencontainers.image.revision", "").lower() != source_sha
     ):
         raise DeployError("The built frontend image revision label does not match the source SHA")
+    if labels.get('com.belib.public-demo-accounts-sha256', '') != _demo_build_args(config)['PUBLIC_DEMO_ACCOUNTS_SHA256']:
+        raise DeployError('The frontend public demo configuration differs; a new reviewed source release is required')
     return image
+
+
+def _demo_build_args(config: dict) -> dict[str, str]:
+    return config.get('_public_demo_build_args', empty_build_args())
 
 
 def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) -> None:
@@ -303,8 +310,7 @@ def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) ->
         "VCS_REF": source_sha,
         "BELIB_FRONTEND_IMAGE": f"belib-frontend:{source_sha}",
         # These are build-time public values; do not read demo credentials from the host env.
-        "VITE_PUBLIC_DEMO_EMAIL": "",
-        "VITE_PUBLIC_DEMO_PASSWORD": "",
+        **_demo_build_args(config),
         "VITE_API_BASE_URL": config["expected_api_base_url"],
     }
     resolved = _run_json(compose_prefix + ["config", "--format", "json"], env=compose_env)
@@ -328,6 +334,7 @@ def _validate_frontend_compose(config: dict, checkout: Path, source_sha: str) ->
             api_base_url=config["expected_api_base_url"],
             expected_networks=config["expected_networks"],
             expected_contract_sha256=config["expected_compose_contract_sha256"],
+            expected_public_demo_args=_demo_build_args(config),
         )
     except (ComposeIdentityError, KeyError, TypeError) as error:
         if config.get("frontend_bootstrap_mode") == "legacy-override-update-required":
@@ -374,8 +381,7 @@ def _up_frontend(
         "COMPOSE_PROFILES": "",
         "VCS_REF": source_sha,
         "VITE_API_BASE_URL": config["expected_api_base_url"],
-        "VITE_PUBLIC_DEMO_EMAIL": "",
-        "VITE_PUBLIC_DEMO_PASSWORD": "",
+        **_demo_build_args(config),
     }
     if image_override is not None:
         env["BELIB_FRONTEND_IMAGE"] = image_override
@@ -389,8 +395,17 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
         main_sha_reader = _main_sha
     if smoke is None:
         smoke = smoke_test
+    try:
+        public_args, accounts = load_accounts(config)
+    except (PublicDemoError, OSError):
+        raise DeployError('Public demo configuration is unavailable or invalid') from None
+    config = {**config, '_public_demo_build_args': public_args}
     checkout = _checkout(config, source_sha)
     _validate_frontend_compose(config, checkout, source_sha)
+    try:
+        verify_accounts(config, accounts)
+    except PublicDemoError as error:
+        raise DeployError(str(error)) from None
 
     current = _container(config)
     rollback_ref, original_ref = _retain_live_image(config, current)
@@ -414,14 +429,20 @@ def deploy_frontend(config: dict, source_sha: str, *, smoke=None, main_sha_reade
             "COMPOSE_PROFILES": "",
             "VCS_REF": source_sha,
             "BELIB_FRONTEND_IMAGE": f"belib-frontend:{source_sha}",
-            # The demo pair is not a CD prerequisite and has not been verified here.
-            # Never expose values from the protected host env file in the public bundle.
+            # Only the explicitly approved, live-verified public accounts may be published.
+            # Never expose values from the protected production env file.
             "VITE_API_BASE_URL": config["expected_api_base_url"],
-            "VITE_PUBLIC_DEMO_EMAIL": "",
-            "VITE_PUBLIC_DEMO_PASSWORD": "",
+            **_demo_build_args(config),
         },
     )
     image = _verify_target_image(config, source_sha)
+    try:
+        fresh_args, fresh_accounts = load_accounts(config)
+        if fresh_args != public_args:
+            raise PublicDemoError('Public demo configuration changed during build')
+        verify_accounts(config, fresh_accounts)
+    except (PublicDemoError, OSError):
+        raise DeployError('Public demo revalidation failed before publication') from None
     if main_sha_reader(config) != source_sha:
         raise DeployError("Main advanced before the frontend switch")
     switched = False

@@ -1,7 +1,7 @@
 /**
  * Vite publishes VITE_* values in the browser bundle. Configure these only
- * with intentionally public demo accounts. An admin demo must belong to an
- * isolated demo environment, never the administrator of a private library.
+ * with newly provisioned demo accounts explicitly approved for public use.
+ * The admin demo has full admin privileges. Never reuse operator credentials.
  */
 export type PublicDemoCredentials = { email: string; password: string };
 

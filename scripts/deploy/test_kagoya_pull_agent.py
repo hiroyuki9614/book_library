@@ -38,6 +38,7 @@ from kagoya_pull_agent import (
     rollback_frontend,
 )
 from release_gate import GateError, TransientGitHubAPIError
+from public_demo_accounts import PublicDemoError, empty_build_args
 
 
 SOURCE_SHA = "a" * 40
@@ -117,8 +118,7 @@ class FakeDocker:
                         "args": {
                             "VCS_REF": source_sha,
                             "VITE_API_BASE_URL": (env or {}).get("VITE_API_BASE_URL"),
-                            "VITE_PUBLIC_DEMO_EMAIL": "",
-                            "VITE_PUBLIC_DEMO_PASSWORD": "",
+                            **{key: (env or {}).get(key, "") for key in empty_build_args()},
                         },
                         "context": str((checkout / "frontend").resolve()),
                         "dockerfile": "Dockerfile",
@@ -158,7 +158,7 @@ class FakeDocker:
             elif "build" in argv:
                 self.images[f"belib-frontend:{SOURCE_SHA}"] = {
                     "Id": NEW_ID,
-                    "Config": {"Labels": {"org.opencontainers.image.revision": SOURCE_SHA}},
+                    "Config": {"Labels": {"org.opencontainers.image.revision": SOURCE_SHA, "com.belib.public-demo-accounts-sha256": (env or {}).get("PUBLIC_DEMO_ACCOUNTS_SHA256", "")}},
                 }
             elif "up" in argv:
                 ref = (env or {}).get("BELIB_FRONTEND_IMAGE", f"belib-frontend:{SOURCE_SHA}")
@@ -682,6 +682,38 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 smoke=smoke,
                 main_sha_reader=lambda _config: SOURCE_SHA,
             )
+
+    def test_explicit_public_accounts_reach_build_only_after_role_checks(self):
+        args = {**empty_build_args(), 'VITE_PUBLIC_DEMO_EMAIL': 'user@example.test',
+                'VITE_PUBLIC_DEMO_PASSWORD': 'synthetic-user-pass',
+                'VITE_PUBLIC_DEMO_ADMIN_EMAIL': 'admin@example.test',
+                'VITE_PUBLIC_DEMO_ADMIN_PASSWORD': 'synthetic-admin-pass',
+                'PUBLIC_DEMO_ACCOUNTS_SHA256': 'c' * 64}
+        with patch('kagoya_pull_agent.load_accounts', return_value=(args, {'synthetic': True})), patch('kagoya_pull_agent.verify_accounts') as verify:
+            result = self.run_deploy(lambda _: None)
+        self.assertFalse(result['no_op'])
+        self.assertEqual(verify.call_count, 2)
+        build_env = next(env for argv, env in self.docker.commands if 'build' in argv)
+        for key, value in args.items(): self.assertEqual(build_env[key], value)
+        self.assertEqual(self.docker.up_targets, ['frontend'])
+
+    def test_public_account_auth_failure_stops_before_build(self):
+        with patch('kagoya_pull_agent.load_accounts', return_value=(empty_build_args(), {'synthetic': True})), patch('kagoya_pull_agent.verify_accounts', side_effect=PublicDemoError('Rejected')):
+            with self.assertRaises(DeployError): self.run_deploy(lambda _: None)
+        self.assertFalse(any('build' in argv or 'up' in argv for argv, _ in self.docker.commands))
+
+    def test_public_accounts_change_during_build_stops_before_switch(self):
+        args = empty_build_args()
+        with patch('kagoya_pull_agent.load_accounts', side_effect=[(args, None), ({**args, 'PUBLIC_DEMO_ACCOUNTS_SHA256': 'c'*64}, None)]):
+            with self.assertRaisesRegex(DeployError, 'revalidation failed'): self.run_deploy(lambda _: None)
+        self.assertEqual(self.docker.up_targets, [])
+
+    def test_same_source_different_public_configuration_is_not_a_silent_noop(self):
+        self.run_deploy(lambda _: None)
+        args = {**empty_build_args(), 'PUBLIC_DEMO_ACCOUNTS_SHA256': 'c'*64}
+        with patch('kagoya_pull_agent.load_accounts', return_value=(args, None)):
+            with self.assertRaisesRegex(DeployError, 'new reviewed source release'): self.run_deploy(lambda _: None)
+        self.assertEqual(self.docker.up_targets, ['frontend'])
 
     def test_legacy_bootstrap_blocks_release_before_build_or_switch(self):
         self.config["frontend_bootstrap_mode"] = "legacy-override-update-required"
