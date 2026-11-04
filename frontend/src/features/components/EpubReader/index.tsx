@@ -61,6 +61,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection, userId }: { bookId: 
 	const [rendererBusy, setRendererBusy] = useState(false);
 	const [tocOpen, setTocOpen] = useState(false);
 	const tocOpenRef = useRef(false);
+	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [currentHref, setCurrentHref] = useState('');
 	const setTocVisible = (open: boolean) => { tocOpenRef.current = open; setTocOpen(open); };
 	const storageKey = userId === undefined ? `reader-location:${bookId}` : `reader-location:${userId}:${bookId}`;
@@ -329,24 +330,24 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection, userId }: { bookId: 
 	const activeTocHref = navigation.find((item) => normalize(item.href) === normalize(currentHref))?.href ?? navigation.find((item) => resource(item.href) === resource(currentHref))?.href;
 	return (
 		<div className='flex h-[100dvh] flex-col bg-white text-foreground'>
-			<header className='shrink-0 border-b border-border bg-white p-2 sm:p-3'>
-				<div className='flex flex-wrap items-center gap-2'>
+			<header className='shrink-0 border-b border-border bg-white px-1 py-1 sm:px-3 sm:py-2'>
+				<div className='flex min-w-0 flex-wrap items-center gap-1 sm:gap-2'>
 					<Link
 						to='/'
-						className='inline-flex min-h-11 shrink-0 items-center rounded-md px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+						className='inline-flex min-h-11 shrink-0 items-center px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
 					>
 						本棚に戻る
 					</Link>
-					{bookTitle && <span className='min-w-0 flex-1 truncate px-1 text-center text-sm font-medium'>{bookTitle}</span>}
-					<div className='ml-auto flex items-center gap-2'>
+					{bookTitle && <span title={bookTitle} className='min-w-0 flex-1 truncate px-1 text-center text-sm font-medium'>{bookTitle}</span>}
+					<div className='ml-auto flex shrink-0 items-center gap-1 sm:gap-2'>
 						{history.length > 0 && (
-							<Button aria-label='目次移動前へ戻る' variant='outline' onClick={handleBack} className='min-h-11 px-3'>
+							<Button aria-label='目次移動前へ戻る' variant='outline' onClick={handleBack} className='min-h-11 px-2 sm:px-3'>
 								戻る
 							</Button>
 						)}
 						<Sheet open={tocOpen} onOpenChange={setTocVisible}>
 							<SheetTrigger asChild>
-								<Button variant='outline' className='min-h-11 bg-white px-3 active:bg-white focus:bg-white data-[state=open]:bg-white'>
+								<Button variant='outline' className='min-h-11 bg-white px-2 active:bg-white focus:bg-white data-[state=open]:bg-white sm:px-3'>
 									目次
 								</Button>
 							</SheetTrigger>
@@ -395,35 +396,20 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection, userId }: { bookId: 
 								</nav>
 							</SheetContent>
 						</Sheet>
-
-						<Select value={spread} onValueChange={changeSpread}>
-							<SelectTrigger
-								disabled={isLoading}
-								aria-label='ページ表示方法'
-								className='min-h-11 w-[132px] bg-white sm:w-[180px]'
-							>
-								<SelectValue />
-							</SelectTrigger>
-							<SelectContent>
-								<SelectGroup>
-									<SelectItem value='always'>常に見開き</SelectItem>
-									<SelectItem value='none'>常に単ページ</SelectItem>
-									<SelectItem value='auto'>自動</SelectItem>
-								</SelectGroup>
-							</SelectContent>
-						</Select>
+						<Sheet open={settingsOpen} onOpenChange={setSettingsOpen}>
+							<SheetTrigger asChild><Button type='button' variant='outline' className='min-h-11 px-2 sm:px-3'>表示設定</Button></SheetTrigger>
+							<SheetContent side='right' className='w-[min(88vw,22rem)] bg-white text-foreground [&>button]:size-11'>
+								<SheetHeader><SheetTitle>表示設定</SheetTitle><SheetDescription>ページの表示方法を選びます。</SheetDescription></SheetHeader>
+								<div className='pt-4'>
+									<Field>
+										<FieldLabel htmlFor='epub-spread-settings'>ページ表示方法</FieldLabel>
+										<SpreadSelect id='epub-spread-settings' spread={spread} disabled={isLoading} onChange={changeSpread} />
+									</Field>
+								</div>
+							</SheetContent>
+						</Sheet>
 					</div>
 				</div>
-
-				<Field className='mt-2 w-full'>
-					<FieldLabel htmlFor='reading-progress' className='text-xs sm:text-sm'>
-						章内ページ: {screenPage.page} / {screenPage.total}（第{screenPage.section}節）
-						<br />
-						本文位置: {currentPage > 0 ? `${currentPage} / ${totalPage}（約1600文字単位）` : '計算中'}
-						<span className='ml-auto'>{percentage === null ? '進捗計算中' : `${percentage}%`}</span>
-					</FieldLabel>
-					<Progress value={percentage ?? 0} id='reading-progress' />
-				</Field>
 				<ReadingSaveStatus status={status} retry={retry} />
 				{restoreError && (
 					<p role='alert' className='text-xs'>
@@ -454,8 +440,9 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection, userId }: { bookId: 
 				/>
 			</main>
 			<footer
+				data-testid='epub-reader-footer'
 				style={{ flexDirection: direction === 'rtl' ? 'row-reverse' : 'row' }}
-				className='flex shrink-0 justify-center gap-3 border-t border-border bg-white p-2'
+				className='flex shrink-0 flex-wrap items-center justify-center gap-x-2 gap-y-1 border-t border-border bg-white px-1 py-1 sm:gap-x-3 sm:px-3'
 			>
 				<Button
 					type='button'
@@ -479,8 +466,33 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection, userId }: { bookId: 
 				>
 					{direction === 'rtl' ? '‹' : '›'}
 				</Button>
+				<div className='order-3 min-w-[9rem] flex-1 basis-full text-center text-xs sm:order-none sm:min-w-0 sm:flex-none sm:basis-auto sm:text-sm' aria-live='polite'>
+					<div>章内ページ: {screenPage.page} / {screenPage.total}（第{screenPage.section}節）</div>
+					<div>本文位置: {currentPage > 0 ? `${currentPage} / ${totalPage}（約1600文字単位）` : '計算中'} <span className='ml-1'>{percentage === null ? '進捗計算中' : `${percentage}%`}</span></div>
+					<Progress value={percentage ?? 0} aria-label='EPUB読書進捗' className='mt-1 h-1 w-full' />
+				</div>
+				<div className='order-4 sm:order-none'>
+					<SpreadSelect spread={spread} disabled={isLoading} onChange={changeSpread} />
+				</div>
 			</footer>
 		</div>
+	);
+}
+
+function SpreadSelect({ id, spread, disabled, onChange }: { id?: string; spread: Spread; disabled: boolean; onChange: (value: string) => void }) {
+	return (
+		<Select value={spread} onValueChange={onChange}>
+			<SelectTrigger id={id} disabled={disabled} aria-label='ページ表示方法' className='min-h-11 w-[132px] bg-white sm:w-[180px]'>
+				<SelectValue />
+			</SelectTrigger>
+			<SelectContent>
+				<SelectGroup>
+					<SelectItem value='always'>常に見開き</SelectItem>
+					<SelectItem value='none'>常に単ページ</SelectItem>
+					<SelectItem value='auto'>自動</SelectItem>
+				</SelectGroup>
+			</SelectContent>
+		</Select>
 	);
 }
 

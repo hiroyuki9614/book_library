@@ -24,7 +24,17 @@ async function fileApi(page: Page, file: Buffer, kind = 'epub', initial: string 
 			json: { bookId: 1, currentPosition: saved, currentPage: kind === 'pdf' ? Number(saved ?? 1) : 1, progressPercentage, readStatus },
 		});
 	});
-	return { writes, saved: () => saved, status: () => readStatus, progress: () => progressPercentage };
+	return {
+		writes,
+		saved: () => saved,
+		status: () => readStatus,
+		progress: () => progressPercentage,
+		reset: () => {
+			saved = initial;
+			readStatus = 'reading';
+			progressPercentage = null;
+		},
+	};
 }
 
 async function visibleText(page: Page) {
@@ -102,12 +112,24 @@ async function ready(page: Page) {
 	logReady('visible text ready');
 }
 async function progress(page: Page) {
-	const label = await page.locator('label[for="reading-progress"]').innerText();
+	const footer = page.getByTestId('epub-reader-footer');
+	await expect(footer).toBeVisible();
+	const label = await footer.innerText();
 	const screen = label.match(/章内ページ:\s*(\d+)\s*\/\s*(\d+)（第(\d+)節）/);
-	const location = label.match(/本文位置:\s*(\d+)\s*\/\s*(\d+)/);
+	const location = label.match(/本文位置:\s*(\d+)\s*\/\s*(\d+)（約1600文字単位）/);
 	expect(screen, 'screen page must be readable').not.toBeNull();
-	expect(location, 'character location must be readable').not.toBeNull();
-	return { page: Number(screen![1]), section: Number(screen![3]), location: Number(location![1]) };
+	expect(location, 'generated character location must be readable').not.toBeNull();
+	const pageNumber = Number(screen![1]);
+	const screenTotal = Number(screen![2]);
+	const section = Number(screen![3]);
+	const locationNumber = Number(location![1]);
+	const locationTotal = Number(location![2]);
+	expect(pageNumber, 'chapter screen page must be positive').toBeGreaterThan(0);
+	expect(pageNumber, 'chapter screen page must not exceed its section total').toBeLessThanOrEqual(screenTotal);
+	expect(section, 'chapter section must be positive').toBeGreaterThan(0);
+	expect(locationNumber, 'generated character location must be positive').toBeGreaterThan(0);
+	expect(locationNumber, 'generated character location must not exceed its total').toBeLessThanOrEqual(locationTotal);
+	return { page: pageNumber, section, location: locationNumber };
 }
 async function move(page: Page, name = '次のページへ', timeout = 5000) {
 	const before = await cfi(page);
@@ -136,7 +158,13 @@ for (const config of [
 		const api = await fileApi(page, epubFixture(config));
 		await page.goto('/e2e/readers/harness.html');
 		await ready(page);
-		for (const mode of ['常に単ページ', '常に見開き', '自動']) {
+		for (const [modeIndex, mode] of ['常に単ページ', '常に見開き', '自動'].entries()) {
+			if (modeIndex > 0) {
+				api.reset();
+				await page.evaluate(() => localStorage.clear());
+				await page.reload();
+				await ready(page);
+			}
 			await page.getByRole('combobox').click();
 			await page.getByRole('option', { name: mode, exact: true }).click();
 			await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
