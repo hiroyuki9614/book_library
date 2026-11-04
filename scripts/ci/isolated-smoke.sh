@@ -84,13 +84,13 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "$recovery_rehearsal" == "github-hosted-v1" ]]; then
-  docker network create --internal \
+  docker network create \
     --label "com.docker.compose.project=$project" \
     --label com.docker.compose.network=default \
     "$network" >/dev/null
   network_identity="$(docker network inspect --format '{{.Name}}|{{.Internal}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}' "$network")"
-  [[ "$network_identity" == "$network|true|$project|default" ]] || {
-    echo "Synthetic Compose network is not internal and project-owned" >&2
+  [[ "$network_identity" == "$network|false|$project|default" ]] || {
+    echo "Synthetic Compose network is not the project-owned bridge" >&2
     exit 1
   }
 fi
@@ -301,7 +301,7 @@ db_continuity="$(docker compose --project-name "$project" --file "$compose_file"
 [[ "$db_continuity" == t ]] || { echo "Synthetic DB marker lost after Docker daemon restart" >&2; exit 1; }
 post_restart_network_identity="$(docker network inspect --format '{{.Name}}|{{.Internal}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}' "$network")"
 [[ "$post_restart_network_identity" == "$network_identity" ]] || {
-  echo "Internal synthetic Compose network identity changed after daemon restart" >&2
+  echo "Synthetic Compose network identity changed after daemon restart" >&2
   exit 1
 }
 capture_runtime

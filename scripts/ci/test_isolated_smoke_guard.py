@@ -71,6 +71,14 @@ esac
     def logged_docker_calls(self):
         return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
 
+    def test_recovery_rehearsal_keeps_project_bridge_for_published_ports(self):
+        script = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('docker network create \\', script)
+        self.assertNotIn('docker network create --internal', script)
+        self.assertIn('--label "com.docker.compose.project=$project"', script)
+        self.assertIn('"$network|false|$project|default"', script)
+        self.assertIn('post_restart_network_identity" == "$network_identity"', script)
+
     def test_rejects_non_github_host_without_docker_call(self):
         result = self.run_guard(RUNNER_ENVIRONMENT="self-hosted")
         self.assertNotEqual(result.returncode, 0)
