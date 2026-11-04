@@ -518,6 +518,37 @@ class ReleaseGateTests(unittest.TestCase):
 
         self.assertEqual(proof["pr_head_sha"], PR_HEAD_SHA)
 
+    def test_accepts_solo_owner_policy_with_github_crlf_comment_separator(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        for comment in api.comments:
+            comment["body"] = comment["body"].replace("\n", "\r\n", 1)
+
+        proof = validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+
+        self.assertEqual(proof["pr_head_sha"], PR_HEAD_SHA)
+
+    def test_rejects_solo_owner_policy_with_extra_crlf_after_json(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        api.comments[0]["body"] = api.comments[0]["body"].replace(
+            "\n", "\r\n", 1
+        ) + "\r\n"
+
+        with self.assertRaisesRegex(GateError, "invalid structure"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_solo_owner_policy_with_carriage_return_inside_json(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        api.comments[0]["body"] += "\r"
+
+        with self.assertRaisesRegex(GateError, "invalid structure"):
+            validate_release(api, SOURCE_SHA)
+
     def test_rejects_solo_policy_when_review_comment_was_edited(self):
         api = FakeAPI()
         api.reviews = []
