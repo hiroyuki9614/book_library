@@ -54,6 +54,8 @@ test('admin sample registration, deletion denies new reading, restore, and perma
  releaseStale();
  await expect.poll(() => delivered).toBe(2);
  await page.unroute('**/api/v1/admin/books?state=*');
+ await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+ await expect(publicRow).toHaveCount(0);
  const refreshed = page.waitForResponse((r) => r.url().endsWith('/api/v1/admin/books?state=active'));
  await page.reload();
  const refreshedBooks = await (await refreshed).json();
