@@ -27,6 +27,7 @@ from urllib.request import (
     build_opener,
 )
 
+from public_demo_accounts import PublicDemoError, empty_build_args, load_accounts, verify_accounts
 from release_gate import GateError, GitHubAPI, TransientGitHubAPIError, validate_release
 from kagoya_compose import (
     ComposeIdentityError,
@@ -450,6 +451,10 @@ def _frontend_compose_env(
         "VITE_API_BASE_URL": config["expected_api_base_url"],
         "VITE_PUBLIC_DEMO_EMAIL": email,
         "VITE_PUBLIC_DEMO_PASSWORD": password,
+        "VITE_PUBLIC_DEMO_ADMIN_EMAIL": "",
+        "VITE_PUBLIC_DEMO_ADMIN_PASSWORD": "",
+        "PUBLIC_DEMO_ACCOUNTS_SHA256": "",
+        **config.get("_public_demo_build_args", {}),
     }
 
 
@@ -773,6 +778,9 @@ def _verify_target_image(config: dict, source_sha: str) -> dict:
         or labels.get("org.opencontainers.image.revision", "").lower() != source_sha
     ):
         raise DeployError("The built frontend image revision label does not match the source SHA")
+    expected_fingerprint = config.get('_public_demo_build_args', empty_build_args())['PUBLIC_DEMO_ACCOUNTS_SHA256']
+    if labels.get('com.belib.public-demo-accounts-sha256', '') != expected_fingerprint:
+        raise DeployError('The frontend public demo configuration differs; a new reviewed source release is required')
     return image
 
 
@@ -815,6 +823,7 @@ def _validate_frontend_compose(
             expected_networks=config["expected_networks"],
             expected_contract_sha256=config["expected_compose_contract_sha256"],
             public_demo_credentials=public_demo_credentials,
+            expected_public_demo_args=config.get("_public_demo_build_args"),
         )
     except (ComposeIdentityError, KeyError, TypeError) as error:
         if config.get("frontend_bootstrap_mode") == "legacy-override-update-required":
@@ -882,6 +891,16 @@ def deploy_frontend(
         main_sha_reader = _main_sha
     if smoke is None:
         smoke = smoke_test
+    dual_accounts = None
+    dual_args = None
+    if config.get('publish_demo_accounts') is True:
+        if 'public_demo_credentials_file' in config or (public_demo_source is not None and public_demo_source.candidate is not None):
+            raise DeployError('Choose exactly one public demo publication mode')
+        try:
+            dual_args, dual_accounts = load_accounts(config)
+        except (PublicDemoError, OSError):
+            raise DeployError('Public demo configuration is unavailable or invalid') from None
+        config = {**config, '_public_demo_build_args': dual_args}
     if public_demo_source is None:
         public_demo_source = _load_public_demo_source(config)
     public_demo_candidate = public_demo_source.candidate
@@ -901,6 +920,11 @@ def deploy_frontend(
         source_sha,
         public_demo_credentials=public_demo_credentials,
     )
+
+    try:
+        verify_accounts(config, dual_accounts)
+    except PublicDemoError as error:
+        raise DeployError(str(error)) from None
 
     current = _container(config)
     if current.get("Config", {}).get("Image") == f"belib-frontend:{source_sha}":
@@ -939,6 +963,14 @@ def deploy_frontend(
         ),
     )
     image = _verify_target_image(config, source_sha)
+    if dual_args is not None:
+        try:
+            fresh_args, fresh_accounts = load_accounts(config)
+            if fresh_args != dual_args:
+                raise PublicDemoError('Public demo configuration changed during build')
+            verify_accounts(config, fresh_accounts)
+        except (PublicDemoError, OSError):
+            raise DeployError('Public demo revalidation failed before publication') from None
     if public_demo_candidate is not None:
         if _validate_public_demo_candidate(public_demo_candidate) != public_demo_identity:
             raise DeployError("The public demo identity changed before the frontend switch")
@@ -1243,6 +1275,8 @@ def dispatch_once(config: dict) -> int:
 
         config["request_sha"] = source_sha
         try:
+            if config.get('publish_demo_accounts') is True and 'public_demo_credentials_file' in config:
+                raise DeployError('Choose exactly one public demo publication mode')
             public_demo_source = _load_public_demo_source(config)
             active_public_demo_marker = _same_sha_public_demo_marker(
                 state, source_sha, public_demo_source.marker

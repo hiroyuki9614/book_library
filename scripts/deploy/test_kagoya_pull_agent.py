@@ -29,6 +29,7 @@ from kagoya_pull_agent import (
     DeployError,
     _DeferredPreSwitchGitTransport,
     _PublicDemoCandidate,
+    _PublicDemoSource,
     _PublicDemoIdentity,
     _PublicDemoValidationSession,
     PUBLIC_DEMO_SHELF_PATH,
@@ -54,6 +55,7 @@ from kagoya_pull_agent import (
     rollback_frontend,
 )
 from release_gate import GateError, TransientGitHubAPIError
+from public_demo_accounts import PublicDemoError, empty_build_args
 
 
 SOURCE_SHA = "a" * 40
@@ -145,6 +147,9 @@ class FakeDocker:
                             "VITE_API_BASE_URL": (env or {}).get("VITE_API_BASE_URL"),
                             "VITE_PUBLIC_DEMO_EMAIL": (env or {}).get("VITE_PUBLIC_DEMO_EMAIL", ""),
                             "VITE_PUBLIC_DEMO_PASSWORD": (env or {}).get("VITE_PUBLIC_DEMO_PASSWORD", ""),
+                            "VITE_PUBLIC_DEMO_ADMIN_EMAIL": (env or {}).get("VITE_PUBLIC_DEMO_ADMIN_EMAIL", ""),
+                            "VITE_PUBLIC_DEMO_ADMIN_PASSWORD": (env or {}).get("VITE_PUBLIC_DEMO_ADMIN_PASSWORD", ""),
+                            "PUBLIC_DEMO_ACCOUNTS_SHA256": (env or {}).get("PUBLIC_DEMO_ACCOUNTS_SHA256", ""),
                         },
                         "context": str((checkout / "frontend").resolve()),
                         "dockerfile": "Dockerfile",
@@ -186,7 +191,7 @@ class FakeDocker:
                 image_id = NEW_ID if source_sha == SOURCE_SHA else DEPLOYED_ID
                 self.images[f"belib-frontend:{source_sha}"] = {
                     "Id": image_id,
-                    "Config": {"Labels": {"org.opencontainers.image.revision": source_sha}},
+                    "Config": {"Labels": {"org.opencontainers.image.revision": source_sha, "com.belib.public-demo-accounts-sha256": (env or {}).get("PUBLIC_DEMO_ACCOUNTS_SHA256", "")}},
                 }
             elif "up" in argv:
                 ref = (env or {}).get("BELIB_FRONTEND_IMAGE", f"belib-frontend:{SOURCE_SHA}")
@@ -1601,6 +1606,48 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 self.docker.commands.clear()
                 self.docker.up_targets.clear()
         self.config["agent_uid"] = os.getuid()
+
+    def test_explicit_public_accounts_reach_build_only_after_role_checks(self):
+        self.config['publish_demo_accounts'] = True
+        args = {**empty_build_args(), 'VITE_PUBLIC_DEMO_EMAIL': 'user@example.test',
+                'VITE_PUBLIC_DEMO_PASSWORD': 'synthetic-user-pass',
+                'VITE_PUBLIC_DEMO_ADMIN_EMAIL': 'admin@example.test',
+                'VITE_PUBLIC_DEMO_ADMIN_PASSWORD': 'synthetic-admin-pass',
+                'PUBLIC_DEMO_ACCOUNTS_SHA256': 'c' * 64}
+        with patch('kagoya_pull_agent.load_accounts', return_value=(args, {'synthetic': True})), patch('kagoya_pull_agent.verify_accounts') as verify:
+            result = self.run_deploy(lambda _: None)
+        self.assertFalse(result['no_op'])
+        self.assertEqual(verify.call_count, 2)
+        build_env = next(env for argv, env in self.docker.commands if 'build' in argv)
+        for key, value in args.items(): self.assertEqual(build_env[key], value)
+        self.assertEqual(self.docker.up_targets, ['frontend'])
+
+    def test_public_account_auth_failure_stops_before_build(self):
+        self.config["publish_demo_accounts"] = True
+        with patch('kagoya_pull_agent.load_accounts', return_value=(empty_build_args(), {'synthetic': True})), patch('kagoya_pull_agent.verify_accounts', side_effect=PublicDemoError('Rejected')):
+            with self.assertRaises(DeployError): self.run_deploy(lambda _: None)
+        self.assertFalse(any('build' in argv or 'up' in argv for argv, _ in self.docker.commands))
+
+    def test_public_accounts_change_during_build_stops_before_switch(self):
+        self.config["publish_demo_accounts"] = True
+        args = empty_build_args()
+        with patch('kagoya_pull_agent.load_accounts', side_effect=[(args, None), ({**args, 'PUBLIC_DEMO_ACCOUNTS_SHA256': 'c'*64}, None)]):
+            with self.assertRaisesRegex(DeployError, 'revalidation failed'): self.run_deploy(lambda _: None)
+        self.assertEqual(self.docker.up_targets, [])
+
+    def test_same_source_different_public_configuration_is_not_a_silent_noop(self):
+        self.run_deploy(lambda _: None)
+        self.config["publish_demo_accounts"] = True
+        args = {**empty_build_args(), 'PUBLIC_DEMO_ACCOUNTS_SHA256': 'c'*64}
+        with patch('kagoya_pull_agent.load_accounts', return_value=(args, None)):
+            with self.assertRaises(DeployError): self.run_deploy(lambda _: None)
+        self.assertEqual(self.docker.up_targets, ['frontend'])
+
+    def test_cannot_mix_legacy_and_dual_public_account_modes(self):
+        self.config.update(publish_demo_accounts=True, public_demo_credentials_file='/never/read/legacy.json')
+        with patch('kagoya_pull_agent._load_public_demo_source', return_value=_PublicDemoSource(None, dict(PUBLIC_DEMO_ABSENT_SIDECAR_MARKER))):
+            with self.assertRaisesRegex(DeployError, 'exactly one'): self.run_deploy(lambda _: None)
+        self.assertEqual(self.docker.commands, [])
 
     def test_legacy_bootstrap_blocks_release_before_build_or_switch(self):
         self.config["frontend_bootstrap_mode"] = "legacy-override-update-required"

@@ -148,3 +148,7 @@ python3 ~/.local/libexec/belib-production-cd/kagoya_pull_agent.py \\
 ```
 
 `CICD_ACCEPTED` remains `INCOMPLETE` until a GitHub Actions-triggered request is consumed by the authorized KAGOYA timer and the exact running image plus public smoke are read back. Demo login/permissions and authenticated EPUB/PDF acceptance are reported separately when the dedicated non-admin account is verified.
+
+### Newly provisioned public administrator
+
+For the owner-authorized new public administrator plus general demo pair, use the mutually exclusive publication mode in `docs/portfolio-demo.md`. Existing general-only sidecar behavior remains intact. The frontend build forwards both role pairs and `PUBLIC_DEMO_ACCOUNTS_SHA256`; default public values remain empty. Existing active timers make the installer exit early, so activation must sync the reviewed dispatcher modules through the existing owner-native session without recreating the timer. Preserve private configuration/module backups, the protected Compose projection, exact-SHA gates and rollback image.
