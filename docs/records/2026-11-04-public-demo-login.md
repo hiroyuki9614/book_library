@@ -4,7 +4,7 @@
 
 The owner requested administrator/user ID/PW on the BeLib login page, then explicitly requested creation and publication of a **new administrator**. Use that newly provisioned identity. It has the existing full administrator role; a new account does not isolate books or reduce permissions. Preserve existing credentials, users, books, R2 and runtime data. No old credential recovery/reset, storage mutation, migration, privilege transport, new timer or shared-runtime restart is authorized by this task.
 
-Base frontend is main `1f41e1feafd0ae7aa333f4c2b676c563f00fc764`; existing PR #83 owns this task. Existing PR #75 targets another general-user credential opt-in and remains separate. This task uses newly generated public identities and does not recover its candidate's previously refused credentials.
+Base frontend is main `1f41e1feafd0ae7aa333f4c2b676c563f00fc764`; existing PR #83 owns this task. PR #75 merged concurrently at main `779acaa1cbdaaed1397abab14e4796a9d2eb7bb8`. Its general-only sidecar validation and tests are preserved. The new two-role mode is explicit and mutually exclusive with the old configuration key; it uses newly generated public identities and does not recover any prior candidate credential.
 
 ## Verified account provisioning
 

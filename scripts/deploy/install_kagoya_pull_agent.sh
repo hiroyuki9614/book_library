@@ -65,6 +65,7 @@ STATE_DIR="$(getent passwd agent | cut -d: -f6)/.local/state/belib-production-cd
 RELEASE_DIR="$(getent passwd agent | cut -d: -f6)/.local/share/belib-production-cd/releases"
 UNIT_DIR="$(getent passwd agent | cut -d: -f6)/.config/systemd/user"
 CONFIG_PATH="$CONFIG_DIR/config.json"
+PUBLIC_DEMO_CREDENTIALS_FILE="$(realpath -m -- "$CONFIG_DIR/public-demo-credentials.json")"
 SERVICE_PATH="$UNIT_DIR/$UNIT_NAME.service"
 TIMER_PATH="$UNIT_DIR/$UNIT_NAME.timer"
 
@@ -124,9 +125,9 @@ install -m 700 "$SCRIPT_DIR/release_gate.py" "$LIBEXEC_DIR/release_gate.py"
 install -m 700 "$SCRIPT_DIR/kagoya_compose.py" "$LIBEXEC_DIR/kagoya_compose.py"
 install -m 700 "$SCRIPT_DIR/public_demo_accounts.py" "$LIBEXEC_DIR/public_demo_accounts.py"
 
-BELIB_EXPECTED_API_BASE_URL="$EXPECTED_API_BASE_URL" BELIB_EXPECTED_COMPOSE_CONTRACT_SHA256="$EXPECTED_COMPOSE_CONTRACT_SHA256" BELIB_FRONTEND_BOOTSTRAP_MODE="$FRONTEND_BOOTSTRAP_MODE" python3 - "$PROJECT" "$PRODUCTION_PROJECT_DIR" "$PRODUCTION_COMPOSE_FILE" "$PRODUCTION_COMPOSE_OVERRIDE" "$PRODUCTION_ENV_FILE" "$EXPECTED_NETWORKS_JSON" "$IMAGE_ID" "$CONFIG_PATH" "$LIBEXEC_DIR" "$STATE_DIR" "$RELEASE_DIR" "$ROLLBACK_REF" <<'PY'
+BELIB_EXPECTED_API_BASE_URL="$EXPECTED_API_BASE_URL" BELIB_EXPECTED_COMPOSE_CONTRACT_SHA256="$EXPECTED_COMPOSE_CONTRACT_SHA256" BELIB_FRONTEND_BOOTSTRAP_MODE="$FRONTEND_BOOTSTRAP_MODE" python3 - "$PROJECT" "$PRODUCTION_PROJECT_DIR" "$PRODUCTION_COMPOSE_FILE" "$PRODUCTION_COMPOSE_OVERRIDE" "$PRODUCTION_ENV_FILE" "$EXPECTED_NETWORKS_JSON" "$IMAGE_ID" "$CONFIG_PATH" "$LIBEXEC_DIR" "$STATE_DIR" "$RELEASE_DIR" "$ROLLBACK_REF" "$PUBLIC_DEMO_CREDENTIALS_FILE" <<'PY'
 import json, os, sys
-project, project_dir, compose_file, override_file, env_file, networks_json, image_id, config_path, libexec, state_dir, release_dir, rollback_ref = sys.argv[1:]
+project, project_dir, compose_file, override_file, env_file, networks_json, image_id, config_path, libexec, state_dir, release_dir, rollback_ref, public_demo_credentials_file = sys.argv[1:]
 expected_api_base_url = os.environ.get("BELIB_EXPECTED_API_BASE_URL", "")
 expected_contract_sha256 = os.environ.get("BELIB_EXPECTED_COMPOSE_CONTRACT_SHA256", "")
 frontend_bootstrap_mode = os.environ.get("BELIB_FRONTEND_BOOTSTRAP_MODE", "")
@@ -147,6 +148,7 @@ config = {
     "production_compose_override": override_file,
     "bootstrap_image_id": image_id,
     "bootstrap_rollback_ref": rollback_ref,
+    "public_demo_credentials_file": public_demo_credentials_file,
     "release_root": release_dir,
     "state_file": os.path.join(state_dir, "state.json"),
     "lock_file": os.path.join(state_dir, "dispatch.lock"),
