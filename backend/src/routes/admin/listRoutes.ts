@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
+import { BookStorageNotFoundError, getBookFileAccess } from '../../lib/bookStorage.js';
 import { auth } from '../../lib/auth.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
 
@@ -26,11 +27,12 @@ type AdminBookRecord = {
 		mimeType: string;
 		originalFileName: string;
 		fileSize: number;
+		fileUrl: string;
 	}>;
 	roleBookPermissions: Array<{ role: { name: string } }>;
 };
 
-function jsonError(c: AdminContext, status: 400 | 401 | 403 | 404 | 500, message: string, code: string) {
+function jsonError(c: AdminContext, status: 400 | 401 | 403 | 404 | 409 | 500, message: string, code: string) {
 	return c.json({ message, code }, status);
 }
 
@@ -61,7 +63,8 @@ function publicationScopeOf(book: AdminBookRecord): PublicationScope {
 }
 
 function toAdminBook(book: AdminBookRecord) {
-	const file = book.bookFiles[0] ?? null;
+	const first = book.bookFiles[0];
+	const file = first ? { id: first.id, extension: first.extension, mimeType: first.mimeType, originalFileName: first.originalFileName, fileSize: first.fileSize } : null;
 	return {
 		id: book.id,
 		title: book.title,
@@ -96,14 +99,22 @@ app.get('/books', async (c) => {
 				category: { select: { id: true, name: true } },
 				bookFiles: {
 					orderBy: { id: 'asc' },
-					take: 1,
-					select: { id: true, extension: true, mimeType: true, originalFileName: true, fileSize: true },
+					select: { id: true, extension: true, mimeType: true, originalFileName: true, fileSize: true, fileUrl: true },
 				},
 				roleBookPermissions: { select: { role: { select: { name: true } } } },
 			},
 		});
 
-		return c.json({ books: books.map((book) => toAdminBook(book as AdminBookRecord)) });
+		const results = await Promise.all(books.map(async (book) => {
+   const response = toAdminBook(book as AdminBookRecord);
+   if (state !== 'deleted') return response;
+   const checks = await Promise.all(book.bookFiles.map(async (file) => {
+    try { await getBookFileAccess(file.fileUrl); return 'available'; }
+    catch (error) { return error instanceof BookStorageNotFoundError ? 'missing' : 'unknown'; }
+   }));
+   return { ...response, fileMissing: checks.includes('missing'), fileCheckFailed: checks.includes('unknown') };
+  }));
+  return c.json({ books: results });
 	} catch (error) {
 		console.error(error);
 		return c.json({ error: 'Failed to load admin books' }, 500);
@@ -150,19 +161,25 @@ app.patch('/books/:bookId/restore', async (c) => {
 		if (!bookId) return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
 
 		const prisma = c.get('prisma');
-		const current = await prisma.book.findUnique({
-			where: { id: bookId },
-			select: { id: true, deletedAt: true },
-		});
-		if (!current) return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
-		if (!current.deletedAt) return c.json({ id: current.id, deletedAt: null });
-
-		const book = await prisma.book.update({
-			where: { id: bookId },
-			data: { deletedAt: null },
-			select: { id: true, deletedAt: true },
-		});
-		return c.json({ id: book.id, deletedAt: book.deletedAt?.toISOString() ?? null });
+  const result = await prisma.$transaction(async (tx) => {
+   await tx.$queryRawUnsafe('SELECT id FROM books WHERE id = $1 FOR UPDATE', bookId);
+   const current = await tx.book.findUnique({
+    where: { id: bookId }, include: { bookFiles: true },
+   });
+   if (!current) return { state: 'missing' as const };
+   if (!current.deletedAt) return { state: 'ok' as const, book: current };
+   for (const file of current.bookFiles) {
+    try { await getBookFileAccess(file.fileUrl); }
+    catch { return { state: 'files_unavailable' as const }; }
+   }
+   const book = await tx.book.update({
+    where: { id: bookId }, data: { deletedAt: null }, select: { id: true, deletedAt: true },
+   });
+   return { state: 'ok' as const, book };
+  }, { timeout: 30_000, maxWait: 5_000 });
+  if (result.state === 'missing') return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
+  if (result.state === 'files_unavailable') return jsonError(c, 409, 'Book files are missing or unavailable; retry permanent deletion', 'BOOK_FILES_UNAVAILABLE');
+  return c.json({ id: result.book.id, deletedAt: null });
 	} catch (error) {
 		console.error(error);
 		return c.json({ error: 'Failed to restore book' }, 500);

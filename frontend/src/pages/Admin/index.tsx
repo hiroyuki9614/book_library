@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { BookOpen, Library, Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -10,6 +11,7 @@ import {
 	registerAdminBook,
 	renameAdminCategory,
 	restoreAdminBook,
+	permanentlyDeleteAdminBook,
 	softDeleteAdminBook,
 	updateAdminBookMetadata,
 	type AdminBook,
@@ -43,6 +45,11 @@ function sortCategories(categories: AdminCategory[]) {
 }
 
 function Admin() {
+ const queryClient = useQueryClient();
+ const clearBookCache = async () => {
+  await queryClient.cancelQueries({ queryKey: ['books'] });
+  queryClient.removeQueries({ queryKey: ['books'] });
+ };
 	const [books, setBooks] = useState<AdminBook[]>([]);
 	const [bookState, setBookState] = useState<AdminBookState>('active');
 	const [booksLoading, setBooksLoading] = useState(true);
@@ -131,6 +138,7 @@ function Admin() {
 		});
 		changeBookState('active');
 		setBooks((currentBooks) => [{ ...registeredBook, deletedAt: null }, ...currentBooks.filter((book) => book.id !== registeredBook.id)]);
+		await clearBookCache();
 		setIsSheetOpen(false);
 		toast.success('書籍とファイルを登録しました。');
 	};
@@ -157,6 +165,7 @@ function Admin() {
 		setMutatingBookId(bookId);
 		try {
 			await softDeleteAdminBook(bookId);
+			await clearBookCache();
 			setBooks((currentBooks) => currentBooks.filter((book) => book.id !== bookId));
 			toast.success('書籍を削除済み一覧へ移動しました。');
 		} catch {
@@ -170,6 +179,7 @@ function Admin() {
 		setMutatingBookId(bookId);
 		try {
 			await restoreAdminBook(bookId);
+			await clearBookCache();
 			setBooks((currentBooks) => currentBooks.filter((book) => book.id !== bookId));
 			toast.success('書籍を復元しました。');
 		} catch {
@@ -178,6 +188,20 @@ function Admin() {
 			setMutatingBookId(null);
 		}
 	};
+
+ const handlePermanentDelete = async (book: AdminBook) => {
+  if (!window.confirm('「' + book.title + '」を完全削除しますか？ファイルと全ユーザーの読書記録を削除します。この操作は取り消せません。')) return;
+  setMutatingBookId(book.id);
+  try {
+   await permanentlyDeleteAdminBook(book.id);
+   await clearBookCache();
+   setBooks((current) => current.filter((item) => item.id !== book.id));
+   toast.success('書籍・ファイル・読書記録を完全削除しました。');
+  } catch {
+   toast.error('完全削除を完了できませんでした。削除済み一覧を確認し、再実行してください。');
+   try { setBooks(await fetchAdminBooks('deleted')); } catch { setBooksError('削除済み一覧を取得できませんでした。再読み込みしてください。'); }
+  } finally { setMutatingBookId(null); }
+ };
 
 	const handleCreateCategory = async () => {
 		const name = newCategoryName.trim();
@@ -311,8 +335,8 @@ function Admin() {
 						</CardDescription>
 					</div>
 					<div className='flex gap-2'>
-						<Button variant={bookState === 'active' ? 'default' : 'outline'} onClick={() => changeBookState('active')}>通常書籍</Button>
-						<Button variant={bookState === 'deleted' ? 'default' : 'outline'} onClick={() => changeBookState('deleted')}>削除済み</Button>
+						<Button variant={bookState === 'active' ? 'default' : 'outline'} disabled={mutatingBookId !== null} onClick={() => changeBookState('active')}>通常書籍</Button>
+						<Button variant={bookState === 'deleted' ? 'default' : 'outline'} disabled={mutatingBookId !== null} onClick={() => changeBookState('deleted')}>削除済み</Button>
 					</div>
 				</CardHeader>
 				<CardContent className='overflow-x-auto'>
@@ -333,7 +357,11 @@ function Admin() {
 						<TableBody>
 							{books.map((book) => (
 								<TableRow key={book.id}>
-									<TableCell className='font-medium'>{book.title}</TableCell>
+									<TableCell className='font-medium'>
+ {book.title}
+ {book.fileMissing && <p role='alert' className='text-xs text-destructive'>ファイルが欠損しています。完全削除を再実行してください。</p>}
+ {book.fileCheckFailed && <p role='alert' className='text-xs text-destructive'>ファイルの状態を確認できません。復元前に再確認してください。</p>}
+ </TableCell>
 									<TableCell>{book.authorName ?? '未設定'}</TableCell>
 									<TableCell>{book.category.name}</TableCell>
 									<TableCell>{formatPublishedAt(book.publishedAt)}</TableCell>
@@ -351,15 +379,20 @@ function Admin() {
 									</TableCell>
 									<TableCell>
 										{isDeletedView ? (
-											<Button size='sm' variant='outline' disabled={mutatingBookId === book.id} onClick={() => handleRestore(book.id)}>
-												<RotateCcw />復元
-											</Button>
+											<div className='flex gap-2'>
+ <Button size='sm' variant='outline' disabled={mutatingBookId !== null || book.fileMissing || book.fileCheckFailed} onClick={() => handleRestore(book.id)}>
+  <RotateCcw />復元
+ </Button>
+ <Button size='sm' variant='destructive' disabled={mutatingBookId !== null} onClick={() => handlePermanentDelete(book)}>
+  <Trash2 />完全削除
+ </Button>
+ </div>
 										) : (
 											<div className='flex gap-2'>
 												<Button size='sm' variant='outline' onClick={() => setEditingBook(book)}>
 													<Pencil />編集
 												</Button>
-												<Button size='sm' variant='outline' disabled={mutatingBookId === book.id} onClick={() => handleDelete(book.id)}>
+												<Button size='sm' variant='outline' disabled={mutatingBookId !== null} onClick={() => handleDelete(book.id)}>
 													<Trash2 />削除
 												</Button>
 											</div>
