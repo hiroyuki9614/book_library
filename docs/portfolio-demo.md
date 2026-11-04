@@ -175,14 +175,37 @@ If registration partially succeeds, stop and inspect IDs/counts through the prot
 
 The unauthenticated entrypoint is `/login` (visitors to `/` are redirected there). It hides raw role/login-state debug labels. Once the existing production authorization checks below have been independently verified, an operator may explicitly approve displaying **only the restricted general demo account** email and password to all visitors.
 
-Set both `VITE_PUBLIC_DEMO_EMAIL` and `VITE_PUBLIC_DEMO_PASSWORD` when building the frontend. A missing or partial pair hides the credentials; the release artifact build refuses partial configuration. Both values are **public, not secrets**, and will appear as plain text in the browser/compiled bundle. They must never refer to admin/private/other reused credentials. Never copy `PORTFOLIO_ADMIN_PASSWORD`, an operator login, or a real personal password into these variables. Provision/rotate the restricted demo account through a separately reviewed, authorized operation first; re-run the general demo-role / admin-403 / private-book-403 gates before publishing the matching credentials. The UI code change alone does not authorize a production release.
+The KAGOYA dispatcher never sources these values from ambient `VITE_*`, `DEMO_USER_*`, admin, or protected production environment variables. A fresh installation records the absolute sidecar path `public_demo_credentials_file` as `<agent-config-dir>/public-demo-credentials.json`; the sidecar is optional and is not created by the installer. An absent sidecar (or an older config without this key) keeps both build arguments blank. A present sidecar must be a regular, non-symlink file owned by the `agent` user with mode `0600`, in a private directory.
+
+The sidecar has exactly this schema; angle-bracket values are operator-provided placeholders and must not be committed:
+
+```json
+{
+  "schema_version": 1,
+  "publication_intent": "public_general_demo_credentials",
+  "public_display_approved": true,
+  "approval_ref": "<non-secret-owner-approval-reference>",
+  "email": "<dedicated-general-demo-email>",
+  "password": "<dedicated-general-demo-password>"
+}
+```
+
+The dispatcher rejects malformed, partial, unapproved, symlinked, wrongly owned, wrongly permissioned, or legacy sidecars with no credential values in errors or logs. Owner-written role/403 flags are not part of the accepted schema and are never evidence. Before any nonblank sidecar pair is published, `expected_api_base_url` (the injected `VITE_API_BASE_URL`) must use the same canonical credential-free HTTPS origin `https://belib.hiroyuki9614.com`; the valid API base path remains empty or `/`, while HTTP, userinfo, query/fragment, arbitrary ports, and confusing subdomains are rejected. A blank pair remains the default when the sidecar is absent. For a present sidecar, the dispatcher uses a fresh cookie jar against the fixed origin to verify the same candidate's positive-integer `/api/v1/me` identity, exact email, exact `user` role, exact Admin API `403` JSON, and exact public shelf response from `/api/v1/books?limit=100`: HTTP 200 with `total=2`, `page=1`, `limit=100`, and unique book IDs exactly `{4,5}`. Titles and authors are not evidence and are not logged. A sidecar containing the removed `private_book_id` field is rejected; the automated publication proof never uses an unknown private-book ID. The complete identity-and-shelf check repeats immediately before the candidate switch and rejects identity or shelf changes. Manual no-build rollback does not read or validate the optional sidecar; it restores the saved immutable prior frontend image with blank public-demo build arguments and verifies the protected Compose runtime and image readback. Both values are **public, not secrets**, and will appear as plain text in the browser/compiled bundle once explicitly approved; they must be dedicated restricted-general credentials, never admin/private/reused credentials. Do not copy `PORTFOLIO_ADMIN_PASSWORD`, an operator login, or a real personal password into the sidecar.
+
+For this change, the current owner cannot recall the demo ID/password and no live credential or production authorization evidence is supplied. Therefore this PR cannot restore live ID/password display. The dedicated publicly shareable general account and independent non-admin evidence must be obtained through the authorized owner workflow first; no fabricated pair, insecure demo admin, credential copy into Git/PR/CI logs, browser session, or production operation is part of this task. The existing frontend display code remains unchanged.
+
+The exact public shelf gate does not replace the final manual private-book acceptance. Before production approval, the operator must separately select the applicable initial/private book and verify its detail, file URL issuance, and reading-info GET/PATCH all return `403` to the demo user. That private-book ID is manual acceptance evidence only; it is not stored in the sidecar or used by the automated publication gate.
+
+The canonical API-origin check also applies when the sidecar is absent: the blank-demo path remains available, but a frontend candidate with a different API origin is rejected before build or switch.
+
+Public-demo credentials are compiled into the static Vite bundle and cannot be retroactively erased by changing or removing the sidecar. The deployment state therefore records only a non-secret identity marker for the validated sidecar file, including an explicit absent marker, permits a same-SHA no-op only for unchanged, proven provenance, and fails closed on rotation, removal, unsafe sidecars, or an unproven legacy state. A new public pair requires a legitimate new `main` source SHA and a newly authorized GitHub Actions deployment request; fail-closed handling does not purge already-published static Vite credentials.
 
 ## 5. Production acceptance still required
 
 Before deployment approval, capture counts/IDs only before and after and verify:
 
 - unauthenticated list/detail return 401;
-- the demo user sees exactly the two demo books and cannot find or open any initial existing book;
+- the demo user sees exactly the public demo shelf IDs 4 and 5 and cannot find or open any initial existing book;
 - initial existing-book detail, file URL issuance, and reading-info GET/PATCH return 403 to the demo user;
 - the demo user receives 403 from every Admin API checked;
 - the admin still sees all initial and demo books;
