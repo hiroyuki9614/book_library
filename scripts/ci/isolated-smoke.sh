@@ -263,7 +263,7 @@ crash_owned_service() {
     return 1
   }
   capture_runtime
-  [[ "\${runtime_ids[$service]}" == "$expected_id" && "\${runtime_images[$service]}" == "$expected_image" ]] || {
+  [[ "${runtime_ids[$service]}" == "$expected_id" && "${runtime_images[$service]}" == "$expected_image" ]] || {
     echo "Refusing synthetic crash: expected container/image identity changed" >&2
     return 1
   }
