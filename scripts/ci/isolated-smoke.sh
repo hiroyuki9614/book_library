@@ -245,6 +245,85 @@ wait_db_healthy() {
   return 1
 }
 
+# Docker API kill is a manual stop: unless-stopped must not auto-restart it.
+# Exercise an unexpected init-process crash only on the preflight-verified,
+# disposable GitHub-hosted VM. pidfd pins the process despite PID reuse.
+crash_owned_service() {
+  local service="$1" expected_id="$2" expected_image="$3"
+  local record actual_id actual_image host_pid running restart_count started_at project_label service_label
+  local current_id current_image current_running current_restart current_started attempt
+
+  [[ "$recovery_rehearsal" == "github-hosted-v1" && "$RUNNER_ENVIRONMENT" == "github-hosted" \
+    && "$GITHUB_ACTIONS" == true ]] || {
+    echo "Refusing synthetic crash outside guarded GitHub-hosted rehearsal" >&2
+    return 1
+  }
+  [[ "$(docker context inspect --format '{{.Endpoints.docker.Host}}')" == "unix:///var/run/docker.sock" ]] || {
+    echo "Refusing synthetic crash outside runner-local Docker" >&2
+    return 1
+  }
+  capture_runtime
+  [[ "\${runtime_ids[$service]}" == "$expected_id" && "\${runtime_images[$service]}" == "$expected_image" ]] || {
+    echo "Refusing synthetic crash: expected container/image identity changed" >&2
+    return 1
+  }
+  record="$(docker inspect --format '{{.Id}}|{{.Image}}|{{.State.Pid}}|{{.State.Running}}|{{.RestartCount}}|{{.State.StartedAt}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' "$expected_id")"
+  IFS='|' read -r actual_id actual_image host_pid running restart_count started_at project_label service_label <<<"$record"
+  [[ "$actual_id" == "$expected_id" && "$actual_image" == "$expected_image" \
+    && "$running" == true && "$project_label" == "$project" && "$service_label" == "$service" \
+    && "$host_pid" =~ ^[0-9]+$ && "$host_pid" -gt 1 \
+    && "$restart_count" =~ ^[0-9]+$ && -n "$started_at" ]] || {
+    echo "Refusing synthetic crash: running PID/identity receipt is invalid" >&2
+    return 1
+  }
+
+  # The cgroup must identify the exact synthetic container. Once opened,
+  # pidfd_send_signal cannot signal a recycled host PID.
+  sudo python3 - "$host_pid" "$expected_id" <<'PYCRASH'
+import os
+from pathlib import Path
+import signal
+import sys
+
+pid, expected_id = int(sys.argv[1]), sys.argv[2]
+if len(expected_id) != 64 or not all(c in "0123456789abcdef" for c in expected_id):
+    raise SystemExit("Refusing synthetic crash: container ID is invalid")
+try:
+    fd = os.pidfd_open(pid, 0)
+except (OSError, AttributeError):
+    raise SystemExit("Refusing synthetic crash: cannot pin container init PID")
+try:
+    try:
+        cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        raise SystemExit("Refusing synthetic crash: cannot verify container cgroup")
+    if expected_id not in cgroup:
+        raise SystemExit("Refusing synthetic crash: process cgroup does not match owned container")
+    try:
+        signal.pidfd_send_signal(fd, signal.SIGKILL)
+    except (OSError, AttributeError):
+        raise SystemExit("Refusing synthetic crash: pidfd SIGKILL was not delivered")
+finally:
+    os.close(fd)
+PYCRASH
+
+  # Require a new start and increased Docker restart counter, not a stale
+  # running snapshot or an explicit docker start/up masking failed recovery.
+  for attempt in {1..60}; do
+    if record="$(docker inspect --format '{{.Id}}|{{.Image}}|{{.State.Running}}|{{.RestartCount}}|{{.State.StartedAt}}' "$expected_id" 2>/dev/null)"; then
+      IFS='|' read -r current_id current_image current_running current_restart current_started <<<"$record"
+      if [[ "$current_id" == "$expected_id" && "$current_image" == "$expected_image" \
+        && "$current_running" == true && "$current_restart" =~ ^[0-9]+$ \
+        && "$current_restart" -gt "$restart_count" && "$current_started" != "$started_at" ]]; then
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  echo "Unexpected crash was not automatically recovered with the same container ID/image: $service" >&2
+  return 1
+}
+
 capture_runtime
 baseline_db_id="${runtime_ids[db]}"
 baseline_frontend_id="${runtime_ids[frontend]}"
@@ -261,11 +340,11 @@ docker compose --project-name "$project" --file "$compose_file" exec -T db \
   psql -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -c "CREATE TABLE ci_recovery_probe (marker text PRIMARY KEY); INSERT INTO ci_recovery_probe VALUES ('$marker');" >/dev/null
 
-docker kill "$baseline_frontend_id" >/dev/null
+crash_owned_service frontend "$baseline_frontend_id" "$baseline_frontend_image"
 wait_service_running frontend "$baseline_frontend_id" "$baseline_frontend_image"
 wait_for_http_recovery
 capture_runtime
-docker kill "$baseline_db_id" >/dev/null
+crash_owned_service db "$baseline_db_id" "$baseline_db_image"
 wait_service_running db "$baseline_db_id" "$baseline_db_image"
 wait_db_healthy "$baseline_db_id"
 db_continuity="$(docker compose --project-name "$project" --file "$compose_file" exec -T db \
