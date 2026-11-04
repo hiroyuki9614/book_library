@@ -88,27 +88,30 @@ function Admin() {
 		};
 	}, []);
 
- const loadBooks = useCallback(async (state: AdminBookState) => {
+ const loadBooks = useCallback(async (state: AdminBookState, isCurrent: () => boolean = () => true) => {
   const version = ++bookReadVersion.current;
   try {
    const loaded = await fetchAdminBooks(state);
-   if (version !== bookReadVersion.current) return null;
+   if (!isCurrent() || version !== bookReadVersion.current) return null;
    setBooks(loaded);
    setBooksError(null);
    return loaded;
   } catch {
-   if (version === bookReadVersion.current) {
+   if (isCurrent() && version === bookReadVersion.current) {
     setBooksError('書籍一覧の取得に失敗しました。再読み込みしてください。');
    }
    return null;
   } finally {
-   if (version === bookReadVersion.current) setBooksLoading(false);
+   if (isCurrent() && version === bookReadVersion.current) setBooksLoading(false);
   }
  }, []);
 
  useEffect(() => {
-  void loadBooks(bookState);
-  return () => { ++bookReadVersion.current; };
+  let active = true;
+  void Promise.resolve().then(() => {
+   if (active) return loadBooks(bookState, () => active);
+  });
+  return () => { active = false; };
  }, [bookState, loadBooks]);
 
  const beginBookMutation = () => {
