@@ -4,7 +4,10 @@ The fake Docker executable records only its arguments; these tests never call Do
 systemctl, a daemon socket, or a real service.
 """
 
+import ast
 import os
+import re
+import select
 import subprocess
 import tempfile
 import unittest
@@ -27,8 +30,11 @@ class IsolatedSmokeGuardTests(unittest.TestCase):
             """#!/usr/bin/env bash
 set -eu
 printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
-if [[ "${FAKE_FAIL_DOCKER_QUERY:-}" == "$*" ]]; then exit 42; fi
-case "$*" in
+args="$*"
+args="${args#--host unix:///var/run/docker.sock }"
+if [[ "${FAKE_FAIL_DOCKER_QUERY:-}" == "$args" ]]; then exit 42; fi
+if [[ "${FAKE_FAIL_NETWORK_INSPECT:-}" == true && "$args" == "network inspect "* ]]; then exit 43; fi
+case "$args" in
   "context inspect --format {{.Endpoints.docker.Host}}") printf '%s\\n' "$FAKE_DOCKER_ENDPOINT" ;;
   "ps -q --no-trunc") printf '%s\\n' "$FAKE_RUNNING_CONTAINERS" ;;
   "ps -aq --filter label=com.docker.compose.project=belib-production") printf '%s\\n' "$FAKE_PRODUCTION_CONTAINERS" ;;
@@ -69,6 +75,10 @@ esac
         )
 
     def logged_docker_calls(self):
+        calls = self.raw_logged_docker_calls()
+        return [call.removeprefix("--host unix:///var/run/docker.sock ") for call in calls]
+
+    def raw_logged_docker_calls(self):
         return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
 
     def test_rejects_non_github_host_without_docker_call(self):
@@ -119,6 +129,119 @@ esac
             )
             self.assertNotIn("remote.example", result.stdout + result.stderr)
             self.log.unlink(missing_ok=True)
+
+    def test_rehearsal_pins_all_post_preflight_docker_calls_to_local_socket(self):
+        result = self.run_guard()
+        self.assertNotEqual(result.returncode, 0)  # Fake network inspection has no identity receipt.
+        calls = self.raw_logged_docker_calls()
+        self.assertGreater(len(calls), 1)
+        self.assertTrue(all(call.startswith("--host unix:///var/run/docker.sock ") for call in calls))
+        self.assertIn(
+            "--host unix:///var/run/docker.sock context inspect --format {{.Endpoints.docker.Host}}",
+            calls,
+        )
+
+    def test_failed_post_restart_network_inspect_reports_safe_receipt(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        function = re.search(
+            r"(?ms)^verify_post_restart_network_identity\(\) \{\n.*?^\}",
+            source,
+        )
+        self.assertIsNotNone(function)
+        harness = "\n".join(
+            (
+                "set -euo pipefail",
+                'docker() { command docker --host unix:///var/run/docker.sock "$@"; }',
+                "network=belib-recovery-ci-123-1_default",
+                function.group(0),
+                "verify_post_restart_network_identity 'belib-recovery-ci-123-1_default|false|belib-recovery-ci-123-1|default'",
+            )
+        )
+        result = subprocess.run(
+            ["bash", "-c", harness],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "PATH": f"{self.bin_dir}:/usr/bin:/bin",
+                "FAKE_DOCKER_LOG": str(self.log),
+                "FAKE_FAIL_NETWORK_INSPECT": "true",
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Expected network receipt: belib-recovery-ci-123-1_default|false|belib-recovery-ci-123-1|default",
+            result.stderr,
+        )
+        self.assertIn(
+            "Observed network receipt: unavailable (Docker network inspect failed)",
+            result.stderr,
+        )
+        self.assertEqual(
+            self.raw_logged_docker_calls(),
+            ['--host unix:///var/run/docker.sock network inspect --format {{.Name}}|{{.Internal}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}} belib-recovery-ci-123-1_default'],
+        )
+
+    def test_crash_receipt_rejects_conflicting_or_malformed_cgroups(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        crash_python = re.search(r"<<'PYCRASH'\n(.*?)\nPYCRASH", source, re.S).group(1)
+        module = ast.parse(crash_python)
+        namespace = {}
+        functions = {
+            node.name: node for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"docker_cgroup_matches", "intended_pidfd_exit_observed"}
+        }
+        self.assertEqual(set(functions), {"docker_cgroup_matches", "intended_pidfd_exit_observed"})
+        exec(compile(ast.Module(body=list(functions.values()), type_ignores=[]), "crash-receipt", "exec"), namespace)
+        matches = namespace["docker_cgroup_matches"]
+        container_id = "a" * 64
+        other_id = "b" * 64
+        self.assertTrue(matches(f"0::/system.slice/docker-{container_id}.scope", container_id))
+        self.assertTrue(matches(f"1:name=systemd:/docker/{container_id}", container_id))
+        self.assertTrue(
+            matches(
+                f"1:cpu:/docker/{container_id}\n2:memory:/docker/{container_id}",
+                container_id,
+            )
+        )
+        self.assertFalse(matches(f"0::/system.slice/prefix-{container_id}-suffix", container_id))
+        self.assertFalse(matches(f"0::/docker/{container_id}\n1:name=systemd:/docker/{container_id}", container_id))
+        self.assertFalse(
+            matches(
+                f"1:cpu:/docker/{container_id}\n2:memory:/docker/{other_id}",
+                container_id,
+            )
+        )
+        self.assertFalse(matches(f"1:cpu:/docker/{container_id}\n1:memory:/docker/{container_id}", container_id))
+        self.assertFalse(matches(f"1:cpu,cpu:/docker/{container_id}", container_id))
+        self.assertFalse(matches(f"malformed/{container_id}", container_id))
+
+    def test_pidfd_poll_receipt_requires_intended_fd_and_pollin(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        crash_python = re.search(r"<<'PYCRASH'\n(.*?)\nPYCRASH", source, re.S).group(1)
+        module = ast.parse(crash_python)
+        function = next(
+            node for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name == "intended_pidfd_exit_observed"
+        )
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "pidfd-poll", "exec"), namespace)
+        observed = namespace["intended_pidfd_exit_observed"]
+        self.assertTrue(observed([(17, select.POLLIN)], 17, select.POLLIN))
+        self.assertFalse(observed([(18, select.POLLIN)], 17, select.POLLIN))
+        self.assertFalse(observed([(17, select.POLLHUP)], 17, select.POLLIN))
+
+    def test_failure_diagnostics_never_print_mount_records(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("mounts_sha256=%s", source)
+        self.assertIn('echo "Expected network receipt: $expected"', source)
+        self.assertIn('echo "Observed network receipt: $observed"', source)
+        self.assertNotIn('echo "Before: $before_record"', source)
+        self.assertNotIn('echo "After:  ${runtime_records[$service]}"', source)
 
     def test_docker_inventory_query_errors_fail_closed(self):
         queries = (

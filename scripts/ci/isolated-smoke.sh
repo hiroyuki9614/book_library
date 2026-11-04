@@ -30,11 +30,15 @@ elif [[ "$recovery_rehearsal" == "github-hosted-v1" ]]; then
       exit 1
     fi
   done
-  if ! docker_endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null)" \
+  if ! docker_endpoint="$(command docker --host unix:///var/run/docker.sock context inspect \
+    --format '{{.Endpoints.docker.Host}}' 2>/dev/null)" \
     || [[ "$docker_endpoint" != "unix:///var/run/docker.sock" ]]; then
     echo "Refusing recovery rehearsal: Docker context is not the runner-local socket" >&2
     exit 1
   fi
+  docker() {
+    command docker --host unix:///var/run/docker.sock "$@"
+  }
   compose_file="compose.yaml"
   project="belib-recovery-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
   network="${project}_default"
@@ -305,6 +309,65 @@ def proc_start_ticks():
     record = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     return record.rsplit(")", 1)[1].strip().split()[19]
 
+def docker_cgroup_matches(cgroup, container_id):
+    import re
+
+    def exact_component(value):
+        return value == container_id or value == f"docker-{container_id}.scope"
+
+    def docker_identity(value):
+        if re.fullmatch(r"[0-9a-f]{64}", value):
+            return value
+        match = re.fullmatch(r"docker-([0-9a-f]{64})\.scope", value)
+        return match.group(1) if match else None
+
+    lines = [line.split(":", 2) for line in cgroup.splitlines()]
+    if not lines or any(len(line) != 3 for line in lines):
+        return False
+    v2_lines = [line for line in lines if line[0] == "0" and line[1] == ""]
+    v1_lines = [line for line in lines if line[0].isdigit() and int(line[0]) > 0 and line[1]]
+    classified_lines = v2_lines + v1_lines
+    if (
+        len(classified_lines) != len(lines)
+        or len(v2_lines) > 1
+        or (v2_lines and v1_lines)
+        or not (v2_lines or v1_lines)
+    ):
+        return False
+    relevant_lines = v2_lines or v1_lines
+    hierarchy_ids = set()
+    controllers = set()
+    identities = set()
+    for hierarchy, controller_list, path in relevant_lines:
+        if not path.startswith("/") or any(part in (".", "..") for part in path.split("/")):
+            return False
+        if hierarchy == "0":
+            if controller_list:
+                return False
+        else:
+            controller_names = controller_list.split(",")
+            if (
+                hierarchy in hierarchy_ids
+                or any(not re.fullmatch(r"[A-Za-z0-9_.=-]+", name) for name in controller_names)
+                or len(controller_names) != len(set(controller_names))
+                or controllers.intersection(controller_names)
+            ):
+                return False
+            hierarchy_ids.add(hierarchy)
+            controllers.update(controller_names)
+        line_identities = {
+            identity
+            for component in path.split("/")
+            if (identity := docker_identity(component)) is not None
+        }
+        if len(line_identities) != 1:
+            return False
+        identities.update(line_identities)
+    return identities == {container_id}
+
+def intended_pidfd_exit_observed(events, pidfd, pollin):
+    return any(event_fd == pidfd and event_mask & pollin for event_fd, event_mask in events)
+
 try:
     ticks_before = proc_start_ticks()
     fd = os.pidfd_open(pid, 0)
@@ -320,7 +383,7 @@ try:
     ns_lines = [line.split()[1:] for line in proc_status.splitlines() if line.startswith("NSpid:")]
     if (
         ticks_before != ticks_after
-        or expected_id not in cgroup
+        or not docker_cgroup_matches(cgroup, expected_id)
         or len(ns_lines) != 1
         or len(ns_lines[0]) < 2
         or ns_lines[0][0] != str(pid)
@@ -347,7 +410,8 @@ try:
         signal.pidfd_send_signal(fd, signal.SIGKILL)
         poller = select.poll()
         poller.register(fd, select.POLLIN)
-        if not poller.poll(10000):
+        events = poller.poll(10000)
+        if not intended_pidfd_exit_observed(events, fd, select.POLLIN):
             raise SystemExit("Refusing synthetic crash: intended init exit not observed")
     except OSError:
         raise SystemExit("Refusing synthetic crash: pinned init crash could not be proven")
@@ -426,12 +490,60 @@ db_continuity="$(docker compose --project-name "$project" --file "$compose_file"
   psql -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -c "SELECT count(*) = 1 AND min(marker) = '$marker' FROM ci_recovery_probe;")"
 [[ "$db_continuity" == t ]] || { echo "Synthetic DB marker lost after Docker daemon restart" >&2; exit 1; }
-post_restart_network_identity="$(docker network inspect --format '{{.Name}}|{{.Internal}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}' "$network")"
-[[ "$post_restart_network_identity" == "$network_identity" ]] || {
-  echo "Synthetic Compose network identity changed after daemon restart" >&2
-  exit 1
+verify_post_restart_network_identity() {
+  local expected="$1" observed
+  if ! observed="$(docker network inspect --format '{{.Name}}|{{.Internal}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}' "$network" 2>/dev/null)"; then
+    echo "Synthetic Compose network identity changed after daemon restart" >&2
+    echo "Expected network receipt: $expected" >&2
+    echo "Observed network receipt: unavailable (Docker network inspect failed)" >&2
+    return 1
+  fi
+  if [[ "$observed" != "$expected" ]]; then
+    echo "Synthetic Compose network identity changed after daemon restart" >&2
+    echo "Expected network receipt: $expected" >&2
+    echo "Observed network receipt: $observed" >&2
+    return 1
+  fi
 }
+verify_post_restart_network_identity "$network_identity"
 capture_runtime
+safe_runtime_receipt() {
+  local record="$1" id image project_label service_label restart mount_record mounts_hash
+  IFS='|' read -r id image project_label service_label restart mount_record <<<"$record"
+  mounts_hash="$(printf '%s' "$mount_record" | sha256sum | cut -d' ' -f1)"
+  printf 'id=%s image=%s project=%s service=%s restart=%s mounts_sha256=%s' \
+    "$id" "$image" "$project_label" "$service_label" "$restart" "$mounts_hash"
+}
+safe_volume_receipt() {
+  local record="$1" name driver created_at project_label logical_name
+  IFS='|' read -r name driver created_at project_label logical_name <<<"$record"
+  printf 'name=%s driver=%s created_at=%s project=%s logical_name=%s' \
+    "$name" "$driver" "$created_at" "$project_label" "$logical_name"
+}
+for service in "${services[@]}"; do
+  case "$service" in
+    db) before_record="$baseline_db" ;;
+    backend) before_record="$baseline_backend" ;;
+    frontend) before_record="$baseline_frontend" ;;
+    nginx) before_record="$baseline_nginx" ;;
+  esac
+  if [[ "${runtime_records[$service]}" != "$before_record" ]]; then
+    echo "Post-daemon-restart container receipt changed: $service" >&2
+    echo "Before: $(safe_runtime_receipt "$before_record")" >&2
+    echo "After:  $(safe_runtime_receipt "${runtime_records[$service]}")" >&2
+  fi
+done
+for volume in postgres-data book-files; do
+  case "$volume" in
+    postgres-data) before_record="$baseline_postgres_volume" ;;
+    book-files) before_record="$baseline_books_volume" ;;
+  esac
+  if [[ "${volume_records[$volume]}" != "$before_record" ]]; then
+    echo "Post-daemon-restart volume receipt changed: $volume" >&2
+    echo "Before: $(safe_volume_receipt "$before_record")" >&2
+    echo "After:  $(safe_volume_receipt "${volume_records[$volume]}")" >&2
+  fi
+done
 [[ "${runtime_records[db]}" == "$baseline_db" && "${runtime_records[backend]}" == "$baseline_backend" \
   && "${runtime_records[frontend]}" == "$baseline_frontend" && "${runtime_records[nginx]}" == "$baseline_nginx" \
   && "${volume_records[postgres-data]}" == "$baseline_postgres_volume" \
