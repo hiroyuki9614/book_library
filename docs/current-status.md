@@ -10,6 +10,20 @@
 - The portfolio MVP is live. The detailed immutable deployment and production-browser evidence is in [the 2026-10-26 production release record](records/2026-10-26-mvp-production-release.md).
 - Scoped update (2026-10-01): Home/BookTable reading-evidence behavior below; this is not a fresh R2 or production acceptance.
 
+## 2026-11-04 stale admin-list follow-up
+
+An active-list response captured before a deletion could arrive after the
+mutation and put the book back in the displayed list. The admin screen now
+versions list requests, invalidates earlier reads before deletion/restoration,
+and re-fetches the relevant server list before reporting success. A server list
+that still contains the book is an explicit verification failure. Admin list
+requests use no-store. Regression coverage delays real API responses across
+tab changes and deletion, then checks the list after a full reload.
+
+This source change does not establish production deployment. The live frontend
+observed during this follow-up lacked the previously merged deletion and admin
+demo UI. Verify the deployed source/image separately before production acceptance.
+
 ## 2026-11-04 deletion candidate
 
 The admin deletion candidate adds permanent deletion from the deleted list with

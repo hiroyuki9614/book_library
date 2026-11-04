@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { BookOpen, Library, Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -50,6 +50,7 @@ function Admin() {
   await queryClient.cancelQueries({ queryKey: ['books'] });
   queryClient.removeQueries({ queryKey: ['books'] });
  };
+	const bookReadVersion = useRef(0);
 	const [books, setBooks] = useState<AdminBook[]>([]);
 	const [bookState, setBookState] = useState<AdminBookState>('active');
 	const [booksLoading, setBooksLoading] = useState(true);
@@ -87,26 +88,47 @@ function Admin() {
 		};
 	}, []);
 
-	useEffect(() => {
-		let isMounted = true;
+ const loadBooks = useCallback(async (state: AdminBookState, isCurrent: () => boolean = () => true) => {
+  const version = ++bookReadVersion.current;
+  try {
+   const loaded = await fetchAdminBooks(state);
+   if (!isCurrent() || version !== bookReadVersion.current) return null;
+   setBooks(loaded);
+   setBooksError(null);
+   return loaded;
+  } catch {
+   if (isCurrent() && version === bookReadVersion.current) {
+    setBooksError('書籍一覧の取得に失敗しました。再読み込みしてください。');
+   }
+   return null;
+  } finally {
+   if (isCurrent() && version === bookReadVersion.current) setBooksLoading(false);
+  }
+ }, []);
 
-		fetchAdminBooks(bookState)
-			.then((loadedBooks) => {
-				if (!isMounted) return;
-				setBooks(loadedBooks);
-			})
-			.catch(() => {
-				if (!isMounted) return;
-				setBooksError('登録済み書籍の取得に失敗しました。再読み込みしてください。');
-			})
-			.finally(() => {
-				if (isMounted) setBooksLoading(false);
-			});
+ useEffect(() => {
+  let active = true;
+  void Promise.resolve().then(() => {
+   if (active) return loadBooks(bookState, () => active);
+  });
+  return () => { active = false; };
+ }, [bookState, loadBooks]);
 
-		return () => {
-			isMounted = false;
-		};
-	}, [bookState]);
+ const beginBookMutation = () => {
+  // Invalidate a list captured before this write, even if it resolves last.
+  ++bookReadVersion.current;
+  setBooksLoading(true);
+  setBooksError(null);
+ };
+
+ const verifyRemovalFromList = async (bookId: number, state: AdminBookState) => {
+  const latest = await loadBooks(state);
+  if (!latest) throw new Error('List verification failed');
+  if (latest.some((book) => book.id === bookId)) {
+   setBooksError('削除後の状態を確認できません。再読み込みして確認してください。');
+   throw new Error('Book still present in server list');
+  }
+ };
 
 	const changeBookState = (nextState: AdminBookState) => {
 		if (nextState === bookState) return;
@@ -163,44 +185,55 @@ function Admin() {
 
 	const handleDelete = async (bookId: number) => {
 		setMutatingBookId(bookId);
+  beginBookMutation();
 		try {
-			await softDeleteAdminBook(bookId);
-			await clearBookCache();
+			const deleted = await softDeleteAdminBook(bookId);
+   if (deleted.id !== bookId || !deleted.deletedAt) throw new Error('Deletion was not confirmed');
 			setBooks((currentBooks) => currentBooks.filter((book) => book.id !== bookId));
+			await clearBookCache();
+   await verifyRemovalFromList(bookId, 'active');
 			toast.success('書籍を削除済み一覧へ移動しました。');
 		} catch {
 			toast.error('書籍の論理削除に失敗しました。');
 		} finally {
 			setMutatingBookId(null);
+   setBooksLoading(false);
 		}
 	};
 
 	const handleRestore = async (bookId: number) => {
 		setMutatingBookId(bookId);
+  beginBookMutation();
 		try {
-			await restoreAdminBook(bookId);
-			await clearBookCache();
+			const restored = await restoreAdminBook(bookId);
+   if (restored.id !== bookId || restored.deletedAt !== null) throw new Error('Restoration was not confirmed');
 			setBooks((currentBooks) => currentBooks.filter((book) => book.id !== bookId));
+			await clearBookCache();
+   await verifyRemovalFromList(bookId, 'deleted');
 			toast.success('書籍を復元しました。');
 		} catch {
 			toast.error('書籍の復元に失敗しました。');
 		} finally {
 			setMutatingBookId(null);
+   setBooksLoading(false);
 		}
 	};
 
  const handlePermanentDelete = async (book: AdminBook) => {
   if (!window.confirm('「' + book.title + '」を完全削除しますか？ファイルと全ユーザーの読書記録を削除します。この操作は取り消せません。')) return;
   setMutatingBookId(book.id);
+  beginBookMutation();
   try {
-   await permanentlyDeleteAdminBook(book.id);
-   await clearBookCache();
+   const deleted = await permanentlyDeleteAdminBook(book.id);
+   if (deleted.id !== book.id || deleted.permanentlyDeleted !== true) throw new Error('Permanent deletion was not confirmed');
    setBooks((current) => current.filter((item) => item.id !== book.id));
+   await clearBookCache();
+   await verifyRemovalFromList(book.id, 'deleted');
    toast.success('書籍・ファイル・読書記録を完全削除しました。');
   } catch {
    toast.error('完全削除を完了できませんでした。削除済み一覧を確認し、再実行してください。');
-   try { setBooks(await fetchAdminBooks('deleted')); } catch { setBooksError('削除済み一覧を取得できませんでした。再読み込みしてください。'); }
-  } finally { setMutatingBookId(null); }
+   await loadBooks('deleted');
+  } finally { setMutatingBookId(null); setBooksLoading(false); }
  };
 
 	const handleCreateCategory = async () => {
@@ -244,7 +277,7 @@ function Admin() {
 		try {
 			const result = await deleteAdminCategory(categoryId);
 			setCategories((current) => current.filter((category) => category.id !== categoryId));
-			setBooks(await fetchAdminBooks(bookState));
+			await loadBooks(bookState);
 			toast.success(`カテゴリを削除し、${result.movedBookCount}冊を未分類へ移動しました。`);
 		} catch {
 			toast.error('カテゴリの削除に失敗しました。');
