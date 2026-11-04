@@ -7,6 +7,7 @@ export type BookDetails = {
 	authorName: string | null;
 	category: { id: number; name: string };
 	readStatus: 'unread' | 'reading' | 'completed';
+	progressPercentage: number | null;
 	pageTurnDirection: 'ltr' | 'rtl';
 	hasFile: boolean;
 	fileType: 'pdf' | 'epub' | null;
@@ -30,6 +31,7 @@ function toFrontendBook(book: BookDetails): Book {
 		fileType: book.fileType ?? 'pdf',
 		category,
 		currentPage: 0,
+		progressPercentage: book.progressPercentage,
 		createdAt: book.createdAt,
 		updatedAt: book.updatedAt,
 	};

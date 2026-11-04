@@ -10,6 +10,9 @@ const mocks = vi.hoisted(() => ({
 	permissionFindUnique: vi.fn(),
 	readingInfoFindUnique: vi.fn(),
 	readingInfoUpsert: vi.fn(),
+	readingInfoUpdateMany: vi.fn(),
+	readingInfoCreate: vi.fn(),
+	readingInfoUpdate: vi.fn(),
 }));
 
 vi.mock('../../lib/auth.js', () => ({
@@ -18,6 +21,11 @@ vi.mock('../../lib/auth.js', () => ({
 			getSession: mocks.getSession,
 		},
 	},
+}));
+
+vi.mock('../../lib/bookStorage.js', () => ({
+	BookStorageNotFoundError: class extends Error {},
+	getBookFileAccess: vi.fn(),
 }));
 
 const app = new Hono<PrismaVariables>();
@@ -29,6 +37,9 @@ app.use('*', async (c, next) => {
 		readingInfo: {
 			findUnique: mocks.readingInfoFindUnique,
 			upsert: mocks.readingInfoUpsert,
+			updateMany: mocks.readingInfoUpdateMany,
+			create: mocks.readingInfoCreate,
+			update: mocks.readingInfoUpdate,
 		},
 	} as never);
 	await next();
@@ -54,16 +65,18 @@ beforeEach(() => {
 		bookFiles: [],
 	});
 	mocks.permissionFindUnique.mockResolvedValue({ id: 1 });
+	mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '3', progressPercentage: 25, readStatus: 'reading' });
+	mocks.readingInfoUpdateMany.mockResolvedValue({ count: 1 });
 });
 
 describe('reading-info API', () => {
 	test('GETは認証済みで権限のあるユーザー自身の現在ページを返す', async () => {
-		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '3', readStatus: 'reading' });
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '3', progressPercentage: 25, readStatus: 'reading' });
 
 		const response = await app.request('/1/reading-info');
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({ bookId: 1, currentPage: 3, readStatus: 'reading' });
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 25, readStatus: 'reading' });
 		expect(mocks.readingInfoFindUnique).toHaveBeenCalledWith({
 			where: { userId_bookId: { userId: 7, bookId: 1 } },
 		});
@@ -75,25 +88,24 @@ describe('reading-info API', () => {
 		const response = await app.request('/1/reading-info');
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({ bookId: 1, currentPage: 1, readStatus: 'unread' });
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition: null, currentPage: 1, progressPercentage: 0, readStatus: 'unread' });
 	});
 
-	test('PATCHはユーザーと書籍単位で現在ページをupsertする', async () => {
-		mocks.readingInfoUpsert.mockResolvedValue({ currentPosition: '3', readStatus: 'reading' });
+	test('PATCHはユーザーと書籍単位でcompletedを降格させずに更新する', async () => {
 
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ currentPage: 3 }),
+			body: JSON.stringify({ currentPage: 3, progressPercentage: 25 }),
 		});
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({ bookId: 1, currentPage: 3, readStatus: 'reading' });
-		expect(mocks.readingInfoUpsert).toHaveBeenCalledWith({
-			where: { userId_bookId: { userId: 7, bookId: 1 } },
-			create: { userId: 7, bookId: 1, currentPosition: '3', readStatus: 'reading' },
-			update: { currentPosition: '3', readStatus: 'reading' },
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 25, readStatus: 'reading' });
+		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
+			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: { not: 'completed' } },
+			data: { currentPosition: '3', readStatus: 'reading', progressPercentage: 25 },
 		});
+		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
 	});
 
 	test('PATCHは正の整数でないcurrentPageを400で拒否する', async () => {
@@ -105,6 +117,18 @@ describe('reading-info API', () => {
 
 		expect(response.status).toBe(400);
 		expect(await response.json()).toMatchObject({ code: 'INVALID_CURRENT_PAGE' });
+		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
+	});
+
+	test('PATCHは範囲外のprogressPercentageを400で拒否する', async () => {
+		const response = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ currentPage: 3, progressPercentage: 101 }),
+		});
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toMatchObject({ code: 'INVALID_PROGRESS_PERCENTAGE' });
 		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
 	});
 

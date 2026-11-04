@@ -2,7 +2,6 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import { render } from 'vitest-browser-react';
 import { BookTable } from './index';
 import { booksData, type Book } from '@/data/booksData';
-import { readingProgressData } from '@/data/readingProgress';
 
 const routerMocks = vi.hoisted(() => ({
 	navigate: vi.fn(),
@@ -23,9 +22,6 @@ const pickBook = (id: number) => {
 };
 
 const books: Book[] = [pickBook(1), pickBook(2), pickBook(3), pickBook(9)];
-// Keep the conflicting prototype deliberately: book 9 is saved as Completed,
-// while its old progress fixture says unread. Book.status owns the read state.
-const readingProgresses = readingProgressData.filter((progress) => [1, 2, 9].includes(progress.id));
 
 type RenderBookTableOptions = {
 	searchQuery?: string;
@@ -42,7 +38,7 @@ const renderBookTable = ({
 	status = 'all',
 	itemsPerPage = 10,
 }: RenderBookTableOptions = {}) =>
-	render(<BookTable books={books} readingProgresses={readingProgresses} itemsPerPage={itemsPerPage} searchQuery={searchQuery} sort={sort} isLoading={isLoading} status={status} />);
+	render(<BookTable books={books} itemsPerPage={itemsPerPage} searchQuery={searchQuery} sort={sort} isLoading={isLoading} status={status} />);
 
 const getBookRows = (container: HTMLElement) => Array.from(container.querySelectorAll('tbody tr'));
 
@@ -85,9 +81,8 @@ describe('BookTable', () => {
 		await expect.element(getByText('System Design Basics')).not.toBeInTheDocument();
 	});
 
-	test('shows saved completed books even when the prototype status disagrees', async () => {
+	test('uses the backend book status for the status filter', async () => {
 		expect(pickBook(9).status).toBe('Completed');
-		expect(readingProgresses.find((progress) => progress.id === 9)?.status).toBe('unread');
 		const { getByText } = await renderBookTable({ status: 'completed' });
 
 		await expect.element(getByText('Learning TypeScript')).toBeInTheDocument();
@@ -104,16 +99,23 @@ describe('BookTable', () => {
 		await expect.element(getByText('Learning TypeScript')).not.toBeInTheDocument();
 	});
 
-	test('preserves saved states without percentages and marks missing progress as unmeasured', async () => {
+	test('renders persisted percentages and leaves unknown progress unmeasured', async () => {
+		const booksWithProgress: Book[] = books.map((book) => book.id === 1 ? { ...book, progressPercentage: 40 } : book);
 		const { container } = await render(
-			<BookTable books={books} itemsPerPage={10} searchQuery='' sort='newest' isLoading={false} status='all' />,
+			<BookTable books={booksWithProgress} itemsPerPage={10} searchQuery='' sort='newest' isLoading={false} status='all' />,
 		);
 		expect(getBookRow(container, 'React Design Patterns').textContent).toContain('reading');
 		expect(getBookRow(container, 'System Design Basics').textContent).toContain('completed');
-		for (const book of books) {
-			expect(getBookRow(container, book.title).textContent).toContain('未計測');
-		}
-		expect(container.querySelector('[role="progressbar"]')).toBeNull();
+		expect(getBookRow(container, 'React Design Patterns').querySelector('[role="progressbar"]')).not.toBeNull();
+		expect(getBookRow(container, 'Learning TypeScript').textContent).toContain('未計測');
+	});
+
+	test('removes inert row actions while keeping one aligned cell per column', async () => {
+		const { container } = await renderBookTable();
+		expect(container.querySelectorAll('thead th')).toHaveLength(6);
+		expect(getBookRow(container, 'React Design Patterns').querySelectorAll('td')).toHaveLength(6);
+		expect(container.querySelectorAll('button[aria-label*="メニュー"]')).toHaveLength(0);
+		expect(container.querySelectorAll('button[aria-label*="お気に入り"]')).toHaveLength(0);
 	});
 
 	test('cover imageがない実API書籍にはファイル形式付きfallbackを表示する', async () => {
@@ -152,6 +154,7 @@ describe('BookTable', () => {
 		const { container, getByText } = await renderBookTable({ isLoading: true, itemsPerPage: 3 });
 
 		expect(container.querySelectorAll('[data-slot="skeleton"]').length).toBeGreaterThan(0);
+		expect(container.querySelector('tbody tr')?.querySelectorAll('td')).toHaveLength(6);
 		await expect.element(getByText('React Design Patterns')).not.toBeInTheDocument();
 	});
 
@@ -201,16 +204,10 @@ describe('BookTable', () => {
 		expect(routerMocks.navigate).toHaveBeenCalledWith('/reader/1');
 	});
 
-	test('does not navigate when row action buttons are clicked or use the keyboard', async () => {
-		const { getByRole } = await renderBookTable({ sort: 'oldest' });
-		const menuButton = getByRole('button', { name: 'React Design Patterns のメニューを開く' });
-		const favoriteButton = getByRole('button', { name: 'React Design Patterns をお気に入りにする' });
+	test('keeps row navigation accessible from the keyboard', async () => {
+		const { container } = await renderBookTable({ sort: 'oldest' });
+		getBookRow(container, 'React Design Patterns').dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ' ' }));
 
-		await menuButton.click();
-		await favoriteButton.click();
-		menuButton.element().dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
-		favoriteButton.element().dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ' ' }));
-
-		expect(routerMocks.navigate).not.toHaveBeenCalled();
+		expect(routerMocks.navigate).toHaveBeenCalledWith('/reader/1');
 	});
 });

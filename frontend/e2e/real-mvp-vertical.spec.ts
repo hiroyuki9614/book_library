@@ -128,25 +128,27 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	await expect(page.locator('output[aria-live="polite"]:visible')).toHaveText('2 / 2 ページ 100%');
 	if (mobileControls) await page.getByRole('button', { name: '閉じる', exact: true }).click();
 	const savedResponse = await saveResponse;
-	expect(savedResponse.request().postDataJSON()).toEqual({ currentPage: 2, readStatus: 'completed' });
+	expect(savedResponse.request().postDataJSON()).toEqual({ currentPage: 2, readStatus: 'completed', progressPercentage: 100 });
 	expect(savedResponse.status()).toBe(200);
 	expect(await savedResponse.json()).toMatchObject({
 		bookId: metadata.pdfBookId,
 		currentPosition: '2',
 		currentPage: 2,
+		progressPercentage: 100,
 		readStatus: 'completed',
 	});
 
 	const latePatchRequests: Array<{
 		request: Request;
 		currentPage: unknown;
+		progressPercentage: unknown;
 		readStatus: unknown;
 	}> = [];
 	let monitorResizePatches = false;
 	const monitorLatePatches = (request: Request) => {
 		if (!monitorResizePatches || request.method() !== 'PATCH' || !request.url().endsWith(readingInfoPath)) return;
-		const body = request.postDataJSON() as { currentPage?: unknown; readStatus?: unknown };
-		latePatchRequests.push({ request, currentPage: body.currentPage, readStatus: body.readStatus });
+		const body = request.postDataJSON() as { currentPage?: unknown; progressPercentage?: unknown; readStatus?: unknown };
+		latePatchRequests.push({ request, currentPage: body.currentPage, progressPercentage: body.progressPercentage, readStatus: body.readStatus });
 	};
 	page.on('request', monitorLatePatches);
 	monitorResizePatches = true;
@@ -163,6 +165,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		bookId: number;
 		currentPosition: string | null;
 		currentPage: number;
+		progressPercentage: number | null;
 		readStatus: string;
 	};
 	const latePatchResponses = await Promise.all(latePatchRequests.map(async (patch) => {
@@ -171,15 +174,17 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		const body = response
 			? await response.json().then((value: unknown) => {
 				responseBodyDecoded = true;
-				return value as { currentPage?: unknown; readStatus?: unknown } | null;
+				return value as { currentPage?: unknown; progressPercentage?: unknown; readStatus?: unknown } | null;
 			}).catch(() => null)
 			: null;
 		return {
 			requestCurrentPage: patch.currentPage,
+			requestProgressPercentage: patch.progressPercentage,
 			requestReadStatus: patch.readStatus,
 			status: response?.status() ?? null,
 			responseBodyDecoded,
 			responseCurrentPage: body?.currentPage ?? null,
+			responseProgressPercentage: body?.progressPercentage ?? null,
 			responseReadStatus: body?.readStatus ?? null,
 		};
 	}));
@@ -188,13 +193,15 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		status: reloadResponse.status(),
 		currentPosition: reloadBody.currentPosition,
 		currentPage: reloadBody.currentPage,
+		progressPercentage: reloadBody.progressPercentage,
 		readStatus: reloadBody.readStatus,
 		latePatches: latePatchResponses,
 	}, 'Reload ReadingInfo GET must confirm persisted page 2 before evaluating the visible PDF restore.')
-		.toMatchObject({ status: 200, currentPosition: '2', currentPage: 2, readStatus: 'completed' });
+		.toMatchObject({ status: 200, currentPosition: '2', currentPage: 2, progressPercentage: 100, readStatus: 'completed' });
 	expect(latePatchResponses.every((patch) => patch.requestCurrentPage === 2
+		&& patch.requestProgressPercentage === 100
 		&& patch.status === 200
-		&& (!patch.responseBodyDecoded || (patch.responseCurrentPage === 2 && patch.responseReadStatus === 'completed'))),
+		&& (!patch.responseBodyDecoded || (patch.responseCurrentPage === 2 && patch.responseProgressPercentage === 100 && patch.responseReadStatus === 'completed'))),
 	`ReadingInfo PATCH calls after resize must not overwrite page 2; observed ${JSON.stringify(latePatchResponses)}`)
 		.toBe(true);
 	if ((await page.evaluate(() => innerWidth)) < 768) {
@@ -238,7 +245,7 @@ test('demo user opens protected EPUB and persists/restores a CFI', async ({ page
 		return { restoreStatus: restored.status, body: await restored.json() };
 	}, { bookId: metadata.epubBookId });
 	expect(result.restoreStatus).toBe(200);
-	expect(result.body).toMatchObject({ bookId: metadata.epubBookId, currentPage: 1, readStatus: 'completed' });
+	expect(result.body).toMatchObject({ bookId: metadata.epubBookId, currentPage: 1, progressPercentage: 100, readStatus: 'completed' });
 	expect(result.body.currentPosition).toMatch(/^epubcfi\(/);
 	await page.setViewportSize({ width: 851, height: 393 });
 	await page.reload();

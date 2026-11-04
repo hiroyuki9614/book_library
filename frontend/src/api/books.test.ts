@@ -22,6 +22,7 @@ describe('books API client', () => {
 							authorName: 'BeLib',
 							category: { id: 1, name: '技術書' },
 							readStatus: 'reading',
+							progressPercentage: 40,
 							hasFile: true,
 							fileType: 'pdf',
 							createdAt: '2026-08-01T00:00:00.000Z',
@@ -34,7 +35,7 @@ describe('books API client', () => {
 		);
 
 		await expect(fetchBooks()).resolves.toMatchObject([
-			{ id: 1, title: 'Phase 3 PDF', author: 'BeLib', status: 'Reading', fileType: 'pdf' },
+			{ id: 1, title: 'Phase 3 PDF', author: 'BeLib', status: 'Reading', fileType: 'pdf', progressPercentage: 40 },
 		]);
 		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/books', expect.objectContaining({ credentials: 'include' }));
 	});

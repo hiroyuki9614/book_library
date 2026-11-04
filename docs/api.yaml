@@ -30,7 +30,7 @@ paths:
       summary: 閲覧権限のある書籍一覧を取得
       description: |
         RoleBookPermissionで現在ユーザーのroleに許可された、論理削除されていない書籍だけを返す。
-        一覧のreadStatusは現在ユーザーのReadingInfoから取得する。
+        一覧のreadStatusとprogressPercentageは現在ユーザーのReadingInfoから取得する。
         EPUBとPDFの両方が存在する場合はEPUBを優先する。
       parameters:
         - name: page
@@ -150,6 +150,8 @@ paths:
       description: |
         currentPositionはPDFではページ番号文字列、EPUBではCFIを保持できる。
         numeric currentPositionの場合は互換用currentPageにも復元する。
+        progressPercentageは現在ユーザーのReadingInfoから返す。未読は0、読了は100、
+        読書中で有効なreader計測値がない場合はnull。
       responses:
         '200':
           description: Reading info
@@ -170,6 +172,8 @@ paths:
       description: |
         currentPageまたはcurrentPositionのどちらか一方だけを受け取る。
         currentPageは既存PDF caller互換。
+        progressPercentageはreaderが有効なcurrent/totalから計算できた0〜100の整数、
+        または計測不能を表すnull。省略時は既存値を保持する。
         readStatusを省略した場合はreading。明示値はreadingまたはcompleted。
       requestBody:
         required: true
@@ -484,7 +488,7 @@ components:
 
     Book:
       type: object
-      required: [id, title, category, pageTurnDirection, readStatus, hasFile, createdAt, updatedAt]
+      required: [id, title, category, pageTurnDirection, readStatus, progressPercentage, hasFile, createdAt, updatedAt]
       properties:
         id:
           type: integer
@@ -512,6 +516,12 @@ components:
           type: string
           enum: [unread, reading, completed]
           description: Current user's persisted ReadingInfo state for list/detail responses.
+        progressPercentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: Current user's progress. Unread is 0, completed is 100, and an unmeasured in-progress book is null.
         hasFile:
           type: boolean
         fileType:
@@ -534,7 +544,7 @@ components:
 
     ReadingInfo:
       type: object
-      required: [bookId, currentPosition, currentPage, readStatus]
+      required: [bookId, currentPosition, currentPage, progressPercentage, readStatus]
       properties:
         bookId:
           type: integer
@@ -547,6 +557,12 @@ components:
           type: integer
           minimum: 1
           description: Numeric compatibility projection; EPUB CFI returns 1 here.
+        progressPercentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: Persisted reader-derived percentage, or null when an in-progress position has not been measured.
         readStatus:
           type: string
           enum: [unread, reading, completed]
@@ -559,6 +575,11 @@ components:
         currentPage:
           type: integer
           minimum: 1
+        progressPercentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
         readStatus:
           type: string
           enum: [reading, completed]
@@ -574,6 +595,11 @@ components:
           minLength: 1
           maxLength: 255
           description: EPUB CFI or another supported textual reading position.
+        progressPercentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
         readStatus:
           type: string
           enum: [reading, completed]

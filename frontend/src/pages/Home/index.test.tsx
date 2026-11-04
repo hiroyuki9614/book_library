@@ -5,47 +5,46 @@ import Home from './index';
 
 const mocks = vi.hoisted(() => ({
 	useBooks: vi.fn(),
-	useReadingProgresses: vi.fn(),
 	navigate: vi.fn(),
 }));
 
 vi.mock('@/hooks/useBooks', () => ({ default: mocks.useBooks }));
-vi.mock('@/hooks/useReadingProgresses', () => ({ default: mocks.useReadingProgresses }));
 vi.mock('react-router-dom', () => ({ useNavigate: () => mocks.navigate }));
 
 const books: Book[] = [
-	{ id: 34, title: '保存済みの読書中書籍', author: '著者A', category: 'Frontend', status: 'Reading', fileType: 'epub', currentPage: 0 },
-	{ id: 35, title: '保存済みの読了書籍', author: '著者B', category: 'Backend', status: 'Completed', fileType: 'pdf', currentPage: 0 },
+	{ id: 34, title: '保存済みの読書中書籍', author: '著者A', category: 'Frontend', status: 'Reading', fileType: 'epub', currentPage: 0, progressPercentage: 40 },
+	{ id: 35, title: '保存済みの読了書籍', author: '著者B', category: 'Backend', status: 'Completed', fileType: 'pdf', currentPage: 0, progressPercentage: 100 },
 ];
 
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.useBooks.mockReturnValue({ books, isLoading: false, isError: false });
-	// Deliberately contradict the saved book state. Production must not consume this prototype.
-	mocks.useReadingProgresses.mockReturnValue({
-		readingProgresses: [
-			{ id: 34, status: 'unread', progress: 93 },
-			{ id: 35, status: 'reading', progress: 93 },
-		],
-	});
 });
 
 describe('Home reading evidence', () => {
 	test('uses saved book states without calling the prototype progress hook', async () => {
 		const { container } = await render(<Home />);
-		expect(mocks.useReadingProgresses).not.toHaveBeenCalled();
 		const rows = Array.from(container.querySelectorAll('tbody tr'));
 		expect(rows.find((row) => row.textContent?.includes(books[0].title))?.textContent).toContain('reading');
 		expect(rows.find((row) => row.textContent?.includes(books[1].title))?.textContent).toContain('completed');
 		expect(container.textContent).toContain('2冊');
 	});
 
-	test('shows unmeasured percentages instead of mock averages or zero progress bars', async () => {
+	test('shows the measured average with its denominator', async () => {
 		const { container } = await render(<Home />);
-		expect(container.textContent).toContain('未計測');
+		expect(container.textContent).toContain('70%（計測済み2/2冊）');
 		expect(container.textContent).not.toContain('93%');
-		expect(container.textContent).not.toContain('0%');
-		expect(container.querySelector('[role="progressbar"]')).toBeNull();
+		expect(container.querySelector('[role="progressbar"]')).not.toBeNull();
+	});
+
+	test('excludes an unmeasured in-progress book from the average denominator', async () => {
+		mocks.useBooks.mockReturnValue({
+			books: [...books, { id: 36, title: '未計測の読書中書籍', author: '著者C', category: 'Design', status: 'Reading', fileType: 'epub', currentPage: 0, progressPercentage: null }],
+			isLoading: false,
+			isError: false,
+		});
+		const { container } = await render(<Home />);
+		expect(container.textContent).toContain('70%（計測済み2/3冊）');
 	});
 
 	test('does not represent initial loading as an empty library', async () => {
@@ -73,6 +72,5 @@ describe('Home reading evidence', () => {
 		expect(container.textContent).toContain('データがありません。');
 		expect(container.textContent).toContain('未計測');
 		expect(container.textContent).not.toContain('取得失敗');
-		expect(mocks.useReadingProgresses).not.toHaveBeenCalled();
 	});
 });

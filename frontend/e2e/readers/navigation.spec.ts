@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 async function fileApi(page: Page, file: Buffer, kind = 'epub', initial: string | null = null) {
 	let saved = initial;
 	let readStatus = 'reading';
+	let progressPercentage: number | null = null;
 	const writes: string[] = [];
 	await page.route('**/api/v1/books/1/file', (route) =>
 		route.fulfill({ body: file, contentType: kind === 'epub' ? 'application/epub+zip' : 'application/pdf' }),
@@ -15,13 +16,15 @@ async function fileApi(page: Page, file: Buffer, kind = 'epub', initial: string 
 			await new Promise((resolve) => setTimeout(resolve, writes.length === 0 ? 120 : 5));
 			saved = String(body.currentPosition ?? body.currentPage);
 			readStatus = body.readStatus ?? 'reading';
+			if (body.progressPercentage !== undefined) progressPercentage = body.progressPercentage;
+			if (readStatus === 'completed') progressPercentage = 100;
 			writes.push(saved);
 		}
 		await route.fulfill({
-			json: { bookId: 1, currentPosition: saved, currentPage: kind === 'pdf' ? Number(saved ?? 1) : 1, readStatus },
+			json: { bookId: 1, currentPosition: saved, currentPage: kind === 'pdf' ? Number(saved ?? 1) : 1, progressPercentage, readStatus },
 		});
 	});
-	return { writes, saved: () => saved, status: () => readStatus };
+	return { writes, saved: () => saved, status: () => readStatus, progress: () => progressPercentage };
 }
 
 async function visibleText(page: Page) {
@@ -191,6 +194,7 @@ test('near-start vertical RTL restores exact saved CFI and returns from hierarch
 	const savedProgress = await progress(page);
 	expect(savedProgress.location).toBeGreaterThan(1);
 	expect(api.status()).toBe('reading');
+	expect(api.progress()).toBeGreaterThan(0);
 	expect(api.saved()).toBe(savedCfi);
 
 	await page.evaluate(() => localStorage.clear());
@@ -389,6 +393,7 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 	await expect(page.locator('[role="status"]:visible')).toContainText('読書位置を保存済み');
 	await closeControls();
 	expect(api.saved()).toBe('10');
+	await expect.poll(() => api.progress()).toBe(83);
 	await page.reload();
 	controlsOpen = false;
 	await openControls();
@@ -405,6 +410,7 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 	await closeControls();
 	await goToPage('12');
 	await expect.poll(shown).toBe(12);
+	await expect.poll(() => api.progress()).toBe(100);
 	await openControls();
 	await expect(page.getByRole('button', { name: '次のページへ', exact: true })).toBeDisabled();
 	await closeControls();
@@ -505,7 +511,7 @@ test('save errors are visible and retry writes the current EPUB CFI', async ({ p
 			}
 			saved = route.request().postDataJSON().currentPosition;
 		}
-		await route.fulfill({ json: { bookId: 1, currentPosition: saved, currentPage: 1, readStatus: 'reading' } });
+		await route.fulfill({ json: { bookId: 1, currentPosition: saved, currentPage: 1, progressPercentage: 30, readStatus: 'reading' } });
 	});
 	await page.goto('/e2e/readers/harness.html');
 	await ready(page);
@@ -656,6 +662,7 @@ test('mixed vertical/horizontal chapters: real two-page geometry, complete sourc
 		await expect(page.getByText('読書位置を保存済み',{exact:true})).toBeVisible();
 		expect(api.writes.length).toBeGreaterThan(0);
 		expect(api.status()).toBe('completed');
+		expect(api.progress()).toBe(100);
 		expect(api.saved()).toBe(await cfi(page));
 		await page.getByRole('button',{name:'前のページへ'}).click();
 		await expect(page.getByRole('button',{name:'次のページへ'})).toBeEnabled();

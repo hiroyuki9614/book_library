@@ -1,6 +1,6 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-10-31
+- Updated: 2026-11-05
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
 - Current main checkpoint for the scoped frontend release candidate: `f8d69c7f1f9a6676ff268ef3da7d815232a779d2`
 - The prior 2026-10-27 implementation snapshot remains historical; this scoped update does not refresh unrelated R2 or portfolio branch state.
@@ -8,7 +8,23 @@
 - The owner reports that the checkpoint above was deployed frontend-only at 2026-10-31 18:42:59 JST with image `sha256:49bf745ed0f5b7fd3d8951d64cbeed51d33034c762eed93547be8081c71f63c9`; this candidate did not independently read back that running image identity.
 - Candidate scope, test evidence and release holds: [2026-10-31 frontend candidate record](records/2026-10-31-frontend-candidate.md).
 - The portfolio MVP is live. The detailed immutable deployment and production-browser evidence is in [the 2026-10-26 production release record](records/2026-10-26-mvp-production-release.md).
-- Scoped update (2026-10-01): Home/BookTable reading-evidence behavior below; this is not a fresh R2 or production acceptance.
+- Scoped update (2026-11-05): Issue #90 shelf actions and per-user reading percentage candidate below; this is not a production acceptance.
+
+## 2026-11-05 Issue #90 shelf actions and reading percentage candidate
+
+The BookTable no longer renders the inert MoreHorizontal/Star controls or a
+trailing empty action column. Row click, keyboard navigation, responsive
+column alignment, empty-state colspan, and loading skeleton cell counts remain
+covered by focused frontend tests.
+
+`ReadingInfo.progressPercentage` is now a nullable 0–100 integer persisted per
+user and book. Authorized list/detail/reading-info responses map unread to 0,
+completed to 100, and an unmeasured in-progress record to null. PDF saves a
+rounded current-page/total-page percentage when both values are valid; EPUB
+saves a generated-location percentage when the current location and generated
+total are valid. Home averages only non-null percentages and displays the
+measured-book denominator. This is a candidate-only source change; no
+production database, storage, or deployment action was performed.
 
 ## 2026-11-04 stale admin-list follow-up
 
@@ -132,6 +148,7 @@ Known authorization requirement drift:
 ## ReadingInfo
 
 `ReadingInfo.currentPosition VARCHAR(255)` is used without a schema migration for both formats.
+`ReadingInfo.progressPercentage INTEGER` is nullable and stores the per-user PDF/EPUB reader measurement when valid.
 
 PDF request example:
 
@@ -163,7 +180,7 @@ Rules:
 - PDF Reader saves `completed` when the final page is displayed.
 - EPUB Reader saves `completed` only when epub.js reports `relocated.atEnd`.
 
-The reader derives progress without adding a database percentage column. PDF displays the current page, total pages, and percentage from EmbedPDF scroll state. EPUB generates epub.js locations and displays a one-based location, generated total, and percentage when those values are valid. Home's status counts and BookTable's status badges/filter continue to use backend `readStatus` through `Book.status`; shelf-wide average percentage remains `未計測`.
+PDF displays the current page, total pages, and percentage from EmbedPDF scroll state and persists the rounded percentage when both values are valid. EPUB generates epub.js locations, persists a percentage only when the generated total and current location are valid, and displays a one-based location. Home's status counts and BookTable's status badges/filter continue to use backend `readStatus` through `Book.status`; BookTable uses the current user's persisted percentage. Home averages only measured percentages and states the measured-book/total-book denominator; an in-progress book with no valid measurement remains `未計測`. Unread and completed books are represented as 0% and 100% respectively. The existing completed status remains monotonic.
 
 ## Reader navigation and usability
 
@@ -261,7 +278,8 @@ Important constraints already present:
 - `ReadingInfo` unique by `userId + bookId`.
 - `RoleBookPermission` unique by `roleId + bookId`.
 - `ReadingInfo.currentPosition` is nullable `VARCHAR(255)` and can contain a PDF page string or EPUB CFI.
-- no schema migration is required for the non-R2 ReadingInfo expansion.
+- `ReadingInfo.progressPercentage` is nullable `INTEGER` with a database check constraint from 0 through 100.
+- the reading percentage is scoped by the existing `ReadingInfo.userId + bookId` unique key and is returned only through the current user's authorized book/reading-info queries.
 
 The earlier fresh PostgreSQL verification for `book_files.file_hash` remains valid and is not modified by this work.
 
@@ -303,7 +321,6 @@ R2-dependent:
 Non-R2:
 
 - disabled-user / existing-session semantic alignment.
-- shelf-wide aggregate reader-derived progress presentation (the reader-local percentage is implemented).
 - category management CRUD and Admin UI.
 - general-user administration and disable/restore flow.
 - logical book delete / restore / permanent delete.
@@ -344,8 +361,7 @@ Production preflight, verified private DB backup, protection, deployment and pub
 3. Implement logical book delete/restore/permanent-delete lifecycle.
 4. Implement category management and user administration.
 5. Implement file replacement/recovery while keeping the storage adapter boundary R2-ready.
-6. Decide whether reader-derived percentages should also appear in shelf-wide aggregate UI.
-7. Run final backup/restore and browser/device acceptance after the management surface is complete.
+6. Run final backup/restore and browser/device acceptance after the management surface is complete.
 
 ## Documentation responsibilities
 

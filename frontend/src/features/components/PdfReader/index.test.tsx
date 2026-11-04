@@ -129,6 +129,17 @@ describe('PdfReader navigation, outline, and progress', () => {
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 	});
 
+	test('ページ移動時に現在ページと総ページから進捗率を保存する', async () => {
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
+
+		mocks.scrollState.currentPage = 3;
+		mocks.viewportScrollState.currentPage = 3;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 3, 'reading', 60), { timeout: 1_500 });
+	});
+
 	test('階層アウトラインを表示して対応ページへ移動し、目次を閉じる', async () => {
 		const { getByRole } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await getByRole('button', { name: '目次' }).click();

@@ -12,6 +12,9 @@ const mocks = vi.hoisted(() => ({
 	permissionFindUnique: vi.fn(),
 	readingInfoFindUnique: vi.fn(),
 	readingInfoUpsert: vi.fn(),
+	readingInfoUpdateMany: vi.fn(),
+	readingInfoCreate: vi.fn(),
+	readingInfoUpdate: vi.fn(),
 }));
 
 vi.mock('../../lib/auth.js', () => ({
@@ -31,6 +34,9 @@ app.use('*', async (c, next) => {
 		readingInfo: {
 			findUnique: mocks.readingInfoFindUnique,
 			upsert: mocks.readingInfoUpsert,
+			updateMany: mocks.readingInfoUpdateMany,
+			create: mocks.readingInfoCreate,
+			update: mocks.readingInfoUpdate,
 		},
 	} as never);
 	await next();
@@ -49,7 +55,7 @@ const book = {
 	updatedAt: new Date('2026-08-02T00:00:00.000Z'),
 	category: { id: 17, name: '技術書' },
 	bookFiles: [{ extension: 'epub', mimeType: 'application/epub+zip', fileSize: 100, originalFileName: 'book.epub' }],
-	readingInfos: [{ currentPosition: 'epubcfi(/6/2!/4/1:0)', readStatus: 'reading' }],
+	readingInfos: [{ currentPosition: 'epubcfi(/6/2!/4/1:0)', progressPercentage: 42, readStatus: 'reading' }],
 };
 
 beforeEach(() => {
@@ -59,6 +65,7 @@ beforeEach(() => {
 	mocks.bookFindUnique.mockResolvedValue({ id: 1, deletedAt: null });
 	mocks.permissionFindUnique.mockResolvedValue({ id: 1 });
 	mocks.readingInfoFindUnique.mockResolvedValue(null);
+	mocks.readingInfoUpdateMany.mockResolvedValue({ count: 1 });
 });
 
 describe('book state routes', () => {
@@ -70,11 +77,30 @@ describe('book state routes', () => {
 		expect(response.status).toBe(200);
 		expect(await response.json()).toMatchObject({
 			total: 1,
-			books: [{ id: 1, readStatus: 'reading', fileType: 'epub' }],
+			books: [{ id: 1, readStatus: 'reading', progressPercentage: 42, fileType: 'epub' }],
 		});
 		expect(mocks.bookFindMany).toHaveBeenCalledWith(expect.objectContaining({
 			include: expect.objectContaining({ readingInfos: { where: { userId: 7 }, take: 1 } }),
 		}));
+	});
+
+	test('一覧は未読0%、読了100%、未計測の読書中をnullへ正規化する', async () => {
+		mocks.bookCount.mockResolvedValue(3);
+		mocks.bookFindMany.mockResolvedValue([
+			{ ...book, id: 1, readingInfos: [{ currentPosition: null, progressPercentage: null, readStatus: 'unread' }] },
+			{ ...book, id: 2, readingInfos: [{ currentPosition: '12', progressPercentage: null, readStatus: 'completed' }] },
+			{ ...book, id: 3, readingInfos: [{ currentPosition: 'epubcfi(start)', progressPercentage: null, readStatus: 'reading' }] },
+		]);
+
+		const response = await app.request('/');
+
+		expect(await response.json()).toMatchObject({
+			books: [
+				{ id: 1, progressPercentage: 0 },
+				{ id: 2, progressPercentage: 100 },
+				{ id: 3, progressPercentage: null },
+			],
+		});
 	});
 
 	test('利用停止後でも既存sessionは書籍一覧を利用できる', async () => {
@@ -106,27 +132,28 @@ describe('book state routes', () => {
 
 	test('EPUB CFIをcurrentPositionとして保存・復元できる', async () => {
 		const cfi = 'epubcfi(/6/4!/4/2/8:0)';
-		mocks.readingInfoUpsert.mockResolvedValue({ currentPosition: cfi, readStatus: 'reading' });
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: cfi, progressPercentage: 42, readStatus: 'reading' });
 
 		const patch = await app.request('/1/reading-info', {
 			method: 'PATCH',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ currentPosition: cfi, readStatus: 'reading' }),
+			body: JSON.stringify({ currentPosition: cfi, progressPercentage: 42, readStatus: 'reading' }),
 		});
 		expect(patch.status).toBe(200);
-		expect(await patch.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, readStatus: 'reading' });
-		expect(mocks.readingInfoUpsert).toHaveBeenCalledWith(expect.objectContaining({
-			create: expect.objectContaining({ currentPosition: cfi, readStatus: 'reading' }),
-			update: { currentPosition: cfi, readStatus: 'reading' },
-		}));
+		expect(await patch.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading' });
+		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
+			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: { not: 'completed' } },
+			data: { currentPosition: cfi, readStatus: 'reading', progressPercentage: 42 },
+		});
+		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
 
-		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: cfi, readStatus: 'reading' });
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: cfi, progressPercentage: 42, readStatus: 'reading' });
 		const get = await app.request('/1/reading-info');
-		expect(await get.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, readStatus: 'reading' });
+		expect(await get.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading' });
 	});
 
 	test('PDF最終ページをcompletedとして保存でき、currentPage互換を維持する', async () => {
-		mocks.readingInfoUpsert.mockResolvedValue({ currentPosition: '12', readStatus: 'completed' });
+		mocks.readingInfoUpsert.mockResolvedValue({ currentPosition: '12', progressPercentage: 100, readStatus: 'completed' });
 
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',
@@ -135,12 +162,17 @@ describe('book state routes', () => {
 		});
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '12', currentPage: 12, readStatus: 'completed' });
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '12', currentPage: 12, progressPercentage: 100, readStatus: 'completed' });
+		expect(mocks.readingInfoUpsert).toHaveBeenCalledWith({
+			where: { userId_bookId: { userId: 7, bookId: 1 } },
+			create: { userId: 7, bookId: 1, currentPosition: '12', readStatus: 'completed', progressPercentage: 100 },
+			update: { currentPosition: '12', readStatus: 'completed', progressPercentage: 100 },
+		});
 	});
 
 	test('一度completedになった書籍は途中位置を保存してもreadingへ戻らない', async () => {
 		mocks.readingInfoFindUnique.mockResolvedValue({ readStatus: 'completed' });
-		mocks.readingInfoUpsert.mockResolvedValue({ currentPosition: '3', readStatus: 'completed' });
+		mocks.readingInfoUpdateMany.mockResolvedValue({ count: 0 });
 
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',
@@ -151,12 +183,13 @@ describe('book state routes', () => {
 		expect(response.status).toBe(200);
 		expect(mocks.readingInfoFindUnique).toHaveBeenCalledWith({
 			where: { userId_bookId: { userId: 7, bookId: 1 } },
-			select: { readStatus: true },
+			select: { currentPosition: true, progressPercentage: true, readStatus: true },
 		});
-		expect(mocks.readingInfoUpsert).toHaveBeenCalledWith(expect.objectContaining({
-			create: expect.objectContaining({ currentPosition: '3', readStatus: 'completed' }),
-			update: { currentPosition: '3', readStatus: 'completed' },
-		}));
-		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, readStatus: 'completed' });
+		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
+			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: { not: 'completed' } },
+			data: { currentPosition: '3', readStatus: 'reading' },
+		});
+		expect(mocks.readingInfoUpdate).not.toHaveBeenCalled();
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition: null, currentPage: 1, progressPercentage: 100, readStatus: 'completed' });
 	});
 });

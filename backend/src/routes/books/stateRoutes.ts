@@ -2,13 +2,13 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { auth } from '../../lib/auth.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
+import { normalizeProgressPercentage, normalizeReadStatus, persistReadingInfo, toReadingInfoResponse, toReadingProgress } from './readingProgress.js';
 
 const app = new Hono<PrismaVariables>();
 type BooksContext = Context<PrismaVariables>;
-type ReadStatus = 'unread' | 'reading' | 'completed';
-
 type ReadingInfoRecord = {
 	currentPosition: string | null;
+	progressPercentage?: number | null;
 	readStatus: string;
 };
 
@@ -34,23 +34,6 @@ type BookListRecord = {
 
 function jsonError(c: BooksContext, status: 400 | 401 | 403 | 404 | 500, message: string, code: string) {
 	return c.json({ message, code }, status);
-}
-
-function normalizeReadStatus(value: string | undefined | null): ReadStatus {
-	return value === 'reading' || value === 'completed' ? value : 'unread';
-}
-
-function toReadingInfoResponse(bookId: number, readingInfo: ReadingInfoRecord | null) {
-	const currentPosition = readingInfo?.currentPosition ?? null;
-	const parsedPage = currentPosition !== null && /^\d+$/.test(currentPosition) ? Number(currentPosition) : Number.NaN;
-	const currentPage = Number.isSafeInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
-
-	return {
-		bookId,
-		currentPosition,
-		currentPage,
-		readStatus: normalizeReadStatus(readingInfo?.readStatus),
-	};
 }
 
 function getPreferredFile(book: BookListRecord) {
@@ -79,6 +62,7 @@ function toBookResponse(book: BookListRecord) {
 		category: book.category,
 		pageTurnDirection: book.pageTurnDirection,
 		readStatus: normalizeReadStatus(readingInfo?.readStatus),
+		progressPercentage: toReadingProgress(readingInfo),
 		hasFile: Boolean(preferred),
 		fileType: preferred?.fileType ?? null,
 		fileSize: preferred?.file.fileSize ?? null,
@@ -207,7 +191,7 @@ app.patch('/:bookId/reading-info', async (c) => {
 			return jsonError(c, 400, 'Request body must be valid JSON', 'INVALID_REQUEST');
 		}
 
-		const input = body as { currentPage?: unknown; currentPosition?: unknown; readStatus?: unknown };
+		const input = body as { currentPage?: unknown; currentPosition?: unknown; progressPercentage?: unknown; readStatus?: unknown };
 		const hasPage = input.currentPage !== undefined;
 		const hasPosition = input.currentPosition !== undefined;
 		if (hasPage === hasPosition) {
@@ -231,22 +215,24 @@ app.patch('/:bookId/reading-info', async (c) => {
 		if (requestedReadStatus !== 'reading' && requestedReadStatus !== 'completed') {
 			return jsonError(c, 400, 'readStatus must be reading or completed', 'INVALID_READ_STATUS');
 		}
-
-		let readStatus: 'reading' | 'completed' = requestedReadStatus;
-		if (requestedReadStatus === 'reading') {
-			const existingReadingInfo = await result.prisma.readingInfo.findUnique({
-				where: { userId_bookId: { userId: result.userId, bookId } },
-				select: { readStatus: true },
-			});
-			if (existingReadingInfo?.readStatus === 'completed') {
-				readStatus = 'completed';
-			}
+		const hasProgressPercentage = input.progressPercentage !== undefined;
+		if (hasProgressPercentage && input.progressPercentage !== null && normalizeProgressPercentage(input.progressPercentage) === null) {
+			return jsonError(c, 400, 'progressPercentage must be an integer between 0 and 100 or null', 'INVALID_PROGRESS_PERCENTAGE');
 		}
 
-		const readingInfo = await result.prisma.readingInfo.upsert({
-			where: { userId_bookId: { userId: result.userId, bookId } },
-			create: { userId: result.userId, bookId, currentPosition, readStatus },
-			update: { currentPosition, readStatus },
+		const readStatus: 'reading' | 'completed' = requestedReadStatus;
+		const persistedProgress = readStatus === 'completed'
+			? 100
+			: hasProgressPercentage
+				? normalizeProgressPercentage(input.progressPercentage)
+				: undefined;
+
+		const readingInfo = await persistReadingInfo(result.prisma, {
+			userId: result.userId,
+			bookId,
+			currentPosition,
+			readStatus,
+			progressPercentage: persistedProgress,
 		});
 		return c.json(toReadingInfoResponse(bookId, readingInfo));
 	} catch (error) {
