@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import type { PrismaVariables } from '../../lib/prisma.js';
+import { BookStorageNotFoundError } from '../../lib/bookStorage.js';
 import listRoutes from './listRoutes.js';
 
 const mocks = vi.hoisted(() => ({
@@ -9,7 +10,11 @@ const mocks = vi.hoisted(() => ({
 	bookFindMany: vi.fn(),
 	bookFindUnique: vi.fn(),
 	bookUpdate: vi.fn(),
+	fileAccess: vi.fn(),
+	lock: vi.fn(),
 }));
+
+vi.mock('../../lib/bookStorage.js', () => ({ BookStorageNotFoundError: class extends Error {}, getBookFileAccess: mocks.fileAccess }));
 
 vi.mock('../../lib/auth.js', () => ({
 	auth: { api: { getSession: mocks.getSession } },
@@ -18,6 +23,7 @@ vi.mock('../../lib/auth.js', () => ({
 const app = new Hono<PrismaVariables>();
 app.use('*', async (c, next) => {
 	c.set('prisma', {
+		$transaction: async (fn: (tx: unknown) => unknown) => fn({ $queryRawUnsafe: mocks.lock, book: { findUnique: mocks.bookFindUnique, update: mocks.bookUpdate } }),
 		user: { findFirst: mocks.userFindFirst },
 		book: {
 			findMany: mocks.bookFindMany,
@@ -126,7 +132,7 @@ describe('admin persisted book list', () => {
 	});
 
 	test('削除済み書籍を復元するとdeletedAtだけnullへ戻す', async () => {
-		mocks.bookFindUnique.mockResolvedValue({ id: 10, deletedAt: new Date('2026-08-24T10:00:00.000Z') });
+		mocks.bookFindUnique.mockResolvedValue({ id: 10, deletedAt: new Date('2026-08-24T10:00:00.000Z'), bookFiles: [] });
 		mocks.bookUpdate.mockResolvedValue({ id: 10, deletedAt: null });
 
 		const response = await app.request('/books/10/restore', { method: 'PATCH' });
@@ -148,4 +154,29 @@ describe('admin persisted book list', () => {
 		expect(mocks.bookFindMany).not.toHaveBeenCalled();
 		expect(mocks.bookUpdate).not.toHaveBeenCalled();
 	});
+});
+
+test('missing files remain visible in trash without leaking storage keys', async () => {
+ mocks.getSession.mockResolvedValue({ user: { id: '1' } });
+ mocks.userFindFirst.mockResolvedValue({ role: { name: 'admin' } });
+ mocks.fileAccess.mockRejectedValue(new BookStorageNotFoundError());
+ mocks.bookFindMany.mockResolvedValue([{
+  id: 10, title: 'Incomplete purge', authorName: null, publisher: null, publishedAt: null,
+  categoryId: 1, pageTurnDirection: 'ltr', description: null, deletedAt: new Date(),
+  category: { id: 1, name: '未分類' }, roleBookPermissions: [],
+  bookFiles: [{ id: 20, extension: 'pdf', mimeType: 'application/pdf', originalFileName: 'sample.pdf', fileSize: 100, fileUrl: 'private-secret-key' }],
+ }]);
+ const response = await app.request('/books?state=deleted');
+ expect(response.status).toBe(200);
+ const body = await response.json();
+ expect(body.books[0]).toMatchObject({ fileMissing: true, fileCheckFailed: false });
+ expect(JSON.stringify(body)).not.toContain('private-secret-key');
+});
+test('restore never republishes a missing file', async () => {
+ mocks.getSession.mockResolvedValue({ user: { id: '1' } });
+ mocks.userFindFirst.mockResolvedValue({ role: { name: 'admin' } });
+ mocks.bookFindUnique.mockResolvedValue({ id: 10, deletedAt: new Date(), bookFiles: [{ fileUrl: 'private-key' }] });
+ mocks.fileAccess.mockRejectedValue(new BookStorageNotFoundError());
+ expect((await app.request('/books/10/restore', { method: 'PATCH' })).status).toBe(409);
+ expect(mocks.bookUpdate).not.toHaveBeenCalled();
 });

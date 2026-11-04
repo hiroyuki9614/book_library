@@ -14,8 +14,13 @@ const mocks = vi.hoisted(() => ({
 	renameAdminCategory: vi.fn(),
 	softDeleteAdminBook: vi.fn(),
 	restoreAdminBook: vi.fn(),
+	permanentlyDeleteAdminBook: vi.fn(),
+	cancelQueries: vi.fn(),
+	removeQueries: vi.fn(),
 	updateAdminBookMetadata: vi.fn(),
 }));
+
+vi.mock('@tanstack/react-query', () => ({ useQueryClient: () => ({ cancelQueries: mocks.cancelQueries, removeQueries: mocks.removeQueries }) }));
 
 vi.mock('@/api/admin', () => ({
 	createAdminCategory: mocks.createAdminCategory,
@@ -26,6 +31,7 @@ vi.mock('@/api/admin', () => ({
 	renameAdminCategory: mocks.renameAdminCategory,
 	softDeleteAdminBook: mocks.softDeleteAdminBook,
 	restoreAdminBook: mocks.restoreAdminBook,
+	permanentlyDeleteAdminBook: mocks.permanentlyDeleteAdminBook,
 	updateAdminBookMetadata: mocks.updateAdminBookMetadata,
 }));
 
@@ -248,6 +254,7 @@ describe('Admin persisted book management', () => {
 		await vi.waitFor(() => expect(mocks.fetchAdminBooks).toHaveBeenCalledWith('active'));
 		await getByRole('button', { name: '削除', exact: true }).click();
 		await vi.waitFor(() => expect(mocks.softDeleteAdminBook).toHaveBeenCalledWith(10));
+		await vi.waitFor(() => expect(mocks.removeQueries).toHaveBeenCalledWith({ queryKey: ['books'] }));
 		await expect.element(getByText('該当する書籍はありません。')).toBeInTheDocument();
 
 		await getByRole('button', { name: '削除済み' }).click();
@@ -289,4 +296,20 @@ describe('Admin persisted book management', () => {
 		await vi.waitFor(() => expect(mocks.fetchAdminBooks).toHaveBeenCalledTimes(2));
 		await expect.element(getByRole('cell', { name: '未分類', exact: true })).toBeInTheDocument();
 	});
+});
+
+test('permanent deletion requires confirmation and only exists in the deleted list', async () => {
+ mocks.fetchAdminCategories.mockResolvedValue([uncategorized, techCategory]);
+ mocks.fetchAdminBooks.mockImplementation(async (state: string) => state === 'deleted' ? [deletedBook] : [activeBook]);
+ mocks.permanentlyDeleteAdminBook.mockResolvedValue({ id: 10, permanentlyDeleted: true });
+ const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
+ const { getByRole, getByText } = await render(<Admin />);
+ await expect.element(getByRole('button', { name: '完全削除', exact: true })).not.toBeInTheDocument();
+ await getByRole('button', { name: '削除済み', exact: true }).click();
+ await getByRole('button', { name: '完全削除', exact: true }).click();
+ expect(mocks.permanentlyDeleteAdminBook).not.toHaveBeenCalled();
+ await getByRole('button', { name: '完全削除', exact: true }).click();
+ await vi.waitFor(() => expect(mocks.permanentlyDeleteAdminBook).toHaveBeenCalledWith(10));
+ await expect.element(getByText('該当する書籍はありません。')).toBeInTheDocument();
+ expect(confirm).toHaveBeenCalledTimes(2);
 });

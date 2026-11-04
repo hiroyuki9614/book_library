@@ -1,0 +1,21 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { renderHook } from 'vitest-browser-react';
+import { expect, test, vi } from 'vitest';
+import type { ReactNode } from 'react';
+const m = vi.hoisted(() => ({ fetchBook: vi.fn() }));
+vi.mock('@/api/books', () => ({ fetchBook: m.fetchBook }));
+import useBook from './useBook';
+test('a cached book is not readable while its current permission is being checked', async () => {
+ const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+ client.setQueryData(['books', 8], { id: 8, title: 'Previously readable', fileType: 'pdf' });
+ let reject!: (e: Error) => void;
+ m.fetchBook.mockImplementation(() => new Promise((_resolve, fail) => { reject = fail; }));
+ const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+ const { result } = await renderHook(() => useBook(8), { wrapper });
+ await expect.poll(() => m.fetchBook.mock.calls.length).toBeGreaterThan(0);
+ expect(result.current.isLoading).toBe(true);
+ reject(new Error('API request failed: 404'));
+ await expect.poll(() => Boolean(result.current.error)).toBe(true);
+ expect(result.current.book).toBeNull();
+ client.clear();
+});

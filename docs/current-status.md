@@ -10,6 +10,28 @@
 - The portfolio MVP is live. The detailed immutable deployment and production-browser evidence is in [the 2026-10-26 production release record](records/2026-10-26-mvp-production-release.md).
 - Scoped update (2026-10-01): Home/BookTable reading-evidence behavior below; this is not a fresh R2 or production acceptance.
 
+## 2026-11-04 deletion candidate
+
+The admin deletion candidate adds permanent deletion from the deleted list with
+confirmation, storage-first deletion, database transaction/rollback and retry.
+Restore and purge serialize on the book row; missing files are reported in the
+deleted list and cannot be restored. No schema migration is required.
+Shelf/detail caches are discarded after an admin state change. Reader entry
+waits for current server authorization instead of rendering cached metadata.
+
+Production activation and production i5 acceptance are not completed by these
+repository changes. The physical i5 test uses an isolated PostgreSQL database,
+local protected storage and synthetic books. Production admin authentication
+must be completed through the normal login screen before a sample can be added
+there. Run the dedicated destructive-fixture test with
+`cd frontend && npx playwright test --config playwright.admin-deletion.config.ts`
+and the existing E2E environment variables against a fresh task-owned database.
+It is excluded from the ordinary E2E suite because it deletes its PDF fixture.
+For physical i5 GUI verification set DISPLAY to the existing GUI session and
+E2E_HEADED=true; the dedicated configuration uses installed Google Chrome.
+Previously opened readers and previously issued R2 URLs retain the
+existing lifetime semantics in requirements section 6.6.
+
 ## Source-of-truth boundary
 
 ```text

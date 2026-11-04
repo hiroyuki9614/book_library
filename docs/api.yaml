@@ -227,6 +227,8 @@ paths:
         論理削除されていない書籍をcreatedAt降順で返す。
         category、先頭BookFile、RoleBookPermissionから復元したpublicationScopeを含む。
         legacy metadata-only書籍はfile=nullで返す。
+        state=deletedで削除済み書籍を取得できる。
+        削除済み一覧にはfileMissing/fileCheckFailedを返し、ストレージキーは返さない。
       responses:
         '200':
           description: Persisted admin books
@@ -306,6 +308,43 @@ paths:
           $ref: '#/components/responses/FileTooLarge'
         '500':
           $ref: '#/components/responses/InternalError'
+
+  /admin/books/{bookId}:
+    delete:
+      summary: 管理者が削除済み書籍を完全削除
+      description: |
+        論理削除済みの書籍だけを対象とする。保護ストレージの全ファイル削除成功後、
+        BookFile、ReadingInfo、RoleBookPermission、Bookをトランザクションで削除する。
+        ストレージ削除失敗時はDBを保持する。部分削除・DB失敗後は再実行可能。
+        復元と同じ書籍行ロックで直列化する。未ログイン401、一般ユーザー403。
+      parameters:
+        - name: bookId
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Permanently deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, permanentlyDeleted]
+                properties:
+                  id: { type: integer }
+                  permanentlyDeleted: { type: boolean, enum: [true] }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Book not found
+        '409':
+          description: Book must first be logically deleted
+        '500':
+          description: DB deletion failed; retry from deleted list
+        '502':
+          description: File deletion failed; DB retained
 
   /admin/books/{bookId}/files:
     parameters:

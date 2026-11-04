@@ -11,6 +11,7 @@ import disabledUserSignIn from './routes/auth/disabledUserSignIn.js';
 import { createOpenApiHandler } from './routes/openApi/route.js';
 import adminBookMetadataRoutes from './routes/admin/bookMetadataRoutes.js';
 import adminCategoryRoutes from './routes/admin/categoryRoutes.js';
+import permanentDeleteRoutes from './routes/admin/permanentDeleteRoutes.js';
 import adminListRoutes from './routes/admin/listRoutes.js';
 import adminRoutes from './routes/admin/routes.js';
 import adminUserRoutes from './routes/admin/userRoutes.js';
@@ -27,7 +28,7 @@ app.use(
 	cors({
 		origin: frontendUrl,
 		allowHeaders: ['Content-Type'],
-		allowMethods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+		allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
 		credentials: true,
 	}),
 );
@@ -81,6 +82,7 @@ app.route('/api/v1/admin', adminBookMetadataRoutes);
 app.route('/api/v1/admin', adminCategoryRoutes);
 app.route('/api/v1/admin', adminUserRoutes);
 app.route('/api/v1/admin', adminListRoutes);
+app.route('/api/v1/admin', permanentDeleteRoutes);
 app.route('/api/v1/admin', adminRoutes);
 
 app.get('/doc', createOpenApiHandler(app));

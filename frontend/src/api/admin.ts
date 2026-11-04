@@ -51,6 +51,8 @@ export type AdminBookFile = {
 };
 
 export type AdminBook = {
+	fileMissing?: boolean;
+	fileCheckFailed?: boolean;
 	id: number;
 	title: string;
 	authorName: string | null;
@@ -164,6 +166,10 @@ export function updateAdminBookMetadata(bookId: number, input: AdminBookMetadata
 
 export function softDeleteAdminBook(bookId: number): Promise<AdminBookDeletionResponse> {
 	return apiFetch<AdminBookDeletionResponse>(`/api/v1/admin/books/${bookId}/delete`, { method: 'PATCH' });
+}
+
+export function permanentlyDeleteAdminBook(bookId: number): Promise<{ id: number; permanentlyDeleted: true }> {
+ return apiFetch('/api/v1/admin/books/' + bookId, { method: 'DELETE' });
 }
 
 export function restoreAdminBook(bookId: number): Promise<AdminBookDeletionResponse> {

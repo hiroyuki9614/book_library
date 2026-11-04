@@ -224,7 +224,7 @@ export async function storeBookFile(input: {
 	return { fileUrl: objectKey, storedFileName };
 }
 
-export async function deleteStoredBookFile(fileUrl: string) {
+export async function deleteStoredBookFile(fileUrl: string, abortSignal?: AbortSignal) {
 	if (getBookStorageDriver() === 'local') {
 		const path = await resolveLocalBookFilePath(fileUrl, false);
 		await rm(path, { force: true });
@@ -233,7 +233,7 @@ export async function deleteStoredBookFile(fileUrl: string) {
 
 	const key = assertR2BookObjectKey(assertSafeRelativeStorageKey(fileUrl));
 	const { client, bucket } = getR2Client();
-	await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+	await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }), { abortSignal });
 }
 
 export async function getBookFileAccess(fileUrl: string): Promise<BookFileAccess> {
