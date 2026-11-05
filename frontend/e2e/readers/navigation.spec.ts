@@ -131,6 +131,24 @@ async function progress(page: Page) {
 	expect(locationNumber, 'generated character location must not exceed its total').toBeLessThanOrEqual(locationTotal);
 	return { page: pageNumber, section, location: locationNumber };
 }
+async function expectReadingPositionSaved(page: Page) {
+	const message = '読書位置を保存済み';
+	const status = page.getByRole('status').filter({ hasText: message });
+	await expect(status).toHaveCount(1);
+	await expect(status).toBeVisible();
+	const compactLabel = status.locator('[aria-hidden="true"]').filter({ hasText: '保存済み' });
+	if (await compactLabel.count()) {
+		const announcement = status.locator('.sr-only').filter({ hasText: message });
+		await expect(announcement).toBeAttached();
+		await expect(announcement).toHaveClass(/sr-only/);
+		await expect(announcement).toContainText(message);
+		await expect(announcement).not.toHaveAttribute('aria-hidden', 'true');
+		await expect(compactLabel).toBeVisible();
+		await expect(compactLabel).toHaveText('✓ 保存済み');
+	} else {
+		await expect(status).toContainText(message);
+	}
+}
 async function move(page: Page, name = '次のページへ', timeout = 5000) {
 	const before = await cfi(page);
 	const beforeProgress = await progress(page);
@@ -194,7 +212,7 @@ for (const config of [
 		if (config.vertical) await testInfo.attach('vertical-layout', { body: await page.screenshot(), contentType: 'image/png' });
 		if (config.vertical) await expect.poll(async () => (await progress(page)).section).toBe(4);
 		else await expect.poll(() => visibleText(page)).toContain('第4章');
-		await expect(page.getByText('読書位置を保存済み', { exact: true })).toBeVisible();
+		await expectReadingPositionSaved(page);
 		const saved = api.saved();
 		expect(saved).toBe(await cfi(page));
 		await page.evaluate(() => localStorage.clear());
@@ -418,8 +436,8 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 	await page.waitForTimeout(500);
 	await expectPage('10');
 	await openControls();
-	await expect(page.locator('[role="status"]:visible')).toContainText('読書位置を保存済み');
 	await closeControls();
+	await expectReadingPositionSaved(page);
 	expect(api.saved()).toBe('10');
 	await expect.poll(() => api.progress()).toBe(83);
 	await page.reload();
@@ -501,7 +519,7 @@ for (const width of [1100, 393, 320])
 		for (let i = 0; i < 5; i++) await next.click({ noWaitAfter: true });
 		await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false');
 		await expect.poll(() => visibleText(page)).not.toBe(text);
-		await expect(page.getByText('読書位置を保存済み', { exact: true })).toBeVisible();
+		await expectReadingPositionSaved(page);
 		expect(api.saved()).toBe(await cfi(page));
 		await page.getByRole('button', { name: '目次', exact: true }).click();
 		await page.getByRole('button', { name: '第1章', exact: true }).click();
@@ -547,7 +565,7 @@ test('save errors are visible and retry writes the current EPUB CFI', async ({ p
 	await expect(page.getByRole('alert')).toContainText('保存できませんでした');
 	fail = false;
 	await page.getByRole('button', { name: '再試行', exact: true }).click();
-	await expect(page.getByText('読書位置を保存済み', { exact: true })).toBeVisible();
+	await expectReadingPositionSaved(page);
 	expect(saved).toBe(await cfi(page));
 });
 
@@ -687,7 +705,7 @@ test('mixed vertical/horizontal chapters: real two-page geometry, complete sourc
 		expect(completeSource[0]).toBe(0);
 		expect(completeSource.every((value,index)=>index===0||value===completeSource[index-1]+1), 'all source characters must appear across screens').toBe(true);
 		expect(completeSource.at(-1)).toBe(before.chapterLength*4-1);
-		await expect(page.getByText('読書位置を保存済み',{exact:true})).toBeVisible();
+		await expectReadingPositionSaved(page);
 		expect(api.writes.length).toBeGreaterThan(0);
 		expect(api.status()).toBe('completed');
 		expect(api.progress()).toBe(100);
