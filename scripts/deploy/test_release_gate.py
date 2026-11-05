@@ -258,6 +258,8 @@ class OwnerConsentReceiptTests(unittest.TestCase):
             "pr": 70,
             "head_sha": PR_HEAD_SHA,
             "owner_login": OWNER_LOGIN,
+            "expected_review_sha256": self.payload["independent_review_sha256"],
+            "expected_i5_preview_sha256": self.payload["i5_preview_sha256"],
             "now": self.now,
         }
         arguments.update(overrides)
@@ -271,6 +273,72 @@ class OwnerConsentReceiptTests(unittest.TestCase):
         self.assertEqual(
             self.verify(serialized, signature, now=self.now - timedelta(minutes=5)), self.payload
         )
+
+    def test_requires_independent_expected_evidence_digests(self):
+        serialized = self.serialize(self.payload)
+        signature = self.sign(serialized)
+        arguments = {
+            "trusted_public_key_pem": self.public_key,
+            "repository": FakeAPI.repository,
+            "pr": 70,
+            "head_sha": PR_HEAD_SHA,
+            "owner_login": OWNER_LOGIN,
+            "now": self.now,
+        }
+        with self.assertRaises(TypeError):
+            release_gate._verify_owner_consent_receipt(serialized, signature, **arguments)
+
+    def test_expected_evidence_digests_must_match_in_order_and_be_canonical(self):
+        serialized = self.serialize(self.payload)
+        signature = self.sign(serialized)
+        invalid = (
+            {"expected_review_sha256": "C" * 64},
+            {"expected_review_sha256": "c" * 63},
+            {"expected_review_sha256": "g" * 64},
+            {"expected_review_sha256": None},
+            {"expected_i5_preview_sha256": "D" * 64},
+            {"expected_i5_preview_sha256": "d" * 63},
+            {"expected_i5_preview_sha256": "g" * 64},
+            {"expected_i5_preview_sha256": None},
+            {"expected_review_sha256": "d" * 64},
+            {"expected_i5_preview_sha256": "c" * 64},
+            # A correctly signed receipt cannot supply its own expected hashes.
+            {
+                "expected_review_sha256": "e" * 64,
+                "expected_i5_preview_sha256": "f" * 64,
+            },
+        )
+        for expected in invalid:
+            with self.subTest(expected=expected), self.assertRaises(GateError):
+                self.verify(serialized, signature, **expected)
+
+    def test_expected_digest_str_subclasses_cannot_override_mismatch_comparison(self):
+        class AdversarialDigest(str):
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+
+        serialized = self.serialize(self.payload)
+        signature = self.sign(serialized)
+        for field, mismatch in (
+            ("expected_review_sha256", "e" * 64),
+            ("expected_i5_preview_sha256", "f" * 64),
+        ):
+            with self.subTest(field=field), self.assertRaises(GateError):
+                self.verify(serialized, signature, **{field: AdversarialDigest(mismatch)})
+
+    def test_signed_self_asserted_digests_do_not_replace_caller_expected_values(self):
+        spoofed = {
+            **self.payload,
+            "independent_review_sha256": "e" * 64,
+            "i5_preview_sha256": "f" * 64,
+        }
+        serialized = self.serialize(spoofed)
+        signature = self.sign(serialized)
+        with self.assertRaisesRegex(GateError, "do not match the expected values"):
+            self.verify(serialized, signature)
 
     def test_accepts_real_signature_at_exact_ten_minute_lifetime_boundary(self):
         payload = {
@@ -317,8 +385,13 @@ class OwnerConsentReceiptTests(unittest.TestCase):
             ("independent_review_sha256", "e" * 64), ("i5_preview_sha256", "e" * 64),
             ("receipt_id", "7054fe6c-cd78-42cb-a952-ed71da2fe739"),
         ):
+            expected = {}
+            if field == "independent_review_sha256":
+                expected["expected_review_sha256"] = value
+            elif field == "i5_preview_sha256":
+                expected["expected_i5_preview_sha256"] = value
             with self.subTest(field=field), self.assertRaisesRegex(GateError, "signature verification failed"):
-                self.verify(self.serialize({**self.payload, field: value}), signature)
+                self.verify(self.serialize({**self.payload, field: value}), signature, **expected)
 
     def test_rejects_even_signed_missing_extra_or_wrongly_typed_fields(self):
         for field in self.payload:

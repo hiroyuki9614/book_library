@@ -58,6 +58,8 @@ def _verify_owner_consent_receipt(
     pr: int,
     head_sha: str,
     owner_login: str,
+    expected_review_sha256: str,
+    expected_i5_preview_sha256: str,
     now: datetime | None = None,
 ) -> dict:
     """INERT: verify a synthetic/future receipt, never authorize a release.
@@ -65,7 +67,16 @@ def _verify_owner_consent_receipt(
     The caller must independently control the trust key and expected context.
     A signature does not prove chat-user authorization of issuance. This helper
     has no revocation/replay state and does not validate review or i5 evidence.
+    Expected evidence digests are independent caller inputs, not authenticated
+    claims or evidence-integrity checks performed by this helper.
     """
+    if (
+        type(expected_review_sha256) is not str
+        or SHA256_PATTERN.fullmatch(expected_review_sha256) is None
+        or type(expected_i5_preview_sha256) is not str
+        or SHA256_PATTERN.fullmatch(expected_i5_preview_sha256) is None
+    ):
+        raise GateError("Expected evidence digests must be lowercase SHA-256 hex")
     if not isinstance(trusted_public_key_pem, bytes) or not trusted_public_key_pem:
         raise GateError("Receipt verification requires an explicit trusted public key")
     # Accept only an Ed25519 SubjectPublicKeyInfo PEM. This DER prefix identifies
@@ -152,6 +163,11 @@ def _verify_owner_consent_receipt(
         for key in ("independent_review_sha256", "i5_preview_sha256")
     ):
         raise GateError("Receipt evidence digests must be lowercase SHA-256 hex")
+    if (
+        payload["independent_review_sha256"] != expected_review_sha256
+        or payload["i5_preview_sha256"] != expected_i5_preview_sha256
+    ):
+        raise GateError("Receipt evidence digests do not match the expected values")
     timestamps = []
     for key in ("issued_at", "expires_at"):
         value = payload[key]
