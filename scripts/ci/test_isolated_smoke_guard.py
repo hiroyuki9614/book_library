@@ -96,7 +96,7 @@ esac
         self.assertIn('mktemp "$restore_backup_dir/postgres.XXXXXX"', body)
         self.assertIn('chmod 600 "$backup_file"', body)
         self.assertIn('pg_dump --format=custom -U "$POSTGRES_USER" -d "$POSTGRES_DB" >"$backup_file" 2>/dev/null', body)
-        self.assertIn('createdb -U "$POSTGRES_USER" "$restore_db"', body)
+        self.assertIn('createdb --template=template0 -U "$POSTGRES_USER" "$restore_db"', body)
         self.assertIn('pg_restore --exit-on-error --no-owner --no-privileges', body)
         self.assertIn('-d "$restore_db" - <"$backup_file" >/dev/null 2>&1', body)
         self.assertIn('SELECT EXISTS (SELECT 1 FROM ci_recovery_probe WHERE marker = \'$marker\')', body)
@@ -138,6 +138,9 @@ esac
                 '    [[ -f "${backup_file[0]}" ]] || return 92',
                 '    [[ "$(stat -c %a "${directory[0]}")" == 700 ]] || return 93',
                 '    [[ "$(stat -c %a "${backup_file[0]}")" == 600 ]] || return 94',
+                '  fi',
+                '  if [[ "$stage" == createdb ]]; then',
+                '    [[ " $* " == *" --template=template0 "* ]] || return 95',
                 '  fi',
                 '  if [[ "$FAKE_FAIL_STAGE" == "$stage" ]]; then',
                 '    printf "%s\\n" "private marker $FAKE_MARKER SQL credential" >&2',

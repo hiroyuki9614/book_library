@@ -293,7 +293,7 @@ synthetic_restore_drill() {
     return 1
   fi
   if ! docker compose --project-name "$project" --file "$compose_file" exec -T db \
-    createdb -U "$POSTGRES_USER" "$restore_db" >/dev/null 2>&1; then
+    createdb --template=template0 -U "$POSTGRES_USER" "$restore_db" >/dev/null 2>&1; then
     echo "Could not create separate synthetic restore database" >&2
     return 1
   fi
