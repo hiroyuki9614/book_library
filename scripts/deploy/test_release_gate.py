@@ -526,6 +526,39 @@ class ReleaseGateTests(unittest.TestCase):
         with self.assertRaisesRegex(GateError, "solo-owner evidence pair"):
             validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
 
+    def test_rejects_unauthenticated_chat_approval_claim_shapes(self):
+        cases = (
+            ("forged_owner_comment", "comment", OWNER_LOGIN, "User", 70, PR_HEAD_SHA),
+            ("bot_comment", "comment", "release-agent[bot]", "Bot", 70, PR_HEAD_SHA),
+            ("pr_body_claim", "body", OWNER_LOGIN, "User", 70, PR_HEAD_SHA),
+            ("different_pr", "comment", OWNER_LOGIN, "User", 71, PR_HEAD_SHA),
+            ("different_head", "comment", OWNER_LOGIN, "User", 70, "c" * 40),
+        )
+        for name, location, login, user_type, claimed_pr, claimed_head in cases:
+            with self.subTest(claim=name):
+                api = FakeAPI()
+                api.reviews = []
+                # Owner merged_by and green CI remain present in every case;
+                # agent-writable claims cannot authenticate human chat consent.
+                claim = (
+                    f"Authenticated chat approval from {OWNER_LOGIN}: mergeして "
+                    f"{api.repository} PR #{claimed_pr} HEAD {claimed_head}"
+                )
+                if location == "body":
+                    api.pull_summary["body"] = api.pull["body"] = claim
+                else:
+                    api.comments = [{
+                        "id": 503,
+                        "body": claim,
+                        "user": {"login": login, "type": user_type},
+                        "author_association": "OWNER" if login == OWNER_LOGIN else "NONE",
+                        "created_at": "2026-11-02T00:02:00Z",
+                        "updated_at": "2026-11-02T00:02:00Z",
+                    }]
+
+                with self.assertRaisesRegex(GateError, "solo-owner evidence pair"):
+                    validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+
     def test_accepts_solo_owner_policy_with_exact_immutable_comments(self):
         api = FakeAPI()
         api.reviews = []
