@@ -272,6 +272,19 @@ class OwnerConsentReceiptTests(unittest.TestCase):
             self.verify(serialized, signature, now=self.now - timedelta(minutes=5)), self.payload
         )
 
+    def test_accepts_real_signature_at_exact_ten_minute_lifetime_boundary(self):
+        payload = {
+            **self.payload,
+            "issued_at": "2026-11-02T00:00:00Z",
+            "expires_at": "2026-11-02T00:10:00Z",
+        }
+        serialized = self.serialize(payload)
+        signature = self.sign(serialized)
+        self.assertEqual(
+            self.verify(serialized, signature, now=datetime(2026, 11, 2, 0, 9, 59, tzinfo=timezone.utc)),
+            payload,
+        )
+
     def test_missing_malformed_or_non_ed25519_key_fails(self):
         serialized = self.serialize(self.payload)
         signature = self.sign(serialized)
@@ -388,6 +401,8 @@ class OwnerConsentReceiptTests(unittest.TestCase):
             ("2026-11-02T00:00:00Z", "2026-11-02T00:05:00Z"),
             ("2026-11-02T00:00:00Z", "2026-11-02T00:00:00Z"),
             ("2026-11-02T00:10:00Z", "2026-11-02T00:00:00Z"),
+            ("2026-11-02T00:00:00Z", "2026-11-02T00:10:01Z"),
+            ("2026-11-02T00:00:00Z", "2026-11-03T00:00:00Z"),
         ):
             serialized = self.serialize({**self.payload, "issued_at": issued_at, "expires_at": expires_at})
             with self.subTest(issued_at=issued_at, expires_at=expires_at), self.assertRaises(GateError):

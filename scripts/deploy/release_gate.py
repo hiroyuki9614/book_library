@@ -38,6 +38,7 @@ SOLO_POLICY_COMMENT_MARKERS = (
 SOLO_POLICY_COMMENT_MAX_BYTES = 4096
 REVIEW_SESSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}\Z")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+MAX_RECEIPT_LIFETIME = timedelta(minutes=10)
 
 
 class GateError(RuntimeError):
@@ -163,9 +164,12 @@ def _verify_owner_consent_receipt(
             raise GateError("Receipt has an invalid timestamp") from None
     issued_at, expires_at = timestamps
     current_time = datetime.now(timezone.utc) if now is None else now
+    lifetime = expires_at - issued_at
     if (
         not isinstance(current_time, datetime)
         or current_time.utcoffset() != timedelta(0)
+        or lifetime <= timedelta(0)
+        or lifetime > MAX_RECEIPT_LIFETIME
         or not issued_at <= current_time < expires_at
     ):
         raise GateError("Receipt time window is invalid, not yet valid, or expired")

@@ -65,11 +65,11 @@ The payload is exactly one UTF-8 JSON object serialized with `json.dumps(payload
 | `owner_login` | Exact expected GitHub user login |
 | `decision` | `MERGE` |
 | `scope` | `normal-ui` |
-| `issued_at`, `expires_at` | Strict UTC RFC3339 whole-second profile `YYYY-MM-DDTHH:MM:SSZ`; valid calendar values, no offsets/fractions; `issued_at <= now < expires_at` |
+| `issued_at`, `expires_at` | Strict UTC RFC3339 whole-second profile `YYYY-MM-DDTHH:MM:SSZ`; valid calendar values, no offsets/fractions; `issued_at < expires_at`, lifetime at most 600 seconds, and `issued_at <= now < expires_at` |
 | `receipt_id` | Canonical lowercase UUIDv4, to be generated uniquely by the future issuer |
 | `independent_review_sha256`, `i5_preview_sha256` | Each exactly 64 lowercase hex characters |
 
-The detached signature is exactly 64 raw Ed25519 signature bytes over those canonical payload bytes. The helper returns the parsed payload only after verification. The optional test clock must be an aware UTC `datetime`; otherwise it uses the current UTC clock. Time-window validity does not impose a maximum receipt lifetime. UUID format checking does not establish uniqueness across receipts.
+The detached signature is exactly 64 raw Ed25519 signature bytes over those canonical payload bytes. The helper returns the parsed payload only after verification. The optional test clock must be an aware UTC `datetime`; otherwise it uses the current UTC clock. The positive receipt lifetime is capped at 600 seconds (10 minutes), inclusive, so zero, reversed, and longer windows fail closed. UUID format checking does not establish uniqueness across receipts.
 
 **Cryptographic authenticity does not prove that the chat user actually authorized issuance.** This primitive does not solve revocation, replay, independent review, or i5 validation. Digest syntax and a signature do not validate the underlying review/preview evidence, and successful offline verification grants no merge or production permission.
 
