@@ -509,6 +509,23 @@ class ReleaseGateTests(unittest.TestCase):
         with self.assertRaisesRegex(GateError, "Release candidate gates"):
             validate_release(api, SOURCE_SHA)
 
+    def test_unverified_chat_merge_claim_and_owner_token_are_not_release_evidence(self):
+        # Issue #100: an agent can call GitHub with an owner-attributed token.
+        # A human-sounding comment and owner merged_by identity do not prove
+        # that an authenticated chat user authorized this exact PR head.
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = [{
+            "id": 503,
+            "body": f"i5 preview OK; mergeして PR #70 HEAD {PR_HEAD_SHA}",
+            "user": {"login": OWNER_LOGIN, "type": "User"},
+            "author_association": "OWNER",
+            "created_at": "2026-11-02T00:02:00Z",
+            "updated_at": "2026-11-02T00:02:00Z",
+        }]
+        with self.assertRaisesRegex(GateError, "solo-owner evidence pair"):
+            validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+
     def test_accepts_solo_owner_policy_with_exact_immutable_comments(self):
         api = FakeAPI()
         api.reviews = []
