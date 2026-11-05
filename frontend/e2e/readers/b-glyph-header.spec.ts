@@ -101,6 +101,16 @@ async function geometry(page: Page, kind: ReaderKind) {
 }
 
 function checkHeader(observed: Awaited<ReturnType<typeof geometry>>, width: number) {
+	// Assert presence before geometry loops: an empty controls array must not pass vacuously.
+	expect(observed.controls.some((control) => control.name === '本棚に戻る'), 'reader back link must exist').toBe(true);
+	expect(observed.controls.some((control) => control.name === '表示設定' || control.name === '操作メニューを開く'), 'reader settings/menu must exist').toBe(true);
+	// Saving state must remain visible and inside the header even on narrow screens.
+	expect(observed.saveStatus.width, 'save status must be rendered').toBeGreaterThan(0);
+	expect(observed.saveStatus.height, 'save status must be visible').toBeGreaterThan(0);
+	expect(observed.saveStatus.x).toBeGreaterThanOrEqual(0);
+	expect(observed.saveStatus.x + observed.saveStatus.width).toBeLessThanOrEqual(width);
+	expect(observed.saveStatus.y).toBeGreaterThanOrEqual(observed.header.y);
+	expect(observed.saveStatus.y + observed.saveStatus.height).toBeLessThanOrEqual(observed.header.y + observed.header.height);
 	expect(observed.overlaps, 'header title, save status and controls must not overlap').toEqual([]);
 	expect(observed.overflow, 'reader must fit the viewport').toBe(false);
 	for (const control of observed.controls) {
@@ -136,6 +146,15 @@ for (const kind of ['epub', 'pdf'] as const) {
 				await page.goto(`/e2e/readers/harness.html?kind=${kind}&direction=${direction}`);
 				await ready(page, kind);
 				const observed = await geometry(page, kind);
+				// Both navigation buttons must be present and remain inside the footer.
+				expect(observed.buttons.map((button) => button.name)).toEqual(['前のページへ', '次のページへ']);
+				for (const button of observed.buttons) {
+					expect(button.x).toBeGreaterThanOrEqual(0);
+					expect(button.x + button.width).toBeLessThanOrEqual(width);
+					expect(button.y).toBeGreaterThanOrEqual(observed.footer.y);
+					expect(button.y + button.height).toBeLessThanOrEqual(observed.footer.y + observed.footer.height);
+				}
+				expect(observed.buttons[0].y).toBeCloseTo(observed.buttons[1].y, 1);
 				console.log(JSON.stringify({ kind, direction, width, ...observed }));
 				await testInfo.attach(`${kind}-${direction}-${width}-geometry`, { body: JSON.stringify(observed, null, 2), contentType: 'application/json' });
 				if (width === 1280) await page.screenshot({ path: testInfo.outputPath(`${kind}-${direction}-layout.png`) });
