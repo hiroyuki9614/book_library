@@ -218,6 +218,71 @@ esac
         self.assertIn("Expected synthetic marker is missing", result.stderr)
         self.assertEqual(calls, ["pg_dump", "createdb", "pg_restore", "marker_psql"])
 
+    def test_real_cleanup_exit_trap_removes_backup_and_scopes_compose_down(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        cleanup_matches = re.findall(r"(?ms)^cleanup\(\) \{\n.*?^\}", source)
+        trap_matches = re.findall(r"(?m)^trap cleanup EXIT$", source)
+        self.assertEqual(len(cleanup_matches), 1, "cleanup source extraction must be unambiguous")
+        self.assertEqual(len(trap_matches), 1, "cleanup EXIT trap source must be unambiguous")
+        cleanup_start = source.index(cleanup_matches[0])
+        trap_start = source.index(trap_matches[0])
+        self.assertLess(cleanup_start, trap_start, "EXIT trap must follow the extracted cleanup function")
+        self.assertIn('docker compose --project-name "$project" --file "$compose_file" down --volumes --remove-orphans', cleanup_matches[0])
+
+        cleanup_bin = self.root / "cleanup-bin"
+        cleanup_bin.mkdir()
+        cleanup_bin.joinpath("rm").symlink_to("/usr/bin/rm")
+        harness = "\n".join(
+            (
+                "set -u",
+                'docker() { printf "%s\\0" "$@" >> "$FAKE_DOCKER_ARGS"; }',
+                cleanup_matches[0],
+                trap_matches[0],
+                'exit "$FAKE_EXIT_STATUS"',
+            )
+        )
+        expected_docker_args = [
+            "compose",
+            "--project-name",
+            "belib-cleanup-test",
+            "--file",
+            "compose.yaml",
+            "down",
+            "--volumes",
+            "--remove-orphans",
+        ]
+
+        for exit_status in (0, 23):
+            with self.subTest(exit_status=exit_status):
+                backup_dir = self.root / f"cleanup-owned-backup-{exit_status}"
+                backup_dir.mkdir()
+                (backup_dir / "synthetic.dump").write_bytes(b"disposable test data")
+                args_log = self.root / f"cleanup-docker-args-{exit_status}"
+                args_log.unlink(missing_ok=True)
+                env = {
+                    "PATH": str(cleanup_bin),
+                    "FAKE_DOCKER_ARGS": str(args_log),
+                    "FAKE_EXIT_STATUS": str(exit_status),
+                    "restore_backup_dir": str(backup_dir),
+                    "project": "belib-cleanup-test",
+                    "compose_file": "compose.yaml",
+                }
+                result = subprocess.run(
+                    ["/bin/bash", "-c", harness],
+                    cwd=ROOT,
+                    env=env,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, exit_status, result.stderr)
+                self.assertFalse(backup_dir.exists(), "EXIT trap did not remove the owned backup directory")
+                self.assertEqual(
+                    args_log.read_bytes().split(b"\0")[:-1],
+                    [arg.encode() for arg in expected_docker_args],
+                )
+
     def test_rejects_non_github_host_without_docker_call(self):
         result = self.run_guard(RUNNER_ENVIRONMENT="self-hosted")
         self.assertNotEqual(result.returncode, 0)
