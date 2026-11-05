@@ -383,6 +383,11 @@ def _parse_github_timestamp(value: object) -> datetime:
         raise GateError("Solo-owner evidence has an invalid comment timestamp") from None
 
 
+def _reject_nonstandard_json_constant(_token: str) -> None:
+    # Python's json.loads otherwise accepts NaN/Infinity, which are not JSON.
+    raise ValueError("Nonstandard JSON constants are forbidden")
+
+
 def _parse_structured_comment_body(body: object, marker: str) -> dict:
     if not isinstance(body, str) or len(body.encode("utf-8")) > SOLO_POLICY_COMMENT_MAX_BYTES:
         raise GateError("Solo-owner evidence comment is too large or malformed")
@@ -405,8 +410,10 @@ def _parse_structured_comment_body(body: object, marker: str) -> dict:
     ):
         raise GateError("Solo-owner evidence comment has an invalid structure")
     try:
-        payload = json.loads(serialized)
-    except json.JSONDecodeError:
+        payload = json.loads(
+            serialized, parse_constant=_reject_nonstandard_json_constant
+        )
+    except ValueError:
         raise GateError("Solo-owner evidence comment has invalid JSON") from None
     if not isinstance(payload, dict):
         raise GateError("Solo-owner evidence comment must contain a JSON object")
