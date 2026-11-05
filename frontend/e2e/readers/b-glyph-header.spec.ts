@@ -2,7 +2,6 @@ import { expect, test, type Page } from '@playwright/test';
 import { epubFixture } from './fixtures';
 
 type ReaderKind = 'epub' | 'pdf';
-type Direction = 'ltr' | 'rtl';
 // Position baselines are measured from a direct-text button in the same
 // production-built browser/viewport; hard-coded host-font coordinates are brittle.
 
