@@ -529,16 +529,53 @@ class ReleaseGateTests(unittest.TestCase):
 
         self.assertEqual(proof["pr_head_sha"], PR_HEAD_SHA)
 
-    def test_rejects_solo_owner_policy_with_extra_crlf_after_json(self):
+    def test_accepts_solo_owner_policy_with_one_trailing_crlf_after_json(self):
         api = FakeAPI()
         api.reviews = []
         api.comments = solo_comments()
+        # Exact GitHub owner-review body shape from PR #95.
         api.comments[0]["body"] = api.comments[0]["body"].replace(
             "\n", "\r\n", 1
         ) + "\r\n"
+        api.comments[1]["body"] = api.comments[1]["body"].replace(
+            "\n", "\r\n", 1
+        )
 
-        with self.assertRaisesRegex(GateError, "invalid structure"):
-            validate_release(api, SOURCE_SHA)
+        proof = validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+        self.assertEqual(proof["pr_head_sha"], PR_HEAD_SHA)
+
+    def test_accepts_solo_owner_policy_with_one_trailing_lf_after_json(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        api.comments[0]["body"] += "\n"
+
+        proof = validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+        self.assertEqual(proof["pr_head_sha"], PR_HEAD_SHA)
+
+    def test_rejects_solo_owner_policy_with_multiple_trailing_newlines(self):
+        for suffix in ("\r\n\r\n", "\n\n", "\r\n\n"):
+            with self.subTest(suffix=repr(suffix)):
+                api = FakeAPI()
+                api.reviews = []
+                api.comments = solo_comments()
+                api.comments[0]["body"] += suffix
+
+                with self.assertRaisesRegex(GateError, "invalid structure"):
+                    validate_release(api, SOURCE_SHA)
+
+    def test_rejects_solo_owner_policy_with_embedded_json_linebreaks(self):
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=repr(newline)):
+                api = FakeAPI()
+                api.reviews = []
+                api.comments = solo_comments()
+                api.comments[0]["body"] = api.comments[0]["body"].replace(
+                    ',"head_sha"', ',' + newline + '"head_sha"', 1
+                )
+
+                with self.assertRaisesRegex(GateError, "invalid structure"):
+                    validate_release(api, SOURCE_SHA)
 
     def test_rejects_solo_owner_policy_with_carriage_return_inside_json(self):
         api = FakeAPI()
