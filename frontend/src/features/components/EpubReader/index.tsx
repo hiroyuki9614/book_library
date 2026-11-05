@@ -321,8 +321,8 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 	const activeTocHref = navigation.find((item) => normalize(item.href) === normalize(currentHref))?.href ?? navigation.find((item) => resource(item.href) === resource(currentHref))?.href;
 	return (
 		<div className='flex h-[100dvh] flex-col bg-white text-foreground'>
-			<header className='shrink-0 border-b border-border bg-white px-1 py-1 sm:px-3 sm:py-2'>
-				<div className='flex min-w-0 flex-wrap items-center gap-1 sm:gap-2'>
+			<header className='shrink-0 border-b border-border bg-white px-1 py-1 sm:px-3 sm:py-2 xl:grid xl:grid-cols-[auto_minmax(0,1fr)_auto_auto] xl:items-center xl:gap-x-2 xl:py-[3.5px]'>
+				<div className='flex min-w-0 flex-wrap items-center gap-1 sm:gap-2 xl:contents'>
 					<Link
 						to='/'
 						className='inline-flex min-h-11 shrink-0 items-center px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
@@ -330,7 +330,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 						本棚に戻る
 					</Link>
 					{bookTitle && <span title={bookTitle} className='min-w-0 flex-1 truncate px-1 text-center text-sm font-medium'>{bookTitle}</span>}
-					<div className='ml-auto flex shrink-0 items-center gap-1 sm:gap-2'>
+					<div className='ml-auto flex shrink-0 items-center gap-1 sm:gap-2 xl:col-start-4 xl:row-start-1'>
 						{history.length > 0 && (
 							<Button aria-label='目次移動前へ戻る' variant='outline' onClick={handleBack} className='min-h-11 px-2 sm:px-3'>
 								戻る
@@ -401,14 +401,14 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 						</Sheet>
 					</div>
 				</div>
-				<ReadingSaveStatus status={status} retry={retry} />
+				<div className='xl:col-start-3 xl:row-start-1'><ReadingSaveStatus status={status} retry={retry} /></div>
 				{restoreError && (
-					<p role='alert' className='text-xs'>
+					<p role='alert' className='text-xs xl:col-span-full'>
 						保存位置を確認・復元できませんでした。現在の表示位置から再開しています。
 					</p>
 				)}
 				{operationError && (
-					<p role='alert' className='text-xs'>
+					<p role='alert' className='text-xs xl:col-span-full'>
 						ページまたは目次を表示できませんでした。もう一度操作してください。
 					</p>
 				)}
@@ -444,7 +444,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 					aria-label='前のページへ'
 					className='size-11 rounded-full text-2xl'
 				>
-					{direction === 'rtl' ? '›' : '‹'}
+					<span aria-hidden='true' className='block -translate-y-px leading-none'>{direction === 'rtl' ? '›' : '‹'}</span>
 				</Button>
 				<Button
 					type='button'
@@ -455,7 +455,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 					aria-label='次のページへ'
 					className='size-11 rounded-full text-2xl'
 				>
-					{direction === 'rtl' ? '‹' : '›'}
+					<span aria-hidden='true' className='block -translate-y-px leading-none'>{direction === 'rtl' ? '‹' : '›'}</span>
 				</Button>
 				<div className='order-3 min-w-[9rem] flex-1 basis-full text-center text-xs sm:order-none sm:min-w-0 sm:flex-none sm:basis-auto sm:text-sm' aria-live='polite'>
 					<div>章内ページ: {screenPage.page} / {screenPage.total}（第{screenPage.section}節）</div>
