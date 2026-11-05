@@ -15,11 +15,10 @@ export default function ReadingSaveStatus({ status, retry }: ReadingSaveStatusPr
 		<div
 			className='flex min-h-11 min-w-0 items-center gap-1 text-xs text-muted-foreground'
 			role={status === 'error' ? 'alert' : 'status'}
-			title={detail}
 		>
 			{status === 'error' ? (
 				<>
-					<span aria-hidden='true' className='shrink-0 whitespace-nowrap text-destructive'>保存失敗</span>
+					<span aria-hidden='true' title={detail} className='shrink-0 whitespace-nowrap text-destructive'>保存失敗</span>
 					<span className='sr-only'>{detail}</span>
 					<button type='button' className='min-h-11 shrink-0 px-2 text-primary underline' onClick={retry}>
 						再試行
@@ -27,7 +26,7 @@ export default function ReadingSaveStatus({ status, retry }: ReadingSaveStatusPr
 				</>
 			) : (
 				<>
-					<span aria-hidden='true' className='whitespace-nowrap'>
+					<span aria-hidden='true' title={detail} className='whitespace-nowrap'>
 						{status === 'saving' ? '保存中…' : '✓ 保存済み'}
 					</span>
 					<span className='sr-only'>{detail}</span>
