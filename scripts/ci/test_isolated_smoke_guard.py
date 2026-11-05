@@ -83,6 +83,141 @@ esac
     def raw_logged_docker_calls(self):
         return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
 
+    def test_synthetic_restore_is_private_isolated_and_fail_closed(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        function = re.search(
+            r"(?ms)^synthetic_restore_drill\(\) \{\n.*?^\}", source
+        )
+        self.assertIsNotNone(function)
+        body = function.group(0)
+        self.assertIn('[[ "$recovery_rehearsal" == "github-hosted-v1" ]] ||', body)
+        self.assertIn('mktemp -d "/tmp/belib-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX"', body)
+        self.assertIn('chmod 700 "$restore_backup_dir"', body)
+        self.assertIn('mktemp "$restore_backup_dir/postgres.XXXXXX"', body)
+        self.assertIn('chmod 600 "$backup_file"', body)
+        self.assertIn('pg_dump --format=custom -U "$POSTGRES_USER" -d "$POSTGRES_DB" >"$backup_file" 2>/dev/null', body)
+        self.assertIn('createdb -U "$POSTGRES_USER" "$restore_db"', body)
+        self.assertIn('pg_restore --exit-on-error --no-owner --no-privileges', body)
+        self.assertIn('-d "$restore_db" - <"$backup_file" >/dev/null 2>&1', body)
+        self.assertIn('SELECT EXISTS (SELECT 1 FROM ci_recovery_probe WHERE marker = \'$marker\')', body)
+        self.assertIn('[[ "$restored_marker" == t ]] ||', body)
+        self.assertNotIn('echo "$marker"', body)
+        self.assertNotIn('echo "$restored_marker"', body)
+        self.assertIn('rm -rf -- "$restore_backup_dir"', source)
+
+        marker_insert = source.index('INSERT INTO ci_recovery_probe VALUES (\'$marker\')')
+        drill_call = source.index('synthetic_restore_drill "$marker"')
+        crash_call = source.index('crash_owned_service frontend')
+        self.assertLess(marker_insert, drill_call)
+        self.assertLess(drill_call, crash_call)
+
+    def test_synthetic_restore_function_with_fake_docker(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        function = re.search(
+            r"(?ms)^synthetic_restore_drill\(\) \{\n.*?^\}", source
+        )
+        self.assertIsNotNone(function)
+        harness = "\n".join(
+            (
+                "set -u",
+                'restore_backup_dir=""',
+                'project="belib-recovery-test"',
+                'compose_file="compose.yaml"',
+                'cleanup_fake_restore() { [[ -z "${restore_backup_dir:-}" ]] || rm -rf -- "$restore_backup_dir"; }',
+                "trap cleanup_fake_restore EXIT",
+                'docker() {',
+                '  local stage="" arg directory backup_file',
+                '  for arg in "$@"; do',
+                '    case "$arg" in pg_dump|createdb|pg_restore) stage="$arg" ;; psql) stage="marker_psql" ;; esac',
+                '  done',
+                '  printf "%s\\n" "$stage" >> "$FAKE_CALL_LOG"',
+                '  if [[ "$stage" == pg_dump ]]; then',
+                '    directory=(/tmp/belib-recovery-"${GITHUB_RUN_ID}"-"${GITHUB_RUN_ATTEMPT}".*)',
+                '    [[ -d "${directory[0]}" ]] || return 91',
+                '    backup_file=("${directory[0]}"/postgres.*)',
+                '    [[ -f "${backup_file[0]}" ]] || return 92',
+                '    [[ "$(stat -c %a "${directory[0]}")" == 700 ]] || return 93',
+                '    [[ "$(stat -c %a "${backup_file[0]}")" == 600 ]] || return 94',
+                '  fi',
+                '  if [[ "$FAKE_FAIL_STAGE" == "$stage" ]]; then',
+                '    printf "%s\\n" "private marker $FAKE_MARKER SQL credential" >&2',
+                '    [[ "$stage" == pg_dump ]] && printf "%s\\n" "partial archive"',
+                '    return 23',
+                '  fi',
+                '  case "$stage" in pg_dump) printf "%s\\n" "synthetic archive" ;; marker_psql) printf "%s\\n" "$FAKE_MARKER_RESULT" ;; esac',
+                '}',
+                function.group(0),
+                'synthetic_restore_drill "$FAKE_MARKER"',
+            )
+        )
+
+        def run_function(*, failure="", mode="github-hosted-v1", marker_result="t"):
+            run_id = f"7{os.getpid()}"
+            call_log = self.root / "restore-calls.log"
+            call_log.unlink(missing_ok=True)
+            env = {
+                "PATH": "/usr/bin:/bin",
+                "FAKE_CALL_LOG": str(call_log),
+                "FAKE_FAIL_STAGE": failure,
+                "FAKE_MARKER": "ci-private-marker-777",
+                "FAKE_MARKER_RESULT": marker_result,
+                "recovery_rehearsal": mode,
+                "GITHUB_RUN_ID": run_id,
+                "GITHUB_RUN_ATTEMPT": "1",
+                "POSTGRES_USER": "ci-private-credential",
+                "POSTGRES_DB": "ci_private_db",
+                "COMPOSE_PROJECT_NAME": "belib-recovery-test",
+            }
+            result = subprocess.run(
+                ["bash", "-c", harness],
+                cwd=ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            calls = call_log.read_text(encoding="utf-8").splitlines() if call_log.exists() else []
+            leftovers = list(Path("/tmp").glob(f"belib-recovery-{run_id}-1.*"))
+            self.assertEqual(leftovers, [], "synthetic dump files were not cleaned up")
+            for private_value in (
+                "ci-private-marker-777",
+                "ci-private-credential",
+                "SELECT EXISTS",
+                "private marker",
+                "SQL credential",
+            ):
+                self.assertNotIn(private_value, result.stdout + result.stderr)
+            return result, calls
+
+        result, calls = run_function()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("marker verified", result.stdout)
+        self.assertEqual(calls, ["pg_dump", "createdb", "pg_restore", "marker_psql"])
+
+        expected_failures = (
+            ("pg_dump", ["pg_dump"], "custom-format dump failed"),
+            ("createdb", ["pg_dump", "createdb"], "separate synthetic restore database"),
+            ("pg_restore", ["pg_dump", "createdb", "pg_restore"], "PostgreSQL restore failed"),
+            ("marker_psql", ["pg_dump", "createdb", "pg_restore", "marker_psql"], "Could not verify marker"),
+        )
+        for stage, expected_calls, safe_message in expected_failures:
+            with self.subTest(stage=stage):
+                result, calls = run_function(failure=stage)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, expected_calls)
+                self.assertIn(safe_message, result.stderr)
+
+        result, calls = run_function(mode="ordinary-smoke")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("outside guarded GitHub-hosted rehearsal", result.stderr)
+        self.assertEqual(calls, [])
+
+        result, calls = run_function(marker_result="f")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Expected synthetic marker is missing", result.stderr)
+        self.assertEqual(calls, ["pg_dump", "createdb", "pg_restore", "marker_psql"])
+
     def test_rejects_non_github_host_without_docker_call(self):
         result = self.run_guard(RUNNER_ENVIRONMENT="self-hosted")
         self.assertNotEqual(result.returncode, 0)

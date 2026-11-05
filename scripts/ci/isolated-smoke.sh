@@ -82,7 +82,11 @@ else
   exit 1
 fi
 
+restore_backup_dir=""
 cleanup() {
+  if [[ -n "${restore_backup_dir:-}" ]]; then
+    rm -rf -- "$restore_backup_dir" || true
+  fi
   docker compose --project-name "$project" --file "$compose_file" down --volumes --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -247,6 +251,69 @@ wait_db_healthy() {
   done
   echo "Synthetic PostgreSQL did not become healthy" >&2
   return 1
+}
+
+synthetic_restore_drill() {
+  local marker="$1" restore_db backup_file restored_marker
+
+  [[ "$recovery_rehearsal" == "github-hosted-v1" ]] || {
+    echo "Refusing synthetic restore outside guarded GitHub-hosted rehearsal" >&2
+    return 1
+  }
+  restore_db="ci_restore_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+  [[ "$restore_db" =~ ^[a-z][a-z0-9_]{0,62}$ ]] || {
+    echo "Synthetic restore database identity is invalid" >&2
+    return 1
+  }
+
+  restore_backup_dir="$(mktemp -d "/tmp/belib-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")" || {
+    echo "Could not create private synthetic backup directory" >&2
+    return 1
+  }
+  chmod 700 "$restore_backup_dir" || {
+    echo "Could not secure private synthetic backup directory" >&2
+    return 1
+  }
+  backup_file="$(mktemp "$restore_backup_dir/postgres.XXXXXX")" || {
+    echo "Could not create private synthetic backup file" >&2
+    return 1
+  }
+  chmod 600 "$backup_file" || {
+    echo "Could not secure private synthetic backup file" >&2
+    return 1
+  }
+
+  if ! docker compose --project-name "$project" --file "$compose_file" exec -T db \
+    pg_dump --format=custom -U "$POSTGRES_USER" -d "$POSTGRES_DB" >"$backup_file" 2>/dev/null; then
+    echo "Synthetic PostgreSQL custom-format dump failed" >&2
+    return 1
+  fi
+  if [[ ! -s "$backup_file" ]]; then
+    echo "Synthetic PostgreSQL custom-format dump is empty" >&2
+    return 1
+  fi
+  if ! docker compose --project-name "$project" --file "$compose_file" exec -T db \
+    createdb -U "$POSTGRES_USER" "$restore_db" >/dev/null 2>&1; then
+    echo "Could not create separate synthetic restore database" >&2
+    return 1
+  fi
+  if ! docker compose --project-name "$project" --file "$compose_file" exec -T db \
+    pg_restore --exit-on-error --no-owner --no-privileges -U "$POSTGRES_USER" \
+    -d "$restore_db" - <"$backup_file" >/dev/null 2>&1; then
+    echo "Synthetic PostgreSQL restore failed" >&2
+    return 1
+  fi
+  if ! restored_marker="$(docker compose --project-name "$project" --file "$compose_file" exec -T db \
+    psql -qAt -U "$POSTGRES_USER" -d "$restore_db" \
+    -c "SELECT EXISTS (SELECT 1 FROM ci_recovery_probe WHERE marker = '$marker');" 2>/dev/null)"; then
+    echo "Could not verify marker in synthetic restored database" >&2
+    return 1
+  fi
+  [[ "$restored_marker" == t ]] || {
+    echo "Expected synthetic marker is missing from restored database" >&2
+    return 1
+  }
+  echo "Synthetic PostgreSQL custom-format restore marker verified"
 }
 
 # Docker API kill is a manual stop: unless-stopped must not auto-restart it.
@@ -451,6 +518,7 @@ marker="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 docker compose --project-name "$project" --file "$compose_file" exec -T db \
   psql -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -c "CREATE TABLE ci_recovery_probe (marker text PRIMARY KEY); INSERT INTO ci_recovery_probe VALUES ('$marker');" >/dev/null
+synthetic_restore_drill "$marker"
 
 crash_owned_service frontend "$baseline_frontend_id" "$baseline_frontend_image"
 wait_service_running frontend "$baseline_frontend_id" "$baseline_frontend_image"
