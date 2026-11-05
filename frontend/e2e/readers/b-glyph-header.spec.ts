@@ -205,6 +205,7 @@ for (const kind of ['epub', 'pdf'] as const) {
 			await page.getByTestId(`${kind}-reader-footer`).getByRole('button', { name: '次のページへ', exact: true }).click();
 			const header = page.locator('header');
 			await expect(header.getByRole('alert')).toContainText('保存失敗');
+			await expect(header.getByRole('alert')).toBeVisible();
 			await expect(header.getByText('✓ 保存済み', { exact: true })).toHaveCount(0);
 			const retry = header.getByRole('button', { name: '再試行', exact: true });
 			await expect(retry).toBeVisible();
@@ -241,6 +242,7 @@ test('epub desktop: failed server restore keeps the 52px header and visible warn
 	await ready(page, 'epub');
 	const warning = page.locator('[data-reader-alerts]').getByRole('alert');
 	await expect(warning).toContainText('保存位置を確認・復元できませんでした');
+	await expect(warning).toBeVisible();
 	expect(await warning.evaluate((node) => node.closest('header'))).toBeNull();
 	const observed = await geometry(page, 'epub');
 	checkHeader(observed, 1280);
