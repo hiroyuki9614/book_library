@@ -538,7 +538,7 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, pageTurnD
 	);
 }
 
-function PdfReader({ bookId, bookTitle, pageTurnDirection = 'ltr', userId }: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection; userId?: number }) {
+function PdfReaderSession({ bookId, bookTitle, pageTurnDirection = 'ltr', userId }: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection; userId?: number }) {
 	const [documentData, setDocumentData] = useState<ArrayBuffer | null>(null);
 	const [fileError, setFileError] = useState(false);
 	const [restoreError, setRestoreError] = useState(false);
@@ -607,6 +607,11 @@ function PdfReader({ bookId, bookTitle, pageTurnDirection = 'ltr', userId }: { b
 			</div>
 		</div>
 	);
+}
+
+function PdfReader(props: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection; userId?: number }) {
+	const readerKey = `${props.bookId}:${props.userId === undefined ? 'anonymous' : props.userId}`;
+	return <PdfReaderSession key={readerKey} {...props} />;
 }
 
 export default PdfReader;

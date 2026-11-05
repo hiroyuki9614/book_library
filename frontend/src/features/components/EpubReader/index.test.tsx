@@ -110,6 +110,36 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		expect(localStorage.getItem('reader-location:7')).toBe('epubcfi(/6/2!/4/1:0)');
 	});
 
+	test('同じ本でuserIdが変わるとEPUBを作り直し、前の読書位置を新しいユーザーへ保存しない', async () => {
+		const first = createEpubRuntime();
+		const second = createEpubRuntime();
+		mocks.ePub.mockReset();
+		mocks.ePub.mockReturnValueOnce(first.book).mockReturnValueOnce(second.book);
+		mocks.fetchReadingInfo.mockImplementation((_bookId: number, userId: number) => Promise.resolve({
+			bookId: 7,
+			currentPosition: userId === 11 ? 'epubcfi(account-one)' : 'epubcfi(account-two)',
+			currentPage: 1,
+			readStatus: 'reading',
+		}));
+
+		const view = await render(<EpubReader bookId={7} userId={11} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(first.rendition.display).toHaveBeenCalledWith('epubcfi(account-one)'));
+		const firstRelocated = renditionHandler<(value: { start: { cfi: string } }) => void>(first, 'relocated');
+
+		await view.rerender(<EpubReader bookId={7} userId={22} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(second.rendition.display).toHaveBeenCalledWith('epubcfi(account-two)'));
+		expect(mocks.fetchReadingInfo).toHaveBeenCalledWith(7, 22);
+		mocks.saveReadingInfo.mockClear();
+
+		firstRelocated?.({ start: { cfi: 'epubcfi(stale-account-one)' } });
+		await new Promise((resolve) => setTimeout(resolve, 800));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		const secondRelocated = renditionHandler<(value: { start: { cfi: string } }) => void>(second, 'relocated');
+		secondRelocated?.({ start: { cfi: 'epubcfi(account-two-next)' } });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(account-two-next)', 'reading', 0, 22));
+	});
+
 	test('スマホ幅では単ページ表示を初期値にする', async () => {
 		const originalWidth = window.innerWidth;
 		Object.defineProperty(window, 'innerWidth', { configurable: true, value: 393 });

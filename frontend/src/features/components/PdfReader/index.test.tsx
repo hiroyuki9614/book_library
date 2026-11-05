@@ -129,6 +129,23 @@ describe('PdfReader navigation, outline, and progress', () => {
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 	});
 
+	test('同じ本でuserIdが変わるとPDFの復元ページを新しいユーザーから読み直す', async () => {
+		mocks.fetchReadingInfo.mockImplementation((_bookId: number, userId: number) => Promise.resolve({
+			bookId: 7,
+			currentPosition: String(userId === 11 ? 2 : 4),
+			currentPage: userId === 11 ? 2 : 4,
+			readStatus: 'reading',
+		}));
+		const view = await render(<PdfReader bookId={7} userId={11} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
+
+		mocks.scrollToPage.mockClear();
+		await view.rerender(<PdfReader bookId={7} userId={22} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 4, behavior: 'auto' }));
+		expect(mocks.fetchReadingInfo).toHaveBeenCalledWith(7, 22);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+	});
+
 	test('ページ移動時に現在ページと総ページから進捗率を保存する', async () => {
 		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));

@@ -35,7 +35,7 @@ function getEpubProgressPercentage(index: number, total: number, atStart: boolea
 	return Math.round((index / total) * 100);
 }
 
-function EpubReader({ bookId, bookTitle, pageTurnDirection, userId }: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection; userId?: number }) {
+function EpubReaderSession({ bookId, bookTitle, pageTurnDirection, userId }: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection; userId?: number }) {
 	const viewerRef = useRef<HTMLDivElement | null>(null);
 	const currentCfiRef = useRef('');
 	const renditionRef = useRef<RuntimeRendition | null>(null);
@@ -494,6 +494,11 @@ function SpreadSelect({ id, spread, disabled, onChange }: { id?: string; spread:
 			</SelectContent>
 		</Select>
 	);
+}
+
+function EpubReader(props: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection; userId?: number }) {
+	const readerKey = `${props.bookId}:${props.userId === undefined ? 'anonymous' : props.userId}`;
+	return <EpubReaderSession key={readerKey} {...props} />;
 }
 
 export default EpubReader;
