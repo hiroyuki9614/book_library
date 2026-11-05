@@ -254,7 +254,7 @@ wait_db_healthy() {
 }
 
 synthetic_restore_drill() {
-  local marker="$1" restore_db backup_file restored_marker
+  local marker="$1" restore_db backup_file restore_error_file restore_error_category restored_marker
 
   [[ "$recovery_rehearsal" == "github-hosted-v1" ]] || {
     echo "Refusing synthetic restore outside guarded GitHub-hosted rehearsal" >&2
@@ -282,6 +282,14 @@ synthetic_restore_drill() {
     echo "Could not secure private synthetic backup file" >&2
     return 1
   }
+  restore_error_file="$(mktemp "$restore_backup_dir/pg-restore-error.XXXXXX")" || {
+    echo "Could not create private synthetic restore diagnostic file" >&2
+    return 1
+  }
+  chmod 600 "$restore_error_file" || {
+    echo "Could not secure private synthetic restore diagnostic file" >&2
+    return 1
+  }
 
   if ! docker compose --project-name "$project" --file "$compose_file" exec -T db \
     pg_dump --format=custom -U "$POSTGRES_USER" -d "$POSTGRES_DB" >"$backup_file" 2>/dev/null; then
@@ -297,10 +305,37 @@ synthetic_restore_drill() {
     echo "Could not create separate synthetic restore database" >&2
     return 1
   fi
+  # Keep only a bounded private sample for classification. The helper consumes
+  # all stderr so pg_restore is not affected by a closed pipe, but writes at
+  # most 16 KiB and never prints the captured text.
   if ! docker compose --project-name "$project" --file "$compose_file" exec -T db \
     pg_restore --exit-on-error --no-owner --no-privileges -U "$POSTGRES_USER" \
-    -d "$restore_db" - <"$backup_file" >/dev/null 2>&1; then
-    echo "Synthetic PostgreSQL restore failed" >&2
+    -d "$restore_db" - <"$backup_file" 2>&1 >/dev/null \
+    | python3 -c '
+import sys
+try:
+    data = sys.stdin.buffer.read(16384)
+    with open(sys.argv[1], "wb") as capture:
+        capture.write(data)
+    sys.stdin.buffer.read()
+except OSError:
+    raise SystemExit(1)
+' "$restore_error_file"; then
+    restore_error_category="unknown"
+    if grep -Eiq 'unsupported version|version[^[:cntrl:]]{0,80}not supported|archive version' "$restore_error_file"; then
+      restore_error_category="unsupported_archive_version"
+    elif grep -Eiq 'did not find magic string|appears to be a text format dump|unexpected end of file|unexpected eof|could not read from input file' "$restore_error_file"; then
+      restore_error_category="invalid_archive"
+    elif grep -Eiq 'does not exist|undefined (function|type)|no such (function|type)' "$restore_error_file"; then
+      restore_error_category="missing_database_object"
+    elif grep -Eiq 'permission denied|must be owner|not authorized|insufficient privilege' "$restore_error_file"; then
+      restore_error_category="permission_failure"
+    elif grep -Eiq 'already exists|duplicate key|duplicate_object' "$restore_error_file"; then
+      restore_error_category="object_conflict"
+    elif grep -Eiq 'could not connect|connection refused|server closed the connection|connection to server' "$restore_error_file"; then
+      restore_error_category="connection_failure"
+    fi
+    echo "Synthetic PostgreSQL restore failed (diagnostic category: $restore_error_category)" >&2
     return 1
   fi
   if ! restored_marker="$(docker compose --project-name "$project" --file "$compose_file" exec -T db \

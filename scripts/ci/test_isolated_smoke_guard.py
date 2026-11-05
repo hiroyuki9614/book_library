@@ -98,7 +98,11 @@ esac
         self.assertIn('pg_dump --format=custom -U "$POSTGRES_USER" -d "$POSTGRES_DB" >"$backup_file" 2>/dev/null', body)
         self.assertIn('createdb --template=template0 -U "$POSTGRES_USER" "$restore_db"', body)
         self.assertIn('pg_restore --exit-on-error --no-owner --no-privileges', body)
-        self.assertIn('-d "$restore_db" - <"$backup_file" >/dev/null 2>&1', body)
+        self.assertIn('-d "$restore_db" - <"$backup_file" 2>&1 >/dev/null', body)
+        self.assertIn('read(16384)', body)
+        self.assertIn('diagnostic category: $restore_error_category', body)
+        self.assertIn('chmod 600 "$restore_error_file"', body)
+        self.assertNotIn('cat "$restore_error_file"', body)
         self.assertIn('SELECT EXISTS (SELECT 1 FROM ci_recovery_probe WHERE marker = \'$marker\')', body)
         self.assertIn('[[ "$restored_marker" == t ]] ||', body)
         self.assertNotIn('echo "$marker"', body)
@@ -119,7 +123,7 @@ esac
         self.assertIsNotNone(function)
         harness = "\n".join(
             (
-                "set -u",
+                "set -euo pipefail",
                 'restore_backup_dir=""',
                 'project="belib-recovery-test"',
                 'compose_file="compose.yaml"',
@@ -143,7 +147,7 @@ esac
                 '    [[ " $* " == *" --template=template0 "* ]] || return 95',
                 '  fi',
                 '  if [[ "$FAKE_FAIL_STAGE" == "$stage" ]]; then',
-                '    printf "%s\\n" "private marker $FAKE_MARKER SQL credential" >&2',
+                '    if [[ "$stage" == pg_restore ]]; then printf "%s\\n" "$FAKE_RESTORE_ERROR" >&2; else printf "%s\\n" "private marker $FAKE_MARKER SQL credential" >&2; fi',
                 '    [[ "$stage" == pg_dump ]] && printf "%s\\n" "partial archive"',
                 '    return 23',
                 '  fi',
@@ -154,7 +158,7 @@ esac
             )
         )
 
-        def run_function(*, failure="", mode="github-hosted-v1", marker_result="t"):
+        def run_function(*, failure="", mode="github-hosted-v1", marker_result="t", restore_error="unsupported version 1.15 in archive for private marker ci-private-marker-777 SQL credential"):
             run_id = f"7{os.getpid()}"
             call_log = self.root / "restore-calls.log"
             call_log.unlink(missing_ok=True)
@@ -164,6 +168,7 @@ esac
                 "FAKE_FAIL_STAGE": failure,
                 "FAKE_MARKER": "ci-private-marker-777",
                 "FAKE_MARKER_RESULT": marker_result,
+                "FAKE_RESTORE_ERROR": restore_error,
                 "recovery_rehearsal": mode,
                 "GITHUB_RUN_ID": run_id,
                 "GITHUB_RUN_ATTEMPT": "1",
@@ -201,7 +206,7 @@ esac
         expected_failures = (
             ("pg_dump", ["pg_dump"], "custom-format dump failed"),
             ("createdb", ["pg_dump", "createdb"], "separate synthetic restore database"),
-            ("pg_restore", ["pg_dump", "createdb", "pg_restore"], "PostgreSQL restore failed"),
+            ("pg_restore", ["pg_dump", "createdb", "pg_restore"], "diagnostic category: unsupported_archive_version"),
             ("marker_psql", ["pg_dump", "createdb", "pg_restore", "marker_psql"], "Could not verify marker"),
         )
         for stage, expected_calls, safe_message in expected_failures:
@@ -210,6 +215,21 @@ esac
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(calls, expected_calls)
                 self.assertIn(safe_message, result.stderr)
+
+        result, calls = run_function(failure="pg_restore")
+        self.assertNotIn("private marker", result.stderr)
+        self.assertNotIn("1.15", result.stderr)
+        self.assertNotIn("ci_private_db", result.stderr)
+
+        result, calls = run_function(
+            failure="pg_restore",
+            restore_error="unclassified failure for ci-private-marker-777 SQL credential",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, ["pg_dump", "createdb", "pg_restore"])
+        self.assertIn("diagnostic category: unknown", result.stderr)
+        for private_value in ("unclassified failure", "ci-private-marker-777", "SQL credential"):
+            self.assertNotIn(private_value, result.stdout + result.stderr)
 
         result, calls = run_function(mode="ordinary-smoke")
         self.assertNotEqual(result.returncode, 0)
