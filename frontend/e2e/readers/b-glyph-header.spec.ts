@@ -145,7 +145,7 @@ for (const kind of ['epub', 'pdf'] as const) {
 				expect(observed.header.height).toBe(expectedHeader);
 				const footerHeight = kind === 'epub' ? width < 640 ? 145 : 57 : width === 320 ? 105 : 53;
 				expect(observed.footer).toEqual({ x: 0, y: 851 - footerHeight, width, height: footerHeight });
-				for (const button of observed.buttons) {
+				for (const [index, button] of observed.buttons.entries()) {
 					const { x, y, width: baseWidth, height: baseHeight } = button.baseline;
 					// The reference footer is anchored at y=0; the live footer remains fixed
 					// at the viewport bottom. Both are measured in the SAME font environment.
