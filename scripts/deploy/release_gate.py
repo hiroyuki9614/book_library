@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
-from datetime import datetime
+import shutil
+import subprocess
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -40,6 +46,153 @@ class GateError(RuntimeError):
 
 class TransientGitHubAPIError(GateError):
     """Raised when GitHub cannot be queried reliably yet."""
+
+
+def _verify_owner_consent_receipt(
+    payload_bytes: bytes,
+    signature: bytes,
+    *,
+    trusted_public_key_pem: bytes | None,
+    repository: str,
+    pr: int,
+    head_sha: str,
+    owner_login: str,
+    now: datetime | None = None,
+) -> dict:
+    """INERT: verify a synthetic/future receipt, never authorize a release.
+
+    The caller must independently control the trust key and expected context.
+    A signature does not prove chat-user authorization of issuance. This helper
+    has no revocation/replay state and does not validate review or i5 evidence.
+    """
+    if not isinstance(trusted_public_key_pem, bytes) or not trusted_public_key_pem:
+        raise GateError("Receipt verification requires an explicit trusted public key")
+    # Accept only an Ed25519 SubjectPublicKeyInfo PEM. This DER prefix identifies
+    # the algorithm/encoding, not a trusted key; the 32 key bytes come from caller.
+    key_match = re.fullmatch(
+        rb"-----BEGIN PUBLIC KEY-----\r?\n([A-Za-z0-9+/=\r\n]+)"
+        rb"\r?\n-----END PUBLIC KEY-----(?:\r?\n)?",
+        trusted_public_key_pem,
+    ) if len(trusted_public_key_pem) <= 256 else None
+    try:
+        key_der = base64.b64decode(
+            key_match[1].replace(b"\r", b"").replace(b"\n", b""), validate=True
+        ) if key_match else b""
+    except (ValueError, binascii.Error):
+        raise GateError("Receipt public key must be an Ed25519 public key PEM") from None
+    if len(key_der) != 44 or not key_der.startswith(bytes.fromhex("302a300506032b6570032100")):
+        raise GateError("Receipt public key must be an Ed25519 public key PEM")
+    if not isinstance(signature, bytes) or len(signature) != 64:
+        raise GateError("Receipt requires a detached 64-byte Ed25519 signature")
+    if not isinstance(payload_bytes, bytes) or not 0 < len(payload_bytes) <= 4096:
+        raise GateError("Receipt payload is missing or too large")
+
+    def unique_fields(pairs: list[tuple[str, object]]) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate receipt field")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(
+            payload_bytes.decode("utf-8"),
+            object_pairs_hook=unique_fields,
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except (ValueError, RecursionError):
+        raise GateError("Receipt payload must contain exactly one UTF-8 JSON object") from None
+    fields = {
+        "schema_version", "repository", "pr", "head_sha", "owner_login", "decision",
+        "scope", "issued_at", "expires_at", "receipt_id", "independent_review_sha256",
+        "i5_preview_sha256",
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != fields
+        or any(not isinstance(payload[key], str) for key in fields - {"pr"})
+        or not _is_positive_int(payload["pr"])
+    ):
+        raise GateError("Receipt payload has an invalid schema")
+    try:
+        canonical = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        ).encode("utf-8")
+    except UnicodeError:
+        raise GateError("Receipt payload contains invalid Unicode") from None
+    if canonical != payload_bytes:
+        raise GateError("Receipt payload is not canonical UTF-8 JSON")
+    if (
+        payload["schema_version"] != "belib-owner-consent-v1"
+        or payload["decision"] != "MERGE"
+        or payload["scope"] != "normal-ui"
+    ):
+        raise GateError("Receipt has an invalid version, decision, or scope")
+    if (
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}", payload["repository"])
+        or payload["repository"] != repository
+        or not _is_positive_int(pr)
+        or payload["pr"] != pr
+        or not re.fullmatch(r"[0-9a-f]{40}", payload["head_sha"])
+        or payload["head_sha"] != head_sha
+        or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", payload["owner_login"])
+        or "--" in payload["owner_login"]
+        or payload["owner_login"] != owner_login
+    ):
+        raise GateError("Receipt does not match the expected repository, PR, head, or owner")
+    if not re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        payload["receipt_id"],
+    ):
+        raise GateError("Receipt ID must be a canonical lowercase UUIDv4")
+    if any(
+        not SHA256_PATTERN.fullmatch(payload[key])
+        for key in ("independent_review_sha256", "i5_preview_sha256")
+    ):
+        raise GateError("Receipt evidence digests must be lowercase SHA-256 hex")
+    timestamps = []
+    for key in ("issued_at", "expires_at"):
+        value = payload[key]
+        # v1 uses the strict UTC RFC3339 whole-second profile; no offsets/fractions.
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", value):
+            raise GateError("Receipt timestamps must be UTC RFC3339 whole seconds")
+        try:
+            timestamps.append(datetime.fromisoformat(value[:-1] + "+00:00"))
+        except ValueError:
+            raise GateError("Receipt has an invalid timestamp") from None
+    issued_at, expires_at = timestamps
+    current_time = datetime.now(timezone.utc) if now is None else now
+    if (
+        not isinstance(current_time, datetime)
+        or current_time.utcoffset() != timedelta(0)
+        or not issued_at <= current_time < expires_at
+    ):
+        raise GateError("Receipt time window is invalid, not yet valid, or expired")
+
+    executable = shutil.which("openssl")
+    if executable is None:
+        raise GateError("Receipt verification requires the installed openssl executable")
+    try:
+        with tempfile.TemporaryDirectory(prefix="belib-consent-") as directory:
+            root = Path(directory)
+            (root / "key.der").write_bytes(key_der)
+            (root / "payload.json").write_bytes(canonical)
+            (root / "signature.bin").write_bytes(signature)
+            result = subprocess.run(
+                [
+                    executable, "pkeyutl", "-verify", "-pubin", "-keyform", "DER",
+                    "-inkey", str(root / "key.der"), "-rawin",
+                    "-in", str(root / "payload.json"), "-sigfile", str(root / "signature.bin"),
+                ],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=10, check=False, shell=False,
+            )
+    except (OSError, subprocess.SubprocessError):
+        raise GateError("Receipt signature verification could not complete") from None
+    if result.returncode != 0:
+        raise GateError("Receipt signature verification failed")
+    return payload
 
 
 class GitHubAPI:

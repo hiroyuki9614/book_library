@@ -1,5 +1,11 @@
+import base64
 import json
+import shutil
+import subprocess
+import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
@@ -184,6 +190,247 @@ class FakeAPI:
         if "/actions/runs?" in path and "event=pull_request" in path:
             return {"workflow_runs": self.pr_runs}
         raise AssertionError(f"Unexpected API request: {path}")
+
+
+class OwnerConsentReceiptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # These are local synthetic keys, never a configured trust anchor. Setup
+        # errors fail the suite; do not skip or replace real signing with a mock.
+        cls.openssl = shutil.which("openssl")
+        if cls.openssl is None:
+            raise RuntimeError("Receipt tests require installed openssl")
+        temporary = tempfile.TemporaryDirectory(prefix="belib-receipt-tests-")
+        cls.addClassCleanup(temporary.cleanup)
+        cls.root = Path(temporary.name)
+        for name, algorithm in (("signer", "ED25519"), ("other", "ED25519"), ("ec", "EC")):
+            options = ["-pkeyopt", "ec_paramgen_curve:P-256"] if algorithm == "EC" else []
+            cls.run_openssl(
+                "genpkey", "-algorithm", algorithm, *options, "-out", str(cls.root / f"{name}.pem")
+            )
+            cls.run_openssl(
+                "pkey", "-in", str(cls.root / f"{name}.pem"),
+                "-pubout", "-out", str(cls.root / f"{name}.pub.pem"),
+            )
+        cls.public_key = (cls.root / "signer.pub.pem").read_bytes()
+
+    @classmethod
+    def run_openssl(cls, *arguments):
+        subprocess.run(
+            [cls.openssl, *arguments], check=True, timeout=10, shell=False,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    def setUp(self):
+        self.payload = {
+            "schema_version": "belib-owner-consent-v1",
+            "repository": FakeAPI.repository,
+            "pr": 70,
+            "head_sha": PR_HEAD_SHA,
+            "owner_login": OWNER_LOGIN,
+            "decision": "MERGE",
+            "scope": "normal-ui",
+            "issued_at": "2026-11-02T00:00:00Z",
+            "expires_at": "2026-11-02T00:10:00Z",
+            "receipt_id": "b07a511e-55b4-40fb-9ddd-79e75cc3c92a",
+            "independent_review_sha256": "c" * 64,
+            "i5_preview_sha256": "d" * 64,
+        }
+        self.now = datetime(2026, 11, 2, 0, 5, tzinfo=timezone.utc)
+
+    def serialize(self, payload):
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+
+    def sign(self, payload_bytes):
+        (self.root / "payload.json").write_bytes(payload_bytes)
+        self.run_openssl(
+            "pkeyutl", "-sign", "-rawin", "-inkey", str(self.root / "signer.pem"),
+            "-in", str(self.root / "payload.json"), "-out", str(self.root / "signature.bin"),
+        )
+        return (self.root / "signature.bin").read_bytes()
+
+    def verify(self, payload_bytes, signature, **overrides):
+        arguments = {
+            "trusted_public_key_pem": self.public_key,
+            "repository": FakeAPI.repository,
+            "pr": 70,
+            "head_sha": PR_HEAD_SHA,
+            "owner_login": OWNER_LOGIN,
+            "now": self.now,
+        }
+        arguments.update(overrides)
+        return release_gate._verify_owner_consent_receipt(payload_bytes, signature, **arguments)
+
+    def test_verifies_real_detached_signature_over_exact_canonical_bytes(self):
+        serialized = self.serialize(self.payload)
+        signature = self.sign(serialized)
+        self.assertEqual(len(signature), 64)
+        self.assertEqual(self.verify(serialized, signature), self.payload)
+        self.assertEqual(
+            self.verify(serialized, signature, now=self.now - timedelta(minutes=5)), self.payload
+        )
+
+    def test_missing_malformed_or_non_ed25519_key_fails(self):
+        serialized = self.serialize(self.payload)
+        signature = self.sign(serialized)
+        keys = (
+            None, b"", "not-bytes", b"not a public key",
+            (self.root / "signer.pem").read_bytes(),
+            (self.root / "ec.pub.pem").read_bytes(),
+            self.public_key + b"trailing data", b"x" * 257,
+            b"-----BEGIN PUBLIC KEY-----\n=bad=\n-----END PUBLIC KEY-----\n",
+        )
+        for index, key in enumerate(keys):
+            with self.subTest(case=index), self.assertRaises(GateError):
+                self.verify(serialized, signature, trusted_public_key_pem=key)
+
+    def test_rejects_different_ed25519_key_and_forged_or_absent_signature(self):
+        serialized = self.serialize(self.payload)
+        signature = self.sign(serialized)
+        with self.assertRaisesRegex(GateError, "signature verification failed"):
+            self.verify(
+                serialized, signature,
+                trusted_public_key_pem=(self.root / "other.pub.pem").read_bytes(),
+            )
+        for forged in (None, "signature", b"", signature[:-1], signature + b"x", b"\0" * 64):
+            with self.subTest(signature_type=type(forged).__name__), self.assertRaises(GateError):
+                self.verify(serialized, forged)
+
+    def test_tampering_with_either_evidence_digest_or_receipt_id_breaks_signature(self):
+        signature = self.sign(self.serialize(self.payload))
+        for field, value in (
+            ("independent_review_sha256", "e" * 64), ("i5_preview_sha256", "e" * 64),
+            ("receipt_id", "7054fe6c-cd78-42cb-a952-ed71da2fe739"),
+        ):
+            with self.subTest(field=field), self.assertRaisesRegex(GateError, "signature verification failed"):
+                self.verify(self.serialize({**self.payload, field: value}), signature)
+
+    def test_rejects_even_signed_missing_extra_or_wrongly_typed_fields(self):
+        for field in self.payload:
+            changed = {key: value for key, value in self.payload.items() if key != field}
+            serialized = self.serialize(changed)
+            with self.subTest(missing=field), self.assertRaises(GateError):
+                self.verify(serialized, self.sign(serialized))
+        for changed in (
+            {**self.payload, "extra": "untrusted"},
+            *({**self.payload, "pr": value} for value in (True, 70.0, "70", 0, -1)),
+            *({**self.payload, field: None} for field in self.payload if field != "pr"),
+        ):
+            serialized = self.serialize(changed)
+            with self.subTest(fields=list(changed)), self.assertRaises(GateError):
+                self.verify(serialized, self.sign(serialized))
+
+    def test_rejects_duplicate_trailing_and_noncanonical_json_even_when_signed(self):
+        serialized = self.serialize(self.payload)
+        invalid = (
+            serialized[:-1] + b',"pr":70}',
+            serialized + b"{}", serialized + b"\n", b" " + serialized,
+            json.dumps(self.payload).encode("utf-8"),
+            serialized.replace(b'"pr":70', b'"pr":NaN'),
+            serialized.replace(b'"normal-ui"', b'"\\ud800"'),
+            b"\xef\xbb\xbf" + serialized, b"\xff", b"[]", b"x" * 4097,
+        )
+        for index, candidate in enumerate(invalid):
+            with self.subTest(case=index), self.assertRaises(GateError):
+                self.verify(candidate, self.sign(candidate))
+        for candidate in (None, "{}", b""):
+            with self.subTest(missing=candidate), self.assertRaises(GateError):
+                self.verify(candidate, self.sign(serialized))
+
+    def test_rejects_signed_wrong_context_version_decision_scope_id_and_digests(self):
+        cases = (
+            ("repository", "other/book_library"), ("repository", "invalid repository"),
+            ("pr", 71), ("head_sha", "e" * 40), ("head_sha", "B" * 40),
+            ("head_sha", "b" * 39), ("schema_version", "belib-owner-consent-v2"),
+            ("owner_login", "other-owner"), ("owner_login", ""),
+            ("owner_login", "owner name"), ("decision", "RELEASE"),
+            ("decision", "mergeして"), ("scope", "production"),
+            ("receipt_id", ""), ("receipt_id", "not-unique"),
+            ("receipt_id", self.payload["receipt_id"].upper()),
+            ("receipt_id", "b07a511e-55b4-10fb-9ddd-79e75cc3c92a"),
+            *((field, value) for field in ("independent_review_sha256", "i5_preview_sha256")
+              for value in ("C" * 64, "c" * 63, "g" * 64, "")),
+        )
+        for field, value in cases:
+            serialized = self.serialize({**self.payload, field: value})
+            with self.subTest(field=field, value=value), self.assertRaises(GateError):
+                self.verify(serialized, self.sign(serialized))
+        serialized = self.serialize(self.payload)
+        signature = self.sign(serialized)
+        for field, value in (
+            ("repository", "other/repository"), ("pr", 71), ("pr", True),
+            ("head_sha", "e" * 40), ("owner_login", "other-owner"),
+        ):
+            with self.subTest(expected=field), self.assertRaises(GateError):
+                self.verify(serialized, signature, **{field: value})
+        # Invalid owner syntax must fail even if caller and signed payload agree.
+        for login in ("", "owner name", "-owner", "owner-", "owner--name", "x" * 40):
+            serialized = self.serialize({**self.payload, "owner_login": login})
+            with self.subTest(invalid_owner=login), self.assertRaises(GateError):
+                self.verify(serialized, self.sign(serialized), owner_login=login)
+
+    def test_rejects_invalid_time_windows_and_non_strict_utc_timestamps(self):
+        invalid_times = (
+            "2026-11-02T00:00:00+00:00", "2026-11-02T00:00:00.1Z",
+            "2026-11-02t00:00:00z", "2026-11-02T00:00:60Z",
+            "2026-02-30T00:00:00Z", "2026-11-02T00:00:00Z\n", "",
+        )
+        for field in ("issued_at", "expires_at"):
+            for value in invalid_times:
+                serialized = self.serialize({**self.payload, field: value})
+                with self.subTest(field=field, time=value), self.assertRaises(GateError):
+                    self.verify(serialized, self.sign(serialized))
+        for issued_at, expires_at in (
+            ("2026-11-02T00:06:00Z", "2026-11-02T00:10:00Z"),
+            ("2026-11-02T00:00:00Z", "2026-11-02T00:04:00Z"),
+            ("2026-11-02T00:00:00Z", "2026-11-02T00:05:00Z"),
+            ("2026-11-02T00:00:00Z", "2026-11-02T00:00:00Z"),
+            ("2026-11-02T00:10:00Z", "2026-11-02T00:00:00Z"),
+        ):
+            serialized = self.serialize({**self.payload, "issued_at": issued_at, "expires_at": expires_at})
+            with self.subTest(issued_at=issued_at, expires_at=expires_at), self.assertRaises(GateError):
+                self.verify(serialized, self.sign(serialized))
+        serialized = self.serialize(self.payload)
+        signature = self.sign(serialized)
+        for now in (self.now.replace(tzinfo=None), "2026-11-02T00:05:00Z",
+                    self.now.astimezone(timezone(timedelta(hours=9)))):
+            with self.subTest(now=now), self.assertRaises(GateError):
+                self.verify(serialized, signature, now=now)
+
+    def test_missing_or_failed_openssl_fails_closed_without_echoing_material(self):
+        serialized = self.serialize(self.payload)
+        signature = self.sign(serialized)
+        with patch.object(release_gate.shutil, "which", return_value=None):
+            with self.assertRaises(GateError):
+                self.verify(serialized, signature)
+        for error in (OSError("sensitive material"), subprocess.TimeoutExpired("openssl", 10)):
+            with patch.object(release_gate.subprocess, "run", side_effect=error):
+                with self.assertRaises(GateError) as raised:
+                    self.verify(serialized, signature)
+                self.assertNotIn("sensitive material", str(raised.exception))
+
+    def test_signed_receipt_in_owner_comments_cannot_satisfy_current_release_gate(self):
+        serialized = self.serialize(self.payload)
+        signature = self.sign(serialized)
+        # A real synthetic signature verifies only with the explicitly supplied
+        # test key. No current release path calls this primitive or trusts it.
+        self.assertEqual(self.verify(serialized, signature), self.payload)
+        envelope = {
+            "payload": self.payload,
+            "signature": base64.b64encode(signature).decode("ascii"),
+            "public_key": self.public_key.decode("ascii"),
+        }
+        for marker in ("BELIB-OWNER-CONSENT v1", SOLO_RELEASE_MARKER):
+            api = FakeAPI()
+            api.reviews = []
+            api.comments = [
+                structured_comment(marker, envelope, 503),
+                {"body": "ChatGPT owner-token approval: mergeして"},
+            ]
+            with self.subTest(marker=marker), self.assertRaises(GateError):
+                validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
 
 
 class ReleaseGateTests(unittest.TestCase):

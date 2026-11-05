@@ -48,6 +48,38 @@ An acceptable replacement must provide evidence from a **separately authenticate
 
 GitHub environment required-reviewer protection is a native possible **separate authenticated click** but adds a second manual human action after the chat message, so it is **not** equivalent to the requested chat-only UX without owner acceptance of that trade-off. Before implementing another approval path, verify that an existing trusted chat-origin receipt/attestation source actually exists, is unavailable to the bot for minting arbitrary owner consent, and is consumable by both release validators; otherwise leave this gate unchanged and fail closed. This change intentionally does not authorize branch-protection mutation, auto-merge or production deployment.
 
+#### Offline receipt primitive — NOT ACTIVATED
+
+`scripts/deploy/release_gate.py::_verify_owner_consent_receipt` is an inert, opt-in offline verifier for a future separately authenticated **CHAT USER** approval. It is not called by `validate_release`, `_verify_pr_review`, or `_verify_solo_owner_policy`, has no CLI/workflow/environment activation, and changes neither Actions CD nor owner-side release acceptance. A signed-looking receipt posted to PR comments, agent-written ChatGPT `mergeして` text, or an owner-token claim cannot replace the current required release evidence. Tests use only ephemeral local keys and synthetic receipts; no production trust key is configured.
+
+A future authorized caller must explicitly supply a separately controlled Ed25519 SubjectPublicKeyInfo `PUBLIC KEY` PEM value and the independently expected repository, positive integer PR number, full lowercase head SHA, and exact owner login. Missing, malformed, wrong-algorithm or different keys fail; there is no default key, embedded trusted key, owner-token fallback, or receipt-supplied key discovery. Verification uses the installed `openssl` executable with fixed `pkeyutl -verify -rawin` arguments and an algorithm-pinned Ed25519 public key, without a shell or new Python dependency. Missing OpenSSL, execution errors, malformed input or signature failures deny verification without echoing keys or message contents. Only private temporary files are used and removed.
+
+The payload is exactly one UTF-8 JSON object serialized with `json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")`, with no BOM, trailing newline, extra whitespace, duplicate keys, extra fields or trailing JSON. Its exact fields are:
+
+| Field | v1 value / constraint |
+| --- | --- |
+| `schema_version` | `belib-owner-consent-v1` |
+| `repository` | Exact expected `owner/repository` |
+| `pr` | Exact expected positive JSON integer; booleans are rejected |
+| `head_sha` | Exact expected 40 lowercase hex characters |
+| `owner_login` | Exact expected GitHub user login |
+| `decision` | `MERGE` |
+| `scope` | `normal-ui` |
+| `issued_at`, `expires_at` | Strict UTC RFC3339 whole-second profile `YYYY-MM-DDTHH:MM:SSZ`; valid calendar values, no offsets/fractions; `issued_at <= now < expires_at` |
+| `receipt_id` | Canonical lowercase UUIDv4, to be generated uniquely by the future issuer |
+| `independent_review_sha256`, `i5_preview_sha256` | Each exactly 64 lowercase hex characters |
+
+The detached signature is exactly 64 raw Ed25519 signature bytes over those canonical payload bytes. The helper returns the parsed payload only after verification. The optional test clock must be an aware UTC `datetime`; otherwise it uses the current UTC clock. Time-window validity does not impose a maximum receipt lifetime. UUID format checking does not establish uniqueness across receipts.
+
+**Cryptographic authenticity does not prove that the chat user actually authorized issuance.** This primitive does not solve revocation, replay, independent review, or i5 validation. Digest syntax and a signature do not validate the underlying review/preview evidence, and successful offline verification grants no merge or production permission.
+
+Before any separately reviewed activation, all of the following designs and evidence remain required:
+
+- **Trusted attestation source:** identify and verify a real separately authenticated chat-user source that binds the actual user's explicit decision to the exact PR/head and `normal-ui` scope. Specify user-to-owner identity mapping and issuance policy. The implementation agent and its owner-scoped GitHub credentials must be unable to mint arbitrary consent, access the issuer signing key, substitute the verification key, or cause issuance merely by submitting agent-written text. A signer that blindly signs agent claims is insufficient.
+- **Trusted forwarding and key provisioning:** define how the original canonical bytes and detached signature reach the pre-merge guard, Actions validator, and owner-side validator with identical context checks. Provision the trust key through separately controlled configuration for every consumer; never trust a key transported alongside the receipt. Specify authenticated origin/audience binding, transport limits, key rotation and compromise response. Discovering a receipt in a PR comment alone establishes no trusted origin.
+- **Revocation and replay:** specify the authoritative, authenticated revocation source, its freshness/availability requirements and fail-closed behavior before merge and deployment, including how consumers agree on key/receipt revocation after issuance. Define issuer-enforced unique IDs, durable atomic one-time consumption and duplicate handling across all consumers, permitted forwarding of the same release evidence, maximum lifetime and clock policy, and head/scope changes. This stateless helper keeps no consumption or revocation records.
+- **Preserved release controls:** independently validate the exact-head commissioned review and its evidence digest, physical i5 isolated preview and its digest, blocking review history, all four PR/main CI jobs, branch protection, guarded pre-merge consent, protected operations, rollback, and production SHA read-back. Specify how those evidence sources are authenticated and bound to the receipt. Test the whole path in both validators before authorizing activation.
+
 ### One-time owner activation
 
 The release gate keeps the distinct-human path for repositories or releases that have an eligible reviewer, but it does not count a PR author's self-approval or a public user's approval. For this repository's single-maintainer mode, independent AI review evidence and explicit owner release approval are separate CD-verified comments; neither is a formal GitHub human approval. Keep the PR in Draft and do not merge it until the exact-head CI and one of these evidence paths are complete:
