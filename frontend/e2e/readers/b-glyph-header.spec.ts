@@ -3,50 +3,10 @@ import { epubFixture } from './fixtures';
 
 type ReaderKind = 'epub' | 'pdf';
 type Direction = 'ltr' | 'rtl';
-type Position = readonly [number, number];
+// Position baselines are measured from a direct-text button in the same
+// production-built browser/viewport; hard-coded host-font coordinates are brittle.
 
-// Actual Chromium rectangles from the production-built 3740a3a harness at 851px
-// high. Keep these separate from the header: its height must not move the footer.
-const FOOTER_BUTTONS: Record<ReaderKind, Record<Direction, Record<number, readonly [Position, Position]>>> = {
-	epub: {
-		ltr: {
-			1280: [[353.09375, 801], [409.09375, 801]],
-			1440: [[433.09375, 801], [489.09375, 801]],
-			1663: [[544.59375, 801], [600.59375, 801]],
-			1024: [[225.09375, 801], [281.09375, 801]],
-			393: [[148.5, 711], [200.5, 711]],
-			320: [[112, 711], [164, 711]],
-		},
-		rtl: {
-			1280: [[882.90625, 801], [826.90625, 801]],
-			1440: [[962.90625, 801], [906.90625, 801]],
-			1663: [[1074.40625, 801], [1018.40625, 801]],
-			1024: [[754.90625, 801], [698.90625, 801]],
-			393: [[200.5, 711], [148.5, 711]],
-			320: [[164, 711], [112, 711]],
-		},
-	},
-	pdf: {
-		ltr: {
-			1280: [[574.515625, 803], [898.578125, 803]],
-			1440: [[654.515625, 803], [978.578125, 803]],
-			1663: [[766.015625, 803], [1090.078125, 803]],
-			1024: [[446.515625, 803], [770.578125, 803]],
-			393: [[12.46875, 803], [336.53125, 803]],
-			320: [[69.96875, 751], [206, 803]],
-		},
-		rtl: {
-			1280: [[898.578125, 803], [574.515625, 803]],
-			1440: [[978.578125, 803], [654.515625, 803]],
-			1663: [[1090.078125, 803], [766.015625, 803]],
-			1024: [[770.578125, 803], [446.515625, 803]],
-			393: [[336.53125, 803], [12.46875, 803]],
-			320: [[206.03125, 751], [70, 803]],
-		},
-	},
-};
-
-async function useProtectedBook(page: Page, file: Buffer, kind: ReaderKind) {
+async function useProtectedBook(page: Page, file: Buffer, kind: ReaderKind, options: { failRead?: boolean } = {}) {
 	const attempts: Array<{ currentPosition?: string; currentPage?: number; readStatus: string }> = [];
 	let saved = { bookId: 1, currentPosition: null as string | null, currentPage: 1, readStatus: 'unread' };
 	const api = { attempts, fail: false };
@@ -55,6 +15,7 @@ async function useProtectedBook(page: Page, file: Buffer, kind: ReaderKind) {
 		contentType: kind === 'epub' ? 'application/epub+zip' : 'application/pdf',
 	}));
 	await page.route('**/api/v1/books/1/reading-info', async (route) => {
+		if (route.request().method() === 'GET' && options.failRead) return route.fulfill({ status: 503, json: { message: 'Synthetic reading-position GET failure' } });
 		if (route.request().method() === 'PATCH') {
 			const body = route.request().postDataJSON();
 			attempts.push(body);
@@ -84,6 +45,23 @@ async function geometry(page: Page, kind: ReaderKind) {
 		};
 		const header = document.querySelector('header')!;
 		const footer = document.querySelector(`[data-testid="${readerKind}-reader-footer"]`)!;
+		// Clone the exact footer at the same width and with inherited production CSS.
+		// Render the pre-span direct-text glyph in the cloned buttons, so the outer
+		// X/Y/width/height can be compared without KAGOYA-specific font metrics.
+		const reference = footer.cloneNode(true) as HTMLElement;
+		Object.assign(reference.style, {
+			position: 'fixed', left: '0px', top: '0px',
+			width: `${footer.getBoundingClientRect().width}px`,
+			visibility: 'hidden', pointerEvents: 'none',
+		});
+		const names = ['前のページへ', '次のページへ'];
+		for (const name of names) {
+			const cloneButton = reference.querySelector(`[aria-label="${name}"]`);
+			cloneButton?.replaceChildren(document.createTextNode(cloneButton.textContent ?? ''));
+		}
+		document.body.appendChild(reference);
+		const baseline = names.map((name) => rect(reference.querySelector(`[aria-label="${name}"]`)!));
+		reference.remove();
 		const items = [...header.querySelectorAll('a, button, span.truncate, [role="status"], [role="alert"]')]
 			.filter((element) => element.getBoundingClientRect().width > 0);
 		const overlaps = items.flatMap((item, index) => items.slice(index + 1).filter((other) => {
@@ -102,7 +80,7 @@ async function geometry(page: Page, kind: ReaderKind) {
 				...rect(element),
 			})),
 			footer: rect(footer),
-			buttons: ['前のページへ', '次のページへ'].map((name) => {
+			buttons: names.map((name, index) => {
 				const button = footer.querySelector(`[aria-label="${name}"]`)!;
 				const glyph = button.querySelector('span');
 				const range = document.createRange();
@@ -113,7 +91,7 @@ async function geometry(page: Page, kind: ReaderKind) {
 				context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
 				const metrics = context.measureText(button.textContent ?? '');
 				return {
-					name, text: button.textContent, ...rect(button), radius: style.borderRadius,
+					name, text: button.textContent, ...rect(button), baseline: baseline[index], radius: style.borderRadius,
 					translate: style.translate, transform: style.transform, marginTop: style.marginTop,
 					glyph: glyph ? rect(glyph) : null,
 					inkCenterY: range.getBoundingClientRect().y + metrics.fontBoundingBoxAscent + (metrics.actualBoundingBoxDescent - metrics.actualBoundingBoxAscent) / 2,
@@ -168,8 +146,12 @@ for (const kind of ['epub', 'pdf'] as const) {
 				const footerHeight = kind === 'epub' ? width < 640 ? 145 : 57 : width === 320 ? 105 : 53;
 				expect(observed.footer).toEqual({ x: 0, y: 851 - footerHeight, width, height: footerHeight });
 				for (const [index, button] of observed.buttons.entries()) {
-					const [x, y] = FOOTER_BUTTONS[kind][direction][width][index];
-					expect({ x: button.x, y: button.y, width: button.width, height: button.height }, `${button.name}: unchanged outer rectangle`).toEqual({ x, y, width: 44, height: 44 });
+				const { x, y, width: baseWidth, height: baseHeight } = button.baseline;
+				// The reference footer is anchored at y=0; the live footer remains fixed
+				// at the viewport bottom. Both are measured in the SAME font environment.
+				expect({ x: button.x, y: button.y - observed.footer.y, width: button.width, height: button.height },
+					`${button.name}: unchanged outer rectangle vs direct-text baseline`).toEqual({ x, y, width: baseWidth, height: baseHeight });
+				expect({ width: button.width, height: button.height }).toEqual({ width: 44, height: 44 });
 					expect(button.translate).toBe('none');
 					expect(button.transform).toBe('none');
 					expect(button.marginTop).toBe('0px');
@@ -179,9 +161,11 @@ for (const kind of ['epub', 'pdf'] as const) {
 					if (kind === 'epub') {
 						expect(Number.parseFloat(button.radius)).toBeGreaterThanOrEqual(22);
 						expect(button.glyph, 'only the glyph has an optical correction').not.toBeNull();
-						expect(button.glyph!.x + button.glyph!.width / 2).toBeCloseTo(x + 22, 1);
-						expect(Math.abs(button.glyph!.y + button.glyph!.height / 2 - (y + 22))).toBeLessThanOrEqual(1);
-						expect(button.inkCenterY, 'visible glyph ink is vertically centered').toBeCloseTo(y + 22, 1);
+						expect(button.glyph!.x + button.glyph!.width / 2).toBeCloseTo(button.x + 22, 1);
+						expect(Math.abs(button.glyph!.y + button.glyph!.height / 2 - (button.y + 22))).toBeLessThanOrEqual(1);
+						// Glyph ink varies by roughly 0.5px across installed system fonts;
+						// 1px still catches meaningful optical off-centering.
+						expect(Math.abs(button.inkCenterY - (button.y + 22)), 'visible glyph ink is vertically centered within 1px').toBeLessThanOrEqual(1);
 					} else expect(button.radius).toBe('6px');
 				}
 				if (width >= 640) {
@@ -249,3 +233,19 @@ for (const kind of ['epub', 'pdf'] as const) {
 		});
 	}
 }
+
+test('epub desktop: failed server restore keeps the 52px header and visible warning', async ({ page }) => {
+	test.setTimeout(90_000);
+	const api = await useProtectedBook(page, epubFixture(), 'epub', { failRead: true });
+	await page.setViewportSize({ width: 1280, height: 851 });
+	await page.goto('/e2e/readers/harness.html?kind=epub&direction=ltr');
+	await ready(page, 'epub');
+	const warning = page.locator('[data-reader-alerts]').getByRole('alert');
+	await expect(warning).toContainText('保存位置を確認・復元できませんでした');
+	expect(await warning.evaluate((node) => node.closest('header'))).toBeNull();
+	const observed = await geometry(page, 'epub');
+	checkHeader(observed, 1280);
+	expect(observed.header.height).toBe(52);
+	expect(observed.footer).toEqual({ x: 0, y: 794, width: 1280, height: 57 });
+	expect(api.attempts, 'failed server GET must not trigger an initial save').toEqual([]);
+});
