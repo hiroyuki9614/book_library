@@ -383,17 +383,25 @@ def _parse_github_timestamp(value: object) -> datetime:
         raise GateError("Solo-owner evidence has an invalid comment timestamp") from None
 
 
+def _reject_nonstandard_json_constant(_token: str) -> None:
+    # Python's json.loads otherwise accepts NaN/Infinity, which are not JSON.
+    raise ValueError("Nonstandard JSON constants are forbidden")
+
+
 def _parse_structured_comment_body(body: object, marker: str) -> dict:
     if not isinstance(body, str) or len(body.encode("utf-8")) > SOLO_POLICY_COMMENT_MAX_BYTES:
         raise GateError("Solo-owner evidence comment is too large or malformed")
+    # GitHub preserves CRLF in owner-authored comments. Normalize line endings
+    # before validating the exact marker and canonical single-line JSON.
+    normalized = body.replace("\r\n", "\n")
     try:
-        expected_prefix, serialized = body.split("\n", 1)
+        expected_prefix, serialized = normalized.split("\n", 1)
     except ValueError:
         raise GateError("Solo-owner evidence comment has an invalid structure") from None
-    # GitHub can preserve CRLF from owner-authored comment editors. Accept
-    # either separator, but do not normalize the canonical JSON payload.
-    if expected_prefix.endswith("\r"):
-        expected_prefix = expected_prefix[:-1]
+    # Some editors append a final newline. Accept exactly one, never more,
+    # and still reject CR/LF embedded inside the canonical JSON.
+    if serialized.endswith("\n"):
+        serialized = serialized[:-1]
     if (
         expected_prefix != marker
         or "\n" in serialized
@@ -402,8 +410,10 @@ def _parse_structured_comment_body(body: object, marker: str) -> dict:
     ):
         raise GateError("Solo-owner evidence comment has an invalid structure")
     try:
-        payload = json.loads(serialized)
-    except json.JSONDecodeError:
+        payload = json.loads(
+            serialized, parse_constant=_reject_nonstandard_json_constant
+        )
+    except ValueError:
         raise GateError("Solo-owner evidence comment has invalid JSON") from None
     if not isinstance(payload, dict):
         raise GateError("Solo-owner evidence comment must contain a JSON object")
