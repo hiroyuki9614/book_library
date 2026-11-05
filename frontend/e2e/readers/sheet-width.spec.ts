@@ -31,6 +31,7 @@ test('EPUB reader TOC and display settings stay compact in actual built CSS at m
 	for (const width of [320, 393, 1280, 1440, 1663]) {
 		await page.setViewportSize({ width, height: 851 });
 		await page.goto('/e2e/readers/harness.html');
+		await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
 		await page.getByRole('button', { name: '目次', exact: true }).click();
 		await checkSheet(page, `EPUB TOC ${width}`, width);
 		await page.getByRole('button', { name: '表示設定', exact: true }).click();
@@ -48,6 +49,8 @@ test('PDF reader TOC, settings and mobile actions stay compact in actual built C
 	for (const width of [320, 393, 1280, 1440, 1663]) {
 		await page.setViewportSize({ width, height: 851 });
 		await page.goto('/e2e/readers/harness.html?kind=pdf');
+		await expect(page.getByTestId('pdf-viewport')).toBeVisible({ timeout: 45_000 });
+		await expect(page.locator('[data-pdf-page="1"] img')).toBeVisible({ timeout: 45_000 });
 		await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45_000 });
 		if (width < 768) {
 			await page.getByRole('button', { name: '操作メニューを開く' }).click();
