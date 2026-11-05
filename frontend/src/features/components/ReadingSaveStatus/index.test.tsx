@@ -10,7 +10,8 @@ describe('ReadingSaveStatus compact reader header status', () => {
 	test('saved state shows a short one-line label but preserves the full accessible announcement', async () => {
 		const { container } = await render(<ReadingSaveStatus status='saved' retry={vi.fn()} />);
 		const element = container.querySelector('[role="status"]');
-		expect(element?.getAttribute('title')).toBe('読書位置を保存済み');
+		expect(element?.hasAttribute('title')).toBe(false);
+		expect(element?.querySelector('[aria-hidden="true"]')?.getAttribute('title')).toBe('読書位置を保存済み');
 		expect(element?.querySelector('[aria-hidden="true"]')?.textContent).toBe('✓ 保存済み');
 		expect(element?.querySelector('.sr-only')?.textContent).toBe('読書位置を保存済み');
 		expect(element?.className).toContain('min-h-11');
@@ -19,6 +20,8 @@ describe('ReadingSaveStatus compact reader header status', () => {
 	test('saving state never claims saved', async () => {
 		const { container } = await render(<ReadingSaveStatus status='saving' retry={vi.fn()} />);
 		const element = container.querySelector('[role="status"]');
+		expect(element?.hasAttribute('title')).toBe(false);
+		expect(element?.querySelector('[aria-hidden="true"]')?.getAttribute('title')).toBe('読書位置を保存中…');
 		expect(element?.querySelector('[aria-hidden="true"]')?.textContent).toBe('保存中…');
 		expect(element?.querySelector('.sr-only')?.textContent).toBe('読書位置を保存中…');
 		expect(element?.textContent).not.toContain('保存済み');
@@ -28,6 +31,8 @@ describe('ReadingSaveStatus compact reader header status', () => {
 		const retry = vi.fn();
 		const { container } = await render(<ReadingSaveStatus status='error' retry={retry} />);
 		const element = container.querySelector('[role="alert"]');
+		expect(element?.hasAttribute('title')).toBe(false);
+		expect(element?.querySelector('[aria-hidden="true"]')?.getAttribute('title')).toBe('読書位置を保存できませんでした。');
 		expect(element?.querySelector('[aria-hidden="true"]')?.textContent).toBe('保存失敗');
 		expect(element?.querySelector('.sr-only')?.textContent).toBe('読書位置を保存できませんでした。');
 		const button = element?.querySelector('button');
