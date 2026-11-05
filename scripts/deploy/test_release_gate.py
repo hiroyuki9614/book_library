@@ -422,15 +422,40 @@ class OwnerConsentReceiptTests(unittest.TestCase):
             "signature": base64.b64encode(signature).decode("ascii"),
             "public_key": self.public_key.decode("ascii"),
         }
-        for marker in ("BELIB-OWNER-CONSENT v1", SOLO_RELEASE_MARKER):
+        # This helper is deliberately NOT connected to either current release
+        # path. Guard against accidental activation, even if the receipt later
+        # becomes time-valid or the error is raised for an unrelated reason.
+        for marker, rejection in (
+            ("BELIB-OWNER-CONSENT v1", "solo-owner evidence pair"),
+            (SOLO_RELEASE_MARKER, "different repository"),
+        ):
             api = FakeAPI()
             api.reviews = []
             api.comments = [
                 structured_comment(marker, envelope, 503),
                 {"body": "ChatGPT owner-token approval: mergeして"},
             ]
-            with self.subTest(marker=marker), self.assertRaises(GateError):
-                validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+            with self.subTest(marker=marker):
+                with patch.object(
+                    release_gate, "_verify_owner_consent_receipt",
+                    side_effect=AssertionError("Inactive consent verifier was called by release gate"),
+                ):
+                    with self.assertRaisesRegex(GateError, rejection):
+                        validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+
+        # Existing documented solo-owner evidence still works even when an
+        # unrelated (signed-looking) new-format comment is present.
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments() + [
+            structured_comment("BELIB-OWNER-CONSENT v1", envelope, 503)
+        ]
+        with patch.object(
+            release_gate, "_verify_owner_consent_receipt",
+            side_effect=AssertionError("Inactive consent verifier was called by release gate"),
+        ):
+            proof = validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
+        self.assertEqual(proof["pr_head_sha"], PR_HEAD_SHA)
 
 
 class ReleaseGateTests(unittest.TestCase):
