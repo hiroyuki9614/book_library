@@ -390,7 +390,16 @@ def _parse_structured_comment_body(body: object, marker: str) -> dict:
         expected_prefix, serialized = body.split("\n", 1)
     except ValueError:
         raise GateError("Solo-owner evidence comment has an invalid structure") from None
-    if expected_prefix != marker or "\n" in serialized or not serialized:
+    # GitHub can preserve CRLF from owner-authored comment editors. Accept
+    # either separator, but do not normalize the canonical JSON payload.
+    if expected_prefix.endswith("\r"):
+        expected_prefix = expected_prefix[:-1]
+    if (
+        expected_prefix != marker
+        or "\n" in serialized
+        or "\r" in serialized
+        or not serialized
+    ):
         raise GateError("Solo-owner evidence comment has an invalid structure")
     try:
         payload = json.loads(serialized)
