@@ -89,6 +89,7 @@ export function BookTable({ books, itemsPerPage, searchQuery, sort, isLoading, s
 						))
 					: currentBooks.map((book) => {
 							const progress = book.progressPercentage;
+							const displayedProgress = progress == null ? null : Math.round(progress);
 							const bookStatus = getBookStatus(book);
 
 							return (
@@ -122,7 +123,7 @@ export function BookTable({ books, itemsPerPage, searchQuery, sort, isLoading, s
 									<TableCell className='block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap px-2 py-1 text-sm text-muted-foreground md:table-cell md:p-2 md:text-foreground'>{book.author}</TableCell>
 									<TableCell className='hidden overflow-hidden text-ellipsis whitespace-nowrap md:table-cell'>{book.category}</TableCell>
 									<TableCell className='block px-2 pb-3 pt-1 md:table-cell md:p-2'><Badge variant={getBadgeVariant(bookStatus)}>{bookStatus}</Badge></TableCell>
-									<TableCell className='hidden md:table-cell'>{progress == null ? <span className='text-muted-foreground'>未計測</span> : <Progress value={progress} className='w-24' />}</TableCell>
+									<TableCell className='hidden md:table-cell'>{displayedProgress == null ? <span className='text-muted-foreground'>未計測</span> : <div className='flex items-center gap-2'><Progress value={displayedProgress} aria-label={`${book.title} の読書進捗`} className='w-24' /><span className='tabular-nums'>{displayedProgress}%</span></div>}</TableCell>
 								</TableRow>
 							);
 						})}

@@ -37,6 +37,23 @@ describe('Home reading evidence', () => {
 		expect(container.querySelector('[role="progressbar"]')).not.toBeNull();
 	});
 
+	test('averages unrounded book progress before rounding the displayed average', async () => {
+		mocks.useBooks.mockReturnValue({
+			books: [
+				{ ...books[0], progressPercentage: 34.4 },
+				{ ...books[1], progressPercentage: 34.5 },
+				{ ...books[0], id: 36, title: '未計測の書籍', progressPercentage: null },
+			],
+			isLoading: false,
+			isError: false,
+		});
+
+		const { container } = await render(<Home />);
+
+		expect(container.textContent).toContain('34%（計測済み2/3冊）');
+		expect(container.textContent).not.toContain('35%（計測済み2/3冊）');
+	});
+
 	test('excludes an unmeasured in-progress book from the average denominator', async () => {
 		mocks.useBooks.mockReturnValue({
 			books: [...books, { id: 36, title: '未計測の読書中書籍', author: '著者C', category: 'Design', status: 'Reading', fileType: 'epub', currentPage: 0, progressPercentage: null }],

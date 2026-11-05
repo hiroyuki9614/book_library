@@ -99,15 +99,34 @@ describe('BookTable', () => {
 		await expect.element(getByText('Learning TypeScript')).not.toBeInTheDocument();
 	});
 
-	test('renders persisted percentages and leaves unknown progress unmeasured', async () => {
-		const booksWithProgress: Book[] = books.map((book) => book.id === 1 ? { ...book, progressPercentage: 40 } : book);
+	test('rounds measured shelf progress for display and accessibility', async () => {
+		const progressByBookId = new Map([[1, 34.4], [2, 34.5], [3, 34.6], [9, 99.6]]);
+		const booksWithProgress: Book[] = books.map((book) => ({ ...book, progressPercentage: progressByBookId.get(book.id) ?? null }));
 		const { container } = await render(
 			<BookTable books={booksWithProgress} itemsPerPage={10} searchQuery='' sort='newest' isLoading={false} status='all' />,
 		);
-		expect(getBookRow(container, 'React Design Patterns').textContent).toContain('reading');
-		expect(getBookRow(container, 'System Design Basics').textContent).toContain('completed');
-		expect(getBookRow(container, 'React Design Patterns').querySelector('[role="progressbar"]')).not.toBeNull();
-		expect(getBookRow(container, 'Learning TypeScript').textContent).toContain('未計測');
+
+		for (const book of booksWithProgress) {
+			const roundedProgress = Math.round(book.progressPercentage ?? 0);
+			const row = getBookRow(container, book.title);
+			const progressbar = row.querySelector('[role="progressbar"]');
+			const indicator = progressbar?.querySelector<HTMLElement>('[data-slot="progress-indicator"]');
+			const expectedTransform = roundedProgress === 100 ? 'translateX(0%)' : `translateX(-${100 - roundedProgress}%)`;
+			expect(row.textContent).toContain(`${roundedProgress}%`);
+			expect(progressbar?.getAttribute('aria-label')).toBe(`${book.title} の読書進捗`);
+			expect(progressbar?.getAttribute('aria-valuenow')).toBe(String(roundedProgress));
+			expect(indicator?.style.transform).toBe(expectedTransform);
+		}
+	});
+
+	test('leaves unknown progress unmeasured without a progress bar', async () => {
+		const unknownBook = { ...pickBook(9), progressPercentage: null };
+		const { container } = await render(
+			<BookTable books={[unknownBook]} itemsPerPage={10} searchQuery='' sort='newest' isLoading={false} status='all' />,
+		);
+		const row = getBookRow(container, unknownBook.title);
+		expect(row.textContent).toContain('未計測');
+		expect(row.querySelector('[role="progressbar"]')).toBeNull();
 	});
 
 	test('removes inert row actions while keeping one aligned cell per column', async () => {
