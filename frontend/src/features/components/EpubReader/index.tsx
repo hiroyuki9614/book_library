@@ -402,17 +402,21 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 					</div>
 				</div>
 				<div className='xl:col-start-3 xl:row-start-1'><ReadingSaveStatus status={status} retry={retry} /></div>
-				{restoreError && (
-					<p role='alert' className='text-xs xl:col-span-full'>
-						保存位置を確認・復元できませんでした。現在の表示位置から再開しています。
-					</p>
-				)}
-				{operationError && (
-					<p role='alert' className='text-xs xl:col-span-full'>
-						ページまたは目次を表示できませんでした。もう一度操作してください。
-					</p>
-				)}
 			</header>
+			{(restoreError || operationError) && (
+				<div data-reader-alerts className='shrink-0 px-3 py-1 text-xs'>
+					{restoreError && (
+						<p role='alert'>
+							保存位置を確認・復元できませんでした。現在の表示位置から再開しています。
+						</p>
+					)}
+					{operationError && (
+						<p role='alert'>
+							ページまたは目次を表示できませんでした。もう一度操作してください。
+						</p>
+					)}
+				</div>
+			)}
 
 			<main tabIndex={0} className='relative min-h-0 w-full flex-1 overflow-hidden bg-white px-0 outline-none'>
 				{isLoading && (
