@@ -309,6 +309,8 @@ synthetic_restore_drill() {
   # Keep only a bounded private sample for classification. The helper consumes
   # all stderr so pg_restore is not affected by a closed pipe, but writes at
   # most 16 KiB and never prints the captured text.
+  # Compose exec keeps stdin interactive by default; -T disables only the
+  # pseudo-TTY while the custom archive is streamed to pg_restore.
   if docker compose --project-name "$project" --file "$compose_file" exec -T db \
     pg_restore --exit-on-error --no-owner --no-privileges -U "$POSTGRES_USER" \
     -d "$restore_db" - <"$backup_file" 2>&1 >/dev/null \
@@ -326,7 +328,9 @@ except OSError:
   else
     restore_pipeline_status=("${PIPESTATUS[@]}")
     restore_error_category="unknown"
-    if grep -Eiq 'unsupported version|version[^[:cntrl:]]{0,80}not supported|archive version' "$restore_error_file"; then
+    if grep -Eiq 'Error response from daemon|OCI runtime exec failed|executable file not found|container[^[:cntrl:]]{0,80}is not running|service[^[:cntrl:]]{0,80}is not running' "$restore_error_file"; then
+      restore_error_category="compose_exec_failure"
+    elif grep -Eiq 'unsupported version|version[^[:cntrl:]]{0,80}not supported|archive version' "$restore_error_file"; then
       restore_error_category="unsupported_archive_version"
     elif grep -Eiq 'did not find magic string|appears to be a text format dump|unexpected end of file|unexpected eof|could not read from input file' "$restore_error_file"; then
       restore_error_category="invalid_archive"

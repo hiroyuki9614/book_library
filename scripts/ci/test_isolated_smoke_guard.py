@@ -97,7 +97,8 @@ esac
         self.assertIn('chmod 600 "$backup_file"', body)
         self.assertIn('pg_dump --format=custom -U "$POSTGRES_USER" -d "$POSTGRES_DB" >"$backup_file" 2>/dev/null', body)
         self.assertIn('createdb --template=template0 -U "$POSTGRES_USER" "$restore_db"', body)
-        self.assertIn('pg_restore --exit-on-error --no-owner --no-privileges', body)
+        self.assertIn('exec -T db \\\n    pg_restore --exit-on-error --no-owner --no-privileges', body)
+        self.assertNotRegex(body, r'\bexec\s+-i(?:\s|$)')
         self.assertIn('-d "$restore_db" - <"$backup_file" 2>&1 >/dev/null', body)
         self.assertIn('read(16384)', body)
         self.assertIn('diagnostic category: $restore_error_category', body)
@@ -158,6 +159,15 @@ esac
                 '  fi',
                 '  if [[ "$stage" == createdb ]]; then',
                 '    [[ " $* " == *" --template=template0 "* ]] || return 95',
+                '  fi',
+                '  if [[ "$stage" == pg_restore ]]; then',
+                '    [[ " $* " == *" exec -T db pg_restore "* ]] || return 96',
+                '    archive="$(cat)" || return 97',
+                '    [[ "$archive" == "synthetic archive" ]] || return 98',
+                '  fi',
+                '  if [[ "$stage" == marker_psql ]]; then',
+                '    [[ " $* " == *" -d ci_restore_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT} "* ]] || return 99',
+                '    [[ "$*" == *"marker = \'$FAKE_MARKER\'"* ]] || return 100',
                 '  fi',
                 '  if [[ "$FAKE_FAIL_STAGE" == "$stage" ]]; then',
                 '    if [[ "$stage" == pg_restore ]]; then printf "%s\\n" "$FAKE_RESTORE_ERROR" >&2; else printf "%s\\n" "private marker $FAKE_MARKER SQL credential" >&2; fi',
@@ -246,6 +256,19 @@ esac
         self.assertIn("compose pg_restore exit: 23; diagnostic capture exit: 0", result.stderr)
         for private_value in ("unclassified failure", "ci-private-marker-777", "SQL credential"):
             self.assertNotIn(private_value, result.stdout + result.stderr)
+
+        result, calls = run_function(
+            failure="pg_restore",
+            restore_error=(
+                'Error response from daemon: exec failed: unable to start container process: '
+                'exec: "pg_restore": executable file not found in $PATH for ci_private_db'
+            ),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, ["pg_dump", "createdb", "pg_restore"])
+        self.assertIn("diagnostic category: compose_exec_failure", result.stderr)
+        self.assertNotIn("executable file not found", result.stderr)
+        self.assertNotIn("ci_private_db", result.stderr)
 
         for restore_failure, expected_statuses in (
             ("", "compose pg_restore exit: 0; diagnostic capture exit: 19"),
