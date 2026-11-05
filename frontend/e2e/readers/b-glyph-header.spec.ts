@@ -145,13 +145,13 @@ for (const kind of ['epub', 'pdf'] as const) {
 				expect(observed.header.height).toBe(expectedHeader);
 				const footerHeight = kind === 'epub' ? width < 640 ? 145 : 57 : width === 320 ? 105 : 53;
 				expect(observed.footer).toEqual({ x: 0, y: 851 - footerHeight, width, height: footerHeight });
-				for (const [index, button] of observed.buttons.entries()) {
-				const { x, y, width: baseWidth, height: baseHeight } = button.baseline;
-				// The reference footer is anchored at y=0; the live footer remains fixed
-				// at the viewport bottom. Both are measured in the SAME font environment.
-				expect({ x: button.x, y: button.y - observed.footer.y, width: button.width, height: button.height },
-					`${button.name}: unchanged outer rectangle vs direct-text baseline`).toEqual({ x, y, width: baseWidth, height: baseHeight });
-				expect({ width: button.width, height: button.height }).toEqual({ width: 44, height: 44 });
+				for (const button of observed.buttons) {
+					const { x, y, width: baseWidth, height: baseHeight } = button.baseline;
+					// The reference footer is anchored at y=0; the live footer remains fixed
+					// at the viewport bottom. Both are measured in the SAME font environment.
+					expect({ x: button.x, y: button.y - observed.footer.y, width: button.width, height: button.height },
+						`${button.name}: unchanged outer rectangle vs direct-text baseline`).toEqual({ x, y, width: baseWidth, height: baseHeight });
+					expect({ width: button.width, height: button.height }).toEqual({ width: 44, height: 44 });
 					expect(button.translate).toBe('none');
 					expect(button.transform).toBe('none');
 					expect(button.marginTop).toBe('0px');
