@@ -586,6 +586,15 @@ class ReleaseGateTests(unittest.TestCase):
         with self.assertRaisesRegex(GateError, "invalid structure"):
             validate_release(api, SOURCE_SHA)
 
+    def test_rejects_nonstandard_json_constants_in_solo_comments(self):
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant):
+                body = f'{SOLO_REVIEW_MARKER}\n{{"example":{constant}}}'
+                with self.assertRaisesRegex(GateError, "invalid JSON"):
+                    release_gate._parse_structured_comment_body(
+                        body, SOLO_REVIEW_MARKER
+                    )
+
     def test_rejects_solo_policy_when_review_comment_was_edited(self):
         api = FakeAPI()
         api.reviews = []
