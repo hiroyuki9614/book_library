@@ -121,6 +121,19 @@ esac
             r"(?ms)^synthetic_restore_drill\(\) \{\n.*?^\}", source
         )
         self.assertIsNotNone(function)
+        capture_bin = self.root / "capture-bin"
+        capture_bin.mkdir()
+        capture_python = capture_bin / "python3"
+        capture_python.write_text(
+            "#!/usr/bin/env bash\n"
+            'if [[ "${1:-}" == "-c" && -n "${FAKE_CAPTURE_EXIT:-}" ]]; then\n'
+            '  cat >/dev/null\n'
+            '  exit "$FAKE_CAPTURE_EXIT"\n'
+            "fi\n"
+            'exec "$REAL_PYTHON" "$@"\n',
+            encoding="utf-8",
+        )
+        capture_python.chmod(0o755)
         harness = "\n".join(
             (
                 "set -euo pipefail",
@@ -158,12 +171,14 @@ esac
             )
         )
 
-        def run_function(*, failure="", mode="github-hosted-v1", marker_result="t", restore_error="unsupported version 1.15 in archive for private marker ci-private-marker-777 SQL credential"):
+        def run_function(*, failure="", mode="github-hosted-v1", marker_result="t", capture_exit="", restore_error="unsupported version 1.15 in archive for private marker ci-private-marker-777 SQL credential"):
             run_id = f"7{os.getpid()}"
             call_log = self.root / "restore-calls.log"
             call_log.unlink(missing_ok=True)
             env = {
-                "PATH": "/usr/bin:/bin",
+                "PATH": f"{capture_bin}:/usr/bin:/bin",
+                "REAL_PYTHON": sys.executable,
+                "FAKE_CAPTURE_EXIT": capture_exit,
                 "FAKE_CALL_LOG": str(call_log),
                 "FAKE_FAIL_STAGE": failure,
                 "FAKE_MARKER": "ci-private-marker-777",
@@ -228,8 +243,22 @@ esac
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(calls, ["pg_dump", "createdb", "pg_restore"])
         self.assertIn("diagnostic category: unknown", result.stderr)
+        self.assertIn("compose pg_restore exit: 23; diagnostic capture exit: 0", result.stderr)
         for private_value in ("unclassified failure", "ci-private-marker-777", "SQL credential"):
             self.assertNotIn(private_value, result.stdout + result.stderr)
+
+        for restore_failure, expected_statuses in (
+            ("", "compose pg_restore exit: 0; diagnostic capture exit: 19"),
+            ("pg_restore", "compose pg_restore exit: 23; diagnostic capture exit: 19"),
+        ):
+            with self.subTest(restore_failure=restore_failure, capture_exit=19):
+                result, calls = run_function(failure=restore_failure, capture_exit="19")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, ["pg_dump", "createdb", "pg_restore"])
+                self.assertIn("diagnostic category: unknown", result.stderr)
+                self.assertIn(expected_statuses, result.stderr)
+                for private_value in ("ci-private-marker-777", "ci-private-credential", "SQL credential"):
+                    self.assertNotIn(private_value, result.stdout + result.stderr)
 
         result, calls = run_function(mode="ordinary-smoke")
         self.assertNotEqual(result.returncode, 0)

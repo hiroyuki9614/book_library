@@ -255,6 +255,7 @@ wait_db_healthy() {
 
 synthetic_restore_drill() {
   local marker="$1" restore_db backup_file restore_error_file restore_error_category restored_marker
+  local -a restore_pipeline_status=()
 
   [[ "$recovery_rehearsal" == "github-hosted-v1" ]] || {
     echo "Refusing synthetic restore outside guarded GitHub-hosted rehearsal" >&2
@@ -308,7 +309,7 @@ synthetic_restore_drill() {
   # Keep only a bounded private sample for classification. The helper consumes
   # all stderr so pg_restore is not affected by a closed pipe, but writes at
   # most 16 KiB and never prints the captured text.
-  if ! docker compose --project-name "$project" --file "$compose_file" exec -T db \
+  if docker compose --project-name "$project" --file "$compose_file" exec -T db \
     pg_restore --exit-on-error --no-owner --no-privileges -U "$POSTGRES_USER" \
     -d "$restore_db" - <"$backup_file" 2>&1 >/dev/null \
     | python3 -c '
@@ -321,6 +322,9 @@ try:
 except OSError:
     raise SystemExit(1)
 ' "$restore_error_file"; then
+    :
+  else
+    restore_pipeline_status=("${PIPESTATUS[@]}")
     restore_error_category="unknown"
     if grep -Eiq 'unsupported version|version[^[:cntrl:]]{0,80}not supported|archive version' "$restore_error_file"; then
       restore_error_category="unsupported_archive_version"
@@ -335,7 +339,7 @@ except OSError:
     elif grep -Eiq 'could not connect|connection refused|server closed the connection|connection to server' "$restore_error_file"; then
       restore_error_category="connection_failure"
     fi
-    echo "Synthetic PostgreSQL restore failed (diagnostic category: $restore_error_category)" >&2
+    echo "Synthetic PostgreSQL restore failed (diagnostic category: $restore_error_category; compose pg_restore exit: ${restore_pipeline_status[0]:-unknown}; diagnostic capture exit: ${restore_pipeline_status[1]:-unknown})" >&2
     return 1
   fi
   if ! restored_marker="$(docker compose --project-name "$project" --file "$compose_file" exec -T db \
