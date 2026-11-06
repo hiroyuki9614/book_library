@@ -97,6 +97,7 @@ esac
         self.assertIn('chmod 600 "$backup_file"', body)
         self.assertIn('pg_dump --format=custom -U "$POSTGRES_USER" -d "$POSTGRES_DB" >"$backup_file" 2>/dev/null', body)
         self.assertIn('createdb --template=template0 -U "$POSTGRES_USER" "$restore_db"', body)
+        self.assertIn('pg_restore --list - <"$backup_file"', body)
         self.assertIn('exec -T db \\\n    pg_restore --exit-on-error --no-owner --no-privileges', body)
         self.assertNotRegex(body, r'\bexec\s+-i(?:\s|$)')
         self.assertIn('-d "$restore_db" - <"$backup_file" 2>&1 >/dev/null', body)
@@ -128,8 +129,14 @@ esac
         capture_python.write_text(
             "#!/usr/bin/env bash\n"
             'if [[ "${1:-}" == "-c" && -n "${FAKE_CAPTURE_EXIT:-}" ]]; then\n'
-            '  cat >/dev/null\n'
-            '  exit "$FAKE_CAPTURE_EXIT"\n'
+            '  count=0\n'
+            '  [[ ! -f "$FAKE_CAPTURE_COUNT_FILE" ]] || read -r count < "$FAKE_CAPTURE_COUNT_FILE"\n'
+            '  count=$((count + 1))\n'
+            '  printf "%s\\n" "$count" > "$FAKE_CAPTURE_COUNT_FILE"\n'
+            '  if [[ "$count" == "${FAKE_CAPTURE_FAIL_INVOCATION:-1}" ]]; then\n'
+            '    "$REAL_PYTHON" "$@"\n'
+            '    exit "$FAKE_CAPTURE_EXIT"\n'
+            '  fi\n'
             "fi\n"
             'exec "$REAL_PYTHON" "$@"\n',
             encoding="utf-8",
@@ -148,6 +155,7 @@ esac
                 '  for arg in "$@"; do',
                 '    case "$arg" in pg_dump|createdb|pg_restore) stage="$arg" ;; psql) stage="marker_psql" ;; esac',
                 '  done',
+                '  [[ "$stage" != pg_restore || " $* " != *" pg_restore --list "* ]] || stage="pg_restore_list"',
                 '  printf "%s\\n" "$stage" >> "$FAKE_CALL_LOG"',
                 '  if [[ "$stage" == pg_dump ]]; then',
                 '    directory=(/tmp/belib-recovery-"${GITHUB_RUN_ID}"-"${GITHUB_RUN_ATTEMPT}".*)',
@@ -170,7 +178,7 @@ esac
                 '    [[ "$*" == *"marker = \'$FAKE_MARKER\'"* ]] || return 100',
                 '  fi',
                 '  if [[ "$FAKE_FAIL_STAGE" == "$stage" ]]; then',
-                '    if [[ "$stage" == pg_restore ]]; then printf "%s\\n" "$FAKE_RESTORE_ERROR" >&2; else printf "%s\\n" "private marker $FAKE_MARKER SQL credential" >&2; fi',
+                '    if [[ "$stage" == pg_restore_list ]]; then printf "%s\\n" "$FAKE_PREFLIGHT_ERROR" >&2; elif [[ "$stage" == pg_restore ]]; then printf "%s\\n" "$FAKE_RESTORE_ERROR" >&2; else printf "%s\\n" "private marker $FAKE_MARKER SQL credential" >&2; fi',
                 '    [[ "$stage" == pg_dump ]] && printf "%s\\n" "partial archive"',
                 '    return 23',
                 '  fi',
@@ -181,19 +189,24 @@ esac
             )
         )
 
-        def run_function(*, failure="", mode="github-hosted-v1", marker_result="t", capture_exit="", restore_error="unsupported version 1.15 in archive for private marker ci-private-marker-777 SQL credential"):
+        def run_function(*, failure="", mode="github-hosted-v1", marker_result="t", capture_exit="", capture_invocation=1, restore_error="unsupported version 1.15 in archive for private marker ci-private-marker-777 SQL credential", preflight_error="unsupported version 1.15 in archive for private marker ci-private-marker-777 SQL credential"):
             run_id = f"7{os.getpid()}"
             call_log = self.root / "restore-calls.log"
             call_log.unlink(missing_ok=True)
+            capture_count_file = self.root / "capture-count"
+            capture_count_file.unlink(missing_ok=True)
             env = {
                 "PATH": f"{capture_bin}:/usr/bin:/bin",
                 "REAL_PYTHON": sys.executable,
                 "FAKE_CAPTURE_EXIT": capture_exit,
+                "FAKE_CAPTURE_FAIL_INVOCATION": str(capture_invocation),
+                "FAKE_CAPTURE_COUNT_FILE": str(capture_count_file),
                 "FAKE_CALL_LOG": str(call_log),
                 "FAKE_FAIL_STAGE": failure,
                 "FAKE_MARKER": "ci-private-marker-777",
                 "FAKE_MARKER_RESULT": marker_result,
                 "FAKE_RESTORE_ERROR": restore_error,
+                "FAKE_PREFLIGHT_ERROR": preflight_error,
                 "recovery_rehearsal": mode,
                 "GITHUB_RUN_ID": run_id,
                 "GITHUB_RUN_ATTEMPT": "1",
@@ -226,13 +239,13 @@ esac
         result, calls = run_function()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("marker verified", result.stdout)
-        self.assertEqual(calls, ["pg_dump", "createdb", "pg_restore", "marker_psql"])
+        self.assertEqual(calls, ["pg_dump", "pg_restore_list", "createdb", "pg_restore", "marker_psql"])
 
         expected_failures = (
             ("pg_dump", ["pg_dump"], "custom-format dump failed"),
-            ("createdb", ["pg_dump", "createdb"], "separate synthetic restore database"),
-            ("pg_restore", ["pg_dump", "createdb", "pg_restore"], "diagnostic category: unsupported_archive_version"),
-            ("marker_psql", ["pg_dump", "createdb", "pg_restore", "marker_psql"], "Could not verify marker"),
+            ("createdb", ["pg_dump", "pg_restore_list", "createdb"], "separate synthetic restore database"),
+            ("pg_restore", ["pg_dump", "pg_restore_list", "createdb", "pg_restore"], "diagnostic category: unsupported_archive_version"),
+            ("marker_psql", ["pg_dump", "pg_restore_list", "createdb", "pg_restore", "marker_psql"], "Could not verify marker"),
         )
         for stage, expected_calls, safe_message in expected_failures:
             with self.subTest(stage=stage):
@@ -251,8 +264,8 @@ esac
             restore_error="unclassified failure for ci-private-marker-777 SQL credential",
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(calls, ["pg_dump", "createdb", "pg_restore"])
-        self.assertIn("diagnostic category: unknown", result.stderr)
+        self.assertEqual(calls, ["pg_dump", "pg_restore_list", "createdb", "pg_restore"])
+        self.assertIn("diagnostic category: restore_sql_failure", result.stderr)
         self.assertIn("compose pg_restore exit: 23; diagnostic capture exit: 0", result.stderr)
         for private_value in ("unclassified failure", "ci-private-marker-777", "SQL credential"):
             self.assertNotIn(private_value, result.stdout + result.stderr)
@@ -265,23 +278,53 @@ esac
             ),
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(calls, ["pg_dump", "createdb", "pg_restore"])
+        self.assertEqual(calls, ["pg_dump", "pg_restore_list", "createdb", "pg_restore"])
         self.assertIn("diagnostic category: compose_exec_failure", result.stderr)
         self.assertNotIn("executable file not found", result.stderr)
         self.assertNotIn("ci_private_db", result.stderr)
 
-        for restore_failure, expected_statuses in (
-            ("", "compose pg_restore exit: 0; diagnostic capture exit: 19"),
-            ("pg_restore", "compose pg_restore exit: 23; diagnostic capture exit: 19"),
+        result, calls = run_function(
+            failure="pg_restore_list",
+            preflight_error="unclassified archive failure for private marker ci-private-marker-777 SQL credential",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, ["pg_dump", "pg_restore_list"])
+        self.assertIn("diagnostic category: archive_validation_failure", result.stderr)
+        self.assertNotIn("unclassified archive failure", result.stdout + result.stderr)
+
+        for preflight_error, category in (
+            ("unsupported version 1.15 in private archive ci-private-marker-777 SQL credential", "unsupported_archive_version"),
+            ("did not find magic string in private archive ci-private-marker-777 SQL credential", "invalid_archive"),
         ):
+            with self.subTest(preflight_category=category):
+                result, calls = run_function(failure="pg_restore_list", preflight_error=preflight_error)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, ["pg_dump", "pg_restore_list"])
+                self.assertIn(f"diagnostic category: {category}", result.stderr)
+                self.assertIn("compose pg_restore exit: 23; diagnostic capture exit: 0", result.stderr)
+                self.assertNotIn(preflight_error, result.stdout + result.stderr)
+
+        for restore_failure in ("", "pg_restore"):
             with self.subTest(restore_failure=restore_failure, capture_exit=19):
                 result, calls = run_function(failure=restore_failure, capture_exit="19")
                 self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(calls, ["pg_dump", "createdb", "pg_restore"])
-                self.assertIn("diagnostic category: unknown", result.stderr)
-                self.assertIn(expected_statuses, result.stderr)
+                self.assertEqual(calls, ["pg_dump", "pg_restore_list"])
+                self.assertIn("diagnostic category: diagnostic_capture_failure", result.stderr)
+                self.assertIn("compose pg_restore exit: 0; diagnostic capture exit: 19", result.stderr)
                 for private_value in ("ci-private-marker-777", "ci-private-credential", "SQL credential"):
                     self.assertNotIn(private_value, result.stdout + result.stderr)
+
+        result, calls = run_function(
+            failure="pg_restore",
+            capture_exit="19",
+            capture_invocation=2,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, ["pg_dump", "pg_restore_list", "createdb", "pg_restore"])
+        self.assertIn("diagnostic category: diagnostic_capture_failure", result.stderr)
+        self.assertIn("compose pg_restore exit: 23; diagnostic capture exit: 19", result.stderr)
+        for private_value in ("ci-private-marker-777", "ci-private-credential", "SQL credential"):
+            self.assertNotIn(private_value, result.stdout + result.stderr)
 
         result, calls = run_function(mode="ordinary-smoke")
         self.assertNotEqual(result.returncode, 0)
@@ -291,7 +334,7 @@ esac
         result, calls = run_function(marker_result="f")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Expected synthetic marker is missing", result.stderr)
-        self.assertEqual(calls, ["pg_dump", "createdb", "pg_restore", "marker_psql"])
+        self.assertEqual(calls, ["pg_dump", "pg_restore_list", "createdb", "pg_restore", "marker_psql"])
 
     def test_real_cleanup_exit_trap_removes_backup_and_scopes_compose_down(self):
         source = SCRIPT.read_text(encoding="utf-8")

@@ -301,14 +301,44 @@ synthetic_restore_drill() {
     echo "Synthetic PostgreSQL custom-format dump is empty" >&2
     return 1
   fi
+  # Keep only a bounded private sample for classification. The helper consumes
+  # all stderr so pg_restore is not affected by a closed pipe, but writes at
+  # most 16 KiB and never prints the captured text.
+  # Validate the dump as a custom archive before creating the restore database.
+  # This distinguishes a bad source/archive or exec from SQL restore failures.
+  if docker compose --project-name "$project" --file "$compose_file" exec -T db \
+    pg_restore --list - <"$backup_file" 2>&1 >/dev/null \
+    | python3 -c '
+import sys
+try:
+    data = sys.stdin.buffer.read(16384)
+    with open(sys.argv[1], "wb") as capture:
+        capture.write(data)
+    sys.stdin.buffer.read()
+except OSError:
+    raise SystemExit(1)
+' "$restore_error_file"; then
+    :
+  else
+    restore_pipeline_status=("${PIPESTATUS[@]}")
+    restore_error_category="archive_validation_failure"
+    if grep -Eiq 'Error response from daemon|OCI runtime exec failed|executable file not found|container[^[:cntrl:]]{0,80}is not running|service[^[:cntrl:]]{0,80}is not running' "$restore_error_file"; then
+      restore_error_category="compose_exec_failure"
+    elif [[ "${restore_pipeline_status[1]:-unknown}" != 0 ]]; then
+      restore_error_category="diagnostic_capture_failure"
+    elif grep -Eiq 'unsupported version|version[^[:cntrl:]]{0,80}not supported|archive version' "$restore_error_file"; then
+      restore_error_category="unsupported_archive_version"
+    elif grep -Eiq 'did not find magic string|appears to be a text format dump|unexpected end of file|unexpected eof|could not read from input file' "$restore_error_file"; then
+      restore_error_category="invalid_archive"
+    fi
+    echo "Synthetic PostgreSQL archive preflight failed (diagnostic category: $restore_error_category; compose pg_restore exit: ${restore_pipeline_status[0]:-unknown}; diagnostic capture exit: ${restore_pipeline_status[1]:-unknown})" >&2
+    return 1
+  fi
   if ! docker compose --project-name "$project" --file "$compose_file" exec -T db \
     createdb --template=template0 -U "$POSTGRES_USER" "$restore_db" >/dev/null 2>&1; then
     echo "Could not create separate synthetic restore database" >&2
     return 1
   fi
-  # Keep only a bounded private sample for classification. The helper consumes
-  # all stderr so pg_restore is not affected by a closed pipe, but writes at
-  # most 16 KiB and never prints the captured text.
   # Compose exec keeps stdin interactive by default; -T disables only the
   # pseudo-TTY while the custom archive is streamed to pg_restore.
   if docker compose --project-name "$project" --file "$compose_file" exec -T db \
@@ -327,9 +357,11 @@ except OSError:
     :
   else
     restore_pipeline_status=("${PIPESTATUS[@]}")
-    restore_error_category="unknown"
+    restore_error_category="restore_sql_failure"
     if grep -Eiq 'Error response from daemon|OCI runtime exec failed|executable file not found|container[^[:cntrl:]]{0,80}is not running|service[^[:cntrl:]]{0,80}is not running' "$restore_error_file"; then
       restore_error_category="compose_exec_failure"
+    elif [[ "${restore_pipeline_status[1]:-unknown}" != 0 ]]; then
+      restore_error_category="diagnostic_capture_failure"
     elif grep -Eiq 'unsupported version|version[^[:cntrl:]]{0,80}not supported|archive version' "$restore_error_file"; then
       restore_error_category="unsupported_archive_version"
     elif grep -Eiq 'did not find magic string|appears to be a text format dump|unexpected end of file|unexpected eof|could not read from input file' "$restore_error_file"; then
