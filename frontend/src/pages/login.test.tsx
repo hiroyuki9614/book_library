@@ -33,8 +33,6 @@ describe('Login flow', () => {
 		vi.unstubAllEnvs();
 		vi.stubEnv('VITE_PUBLIC_DEMO_EMAIL', '');
 		vi.stubEnv('VITE_PUBLIC_DEMO_PASSWORD', '');
-		vi.stubEnv('VITE_PUBLIC_DEMO_ADMIN_EMAIL', '');
-		vi.stubEnv('VITE_PUBLIC_DEMO_ADMIN_PASSWORD', '');
 	});
 
 	test('ログイン成功後にセッションを再取得して認証済みページへ遷移する', async () => {
@@ -157,24 +155,23 @@ describe('Login flow', () => {
 		await expect.element(getByText('demo@example.test')).not.toBeInTheDocument();
 	});
 
-	test('管理者と一般ユーザーのID/PWを表示し、選んだ情報をフォームに入力する', async () => {
+	test('admin Vite values do not create an admin credential or autofill path; general demo autofill still works', async () => {
 		vi.stubEnv('VITE_PUBLIC_DEMO_EMAIL', 'user-demo@example.test');
 		vi.stubEnv('VITE_PUBLIC_DEMO_PASSWORD', 'user-demo-password');
 		vi.stubEnv('VITE_PUBLIC_DEMO_ADMIN_EMAIL', 'admin-demo@example.test');
 		vi.stubEnv('VITE_PUBLIC_DEMO_ADMIN_PASSWORD', 'admin-demo-password');
-		const { getByText, getByLabelText } = await render(
+		const { getByText, getByLabelText, getByRole } = await render(
 			<authContext.Provider value={{ user: null, isPending: false, isAuthenticated: false, role: null, refreshAuth: vi.fn(), signOut: vi.fn(), logout: vi.fn() }}>
 				<MemoryRouter><Login /></MemoryRouter>
 			</authContext.Provider>,
 		);
-		await expect.element(getByText('admin-demo@example.test')).toBeInTheDocument();
-		await expect.element(getByText('admin-demo-password')).toBeInTheDocument();
+		await expect.element(getByText('管理者デモアカウント')).not.toBeInTheDocument();
+		await expect.element(getByText('admin-demo@example.test')).not.toBeInTheDocument();
+		await expect.element(getByText('admin-demo-password')).not.toBeInTheDocument();
+		await expect.element(getByRole('button', { name: '管理者のID/PWを入力' })).not.toBeInTheDocument();
 		await expect.element(getByText('user-demo@example.test')).toBeInTheDocument();
 		await expect.element(getByText('user-demo-password')).toBeInTheDocument();
-		await getByText('管理者のID/PWを入力').click();
-		await expect.element(getByLabelText('ユーザーID')).toHaveValue('admin-demo@example.test');
-		await expect.element(getByLabelText('パスワード', { exact: true })).toHaveValue('admin-demo-password');
-		await getByText('一般ユーザーのID/PWを入力').click();
+		await getByRole('button', { name: '一般ユーザーのID/PWを入力' }).click();
 		await expect.element(getByLabelText('ユーザーID')).toHaveValue('user-demo@example.test');
 		await expect.element(getByLabelText('パスワード', { exact: true })).toHaveValue('user-demo-password');
 		expect(authClient.signIn.email).not.toHaveBeenCalled();
