@@ -307,7 +307,7 @@ synthetic_restore_drill() {
   # Validate the dump as a custom archive before creating the restore database.
   # This distinguishes a bad source/archive or exec from SQL restore failures.
   if docker compose --project-name "$project" --file "$compose_file" exec -T db \
-    pg_restore --list - <"$backup_file" 2>&1 >/dev/null \
+    pg_restore --list <"$backup_file" 2>&1 >/dev/null \
     | python3 -c '
 import sys
 try:
@@ -343,7 +343,7 @@ except OSError:
   # pseudo-TTY while the custom archive is streamed to pg_restore.
   if docker compose --project-name "$project" --file "$compose_file" exec -T db \
     pg_restore --exit-on-error --no-owner --no-privileges -U "$POSTGRES_USER" \
-    -d "$restore_db" - <"$backup_file" 2>&1 >/dev/null \
+    -d "$restore_db" <"$backup_file" 2>&1 >/dev/null \
     | python3 -c '
 import sys
 try:

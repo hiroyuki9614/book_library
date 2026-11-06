@@ -97,10 +97,11 @@ esac
         self.assertIn('chmod 600 "$backup_file"', body)
         self.assertIn('pg_dump --format=custom -U "$POSTGRES_USER" -d "$POSTGRES_DB" >"$backup_file" 2>/dev/null', body)
         self.assertIn('createdb --template=template0 -U "$POSTGRES_USER" "$restore_db"', body)
-        self.assertIn('pg_restore --list - <"$backup_file"', body)
+        self.assertIn('pg_restore --list <"$backup_file"', body)
+        self.assertNotRegex(body, r'pg_restore --list\s+-\s+<')
         self.assertIn('exec -T db \\\n    pg_restore --exit-on-error --no-owner --no-privileges', body)
         self.assertNotRegex(body, r'\bexec\s+-i(?:\s|$)')
-        self.assertIn('-d "$restore_db" - <"$backup_file" 2>&1 >/dev/null', body)
+        self.assertIn('-d "$restore_db" <"$backup_file" 2>&1 >/dev/null', body)
         self.assertIn('read(16384)', body)
         self.assertIn('diagnostic category: $restore_error_category', body)
         self.assertIn('chmod 600 "$restore_error_file"', body)
@@ -157,6 +158,9 @@ esac
                 '  done',
                 '  [[ "$stage" != pg_restore || " $* " != *" pg_restore --list "* ]] || stage="pg_restore_list"',
                 '  printf "%s\\n" "$stage" >> "$FAKE_CALL_LOG"',
+                '  if [[ "$stage" == pg_restore || "$stage" == pg_restore_list ]]; then',
+                '    for arg in "$@"; do [[ "$arg" != "-" ]] || return 101; done',
+                '  fi',
                 '  if [[ "$stage" == pg_dump ]]; then',
                 '    directory=(/tmp/belib-recovery-"${GITHUB_RUN_ID}"-"${GITHUB_RUN_ATTEMPT}".*)',
                 '    [[ -d "${directory[0]}" ]] || return 91',
@@ -168,7 +172,7 @@ esac
                 '  if [[ "$stage" == createdb ]]; then',
                 '    [[ " $* " == *" --template=template0 "* ]] || return 95',
                 '  fi',
-                '  if [[ "$stage" == pg_restore ]]; then',
+                '  if [[ "$stage" == pg_restore || "$stage" == pg_restore_list ]]; then',
                 '    [[ " $* " == *" exec -T db pg_restore "* ]] || return 96',
                 '    archive="$(cat)" || return 97',
                 '    [[ "$archive" == "synthetic archive" ]] || return 98',
