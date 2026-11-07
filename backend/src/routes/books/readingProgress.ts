@@ -100,7 +100,7 @@ export async function persistReadingInfo(
 
 	for (let attempt = 0; attempt < 2; attempt += 1) {
 		const updated = await prisma.readingInfo.updateMany({
-			where: { ...where, readStatus: { not: 'completed' } },
+			where: { userId: input.userId, bookId: input.bookId, readStatus: { not: 'completed' } },
 			data: readingData,
 		});
 		if (updated.count > 0) {
@@ -115,7 +115,7 @@ export async function persistReadingInfo(
 		});
 		if (existing?.readStatus === 'completed') {
 			const completedUpdate = await prisma.readingInfo.updateMany({
-				where: { ...where, readStatus: 'completed' },
+				where: { userId: input.userId, bookId: input.bookId, readStatus: 'completed' },
 				data: {
 					currentPosition: input.currentPosition,
 					readStatus: 'completed',

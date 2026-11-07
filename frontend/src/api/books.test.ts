@@ -69,6 +69,41 @@ describe('books API client', () => {
 		expect(fetch).toHaveBeenNthCalledWith(2, 'http://localhost:3000/api/v1/books?page=2&limit=100', expect.objectContaining({ credentials: 'include' }));
 	});
 
+	test('認証sessionがページ取得中に変わったら次ページの別アカウント書籍を混在させない', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		const controller = new AbortController();
+		const makeBook = (id: number, title: string) => ({
+			id,
+			title,
+			authorName: 'BeLib',
+			category: { id: 1, name: '技術書' },
+			readStatus: 'reading',
+			progressPercentage: null,
+			hasFile: false,
+			fileType: null,
+			createdAt: '2026-08-01T00:00:00.000Z',
+			updatedAt: '2026-08-01T00:00:00.000Z',
+		});
+		const account8Books = Array.from({ length: 100 }, (_, index) => makeBook(index + 1, `Account 8 book ${index + 1}`));
+		const account7RestrictedBook = makeBook(101, 'Account 7 restricted book');
+		vi.spyOn(globalThis, 'fetch')
+			.mockResolvedValueOnce(new Response(JSON.stringify({ total: 101, page: 1, limit: 100, books: account8Books }), {
+				headers: { 'Content-Type': 'application/json' },
+			}))
+			.mockImplementationOnce(() => {
+				controller.abort();
+				return Promise.resolve(new Response(JSON.stringify({ total: 101, page: 2, limit: 100, books: [account7RestrictedBook] }), {
+					headers: { 'Content-Type': 'application/json' },
+				}));
+			});
+
+		await expect(fetchBooks(controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(fetch).toHaveBeenNthCalledWith(1, 'http://localhost:3000/api/v1/books?page=1&limit=100', expect.objectContaining({ signal: controller.signal }));
+		expect(fetch).toHaveBeenNthCalledWith(2, 'http://localhost:3000/api/v1/books?page=2&limit=100', expect.objectContaining({ signal: controller.signal }));
+	});
+
 	test('PDF file APIをcookie付きで呼び出しBlobを返す', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000/');
 		const pdf = new Blob(['%PDF-1.7'], { type: 'application/pdf' });

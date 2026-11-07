@@ -145,7 +145,7 @@ describe('book state routes', () => {
 		expect(patch.status).toBe(200);
 		expect(await patch.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading' });
 		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
-			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: { not: 'completed' } },
+			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' } },
 			data: { currentPosition: cfi, readStatus: 'reading', progressPercentage: 42 },
 		});
 		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
@@ -224,11 +224,11 @@ describe('book state routes', () => {
 			select: { currentPosition: true, progressPercentage: true, readStatus: true },
 		});
 		expect(mocks.readingInfoUpdateMany).toHaveBeenNthCalledWith(1, {
-			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: { not: 'completed' } },
+			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' } },
 			data: { currentPosition: '3', readStatus: 'reading' },
 		});
 		expect(mocks.readingInfoUpdateMany).toHaveBeenNthCalledWith(2, {
-			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: 'completed' },
+			where: { userId: 7, bookId: 1, readStatus: 'completed' },
 			data: { currentPosition: '3', readStatus: 'completed', progressPercentage: 100 },
 		});
 		expect(mocks.readingInfoUpdate).not.toHaveBeenCalled();

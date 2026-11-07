@@ -42,11 +42,11 @@ describe('persistReadingInfo', () => {
 		})).resolves.toEqual({ currentPosition: '3', progressPercentage: 100, readStatus: 'completed' });
 
 		expect(persistence.readingInfo.updateMany).toHaveBeenNthCalledWith(1, {
-			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: { not: 'completed' } },
+			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' } },
 			data: { currentPosition: '3', readStatus: 'reading', progressPercentage: 25 },
 		});
 		expect(persistence.readingInfo.updateMany).toHaveBeenNthCalledWith(2, {
-			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: 'completed' },
+			where: { userId: 7, bookId: 1, readStatus: 'completed' },
 			data: { currentPosition: '3', readStatus: 'completed', progressPercentage: 100 },
 		});
 		expect(persistence.readingInfo.updateMany).toHaveBeenCalledTimes(2);

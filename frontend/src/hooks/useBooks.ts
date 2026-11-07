@@ -11,7 +11,7 @@ export default function useBooks() {
 		isError,
 	} = useQuery({
 		queryKey: ['books', 'list', userId],
-		queryFn: () => fetchBooks(),
+		queryFn: ({ signal }) => fetchBooks(signal),
 		enabled: userId !== null,
 	});
 

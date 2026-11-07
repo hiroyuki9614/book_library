@@ -24,6 +24,12 @@ type BooksResponse = {
 
 const BOOKS_PAGE_LIMIT = 100;
 
+function throwIfAborted(signal?: AbortSignal) {
+	if (signal?.aborted) {
+		throw new DOMException('The operation was aborted', 'AbortError');
+	}
+}
+
 function toFrontendBook(book: BookDetails): Book {
 	const status = book.readStatus[0].toUpperCase() + book.readStatus.slice(1) as Book['status'];
 	const category = book.category.name as Book['category'];
@@ -42,12 +48,17 @@ function toFrontendBook(book: BookDetails): Book {
 	};
 }
 
-export async function fetchBooks() {
+export async function fetchBooks(signal?: AbortSignal) {
 	const books: Book[] = [];
 	let page = 1;
 
 	while (true) {
-		const response = await apiFetch<BooksResponse>(`/api/v1/books?page=${page}&limit=${BOOKS_PAGE_LIMIT}`);
+		throwIfAborted(signal);
+		const response = await apiFetch<BooksResponse>(
+			`/api/v1/books?page=${page}&limit=${BOOKS_PAGE_LIMIT}`,
+			signal ? { signal } : undefined,
+		);
+		throwIfAborted(signal);
 		books.push(...response.books.map(toFrontendBook));
 		if (response.books.length === 0 || books.length >= response.total) break;
 		page += 1;

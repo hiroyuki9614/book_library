@@ -74,7 +74,7 @@ describe('React Query hooks', () => {
 		await expect.poll(() => result.current.isLoading).toBe(false);
 		expect(result.current.books).toEqual(books);
 		expect(result.current.isError).toBe(false);
-		expect(mocks.fetchBooks).toHaveBeenCalledWith();
+		expect(mocks.fetchBooks).toHaveBeenCalledWith(expect.any(AbortSignal));
 	});
 
 	test('useBooks does not expose one account books while another account is loading', async () => {

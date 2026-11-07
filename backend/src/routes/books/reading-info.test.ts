@@ -116,7 +116,7 @@ describe('reading-info API', () => {
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 25, readStatus: 'reading' });
 		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
-			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: { not: 'completed' } },
+			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' } },
 			data: { currentPosition: '3', readStatus: 'reading', progressPercentage: 25 },
 		});
 		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
