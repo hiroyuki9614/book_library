@@ -170,8 +170,11 @@ describe('React Query hooks', () => {
 			mocks.authIsPending = true;
 			rerender();
 		});
-		expect(result.current.book).toBeNull();
-		expect(result.current.isLoading).toBe(true);
+		// Already-open reader state is retained during revalidation. RequireAuth
+		// hides the rendered route until the session is verified; a real change
+		// of account identity must still clear this cached book below.
+		expect(result.current.book).toEqual(account7Book);
+		expect(result.current.isLoading).toBe(false);
 
 		act(() => {
 			mocks.authUserId = 8;
