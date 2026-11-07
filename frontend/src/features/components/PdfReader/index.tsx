@@ -487,7 +487,7 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, pageTurnD
 	const navigation = usePageNavigation({ bookId, documentId, initialPage, pageTurnDirection });
 	return (
 		<div className='flex h-full flex-col'>
-			<header className='flex shrink-0 items-center gap-1 border-b px-1 py-1 sm:gap-2 sm:px-3 sm:py-2'>
+			<header className='flex shrink-0 items-center gap-1 border-b px-1 py-1 sm:gap-2 sm:px-3 sm:py-2 xl:py-[3.5px]'>
 				<Link to='/' className='inline-flex min-h-11 shrink-0 items-center rounded-md px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'>本棚に戻る</Link>
 				<span className='min-w-0 flex-1 truncate px-1 text-center text-sm font-medium text-foreground'>{bookTitle || 'PDFリーダー'}</span>
 				<div className='max-w-[7rem] shrink md:max-w-none'><ReadingSaveStatus status={navigation.status} retry={navigation.retry} /></div>
