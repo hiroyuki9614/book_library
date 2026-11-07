@@ -31,7 +31,7 @@ vi.mock('@/features/components/PdfReader', async () => {
 		default: function PdfReaderStub({ bookId, bookTitle }: { bookId: number; bookTitle: string }) {
 			const [instance] = React.useState(() => ++mocks.readerMounts);
 			React.useEffect(() => () => { mocks.readerUnmounts += 1; }, []);
-			return React.createElement('div', { 'data-testid': 'reader-content', 'data-instance': String(instance) }, `PDF reader ${bookId}: ${bookTitle}`);
+			return React.createElement('div', { 'data-testid': 'reader-content', 'data-instance': String(instance), tabIndex: -1 }, `PDF reader ${bookId}: ${bookTitle}`);
 		},
 	};
 });
@@ -414,19 +414,22 @@ describe('cross-tab session refresh', () => {
 	});
 
 	test('a queued focus restoration cannot refocus account A during a newer account B validation', async () => {
-		const { getByText, getByRole } = await setup();
-		await expect.element(getByText(restrictedBook.title)).toBeInTheDocument();
+		const { getByTestId, getByRole } = await setup(['/reader/11']);
+		await expect.element(getByTestId('reader-content')).toBeInTheDocument();
 		await expect.element(getByRole('status')).not.toBeInTheDocument();
-		const oldRow = document.querySelector('[role="link"][aria-label="Account A restricted bookを読む"]') as HTMLElement;
-		expect(oldRow).toBeInstanceOf(HTMLElement);
-		oldRow.focus();
-		expect(document.activeElement).toBe(oldRow);
+		// Unlike a shelf row, the same-account reader remains mounted during /me.
+		const oldReader = document.querySelector('[data-testid="reader-content"]') as HTMLElement;
+		expect(oldReader).toBeInstanceOf(HTMLElement);
+		oldReader.focus();
+		expect(document.activeElement).toBe(oldReader);
 
 		const frames = new Map<number, FrameRequestCallback>();
+		const allScheduledFrames: FrameRequestCallback[] = [];
 		let nextFrameId = 1000;
 		const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
 			const id = ++nextFrameId;
 			frames.set(id, callback);
+			allScheduledFrames.push(callback);
 			return id;
 		});
 		const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id); });
@@ -437,7 +440,7 @@ describe('cross-tab session refresh', () => {
 			await expect.element(getByRole('status')).toBeInTheDocument();
 			await act(async () => resolveSame(adminUser));
 			await expect.element(getByRole('status')).not.toBeInTheDocument();
-			const priorCallbacks = [...frames.values()];
+			const priorCallbacks = [...allScheduledFrames];
 			expect(priorCallbacks.length).toBeGreaterThan(0);
 
 			let resolveOther!: (user: AuthenticatedUser) => void;
@@ -448,11 +451,11 @@ describe('cross-tab session refresh', () => {
 			// Invoke the captured stale callback even after cancellation to prove it
 			// rechecks the current auth state rather than trusting the old closure.
 			await act(async () => priorCallbacks.forEach((callback) => callback(performance.now())));
-			expect(document.activeElement).not.toBe(oldRow);
+			expect(document.activeElement).not.toBe(oldReader);
 
 			await act(async () => resolveOther(userB));
-			await expect.element(getByText(userBBook.title)).toBeInTheDocument();
-			expect(document.activeElement).not.toBe(oldRow);
+			await expect.element(getByRole('status')).not.toBeInTheDocument();
+			expect(document.activeElement).not.toBe(oldReader);
 		} finally {
 			requestFrame.mockRestore();
 			cancelFrame.mockRestore();
