@@ -219,7 +219,8 @@ describe('cross-tab session refresh', () => {
 		// Measure the settled baseline instead of treating a fetch count as API contract.
 		const readerEntryRefreshCount = mocks.getCurrentUser.mock.calls.length;
 		expect(readerEntryRefreshCount).toBeGreaterThanOrEqual(3);
-		const readerInstance = await getByTestId('reader-content').getAttribute('data-instance');
+		const readerMountCount = mocks.readerMounts;
+		expect(readerMountCount).toBe(1);
 		expect(mocks.readerUnmounts).toBe(0);
 
 		let resolveSameAccount!: (user: AuthenticatedUser) => void;
@@ -229,13 +230,13 @@ describe('cross-tab session refresh', () => {
 		await expect.poll(() => mocks.getCurrentUser.mock.calls.length).toBeGreaterThan(readerEntryRefreshCount);
 		await expect.element(getByRole('status')).toBeInTheDocument();
 		expect(mocks.readerUnmounts).toBe(0);
-		expect(await getByTestId('reader-content').getAttribute('data-instance')).toBe(readerInstance);
+		expect(mocks.readerMounts).toBe(readerMountCount);
 
 		await act(async () => resolveSameAccount(adminUser));
 		await expect.element(getByRole('status')).not.toBeInTheDocument();
 		await expect.element(getByTestId('reader-content')).toBeInTheDocument();
 		expect(mocks.readerUnmounts).toBe(0);
-		expect(await getByTestId('reader-content').getAttribute('data-instance')).toBe(readerInstance);
+		expect(mocks.readerMounts).toBe(readerMountCount);
 
 		let resolveHomeEntry!: (user: AuthenticatedUser) => void;
 		const homeEntryResponse = new Promise<AuthenticatedUser>((resolve) => { resolveHomeEntry = resolve; });
