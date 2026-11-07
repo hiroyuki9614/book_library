@@ -248,7 +248,7 @@ describe('cross-tab session refresh', () => {
 
 		mocks.getCurrentUser.mockImplementation(async () => nextUser);
 		if (nextUser.id === generalUser.id && nextUser.role === 'user') {
-			mocks.fetchBooks.mockImplementationOnce(async () => [generalBook]);
+			mocks.fetchBooks.mockImplementation(async () => [generalBook]);
 		}
 		let resolveIdentity!: (user: AuthenticatedUser) => void;
 		const nextIdentityResponse = new Promise<AuthenticatedUser>((resolve) => { resolveIdentity = resolve; });
