@@ -711,6 +711,80 @@ esac
         self.assertIn("runtime_identity_changed=false", source)
         self.assertIn('[[ "$runtime_identity_changed" == false \\', source)
 
+    def test_ordinary_crash_identity_accepts_mount_reordering_and_rejects_mutation_safely(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        helpers = re.search(
+            r"(?ms)^safe_mount_diff\(\) \{\n.*?^safe_volume_receipt\(\) \{",
+            source,
+        )
+        self.assertIsNotNone(helpers)
+        helper_source = helpers.group(0).removesuffix("safe_volume_receipt() {")
+        harness = "\n".join(
+            (
+                "set -euo pipefail",
+                helper_source,
+                "services=(db)",
+                "declare -A runtime_records=() volume_records=()",
+                'baseline_db="$1"; baseline_backend="$1"; baseline_frontend="$1"; baseline_nginx="$1"',
+                'baseline_postgres_volume="vol|local|created|project|postgres-data"',
+                'baseline_books_volume="books|local|created|project|book-files"',
+                'runtime_records[db]="$2"',
+                'volume_records[postgres-data]="${3:-$baseline_postgres_volume}"',
+                'volume_records[book-files]="$baseline_books_volume"',
+                "verify_ordinary_crash_identity",
+            )
+        )
+        before_mounts = (
+            '[{"Type":"bind","Source":"/private/belib/nginx.conf",'
+            '"Destination":"/etc/nginx/conf.d/default.conf","Mode":"ro","RW":false},'
+            '{"Type":"volume","Name":"books","Source":"/var/lib/books",'
+            '"Destination":"/books","Mode":"rw","RW":true}]'
+        )
+        reordered_mounts = (
+            '[{"Type":"volume","Name":"books","Source":"/var/lib/books",'
+            '"Destination":"/books","Mode":"rw","RW":true},'
+            '{"RW":false,"Mode":"ro","Destination":"/etc/nginx/conf.d/default.conf",'
+            '"Source":"/private/belib/nginx.conf","Type":"bind"}]'
+        )
+
+        def run_compare(after_mounts, after_id="a", after_volume=""):
+            before = f"a|sha256:image|project|db|unless-stopped|{before_mounts}"
+            after = f"{after_id}|sha256:image|project|db|unless-stopped|{after_mounts}"
+            return subprocess.run(
+                ["bash", "-c", harness, "ordinary-crash", before, after, after_volume],
+                cwd=ROOT,
+                env={**os.environ, "PATH": f"{self.bin_dir}:/usr/bin:/bin"},
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+        result = run_compare(reordered_mounts)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+
+        mutated = before_mounts.replace("/private/belib/nginx.conf", "/private/changed-secret.conf")
+        result = run_compare(mutated)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("service=db field=Mounts before_sha256=", result.stderr)
+        self.assertIn("Mounts[0].Source", result.stderr)
+        self.assertNotIn("/private", result.stdout + result.stderr)
+        self.assertNotIn("changed-secret", result.stdout + result.stderr)
+
+        result = run_compare(before_mounts, after_id="b")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("service=db field=Id before_sha256=", result.stderr)
+        self.assertNotIn("|sha256:image|", result.stdout + result.stderr)
+
+        result = run_compare(
+            before_mounts,
+            after_volume="vol|local|changed-created|project|postgres-data",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("service=postgres-data field=CreatedAt before_sha256=", result.stderr)
+        self.assertNotIn("changed-created", result.stdout + result.stderr)
+
     def test_docker_inventory_query_errors_fail_closed(self):
         queries = (
             "ps -q --no-trunc",

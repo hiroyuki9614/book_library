@@ -578,78 +578,6 @@ PYCRASH
   return 1
 }
 
-capture_runtime
-baseline_db_id="${runtime_ids[db]}"
-baseline_frontend_id="${runtime_ids[frontend]}"
-baseline_db_image="${runtime_images[db]}"
-baseline_frontend_image="${runtime_images[frontend]}"
-baseline_db="${runtime_records[db]}"
-baseline_backend="${runtime_records[backend]}"
-baseline_frontend="${runtime_records[frontend]}"
-baseline_nginx="${runtime_records[nginx]}"
-baseline_postgres_volume="${volume_records[postgres-data]}"
-baseline_books_volume="${volume_records[book-files]}"
-marker="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-docker compose --project-name "$project" --file "$compose_file" exec -T db \
-  psql -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-  -c "CREATE TABLE ci_recovery_probe (marker text PRIMARY KEY); INSERT INTO ci_recovery_probe VALUES ('$marker');" >/dev/null
-synthetic_restore_drill "$marker"
-
-crash_owned_service frontend "$baseline_frontend_id" "$baseline_frontend_image"
-wait_service_running frontend "$baseline_frontend_id" "$baseline_frontend_image"
-wait_for_http_recovery
-capture_runtime
-crash_owned_service db "$baseline_db_id" "$baseline_db_image"
-wait_service_running db "$baseline_db_id" "$baseline_db_image"
-wait_db_healthy "$baseline_db_id"
-db_continuity="$(docker compose --project-name "$project" --file "$compose_file" exec -T db \
-  psql -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-  -c "SELECT count(*) = 1 AND min(marker) = '$marker' FROM ci_recovery_probe;")"
-[[ "$db_continuity" == t ]] || { echo "Synthetic DB marker lost after ordinary crash" >&2; exit 1; }
-wait_for_http_recovery
-capture_runtime
-[[ "${runtime_records[db]}" == "$baseline_db" && "${runtime_records[backend]}" == "$baseline_backend" \
-  && "${runtime_records[frontend]}" == "$baseline_frontend" && "${runtime_records[nginx]}" == "$baseline_nginx" \
-  && "${volume_records[postgres-data]}" == "$baseline_postgres_volume" \
-  && "${volume_records[book-files]}" == "$baseline_books_volume" ]] || {
-  echo "Identity changed during ordinary crash recovery" >&2
-  exit 1
-}
-
-capture_runtime
-echo "Restarting Docker only on the guarded GitHub-hosted VM"
-sudo systemctl restart docker
-for attempt in {1..60}; do
-  docker info >/dev/null 2>&1 && break
-  [[ "$attempt" != 60 ]] || { echo "Disposable Docker daemon did not return" >&2; exit 1; }
-  sleep 2
-done
-for service in "${services[@]}"; do
-  wait_service_running "$service" "${runtime_ids[$service]}" "${runtime_images[$service]}"
-done
-wait_db_healthy "${runtime_ids[db]}"
-wait_for_http_recovery
-db_continuity="$(docker compose --project-name "$project" --file "$compose_file" exec -T db \
-  psql -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-  -c "SELECT count(*) = 1 AND min(marker) = '$marker' FROM ci_recovery_probe;")"
-[[ "$db_continuity" == t ]] || { echo "Synthetic DB marker lost after Docker daemon restart" >&2; exit 1; }
-verify_post_restart_network_identity() {
-  local expected="$1" observed
-  if ! observed="$(docker network inspect --format '{{.Name}}|{{.Internal}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}' "$network" 2>/dev/null)"; then
-    echo "Synthetic Compose network identity changed after daemon restart" >&2
-    echo "Expected network receipt: $expected" >&2
-    echo "Observed network receipt: unavailable (Docker network inspect failed)" >&2
-    return 1
-  fi
-  if [[ "$observed" != "$expected" ]]; then
-    echo "Synthetic Compose network identity changed after daemon restart" >&2
-    echo "Expected network receipt: $expected" >&2
-    echo "Observed network receipt: $observed" >&2
-    return 1
-  fi
-}
-verify_post_restart_network_identity "$network_identity"
-capture_runtime
 safe_runtime_receipt() {
   local record="$1" id image project_label service_label restart mount_record mounts_hash
   IFS='|' read -r id image project_label service_label restart mount_record <<<"$record"
@@ -747,12 +675,150 @@ same_runtime_identity() {
   [[ "$before_id|$before_image|$before_project|$before_service|$before_restart" == \
     "$after_id|$after_image|$after_project|$after_service|$after_restart" ]]
 }
+sha256_value() {
+  printf '%s' "$1" | sha256sum | cut -d' ' -f1
+}
+verify_ordinary_crash_identity() {
+  local service before_record after_record before_id before_image before_project before_service before_restart before_mounts
+  local after_id after_image after_project after_service after_restart after_mounts mount_diff field before_value after_value
+  local volume before_volume after_volume before_name before_driver before_created before_project_label before_logical
+  local after_name after_driver after_created after_project_label after_logical
+  local changed=false
+  for service in "${services[@]}"; do
+    case "$service" in
+      db) before_record="$baseline_db" ;;
+      backend) before_record="$baseline_backend" ;;
+      frontend) before_record="$baseline_frontend" ;;
+      nginx) before_record="$baseline_nginx" ;;
+    esac
+    after_record="${runtime_records[$service]}"
+    IFS='|' read -r before_id before_image before_project before_service before_restart before_mounts <<<"$before_record"
+    IFS='|' read -r after_id after_image after_project after_service after_restart after_mounts <<<"$after_record"
+    if ! same_runtime_identity "$before_record" "$after_record"; then
+      changed=true
+    fi
+    for field in Id Image ComposeProject ComposeService RestartPolicy; do
+      case "$field" in
+        Id) before_value="$before_id"; after_value="$after_id" ;;
+        Image) before_value="$before_image"; after_value="$after_image" ;;
+        ComposeProject) before_value="$before_project"; after_value="$after_project" ;;
+        ComposeService) before_value="$before_service"; after_value="$after_service" ;;
+        RestartPolicy) before_value="$before_restart"; after_value="$after_restart" ;;
+      esac
+      if [[ "$before_value" != "$after_value" ]]; then
+        changed=true
+        printf 'Ordinary-crash identity mismatch: service=%s field=%s before_sha256=%s after_sha256=%s\n' \
+          "$service" "$field" "$(sha256_value "$before_value")" "$(sha256_value "$after_value")" >&2
+      fi
+    done
+    if ! mount_diff="$(safe_mount_diff "$before_record" "$after_record")"; then
+      changed=true
+      printf 'Ordinary-crash identity mismatch: service=%s field=Mounts before_sha256=%s after_sha256=%s\n' \
+        "$service" "$(sha256_value "$before_mounts")" "$(sha256_value "$after_mounts")" >&2
+      [[ -z "$mount_diff" ]] || printf '%s\n' "$mount_diff" >&2
+    fi
+  done
+  for volume in postgres-data book-files; do
+    case "$volume" in
+      postgres-data) before_volume="$baseline_postgres_volume" ;;
+      book-files) before_volume="$baseline_books_volume" ;;
+    esac
+    after_volume="${volume_records[$volume]}"
+    IFS='|' read -r before_name before_driver before_created before_project_label before_logical <<<"$before_volume"
+    IFS='|' read -r after_name after_driver after_created after_project_label after_logical <<<"$after_volume"
+    for field in Name Driver CreatedAt ComposeProject ComposeVolume; do
+      case "$field" in
+        Name) before_value="$before_name"; after_value="$after_name" ;;
+        Driver) before_value="$before_driver"; after_value="$after_driver" ;;
+        CreatedAt) before_value="$before_created"; after_value="$after_created" ;;
+        ComposeProject) before_value="$before_project_label"; after_value="$after_project_label" ;;
+        ComposeVolume) before_value="$before_logical"; after_value="$after_logical" ;;
+      esac
+      if [[ "$before_value" != "$after_value" ]]; then
+        changed=true
+        printf 'Ordinary-crash identity mismatch: service=%s field=%s before_sha256=%s after_sha256=%s\n' \
+          "$volume" "$field" "$(sha256_value "$before_value")" "$(sha256_value "$after_value")" >&2
+      fi
+    done
+  done
+  [[ "$changed" == false ]]
+}
 safe_volume_receipt() {
   local record="$1" name driver created_at project_label logical_name
   IFS='|' read -r name driver created_at project_label logical_name <<<"$record"
   printf 'name=%s driver=%s created_at=%s project=%s logical_name=%s' \
     "$name" "$driver" "$created_at" "$project_label" "$logical_name"
 }
+
+capture_runtime
+baseline_db_id="${runtime_ids[db]}"
+baseline_frontend_id="${runtime_ids[frontend]}"
+baseline_db_image="${runtime_images[db]}"
+baseline_frontend_image="${runtime_images[frontend]}"
+baseline_db="${runtime_records[db]}"
+baseline_backend="${runtime_records[backend]}"
+baseline_frontend="${runtime_records[frontend]}"
+baseline_nginx="${runtime_records[nginx]}"
+baseline_postgres_volume="${volume_records[postgres-data]}"
+baseline_books_volume="${volume_records[book-files]}"
+marker="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+docker compose --project-name "$project" --file "$compose_file" exec -T db \
+  psql -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "CREATE TABLE ci_recovery_probe (marker text PRIMARY KEY); INSERT INTO ci_recovery_probe VALUES ('$marker');" >/dev/null
+synthetic_restore_drill "$marker"
+
+crash_owned_service frontend "$baseline_frontend_id" "$baseline_frontend_image"
+wait_service_running frontend "$baseline_frontend_id" "$baseline_frontend_image"
+wait_for_http_recovery
+capture_runtime
+crash_owned_service db "$baseline_db_id" "$baseline_db_image"
+wait_service_running db "$baseline_db_id" "$baseline_db_image"
+wait_db_healthy "$baseline_db_id"
+db_continuity="$(docker compose --project-name "$project" --file "$compose_file" exec -T db \
+  psql -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT count(*) = 1 AND min(marker) = '$marker' FROM ci_recovery_probe;")"
+[[ "$db_continuity" == t ]] || { echo "Synthetic DB marker lost after ordinary crash" >&2; exit 1; }
+wait_for_http_recovery
+capture_runtime
+if ! verify_ordinary_crash_identity; then
+  echo "Identity changed during ordinary crash recovery" >&2
+  exit 1
+fi
+
+capture_runtime
+echo "Restarting Docker only on the guarded GitHub-hosted VM"
+sudo systemctl restart docker
+for attempt in {1..60}; do
+  docker info >/dev/null 2>&1 && break
+  [[ "$attempt" != 60 ]] || { echo "Disposable Docker daemon did not return" >&2; exit 1; }
+  sleep 2
+done
+for service in "${services[@]}"; do
+  wait_service_running "$service" "${runtime_ids[$service]}" "${runtime_images[$service]}"
+done
+wait_db_healthy "${runtime_ids[db]}"
+wait_for_http_recovery
+db_continuity="$(docker compose --project-name "$project" --file "$compose_file" exec -T db \
+  psql -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT count(*) = 1 AND min(marker) = '$marker' FROM ci_recovery_probe;")"
+[[ "$db_continuity" == t ]] || { echo "Synthetic DB marker lost after Docker daemon restart" >&2; exit 1; }
+verify_post_restart_network_identity() {
+  local expected="$1" observed
+  if ! observed="$(docker network inspect --format '{{.Name}}|{{.Internal}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}' "$network" 2>/dev/null)"; then
+    echo "Synthetic Compose network identity changed after daemon restart" >&2
+    echo "Expected network receipt: $expected" >&2
+    echo "Observed network receipt: unavailable (Docker network inspect failed)" >&2
+    return 1
+  fi
+  if [[ "$observed" != "$expected" ]]; then
+    echo "Synthetic Compose network identity changed after daemon restart" >&2
+    echo "Expected network receipt: $expected" >&2
+    echo "Observed network receipt: $observed" >&2
+    return 1
+  fi
+}
+verify_post_restart_network_identity "$network_identity"
+capture_runtime
 runtime_identity_changed=false
 for service in "${services[@]}"; do
   case "$service" in
