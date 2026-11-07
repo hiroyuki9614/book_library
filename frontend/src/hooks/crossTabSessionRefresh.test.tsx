@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
 	signOut: vi.fn(),
 	readerMounts: 0,
 	readerUnmounts: 0,
+	readerKeyTurns: 0,
 }));
 
 vi.mock('@/api/me', () => ({ getCurrentUser: mocks.getCurrentUser }));
@@ -34,7 +35,27 @@ vi.mock('@/features/components/PdfReader', async () => {
 		},
 	};
 });
-vi.mock('@/features/components/EpubReader', () => ({ default: () => null }));
+vi.mock('@/features/components/EpubReader', async () => {
+	const React = await import('react');
+	const { createPortal } = await import('react-dom');
+	return {
+		default: function EpubReaderStub() {
+			React.useEffect(() => {
+				const onKey = (event: KeyboardEvent) => {
+					if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') mocks.readerKeyTurns += 1;
+			};
+			document.addEventListener('keydown', onKey);
+			return () => document.removeEventListener('keydown', onKey);
+			}, []);
+			return createPortal(
+				<div data-slot='sheet-content' data-testid='reader-toc-portal' role='dialog' aria-label='Reader table of contents'>
+					<button type='button'>Reader chapter</button>
+				</div>,
+				document.body,
+			);
+		},
+	};
+});
 
 const adminUser: AuthenticatedUser = { id: 7, name: 'Admin A', email: 'a@example.com', role: 'admin' };
 const generalUser: AuthenticatedUser = { id: 7, name: 'Admin A', email: 'a@example.com', role: 'user' };
@@ -147,6 +168,7 @@ beforeEach(() => {
 	vi.resetAllMocks();
 	mocks.readerMounts = 0;
 	mocks.readerUnmounts = 0;
+	mocks.readerKeyTurns = 0;
 	originalVisibilityDescriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState');
 	setVisibilityState('visible');
 	mocks.getCurrentUser.mockResolvedValue(adminUser);
@@ -356,5 +378,38 @@ describe('cross-tab session refresh', () => {
 		await expect.element(getByRole('status')).toBeInTheDocument();
 		await act(async () => resolveHomeEntry(adminUser));
 		await expect.element(getByText(restrictedBook.title)).toBeInTheDocument();
+	});
+
+	test('identity checks hide a reader sheet portal and suppress reader Arrow keys until /me settles', async () => {
+		mocks.fetchBook.mockResolvedValue({ ...readerBook, fileType: 'epub' });
+		const { getByRole, getByTestId } = await setup(['/reader/11']);
+		await expect.element(getByTestId('reader-toc-portal')).toBeInTheDocument();
+		const toc = document.body.querySelector('[data-testid="reader-toc-portal"]')!;
+		const tocButton = toc.querySelector('button')!;
+		tocButton.focus();
+		expect(document.activeElement).toBe(tocButton);
+
+		const settledRequestCount = mocks.getCurrentUser.mock.calls.length;
+		let resolveIdentity!: (user: AuthenticatedUser) => void;
+		const identityResponse = new Promise<AuthenticatedUser>((resolve) => { resolveIdentity = resolve; });
+		mocks.getCurrentUser.mockImplementationOnce(() => identityResponse);
+		await act(async () => window.dispatchEvent(new Event('focus')));
+		await expect.poll(() => mocks.getCurrentUser.mock.calls.length).toBeGreaterThan(settledRequestCount);
+		await expect.element(getByRole('status')).toBeInTheDocument();
+
+		expect(toc).toHaveAttribute('aria-hidden', 'true');
+		expect(toc).toHaveAttribute('inert');
+		expect(getComputedStyle(toc).visibility).toBe('hidden');
+		expect(document.activeElement).not.toBe(tocButton);
+		const keyEvent = new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true });
+		document.dispatchEvent(keyEvent);
+		expect(keyEvent.defaultPrevented).toBe(true);
+		expect(mocks.readerKeyTurns).toBe(0);
+
+		await act(async () => resolveIdentity(adminUser));
+		await expect.element(getByRole('status')).not.toBeInTheDocument();
+		expect(toc).not.toHaveAttribute('aria-hidden');
+		expect(toc).not.toHaveAttribute('inert');
+		expect(getComputedStyle(toc).visibility).not.toBe('hidden');
 	});
 });
