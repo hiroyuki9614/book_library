@@ -1,4 +1,5 @@
 import { act, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { render } from 'vitest-browser-react';
@@ -91,7 +92,17 @@ function NavigationControls() {
 function AdminRouteContent() {
 	const { user } = useAuth();
 	const [loadedFor] = useState(() => user?.name ?? 'unknown user');
-	return <div data-testid='admin-private-row'>Admin data for {loadedFor}</div>;
+	return (
+		<>
+			<div data-testid='admin-private-row'>Admin data for {loadedFor}</div>
+			{createPortal(
+				<div data-testid='admin-sheet-portal' role='dialog' aria-label={`Admin sheet for ${loadedFor}`}>
+					<button type='button'>Save admin data for {loadedFor}</button>
+				</div>,
+				document.body,
+			)}
+		</>
+	);
 }
 
 function RoutedShelf({ initialEntries = ['/'] }: { initialEntries?: string[] }) {
@@ -239,10 +250,15 @@ describe('cross-tab session refresh', () => {
 			homeBook: null,
 			adminSnapshot: 'Admin data for Admin B',
 		},
-	])('$name masks then clears the previous admin view', async ({ nextUser, homeBook, adminSnapshot }) => {
+	])('$name unmounts admin content while identity is uncertain', async ({ nextUser, homeBook, adminSnapshot }) => {
 		const { getByRole, getByText, getByTestId } = await setup(['/admin']);
 		const adminRow = getByTestId('admin-private-row');
 		await expect.element(adminRow).toHaveTextContent('Admin data for Admin A');
+		const initialPortal = document.body.querySelector('[data-testid="admin-sheet-portal"]');
+		const initialPortalButton = initialPortal?.querySelector('button');
+		expect(initialPortal?.textContent).toContain('Save admin data for Admin A');
+		initialPortalButton?.focus();
+		expect(document.activeElement).toBe(initialPortalButton);
 		await expect.element(getByRole('status')).not.toBeInTheDocument();
 		const settledRequestCount = mocks.getCurrentUser.mock.calls.length;
 
@@ -257,19 +273,25 @@ describe('cross-tab session refresh', () => {
 		await act(async () => window.dispatchEvent(new Event('focus')));
 		await expect.poll(() => mocks.getCurrentUser.mock.calls.length).toBeGreaterThan(settledRequestCount);
 		await expect.element(getByRole('status')).toBeInTheDocument();
-		// The router outlet stays mounted under the inert hidden veil until /me resolves.
-		await expect.element(adminRow).toBeInTheDocument();
-		await expect.element(adminRow).not.toBeVisible();
-		const hiddenOutlet = document.querySelector('[aria-hidden="true"][inert]');
-		expect(hiddenOutlet?.textContent).toContain('Admin data for Admin A');
+		// Admin descendants are unmounted while identity is uncertain, including
+		// content portaled directly into document.body.
+		await expect.element(adminRow).not.toBeInTheDocument();
+		expect(document.body.querySelector('[data-testid="admin-sheet-portal"]')).toBeNull();
+		expect(document.body.textContent).not.toContain('Save admin data for Admin A');
+		expect(initialPortal?.isConnected).toBe(false);
+		expect(document.activeElement).not.toBe(initialPortalButton);
 
 		await act(async () => resolveIdentity(nextUser));
 		if (adminSnapshot) {
 			await expect.element(getByTestId('admin-private-row')).toHaveTextContent(adminSnapshot);
 			await expect.element(getByText('Admin data for Admin A')).not.toBeInTheDocument();
+			const resolvedPortal = document.body.querySelector('[data-testid="admin-sheet-portal"]');
+			expect(resolvedPortal).not.toBe(initialPortal);
+			await expect.element(document.body).toHaveTextContent('Save admin data for Admin B');
 		} else {
 			await expect.element(getByText(homeBook!.title)).toBeInTheDocument();
 			await expect.element(adminRow).not.toBeInTheDocument();
+			expect(document.body.querySelector('[data-testid="admin-sheet-portal"]')).toBeNull();
 		}
 	});
 

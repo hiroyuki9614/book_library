@@ -17,7 +17,9 @@ session revalidation for every authenticated route. Its router outlet stays
 mounted under an inert hidden veil until the current identity is confirmed.
 Book hooks retain route-entry revalidation without registering duplicate
 browser listeners. `RequireAdmin` redirects after role loss and remounts its
-nested view when the authenticated user or role changes. Same-session reader
+nested view when the authenticated user or role changes. It unmounts the admin
+outlet while any identity check is pending so body-mounted portals are removed;
+admin form state can reset during same-account focus checks. Same-session reader
 content remains mounted across focus checks. This is a candidate-only source
 change; no production or release action was performed.
 
