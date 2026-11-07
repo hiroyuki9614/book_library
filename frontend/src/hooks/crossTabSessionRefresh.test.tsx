@@ -80,6 +80,7 @@ function NavigationControls() {
 	return (
 		<nav>
 			<button type='button' onClick={() => navigate('/')}>Go home</button>
+			<button type='button' onClick={() => navigate('/reader/11')}>Go reader</button>
 		</nav>
 	);
 }
@@ -209,7 +210,9 @@ describe('cross-tab session refresh', () => {
 		await expect.element(getByText(restrictedBook.title)).toBeInTheDocument();
 		await expect.poll(() => mocks.getCurrentUser.mock.calls.length).toBe(2);
 
-		await getByRole('link', { name: `${restrictedBook.title}を読む` }).click();
+		// Navigate directly to the reader so this test isolates route retention
+		// from BookTable's separate row click/keyboard interaction tests.
+		await getByRole('button', { name: 'Go reader' }).click();
 		await expect.element(getByTestId('reader-content')).toBeInTheDocument();
 		await expect.poll(() => mocks.fetchBook).toHaveBeenCalled();
 		await expect.poll(() => mocks.getCurrentUser.mock.calls.length).toBe(3);
