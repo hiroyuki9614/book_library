@@ -204,9 +204,13 @@ describe('book state routes', () => {
 		});
 	});
 
-	test('一度completedになった書籍は途中位置を保存してもreadingへ戻らない', async () => {
-		mocks.readingInfoFindUnique.mockResolvedValue({ readStatus: 'completed' });
-		mocks.readingInfoUpdateMany.mockResolvedValue({ count: 0 });
+	test('一度completedになった書籍は途中位置へ更新してもcompleted・100%を維持する', async () => {
+		mocks.readingInfoUpdateMany
+			.mockResolvedValueOnce({ count: 0 })
+			.mockResolvedValueOnce({ count: 1 });
+		mocks.readingInfoFindUnique
+			.mockResolvedValueOnce({ currentPosition: '12', progressPercentage: 100, readStatus: 'completed' })
+			.mockResolvedValueOnce({ currentPosition: '3', progressPercentage: 100, readStatus: 'completed' });
 
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',
@@ -215,15 +219,19 @@ describe('book state routes', () => {
 		});
 
 		expect(response.status).toBe(200);
-		expect(mocks.readingInfoFindUnique).toHaveBeenCalledWith({
+		expect(mocks.readingInfoFindUnique).toHaveBeenNthCalledWith(1, {
 			where: { userId_bookId: { userId: 7, bookId: 1 } },
 			select: { currentPosition: true, progressPercentage: true, readStatus: true },
 		});
-		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
+		expect(mocks.readingInfoUpdateMany).toHaveBeenNthCalledWith(1, {
 			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: { not: 'completed' } },
 			data: { currentPosition: '3', readStatus: 'reading' },
 		});
+		expect(mocks.readingInfoUpdateMany).toHaveBeenNthCalledWith(2, {
+			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: 'completed' },
+			data: { currentPosition: '3', readStatus: 'completed', progressPercentage: 100 },
+		});
 		expect(mocks.readingInfoUpdate).not.toHaveBeenCalled();
-		expect(await response.json()).toEqual({ bookId: 1, currentPosition: null, currentPage: 1, progressPercentage: 100, readStatus: 'completed' });
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 100, readStatus: 'completed' });
 	});
 });

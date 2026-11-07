@@ -24,10 +24,14 @@ describe('persistReadingInfo', () => {
 		expect(toReadingProgress({ readStatus: 'reading', progressPercentage: null })).toBeNull();
 	});
 
-	test('atomically preserves completed status when an older reading save races it', async () => {
+	test('saves a reading position on a completed row without downgrading its status', async () => {
 		const persistence = createPersistence();
-		persistence.readingInfo.updateMany.mockResolvedValue({ count: 0 });
-		persistence.readingInfo.findUnique.mockResolvedValue({ currentPosition: '12', progressPercentage: 100, readStatus: 'completed' });
+		persistence.readingInfo.updateMany
+			.mockResolvedValueOnce({ count: 0 })
+			.mockResolvedValueOnce({ count: 1 });
+		persistence.readingInfo.findUnique
+			.mockResolvedValueOnce({ currentPosition: '12', progressPercentage: 100, readStatus: 'completed' })
+			.mockResolvedValueOnce({ currentPosition: '3', progressPercentage: 100, readStatus: 'completed' });
 
 		await expect(persistReadingInfo(persistence as never, {
 			userId: 7,
@@ -35,12 +39,17 @@ describe('persistReadingInfo', () => {
 			currentPosition: '3',
 			readStatus: 'reading',
 			progressPercentage: 25,
-		})).resolves.toEqual({ currentPosition: '12', progressPercentage: 100, readStatus: 'completed' });
+		})).resolves.toEqual({ currentPosition: '3', progressPercentage: 100, readStatus: 'completed' });
 
-		expect(persistence.readingInfo.updateMany).toHaveBeenCalledWith({
+		expect(persistence.readingInfo.updateMany).toHaveBeenNthCalledWith(1, {
 			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: { not: 'completed' } },
 			data: { currentPosition: '3', readStatus: 'reading', progressPercentage: 25 },
 		});
+		expect(persistence.readingInfo.updateMany).toHaveBeenNthCalledWith(2, {
+			where: { userId_bookId: { userId: 7, bookId: 1 }, readStatus: 'completed' },
+			data: { currentPosition: '3', readStatus: 'completed', progressPercentage: 100 },
+		});
+		expect(persistence.readingInfo.updateMany).toHaveBeenCalledTimes(2);
 		expect(persistence.readingInfo.update).not.toHaveBeenCalled();
 	});
 

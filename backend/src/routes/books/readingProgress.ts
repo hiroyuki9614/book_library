@@ -114,7 +114,19 @@ export async function persistReadingInfo(
 			select: { currentPosition: true, progressPercentage: true, readStatus: true },
 		});
 		if (existing?.readStatus === 'completed') {
-			return existing;
+			const completedUpdate = await prisma.readingInfo.updateMany({
+				where: { ...where, readStatus: 'completed' },
+				data: {
+					currentPosition: input.currentPosition,
+					readStatus: 'completed',
+					progressPercentage: 100,
+				},
+			});
+			if (completedUpdate.count > 0) {
+				const saved = await prisma.readingInfo.findUnique({ where });
+				if (saved) return saved;
+			}
+			continue;
 		}
 		if (existing) continue;
 
