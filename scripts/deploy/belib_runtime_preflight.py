@@ -126,7 +126,12 @@ def assess(snapshot, expected_head):
             and item.get("health") in {"healthy", "unhealthy", "starting", "not_configured", "none"},
             f"SERVICE_{name.upper()}_HEALTH_INVALID",
         )
-        require(item.get("health") == "healthy", f"SERVICE_{name.upper()}_NOT_HEALTHY")
+        accepted_health = {"healthy", "not_configured"} if name in {"frontend", "nginx"} else {"healthy"}
+        health = item.get("health")
+        require(
+            isinstance(health, str) and health in accepted_health,
+            f"SERVICE_{name.upper()}_NOT_HEALTHY",
+        )
         require(item.get("restart") == "unless-stopped", f"SERVICE_{name.upper()}_RESTART_MISMATCH")
         expected_image_id = item.get("expected_image_id")
         observed_image_id = item.get("observed_image_id")

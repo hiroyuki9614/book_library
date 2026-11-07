@@ -45,7 +45,7 @@ def healthy_snapshot():
                 "runc_state": "running",
                 "task_container_id": f"{index:012x}",
                 "runc_container_id": f"{index:012x}",
-                "health": "healthy",
+                "health": "not_configured" if name in {"frontend", "nginx"} else "healthy",
                 "restart": "unless-stopped",
                 "expected_image_id": f"sha256:{index:064x}",
                 "observed_image_id": f"sha256:{index:064x}",
@@ -158,6 +158,41 @@ class ReadOnlyPreflightTests(unittest.TestCase):
         self.assertEqual(report["authorization"], "NONE")
         self.assertFalse(report["mutation_attempted"])
 
+    def test_db_and_backend_without_healthchecks_remain_unhealthy(self):
+        for name in ("db", "backend"):
+            with self.subTest(service=name):
+                evidence = healthy_snapshot()
+                evidence["services"][name]["health"] = "not_configured"
+                report = assess(evidence, HEAD)
+                self.assertEqual(report["decision"], "SERVICE_UNHEALTHY")
+                self.assertIn(f"SERVICE_{name.upper()}_NOT_HEALTHY", report["reason_codes"])
+                self.assertEqual(report["authorization"], "NONE")
+                self.assertFalse(report["mutation_attempted"])
+                self.assertFalse(report["safe_to_repair"])
+
+    def test_frontend_and_nginx_unhealthy_or_starting_block(self):
+        for name in ("frontend", "nginx"):
+            for health in ("unhealthy", "starting"):
+                with self.subTest(service=name, health=health):
+                    evidence = healthy_snapshot()
+                    evidence["services"][name]["health"] = health
+                    report = assess(evidence, HEAD)
+                    self.assertEqual(report["decision"], "SERVICE_UNHEALTHY")
+                    self.assertIn(f"SERVICE_{name.upper()}_NOT_HEALTHY", report["reason_codes"])
+                    self.assertEqual(report["authorization"], "NONE")
+                    self.assertFalse(report["mutation_attempted"])
+                    self.assertFalse(report["safe_to_repair"])
+
+    def test_frontend_and_nginx_explicitly_healthy_are_accepted(self):
+        evidence = healthy_snapshot()
+        evidence["services"]["frontend"]["health"] = "healthy"
+        evidence["services"]["nginx"]["health"] = "healthy"
+        report = assess(evidence, HEAD)
+        self.assertEqual(report["decision"], "READY_FOR_OWNER_REVIEW")
+        self.assertEqual(report["authorization"], "NONE")
+        self.assertFalse(report["mutation_attempted"])
+        self.assertFalse(report["safe_to_repair"])
+
     def test_duplicate_container_ids_block(self):
         evidence = healthy_snapshot()
         evidence["services"]["nginx"]["container_id"] = evidence["services"]["db"]["container_id"]
@@ -204,7 +239,7 @@ class ReadOnlyPreflightTests(unittest.TestCase):
         evidence["services"]["db"]["volumes"] = ["other-project_data"]
         self.assert_shared_failure(evidence, "SERVICE_DB_VOLUME_MISMATCH")
 
-    def test_namespace_error_blocks(self):
+    def test_namespace_error_blocks_with_realistic_frontend_health(self):
         evidence = healthy_snapshot()
         evidence["runtime"]["namespace_error"] = True
         self.assert_shared_failure(evidence, "NAMESPACE_ERROR")
