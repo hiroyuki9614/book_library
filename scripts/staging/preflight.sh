@@ -30,6 +30,7 @@ rev="$(sed -n 's/^BELIB_STAGE_VCS_REF=//p' "$file")"
 [[ "$port" =~ ^[0-9]{4,5}$ && "$port" -ge 1024 && "$port" -le 65535 ]] || fail 'Invalid loopback port'
 [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || fail 'Revision must be full lowercase 40-character Git SHA'
 [[ "$(git -C "$root" rev-parse HEAD)" == "$rev" ]] || fail 'Checked-out Git HEAD differs from staging revision'
+[[ -z "$(git -C "$root" status --porcelain)" ]] || fail 'Dirty source tree: fixed staging SHA cannot describe local changes'
 # URL-safe, no delimiter characters: DB password is interpolated into the backend DATABASE_URL.
 grep -Eq '^BELIB_STAGE_DB_PASSWORD=[a-f0-9]{64}$' "$file" || fail 'DB password must be local 64-character hex'
 grep -Eq '^BELIB_STAGE_AUTH_SECRET=[a-f0-9]{64}$' "$file" || fail 'Auth secret must be local 64-character hex'
