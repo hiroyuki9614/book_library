@@ -90,7 +90,8 @@ services:
     networks: [isolated]
 
 networks:
-  isolated: {}
+  isolated:
+    internal: true
 
 volumes:
   staging-postgres-data: {}
