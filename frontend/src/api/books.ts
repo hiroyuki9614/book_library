@@ -23,6 +23,7 @@ type BooksResponse = {
 };
 
 const BOOKS_PAGE_LIMIT = 100;
+const READING_SESSION_USER_HEADER = 'X-BeLib-User-Id';
 
 function throwIfAborted(signal?: AbortSignal) {
 	if (signal?.aborted) {
@@ -48,15 +49,19 @@ function toFrontendBook(book: BookDetails): Book {
 	};
 }
 
-export async function fetchBooks(signal?: AbortSignal) {
+export async function fetchBooks(expectedUserId: number, signal?: AbortSignal) {
 	const books: Book[] = [];
 	let page = 1;
 
 	while (true) {
 		throwIfAborted(signal);
+		const requestOptions: RequestInit = {
+			headers: { [READING_SESSION_USER_HEADER]: String(expectedUserId) },
+		};
+		if (signal) requestOptions.signal = signal;
 		const response = await apiFetch<BooksResponse>(
 			`/api/v1/books?page=${page}&limit=${BOOKS_PAGE_LIMIT}`,
-			signal ? { signal } : undefined,
+			requestOptions,
 		);
 		throwIfAborted(signal);
 		books.push(...response.books.map(toFrontendBook));

@@ -114,6 +114,9 @@ app.get('/', async (c) => {
 	try {
 		const user = await getAuthenticatedUser(c);
 		if (!user) return jsonError(c, 401, 'Authentication required', 'UNAUTHORIZED');
+		if (hasReadingSessionUserMismatch(c.req.header(READING_SESSION_USER_HEADER), user.id)) {
+			return jsonError(c, 409, 'Book list request is bound to a different authenticated user', 'READING_SESSION_MISMATCH');
+		}
 
 		const page = Math.max(1, Number(c.req.query('page') ?? 1) || 1);
 		const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') ?? 20) || 20));

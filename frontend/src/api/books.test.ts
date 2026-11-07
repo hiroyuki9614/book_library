@@ -34,10 +34,13 @@ describe('books API client', () => {
 			),
 		);
 
-		await expect(fetchBooks()).resolves.toMatchObject([
+		await expect(fetchBooks(7)).resolves.toMatchObject([
 			{ id: 1, title: 'Phase 3 PDF', author: 'BeLib', status: 'Reading', fileType: 'pdf', progressPercentage: 40 },
 		]);
-		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/books?page=1&limit=100', expect.objectContaining({ credentials: 'include' }));
+		expect(fetch).toHaveBeenCalledWith('http://localhost:3000/api/v1/books?page=1&limit=100', expect.objectContaining({
+			credentials: 'include',
+			headers: { 'X-BeLib-User-Id': '7' },
+		}));
 	});
 
 	test('一覧APIを100件ずつページングして101冊目以降も画面へ渡す', async () => {
@@ -62,11 +65,69 @@ describe('books API client', () => {
 				headers: { 'Content-Type': 'application/json' },
 			}));
 
-		const books = await fetchBooks();
+		const books = await fetchBooks(7);
 
 		expect(books).toHaveLength(101);
 		expect(books.at(-1)).toMatchObject({ id: 101, progressPercentage: 100 });
-		expect(fetch).toHaveBeenNthCalledWith(2, 'http://localhost:3000/api/v1/books?page=2&limit=100', expect.objectContaining({ credentials: 'include' }));
+		expect(fetch).toHaveBeenNthCalledWith(1, 'http://localhost:3000/api/v1/books?page=1&limit=100', expect.objectContaining({
+			credentials: 'include',
+			headers: { 'X-BeLib-User-Id': '7' },
+		}));
+		expect(fetch).toHaveBeenNthCalledWith(2, 'http://localhost:3000/api/v1/books?page=2&limit=100', expect.objectContaining({
+			credentials: 'include',
+			headers: { 'X-BeLib-User-Id': '7' },
+		}));
+	});
+
+	test('ページ取得中にcookie accountが切り替わるとabortなしでも別accountのページを混在させない', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		let cookieUserId = 8;
+		const makeBook = (id: number, title: string) => ({
+			id,
+			title,
+			authorName: 'BeLib',
+			category: { id: 1, name: '技術書' },
+			readStatus: 'reading',
+			progressPercentage: null,
+			hasFile: false,
+			fileType: null,
+			createdAt: '2026-08-01T00:00:00.000Z',
+			updatedAt: '2026-08-01T00:00:00.000Z',
+		});
+		const account8Books = Array.from({ length: 100 }, (_, index) => makeBook(index + 1, `Account 8 book ${index + 1}`));
+		const account7Book = makeBook(101, 'Account 7 restricted book');
+		const page1 = new Response(JSON.stringify({ total: 101, page: 1, limit: 100, books: account8Books }), {
+			headers: { 'Content-Type': 'application/json' },
+		});
+		const page2 = new Response(JSON.stringify({ total: 101, page: 2, limit: 100, books: [account7Book] }), {
+			headers: { 'Content-Type': 'application/json' },
+		});
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+			const expectedUserId = new Headers(init?.headers).get('X-BeLib-User-Id');
+			if (cookieUserId === 8) {
+				cookieUserId = 7;
+				return page1;
+			}
+			if (expectedUserId !== null && Number(expectedUserId) !== cookieUserId) {
+				return new Response(JSON.stringify({
+					message: 'Book list request is bound to a different authenticated user',
+					code: 'READING_SESSION_MISMATCH',
+				}), { status: 409, headers: { 'Content-Type': 'application/json' } });
+			}
+			return page2;
+		});
+
+		await expect(fetchBooks(8)).rejects.toThrow('API request failed: 409');
+
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(fetch).toHaveBeenNthCalledWith(1, 'http://localhost:3000/api/v1/books?page=1&limit=100', expect.objectContaining({
+			credentials: 'include',
+			headers: { 'X-BeLib-User-Id': '8' },
+		}));
+		expect(fetch).toHaveBeenNthCalledWith(2, 'http://localhost:3000/api/v1/books?page=2&limit=100', expect.objectContaining({
+			credentials: 'include',
+			headers: { 'X-BeLib-User-Id': '8' },
+		}));
 	});
 
 	test('認証sessionがページ取得中に変わったら次ページの別アカウント書籍を混在させない', async () => {
@@ -97,11 +158,17 @@ describe('books API client', () => {
 				}));
 			});
 
-		await expect(fetchBooks(controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+		await expect(fetchBooks(8, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
 
 		expect(fetch).toHaveBeenCalledTimes(2);
-		expect(fetch).toHaveBeenNthCalledWith(1, 'http://localhost:3000/api/v1/books?page=1&limit=100', expect.objectContaining({ signal: controller.signal }));
-		expect(fetch).toHaveBeenNthCalledWith(2, 'http://localhost:3000/api/v1/books?page=2&limit=100', expect.objectContaining({ signal: controller.signal }));
+		expect(fetch).toHaveBeenNthCalledWith(1, 'http://localhost:3000/api/v1/books?page=1&limit=100', expect.objectContaining({
+			signal: controller.signal,
+			headers: { 'X-BeLib-User-Id': '8' },
+		}));
+		expect(fetch).toHaveBeenNthCalledWith(2, 'http://localhost:3000/api/v1/books?page=2&limit=100', expect.objectContaining({
+			signal: controller.signal,
+			headers: { 'X-BeLib-User-Id': '8' },
+		}));
 	});
 
 	test('PDF file APIをcookie付きで呼び出しBlobを返す', async () => {

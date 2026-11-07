@@ -87,6 +87,50 @@ describe('book state routes', () => {
 		}));
 	});
 
+	test('一覧はcookie session userと期待userが異なる場合に409を返し書籍検索しない', async () => {
+		const response = await app.request('/', { headers: { 'X-BeLib-User-Id': '8' } });
+
+		expect(response.status).toBe(409);
+		expect(await response.json()).toMatchObject({
+			message: 'Book list request is bound to a different authenticated user',
+			code: 'READING_SESSION_MISMATCH',
+		});
+		expect(mocks.userFindFirst).toHaveBeenCalledWith({
+			where: { id: 7 },
+			select: { id: true, roleId: true },
+		});
+		expect(mocks.bookCount).not.toHaveBeenCalled();
+		expect(mocks.bookFindMany).not.toHaveBeenCalled();
+	});
+
+	test('期待user headerがあっても未認証なら401を返す', async () => {
+		mocks.getSession.mockResolvedValue(null);
+
+		const response = await app.request('/', { headers: READING_HEADERS });
+
+		expect(response.status).toBe(401);
+		expect(await response.json()).toMatchObject({ code: 'UNAUTHORIZED' });
+		expect(mocks.bookCount).not.toHaveBeenCalled();
+		expect(mocks.bookFindMany).not.toHaveBeenCalled();
+	});
+
+	test('一覧はcookie session userと一致した期待userに許可書籍と本人の進捗を返す', async () => {
+		mocks.bookCount.mockResolvedValue(1);
+		mocks.bookFindMany.mockResolvedValue([book]);
+
+		const response = await app.request('/', { headers: READING_HEADERS });
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({
+			total: 1,
+			books: [{ id: 1, title: 'TypeScript実践', readStatus: 'reading', progressPercentage: 42 }],
+		});
+		expect(mocks.bookFindMany).toHaveBeenCalledWith(expect.objectContaining({
+			where: { deletedAt: null, roleBookPermissions: { some: { roleId: 2 } } },
+			include: expect.objectContaining({ readingInfos: { where: { userId: 7 }, take: 1 } }),
+		}));
+	});
+
 	test('一覧は未読0%、読了100%、未計測の読書中をnullへ正規化する', async () => {
 		mocks.bookCount.mockResolvedValue(3);
 		mocks.bookFindMany.mockResolvedValue([

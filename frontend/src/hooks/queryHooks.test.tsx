@@ -74,7 +74,7 @@ describe('React Query hooks', () => {
 		await expect.poll(() => result.current.isLoading).toBe(false);
 		expect(result.current.books).toEqual(books);
 		expect(result.current.isError).toBe(false);
-		expect(mocks.fetchBooks).toHaveBeenCalledWith(expect.any(AbortSignal));
+		expect(mocks.fetchBooks).toHaveBeenCalledWith(7, expect.any(AbortSignal));
 	});
 
 	test('useBooks does not expose one account books while another account is loading', async () => {
@@ -114,6 +114,8 @@ describe('React Query hooks', () => {
 		expect(result.current.books).toEqual([]);
 		expect(result.current.isLoading).toBe(true);
 		expect(mocks.fetchBooks).toHaveBeenCalledTimes(2);
+		expect(mocks.fetchBooks).toHaveBeenNthCalledWith(1, 7, expect.any(AbortSignal));
+		expect(mocks.fetchBooks).toHaveBeenNthCalledWith(2, 8, expect.any(AbortSignal));
 
 		await act(async () => {
 			resolveAccount8(account8Books);

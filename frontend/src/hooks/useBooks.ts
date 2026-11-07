@@ -11,7 +11,10 @@ export default function useBooks() {
 		isError,
 	} = useQuery({
 		queryKey: ['books', 'list', userId],
-		queryFn: ({ signal }) => fetchBooks(signal),
+		queryFn: ({ signal }) => {
+			if (userId === null) throw new Error('Cannot fetch books without an authenticated user');
+			return fetchBooks(userId, signal);
+		},
 		enabled: userId !== null,
 	});
 
