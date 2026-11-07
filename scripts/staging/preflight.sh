@@ -36,7 +36,20 @@ grep -Eq '^BELIB_STAGE_DB_PASSWORD=[a-f0-9]{64}$' "$file" || fail 'DB password m
 grep -Eq '^BELIB_STAGE_AUTH_SECRET=[a-f0-9]{64}$' "$file" || fail 'Auth secret must be local 64-character hex'
 
 command -v docker >/dev/null || fail 'Docker CLI missing; do not install with sudo'
-docker info --format '{{.ServerVersion}}' >/dev/null || fail 'Current nonroot user has no Docker access'
+# CLI access does not prove rootless: docker-group access to a rootful daemon is forbidden.
+# Resolve the effective endpoint, including DOCKER_CONTEXT/DOCKER_HOST overrides.
+rootless_socket="unix:///run/user/$(id -u)/docker.sock"
+if [[ -n "${DOCKER_CONTEXT:-}" ]]; then
+  docker_endpoint="$(docker context inspect "$DOCKER_CONTEXT" --format '{{ (index .Endpoints "docker").Host }}')" || fail 'Cannot resolve Docker context'
+elif [[ -n "${DOCKER_HOST:-}" ]]; then
+  docker_endpoint="$DOCKER_HOST"
+else
+  docker_endpoint="$(docker context inspect "$(docker context show)" --format '{{ (index .Endpoints "docker").Host }}')" || fail 'Cannot resolve current Docker context'
+fi
+[[ "$docker_endpoint" == "$rootless_socket" ]] || fail 'Docker endpoint is not this i5 user rootless socket; rootful/remote daemon forbidden'
+docker_identity="$(docker info --format '{{.Name}}|{{json .SecurityOptions}}')" || fail 'Current nonroot user has no Docker access'
+[[ "$docker_identity" == "ubuntu-worker|"* ]] || fail 'Docker daemon is not on the expected i5 host'
+[[ "$docker_identity" == *'"name=rootless"'* ]] || fail 'Docker daemon does not report rootless security option'
 docker compose version >/dev/null || fail 'Docker Compose plugin unavailable'
 
 free_kib="$(df -Pk "$root" | awk 'END {print $4}')"
