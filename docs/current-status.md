@@ -138,6 +138,8 @@ Current behavior:
 - books are filtered by `RoleBookPermission` and logical deletion state.
 - list/detail/file/reading-info use the same role-based authorization boundary.
 - list joins only the current user's `ReadingInfo` and returns the persisted `readStatus`.
+- the shelf and reader refresh the current session when their tab regains focus and hide account-scoped book data while that refresh is pending.
+- book-list and reading-info requests that provide an expected user ID reject a mismatch with the cookie session; legacy reading-info callers may omit the hint.
 - list supports `page`, `limit`, `q`, and `categoryId`; the Home client retrieves all authorized pages in batches capped at 100 records so its summary is not limited to the first page.
 - `q` searches title and author name case-insensitively and is limited to 100 characters.
 - `categoryId` must be a positive integer.

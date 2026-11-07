@@ -170,7 +170,7 @@ app.get('/:bookId/reading-info', async (c) => {
 	try {
 		const bookId = parseBookId(c.req.param('bookId'));
 		if (!bookId) return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
-		const result = await getAuthorizedReadingContext(c, bookId);
+		const result = await getAuthorizedReadingContext(c, bookId, true);
 		if ('response' in result) return result.response;
 
 		const readingInfo = await result.prisma.readingInfo.findUnique({

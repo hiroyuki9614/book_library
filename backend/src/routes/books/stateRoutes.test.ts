@@ -208,6 +208,36 @@ describe('book state routes', () => {
 		expect(await response.json()).toMatchObject({ bookId: 1, currentPage: 3, progressPercentage: 25, readStatus: 'reading' });
 	});
 
+	test('reading-info GETは一致する期待user headerを受け入れ本人の記録を読む', async () => {
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '3', progressPercentage: 25, readStatus: 'reading' });
+
+		const response = await app.request('/1/reading-info', { headers: READING_HEADERS });
+
+		expect(response.status).toBe(200);
+		expect(mocks.readingInfoFindUnique).toHaveBeenCalledWith({ where: { userId_bookId: { userId: 7, bookId: 1 } } });
+	});
+
+	test('reading-info GETは異なる期待user headerを409で拒否し読書記録に触れない', async () => {
+		const response = await app.request('/1/reading-info', { headers: { 'X-BeLib-User-Id': '8' } });
+
+		expect(response.status).toBe(409);
+		expect(await response.json()).toMatchObject({ code: 'READING_SESSION_MISMATCH' });
+		expect(mocks.bookFindUnique).toHaveBeenCalledWith({ where: { id: 1 }, select: { id: true, deletedAt: true } });
+		expect(mocks.permissionFindUnique).toHaveBeenCalledWith({ where: { roleId_bookId: { roleId: 2, bookId: 1 } }, select: { id: true } });
+		expect(mocks.readingInfoFindUnique).not.toHaveBeenCalled();
+	});
+
+	test('reading-info GETは期待user headerがあっても未認証なら401を返す', async () => {
+		mocks.getSession.mockResolvedValue(null);
+
+		const response = await app.request('/1/reading-info', { headers: READING_HEADERS });
+
+		expect(response.status).toBe(401);
+		expect(await response.json()).toMatchObject({ code: 'UNAUTHORIZED' });
+		expect(mocks.bookFindUnique).not.toHaveBeenCalled();
+		expect(mocks.readingInfoFindUnique).not.toHaveBeenCalled();
+	});
+
 	test('権限のないreading-infoは不一致ヒントがあっても403を優先する', async () => {
 		mocks.permissionFindUnique.mockResolvedValue(null);
 

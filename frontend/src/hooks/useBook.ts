@@ -2,8 +2,10 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchBook, type BookDetails } from '@/api/books';
 import { useAuth } from '@/contexts/useAuth';
+import useRefreshAuthOnFocus from './useRefreshAuthOnFocus';
 
 export default function useBook(id: number) {
+ useRefreshAuthOnFocus();
  const { user, isPending } = useAuth();
  const userId = isPending ? null : user?.id ?? null;
  const validId = Number.isSafeInteger(id) && id > 0;

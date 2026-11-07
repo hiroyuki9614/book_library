@@ -158,7 +158,8 @@ paths:
         progressPercentageはIssue #90のowner-requested exceptionとして、現在ユーザーの
         ReadingInfoに保存したreader計測スナップショットから返す。未読は0、読了は100、
         読書中で有効なreader計測値がない場合はnull。X-BeLib-User-Idは互換用の任意の
-        hintであり、GETでは省略できる。
+        hintであり、省略できる。指定された場合は書籍閲覧権限の確認後、Cookie sessionの
+        user IDと一致することを確認する。
       responses:
         '200':
           description: Reading info
@@ -172,6 +173,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/BookNotFound'
+        '409':
+          $ref: '#/components/responses/ReadingSessionMismatch'
         '500':
           $ref: '#/components/responses/InternalError'
     patch:
@@ -418,7 +421,7 @@ components:
       name: X-BeLib-User-Id
       in: header
       required: false
-      description: Optional expected authenticated user ID hint; it does not grant access. The book list GET and reading-info PATCH reject an explicitly mismatched hint. Legacy callers may omit it.
+      description: Optional expected authenticated user ID hint; it does not grant access. The book list GET and reading-info GET/PATCH reject an explicitly mismatched hint. Legacy callers may omit it.
       schema:
         type: integer
         minimum: 1
