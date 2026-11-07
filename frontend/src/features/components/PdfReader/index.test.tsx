@@ -129,6 +129,29 @@ describe('PdfReader navigation, outline, and progress', () => {
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 	});
 
+
+	test.each([
+		{ currentPage: 1, totalPages: 7, expected: '1 / 7 ページ 14%' },
+		{ currentPage: 2, totalPages: 7, expected: '2 / 7 ページ 29%' },
+		{ currentPage: 5, totalPages: 8, expected: '5 / 8 ページ 63%' },
+		{ currentPage: 7, totalPages: 7, expected: '7 / 7 ページ 100%' },
+	])('PDFの読書進捗を整数表示する ($currentPage/$totalPages)', async ({ currentPage, totalPages, expected }) => {
+		mocks.scrollState.currentPage = currentPage;
+		mocks.scrollState.totalPages = totalPages;
+		mocks.viewportScrollState.currentPage = currentPage;
+		mocks.viewportScrollState.totalPages = totalPages;
+		mocks.scrollProvides.getCurrentPage.mockReturnValue(currentPage);
+		mocks.fetchReadingInfo.mockResolvedValue({
+			bookId: 7,
+			currentPosition: String(currentPage),
+			currentPage,
+			readStatus: 'reading',
+		});
+		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await expect.element(getByTestId('pdf-reader-footer')).toHaveTextContent(expected);
+	});
+
+
 	test('同じ本でuserIdが変わるとPDFの復元ページを新しいユーザーから読み直す', async () => {
 		mocks.fetchReadingInfo.mockImplementation((_bookId: number, userId: number) => Promise.resolve({
 			bookId: 7,
