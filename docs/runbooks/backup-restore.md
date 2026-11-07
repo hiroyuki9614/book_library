@@ -43,3 +43,19 @@ Restore into isolated resources with isolated credentials and no public exposure
 Start the candidate application against the isolated pair only after integrity checks. The restore is accepted only when smoke proves database records and an authorized protected-file stream, including the evidenced `/api/v1/books/:bookId/file` route, work together. A successful database restore without matching storage-object evidence is not recovery evidence.
 
 Record isolated resource identifiers, backup IDs, checksums, restore logs, schema version, smoke request outcomes, and approver. Do not use real books or credentials in synthetic drills. No recovery claim is permitted until the database, active-storage evidence, and application smoke are accepted.
+
+### Resource-only feasibility screen
+
+`scripts/ops/restore_resource_check.py` is an offline, read-only resource screen for an existing proposed destination directory. It reads that directory's filesystem free-byte count, `/proc/meminfo` `MemAvailable`, and `/proc/pressure/io` `full` averages. It does not inspect a backup, database, Docker, R2, or recovery state. Run it on the proposed destination host, supplying minima and pressure caps selected by the authorized operator for the specific recovery plan:
+
+```sh
+# Set these shell variables to the approved operator-selected values first.
+python3 scripts/ops/restore_resource_check.py \
+  --target /approved/existing/destination \
+  --min-free-bytes "$MIN_FREE_BYTES" \
+  --min-memavailable-bytes "$MIN_MEMAVAILABLE_BYTES" \
+  --max-io-full-avg10 "$MAX_IO_FULL_AVG10" \
+  --max-io-full-avg60 "$MAX_IO_FULL_AVG60"
+```
+
+Every option is required. For input sanity only, the checker rejects free-space minima below 1 GiB and available-memory minima below 512 MiB; these floors are not sizing recommendations or evidence that a recovery fits. Missing or unreadable inputs, unavailable sensors, invalid thresholds, and resource shortfalls return JSON `BLOCK_UNMEASURED` or `BLOCK_RESOURCE` with a nonzero exit. `RESOURCE_CANDIDATE_ONLY` with exit 0 means only that the sampled aggregate measurements met the supplied thresholds. It does not establish an approved destination, isolation, archive validity, source consistency, or safe operations, and it never authorizes a restore. Continue to require independent approval and the complete isolated restore procedure above. Unit tests use temporary directories and mock sensor files only.
