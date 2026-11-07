@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { epubFixture } from './fixtures';
 
 // Observe production-built Tailwind CSS, not Vitest's unstyled component DOM.
@@ -12,15 +12,58 @@ async function useProtectedBook(page: Page, file: Buffer, kind: 'epub' | 'pdf') 
 	}));
 }
 
-async function checkSheet(page: Page, label: string, viewportWidth: number) {
+async function checkZoomControls(sheet: Locator, label: string) {
+	const zoomOut = sheet.getByRole('button', { name: '縮小', exact: true });
+	const zoomIn = sheet.getByRole('button', { name: '拡大', exact: true });
+	const fitWidth = sheet.getByRole('button', { name: '倍率をリセット', exact: true });
+	const toolbar = zoomOut.locator('..');
+	const percentage = toolbar.getByText(/^\d+%$/);
+	await expect(fitWidth).toHaveText('ページ幅に合わせる');
+	const sheetBounds = await sheet.boundingBox();
+	// The mobile section excludes the scroll container's padding; desktop uses its settings content div.
+	const contentBounds = await toolbar.locator('..').boundingBox();
+	expect(sheetBounds).not.toBeNull();
+	expect(contentBounds).not.toBeNull();
+	for (const [name, control] of [['toolbar', toolbar], ['zoom out', zoomOut], ['percentage', percentage], ['zoom in', zoomIn], ['fit width', fitWidth]] as const) {
+		await expect(control).toBeVisible();
+		const bounds = await control.boundingBox();
+		expect(bounds, `${label}: ${name} must have measurable bounds`).not.toBeNull();
+		for (const [region, container] of [['Sheet', sheetBounds!], ['active content', contentBounds!]] as const) {
+			expect(bounds!.x, `${label}: ${name} left inside ${region}`).toBeGreaterThanOrEqual(container.x - 1);
+			expect(bounds!.y, `${label}: ${name} top inside ${region}`).toBeGreaterThanOrEqual(container.y - 1);
+			expect(bounds!.x + bounds!.width, `${label}: ${name} right inside ${region}`).toBeLessThanOrEqual(container.x + container.width + 1);
+			expect(bounds!.y + bounds!.height, `${label}: ${name} bottom inside ${region}`).toBeLessThanOrEqual(container.y + container.height + 1);
+		}
+		if (name !== 'toolbar' && name !== 'percentage') {
+			expect(bounds!.width, `${label}: ${name} hit target width`).toBeGreaterThanOrEqual(44);
+			expect(bounds!.height, `${label}: ${name} hit target height`).toBeGreaterThanOrEqual(44);
+		}
+	}
+	const readZoom = async () => Number((await percentage.innerText()).replace('%', ''));
+	const initialZoom = await readZoom();
+	await zoomOut.click();
+	await expect.poll(readZoom).toBeLessThan(initialZoom);
+	const reducedZoom = await readZoom();
+	await fitWidth.click();
+	await expect.poll(readZoom).toBeGreaterThan(reducedZoom);
+	const fittedZoom = await percentage.innerText();
+	await zoomIn.click();
+	await expect.poll(readZoom).toBeGreaterThan(Number(fittedZoom.replace('%', '')));
+	await fitWidth.click();
+	await expect(percentage).toHaveText(fittedZoom);
+}
+
+async function checkSheet(page: Page, label: string, viewportWidth: number, hasZoomControls = false) {
 	const sheet = page.locator('[data-slot="sheet-content"][data-side="right"]');
 	await expect(sheet).toBeVisible();
+	await expect(sheet).toBeInViewport({ ratio: 1 });
 	const bounds = await sheet.boundingBox();
 	expect(bounds, `${label}: reader sheet must have measurable bounds`).not.toBeNull();
 	const desiredWidth = viewportWidth < 640 ? Math.min(208, viewportWidth - 16) : 224;
 	expect(bounds!.width, `${label}: compact width`).toBeCloseTo(desiredWidth, 0);
 	expect(bounds!.x, `${label}: panel must fit within viewport`).toBeGreaterThanOrEqual(-1);
 	expect(bounds!.x + bounds!.width, `${label}: no horizontal overflow`).toBeLessThanOrEqual(viewportWidth + 1);
+	if (hasZoomControls) await checkZoomControls(sheet, label);
 	await page.keyboard.press('Escape');
 	await expect(sheet).not.toBeVisible();
 }
@@ -39,14 +82,14 @@ test('EPUB reader TOC and display settings stay compact in actual built CSS at m
 	}
 });
 
-test('PDF reader TOC, settings and mobile actions stay compact in actual built CSS', async ({ page, browser }) => {
-	test.setTimeout(150_000);
-	const pdfSource = await browser.newPage();
-	await pdfSource.setContent('<h1>Reader sheet test</h1><p>Synthetic PDF page.</p>');
-	const pdf = await pdfSource.pdf();
-	await pdfSource.close();
-	await useProtectedBook(page, pdf, 'pdf');
-	for (const width of [320, 393, 1280, 1440, 1663]) {
+for (const width of [320, 393, 1280, 1440, 1663]) {
+	test(`PDF reader Sheet content and zoom controls stay contained and operable at ${width}px in actual built CSS`, async ({ page, browser }) => {
+		test.setTimeout(150_000);
+		const pdfSource = await browser.newPage();
+		await pdfSource.setContent('<h1>Reader sheet test</h1><p>Synthetic PDF page.</p>');
+		const pdf = await pdfSource.pdf();
+		await pdfSource.close();
+		await useProtectedBook(page, pdf, 'pdf');
 		await page.setViewportSize({ width, height: 851 });
 		await page.goto('/e2e/readers/harness.html?kind=pdf');
 		await expect(page.getByTestId('pdf-viewport')).toBeVisible({ timeout: 45_000 });
@@ -54,12 +97,23 @@ test('PDF reader TOC, settings and mobile actions stay compact in actual built C
 		await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45_000 });
 		if (width < 768) {
 			await page.getByRole('button', { name: '操作メニューを開く' }).click();
-			await checkSheet(page, `PDF mobile controls ${width}`, width);
+			await checkSheet(page, `PDF mobile controls ${width}`, width, true);
 		} else {
 			await page.getByRole('button', { name: '目次', exact: true }).click();
 			await checkSheet(page, `PDF TOC ${width}`, width);
 			await page.getByRole('button', { name: '表示設定', exact: true }).click();
-			await checkSheet(page, `PDF settings ${width}`, width);
+			await checkSheet(page, `PDF settings ${width}`, width, true);
+			const footerReset = page.getByTestId('pdf-reader-footer').getByRole('button', { name: '倍率をリセット', exact: true });
+			const footerToolbar = footerReset.locator('..');
+			const centers = await footerToolbar.locator(':scope > *').evaluateAll((controls) => controls.map((control) => {
+				const bounds = control.getBoundingClientRect();
+				return bounds.y + bounds.height / 2;
+			}));
+			expect(centers).toHaveLength(4);
+			for (const center of centers) expect(center, 'desktop footer zoom controls stay in one row').toBeCloseTo(centers[0], 0);
+			await expect(footerReset).toHaveText('Reset');
+			await footerReset.click();
+			await expect(footerToolbar.getByText('100%', { exact: true })).toBeVisible();
 		}
-	}
-});
+	});
+}
