@@ -1,6 +1,6 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-11-05
+- Updated: 2026-11-07
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
 - Current main checkpoint for the scoped frontend release candidate: `f8d69c7f1f9a6676ff268ef3da7d815232a779d2`
 - The prior 2026-10-27 implementation snapshot remains historical; this scoped update does not refresh unrelated R2 or portfolio branch state.
@@ -8,7 +8,18 @@
 - The owner reports that the checkpoint above was deployed frontend-only at 2026-10-31 18:42:59 JST with image `sha256:49bf745ed0f5b7fd3d8951d64cbeed51d33034c762eed93547be8081c71f63c9`; this candidate did not independently read back that running image identity.
 - Candidate scope, test evidence and release holds: [2026-10-31 frontend candidate record](records/2026-10-31-frontend-candidate.md).
 - The portfolio MVP is live. The detailed immutable deployment and production-browser evidence is in [the 2026-10-26 production release record](records/2026-10-26-mvp-production-release.md).
-- Scoped update (2026-11-05): Issue #90 shelf actions and per-user reading percentage candidate below; this is not a production acceptance.
+- Scoped update (2026-11-07): authenticated-route session revalidation and stale Admin view masking candidate below; this is not a production acceptance.
+
+## 2026-11-07 authenticated-route revalidation candidate
+
+The `RequireAuth` boundary now owns focus, visibility-return and `pageshow`
+session revalidation for every authenticated route. Its router outlet stays
+mounted under an inert hidden veil until the current identity is confirmed.
+Book hooks retain route-entry revalidation without registering duplicate
+browser listeners. `RequireAdmin` redirects after role loss and remounts its
+nested view when the authenticated user or role changes. Same-session reader
+content remains mounted across focus checks. This is a candidate-only source
+change; no production or release action was performed.
 
 ## 2026-11-05 Issue #90 shelf actions and reading percentage candidate
 
@@ -138,7 +149,7 @@ Current behavior:
 - books are filtered by `RoleBookPermission` and logical deletion state.
 - list/detail/file/reading-info use the same role-based authorization boundary.
 - list joins only the current user's `ReadingInfo` and returns the persisted `readStatus`.
-- the shelf and reader refresh the current session when their tab regains focus and hide account-scoped book data while that refresh is pending.
+- the authenticated route boundary refreshes the current session when the tab regains focus or returns visible, and hides account-scoped route content while that refresh is pending.
 - book-list and reading-info requests that provide an expected user ID reject a mismatch with the cookie session; legacy reading-info callers may omit the hint.
 - list supports `page`, `limit`, `q`, and `categoryId`; the Home client retrieves all authorized pages in batches capped at 100 records so its summary is not limited to the first page.
 - `q` searches title and author name case-insensitively and is limited to 100 characters.

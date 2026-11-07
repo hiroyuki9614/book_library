@@ -1,10 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
 import { fetchBooks } from '@/api/books';
 import { useAuth } from '@/contexts/useAuth';
-import useRefreshAuthOnFocus from './useRefreshAuthOnFocus';
+import { useRefreshAuthOnMount } from './useRefreshAuthOnFocus';
 
 export default function useBooks() {
-	const refreshState = useRefreshAuthOnFocus();
+	const refreshState = useRefreshAuthOnMount();
 	const { user, isPending } = useAuth();
 	const userId = user?.id ?? null;
 	const role = user?.role ?? null;

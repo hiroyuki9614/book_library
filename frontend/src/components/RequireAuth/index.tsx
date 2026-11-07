@@ -1,12 +1,14 @@
 import { Navigate, useOutlet } from 'react-router-dom';
 import { useAuth } from '@/contexts/useAuth';
-import { useAuthRefreshState } from '@/hooks/useRefreshAuthOnFocus';
+import useRefreshAuthOnFocus from '@/hooks/useRefreshAuthOnFocus';
 
 const RequireAuth = () => {
 	const { isAuthenticated, isPending } = useAuth();
-	const refreshState = useAuthRefreshState();
+	const refreshState = useRefreshAuthOnFocus(isAuthenticated);
 	const outlet = useOutlet();
-	const isIdentityUncertain = isPending || refreshState.isRefreshing;
+	const isIdentityUncertain = isPending
+		|| refreshState.isRefreshing
+		|| (isAuthenticated && !refreshState.hasValidated);
 
 	if (!isAuthenticated) {
 		if (isPending) return <div>Loading...</div>;

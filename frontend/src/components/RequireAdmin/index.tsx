@@ -1,16 +1,26 @@
-import { Navigate, Outlet } from 'react-router-dom';
+import { Navigate, useOutlet } from 'react-router-dom';
 import { useAuth } from '@/contexts/useAuth';
 
 export default function RequireAdmin() {
-	const { role, isPending } = useAuth();
+	const { user, role, isPending } = useAuth();
+	const outlet = useOutlet();
 
-	if (isPending) {
+	if (isPending && !user) {
 		return <div>Loading...</div>;
 	}
 
-	if (role !== 'admin') {
+	if (!isPending && role !== 'admin') {
 		return <Navigate to='/' replace />;
 	}
 
-	return <Outlet />;
+	return (
+		<div
+			key={`${user?.id ?? ''}:${role}`}
+			aria-hidden={isPending ? 'true' : undefined}
+			inert={isPending}
+			style={isPending ? { display: 'contents', visibility: 'hidden' } : { display: 'contents' }}
+		>
+			{outlet}
+		</div>
+	);
 }

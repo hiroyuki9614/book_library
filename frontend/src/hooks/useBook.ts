@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchBook, type BookDetails } from '@/api/books';
 import { useAuth } from '@/contexts/useAuth';
-import useRefreshAuthOnFocus from './useRefreshAuthOnFocus';
+import { useRefreshAuthOnMount } from './useRefreshAuthOnFocus';
 
 type BookEntry = {
 	userId: number | null;
@@ -11,7 +11,7 @@ type BookEntry = {
 };
 
 export default function useBook(id: number) {
-	const refreshState = useRefreshAuthOnFocus();
+	const refreshState = useRefreshAuthOnMount();
 	const { user, isPending } = useAuth();
 	const userId = user?.id ?? null;
 	const role = user?.role ?? null;

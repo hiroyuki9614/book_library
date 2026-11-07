@@ -13,7 +13,7 @@ type RefreshCoordinator = {
 	listeners: Set<() => void>;
 	isRunning: boolean;
 	runAgain: boolean;
-	refresh: () => Promise<void>;
+	refresh: (queueIfRunning?: boolean) => Promise<void>;
 };
 
 const coordinators = new WeakMap<AuthContextType['refreshAuth'], RefreshCoordinator>();
@@ -29,9 +29,9 @@ function getCoordinator(refreshAuth: AuthContextType['refreshAuth']) {
 		runAgain: false,
 		refresh: async () => undefined,
 	};
-	coordinator.refresh = async () => {
+	coordinator.refresh = async (queueIfRunning = true) => {
 		if (coordinator.isRunning) {
-			coordinator.runAgain = true;
+			if (queueIfRunning) coordinator.runAgain = true;
 			return;
 		}
 
@@ -84,30 +84,43 @@ export function useAuthRefreshState() {
 	return useRefreshSnapshot(getCoordinator(refreshAuth));
 }
 
-export default function useRefreshAuthOnFocus() {
+export function useRefreshAuthOnMount(enabled = true) {
 	const { refreshAuth } = useAuth();
 	const coordinator = getCoordinator(refreshAuth);
 	const snapshot = useRefreshSnapshot(coordinator);
 
 	useEffect(() => {
+		if (enabled) void coordinator.refresh(false);
+	}, [coordinator, enabled]);
+
+	return snapshot;
+}
+
+export default function useRefreshAuthOnFocus(enabled = true) {
+	const { refreshAuth } = useAuth();
+	const coordinator = getCoordinator(refreshAuth);
+	const snapshot = useRefreshSnapshot(coordinator);
+
+	useEffect(() => {
+		if (!enabled) return;
+
 		const refreshWhenVisible = () => {
-			if (document.visibilityState === 'visible') void coordinator.refresh();
+			if (document.visibilityState === 'visible') void coordinator.refresh(true);
 		};
 
 		window.addEventListener('focus', refreshWhenVisible);
 		window.addEventListener('pageshow', refreshWhenVisible);
 		document.addEventListener('visibilitychange', refreshWhenVisible);
-		// A route may be entered while the window is already visible, without a
-		// focus or visibility event. Revalidate every time an authorized data
-		// entry point mounts.
-		refreshWhenVisible();
+		// The authenticated boundary owns this one listener set and its initial
+		// validation. Data-entry hooks request a non-queued refresh on mount.
+		if (document.visibilityState === 'visible') void coordinator.refresh(false);
 
 		return () => {
 			window.removeEventListener('focus', refreshWhenVisible);
 			window.removeEventListener('pageshow', refreshWhenVisible);
 			document.removeEventListener('visibilitychange', refreshWhenVisible);
 		};
-	}, [coordinator]);
+	}, [coordinator, enabled]);
 
 	return snapshot;
 }
