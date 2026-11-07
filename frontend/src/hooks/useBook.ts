@@ -6,7 +6,6 @@ import useRefreshAuthOnFocus from './useRefreshAuthOnFocus';
 
 type BookEntry = {
 	userId: number | null;
-	role: string | null;
 	id: number;
 	book: BookDetails | null;
 };
@@ -17,7 +16,7 @@ export default function useBook(id: number) {
 	const userId = user?.id ?? null;
 	const role = user?.role ?? null;
 	const validId = Number.isSafeInteger(id) && id > 0;
-	const [entry, setEntry] = useState<BookEntry>({ userId, role, id, book: null });
+	const [entry, setEntry] = useState<BookEntry>({ userId, id, book: null });
 	const query = useQuery({
 		queryKey: ['books', 'detail', userId, role, id],
 		queryFn: () => fetchBook(id),
@@ -28,15 +27,15 @@ export default function useBook(id: number) {
 
 	// A new route or identity can use cached metadata only after its own fresh
 	// authorization request. An already-open same-account reader keeps its
-	// accepted entry during later focus refreshes, including a permission loss.
+	// accepted entry during later focus refreshes or a same-user role downgrade.\n\t// A new reader mount has no accepted entry and must pass fresh authorization.
 	const verifiedBook = userId !== null && query.isSuccess && query.isFetchedAfterMount ? query.data : null;
-	if (!Object.is(entry.userId, userId) || !Object.is(entry.role, role) || !Object.is(entry.id, id)) {
-		setEntry({ userId, role, id, book: verifiedBook ?? null });
+	if (!Object.is(entry.userId, userId) || !Object.is(entry.id, id)) {
+		setEntry({ userId, id, book: verifiedBook ?? null });
 	} else if (verifiedBook && entry.book !== verifiedBook) {
-		setEntry({ userId, role, id, book: verifiedBook });
+		setEntry({ userId, id, book: verifiedBook });
 	}
 
-	const book = userId !== null && Object.is(entry.userId, userId) && Object.is(entry.role, role) && Object.is(entry.id, id)
+	const book = userId !== null && Object.is(entry.userId, userId) && Object.is(entry.id, id)
 		? entry.book
 		: null;
 	const error = userId === null || book ? null : query.error;
