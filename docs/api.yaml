@@ -30,9 +30,11 @@ paths:
       summary: 閲覧権限のある書籍一覧を取得
       description: |
         RoleBookPermissionで現在ユーザーのroleに許可された、論理削除されていない書籍だけを返す。
-        一覧のreadStatusは現在ユーザーのReadingInfoから取得する。
+        一覧のreadStatusとprogressPercentageは現在ユーザーのReadingInfoから取得する。
         EPUBとPDFの両方が存在する場合はEPUBを優先する。
+        X-BeLib-User-Idはcookie sessionで認証したユーザーIDへの任意の期待値hint。認可には使用せず、指定値とcookie sessionのユーザーが異なる場合は409を返す。省略時は従来どおり動作する。
       parameters:
+        - $ref: '#/components/parameters/ReadingSessionUserId'
         - name: page
           in: query
           schema:
@@ -81,6 +83,8 @@ paths:
           $ref: '#/components/responses/InvalidRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/ReadingSessionMismatch'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -145,11 +149,17 @@ paths:
   /books/{bookId}/reading-info:
     parameters:
       - $ref: '#/components/parameters/BookId'
+      - $ref: '#/components/parameters/ReadingSessionUserId'
     get:
       summary: 現在ユーザーの読書情報を取得
       description: |
         currentPositionはPDFではページ番号文字列、EPUBではCFIを保持できる。
         numeric currentPositionの場合は互換用currentPageにも復元する。
+        progressPercentageはIssue #90のowner-requested exceptionとして、現在ユーザーの
+        ReadingInfoに保存したreader計測スナップショットから返す。未読は0、読了は100、
+        読書中で有効なreader計測値がない場合はnull。X-BeLib-User-Idは互換用の任意の
+        hintであり、省略できる。指定された場合は書籍閲覧権限の確認後、Cookie sessionの
+        user IDと一致することを確認する。
       responses:
         '200':
           description: Reading info
@@ -163,6 +173,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/BookNotFound'
+        '409':
+          $ref: '#/components/responses/ReadingSessionMismatch'
         '500':
           $ref: '#/components/responses/InternalError'
     patch:
@@ -170,6 +182,11 @@ paths:
       description: |
         currentPageまたはcurrentPositionのどちらか一方だけを受け取る。
         currentPageは既存PDF caller互換。
+        progressPercentageはreaderが有効なcurrent/totalから計算できた0〜100の整数、
+        または計測不能を表すnull。Issue #90のowner-requested exceptionとして既存の
+        ReadingInfoへ保存する。省略時は既存値を保持する。X-BeLib-User-Idが指定された場合に
+        現在のCookie sessionと一致しない保存は拒否する。hintの照合は書籍の存在と
+        RoleBookPermissionの確認後に行い、hintを省略した既存callerも受け入れる。
         readStatusを省略した場合はreading。明示値はreadingまたはcompleted。
       requestBody:
         required: true
@@ -194,6 +211,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/BookNotFound'
+        '409':
+          $ref: '#/components/responses/ReadingSessionMismatch'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -398,6 +417,15 @@ components:
         type: integer
         minimum: 1
 
+    ReadingSessionUserId:
+      name: X-BeLib-User-Id
+      in: header
+      required: false
+      description: Optional expected authenticated user ID hint; it does not grant access. The book list GET and reading-info GET/PATCH reject an explicitly mismatched hint. Legacy callers may omit it.
+      schema:
+        type: integer
+        minimum: 1
+
   responses:
     InvalidRequest:
       description: Invalid request
@@ -431,6 +459,12 @@ components:
             $ref: '#/components/schemas/Error'
     Conflict:
       description: Duplicate file content or one-file-per-book conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ReadingSessionMismatch:
+      description: The request's expected authenticated user does not match the Cookie session.
       content:
         application/json:
           schema:
@@ -484,7 +518,7 @@ components:
 
     Book:
       type: object
-      required: [id, title, category, pageTurnDirection, readStatus, hasFile, createdAt, updatedAt]
+      required: [id, title, category, pageTurnDirection, readStatus, progressPercentage, hasFile, createdAt, updatedAt]
       properties:
         id:
           type: integer
@@ -512,6 +546,12 @@ components:
           type: string
           enum: [unread, reading, completed]
           description: Current user's persisted ReadingInfo state for list/detail responses.
+        progressPercentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: Current user's progress. Unread is 0, completed is 100, and an unmeasured in-progress book is null.
         hasFile:
           type: boolean
         fileType:
@@ -534,7 +574,7 @@ components:
 
     ReadingInfo:
       type: object
-      required: [bookId, currentPosition, currentPage, readStatus]
+      required: [bookId, currentPosition, currentPage, progressPercentage, readStatus]
       properties:
         bookId:
           type: integer
@@ -547,6 +587,12 @@ components:
           type: integer
           minimum: 1
           description: Numeric compatibility projection; EPUB CFI returns 1 here.
+        progressPercentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: Nullable reader-derived snapshot persisted per user and book for the Issue #90 §6.8 exception; null when an in-progress position has not been measured.
         readStatus:
           type: string
           enum: [unread, reading, completed]
@@ -559,6 +605,11 @@ components:
         currentPage:
           type: integer
           minimum: 1
+        progressPercentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
         readStatus:
           type: string
           enum: [reading, completed]
@@ -574,6 +625,11 @@ components:
           minLength: 1
           maxLength: 255
           description: EPUB CFI or another supported textual reading position.
+        progressPercentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
         readStatus:
           type: string
           enum: [reading, completed]

@@ -28,7 +28,14 @@ type RuntimeBook = Omit<Book, 'locations'> & {
 const EPUB_LOCATION_BREAK_SIZE = 1600;
 const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
-function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection }) {
+function getEpubProgressPercentage(index: number, total: number, atStart: boolean, atEnd: boolean) {
+	if (atEnd) return 100;
+	if (atStart) return 0;
+	if (!Number.isSafeInteger(index) || !Number.isSafeInteger(total) || index < 0 || total <= 0 || index > total) return null;
+	return Math.round((index / total) * 100);
+}
+
+function EpubReaderSession({ bookId, bookTitle, pageTurnDirection, userId }: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection; userId?: number }) {
 	const viewerRef = useRef<HTMLDivElement | null>(null);
 	const currentCfiRef = useRef('');
 	const renditionRef = useRef<RuntimeRendition | null>(null);
@@ -57,8 +64,8 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [currentHref, setCurrentHref] = useState('');
 	const setTocVisible = (open: boolean) => { tocOpenRef.current = open; setTocOpen(open); };
-	const storageKey = `reader-location:${bookId}`;
-	const { save, status, retry } = useReadingSave(bookId);
+	const storageKey = userId === undefined ? `reader-location:${bookId}` : `reader-location:${userId}:${bookId}`;
+	const { save, status, retry } = useReadingSave(bookId, userId);
 
 	const enqueue = useCallback((action: (rendition: Rendition) => unknown) => {
 		const rendition = renditionRef.current;
@@ -89,7 +96,8 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 					setIsLoading(false);
 				}
 			});
-		void fetchReadingInfo(bookId)
+		const readingInfoRequest = userId === undefined ? fetchReadingInfo(bookId) : fetchReadingInfo(bookId, userId);
+		void readingInfoRequest
 			.then((info) => {
 				if (!active) return;
 				// A successful server response is authoritative, including a fresh book.
@@ -107,7 +115,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 		return () => {
 			active = false;
 		};
-	}, [bookId, storageKey]);
+	}, [bookId, storageKey, userId]);
 
 	useEffect(() => {
 		const viewer = viewerRef.current;
@@ -138,7 +146,8 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 				|| (location.start.index === 0 && location.start.displayed?.page === 1),
 			);
 			initialLocation = cfi;
-			setPercentage(location.atEnd ? 100 : atPublicationStart ? 0 : index >= 0 && last > 0 ? Math.round((index / last) * 100) : null);
+			const progressPercentage = getEpubProgressPercentage(index, last, atPublicationStart, Boolean(location.atEnd));
+			setPercentage(progressPercentage);
 			setCurrentPage(location.atEnd ? last + 1 : atPublicationStart ? 1 : index >= 0 && last > 0 ? index + 1 : 0);
 			setCurrentHref(location.start.href ?? '');
 			setTotalPage(last >= 0 ? last + 1 : 0);
@@ -147,7 +156,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 			if (readyToPersist) {
 				currentCfiRef.current = cfi;
 				localStorage.setItem(storageKey, cfi);
-				save(cfi, location.atEnd ? 'completed' : 'reading');
+				save(cfi, location.atEnd ? 'completed' : 'reading', progressPercentage);
 			}
 		};
 		const onKey = (event: KeyboardEvent) => {
@@ -485,6 +494,11 @@ function SpreadSelect({ id, spread, disabled, onChange }: { id?: string; spread:
 			</SelectContent>
 		</Select>
 	);
+}
+
+function EpubReader(props: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection; userId?: number }) {
+	const readerKey = `${props.bookId}:${props.userId === undefined ? 'anonymous' : props.userId}`;
+	return <EpubReaderSession key={readerKey} {...props} />;
 }
 
 export default EpubReader;

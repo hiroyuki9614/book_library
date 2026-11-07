@@ -200,6 +200,7 @@ export const ReadingInfoScalarFieldEnum = {
   createdAt: 'createdAt',
   updatedAt: 'updatedAt',
   currentPosition: 'currentPosition',
+  progressPercentage: 'progressPercentage',
   readStatus: 'readStatus',
   userId: 'userId',
   bookId: 'bookId'
