@@ -23,7 +23,7 @@ type CommandButtonProps = {
 
 const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageInput, handleGoToPage, pageTurnDirection = 'ltr' }: CommandButtonProps) => {
 	if (!prevResolved || !prevResolved.visible) return null;
-	const percentage = state.totalPages > 0 ? Math.round((state.currentPage / state.totalPages) * 1000) / 10 : null;
+	const percentage = state.totalPages > 0 ? Math.round((state.currentPage / state.totalPages) * 100) : null;
 
 	return (
 		<div style={{flexDirection:pageTurnDirection === 'rtl' ? 'row-reverse' : 'row'}} className='flex flex-wrap items-center justify-center gap-2'>
