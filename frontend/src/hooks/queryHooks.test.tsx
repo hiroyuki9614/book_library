@@ -12,7 +12,9 @@ const mocks = vi.hoisted(() => ({
 	fetchBook: vi.fn(),
 	readingProgressesApiMock: vi.fn(),
 	userApiMock: vi.fn(),
+	refreshAuth: vi.fn(),
 	authUserId: 7 as number | null,
+	authRole: 'user' as const,
 	authIsPending: false,
 }));
 
@@ -32,7 +34,9 @@ vi.mock('@/mocks/userApiMock', () => ({
 vi.mock('@/contexts/useAuth', () => ({
 	useAuth: () => ({
 		user: mocks.authUserId === null ? null : { id: mocks.authUserId },
+		role: mocks.authUserId === null ? null : mocks.authRole,
 		isPending: mocks.authIsPending,
+		refreshAuth: mocks.refreshAuth,
 	}),
 }));
 
@@ -59,7 +63,9 @@ afterEach(() => {
 	vi.clearAllMocks();
 	vi.restoreAllMocks();
 	mocks.authUserId = 7;
+	mocks.authRole = 'user';
 	mocks.authIsPending = false;
+	mocks.refreshAuth = vi.fn();
 });
 
 describe('React Query hooks', () => {

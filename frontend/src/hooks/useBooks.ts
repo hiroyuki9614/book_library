@@ -4,25 +4,34 @@ import { useAuth } from '@/contexts/useAuth';
 import useRefreshAuthOnFocus from './useRefreshAuthOnFocus';
 
 export default function useBooks() {
-	useRefreshAuthOnFocus();
+	const refreshState = useRefreshAuthOnFocus();
 	const { user, isPending } = useAuth();
-	const userId = isPending ? null : user?.id ?? null;
+	const userId = user?.id ?? null;
+	const role = user?.role ?? null;
 	const {
 		data: books = [],
 		isLoading,
 		isError,
+		isFetchedAfterMount,
 	} = useQuery({
-		queryKey: ['books', 'list', userId],
+		queryKey: ['books', 'list', userId, role, refreshState.generation],
 		queryFn: ({ signal }) => {
 			if (userId === null) throw new Error('Cannot fetch books without an authenticated user');
 			return fetchBooks(userId, signal);
 		},
-		enabled: userId !== null,
+		enabled: userId !== null && !isPending && !refreshState.isRefreshing && refreshState.hasValidated,
+		refetchOnMount: 'always',
 	});
+	const canExposeBooks = userId !== null
+		&& !isPending
+		&& !refreshState.isRefreshing
+		&& refreshState.hasValidated
+		&& isFetchedAfterMount
+		&& !isError;
 
 	return {
-		books: userId === null ? [] : books,
-		isLoading: isPending || isLoading,
-		isError: userId !== null && isError,
+		books: canExposeBooks ? books : [],
+		isLoading: userId !== null && (isPending || refreshState.isRefreshing || !refreshState.hasValidated || (isLoading || (!isFetchedAfterMount && !isError))),
+		isError: userId !== null && !refreshState.isRefreshing && refreshState.hasValidated && isError,
 	};
 }
