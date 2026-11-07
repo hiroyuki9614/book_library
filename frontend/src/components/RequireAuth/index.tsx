@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Navigate, useOutlet } from 'react-router-dom';
 import { useAuth } from '@/contexts/useAuth';
@@ -9,7 +9,7 @@ const RequireAuth = () => {
 	const refreshState = useRefreshAuthOnFocus(isAuthenticated);
 	const outlet = useOutlet();
 	const statusRef = useRef<HTMLDivElement>(null);
-	const focusBeforeCheck = useRef<{ element: HTMLElement; userId: number } | null>(null);
+	const focusBeforeCheck = useRef<{ element: HTMLElement; userId: number; role: string | undefined } | null>(null);
 	const currentUserId = useRef(user?.id);
 	useEffect(() => {
 		currentUserId.current = user?.id;
@@ -17,13 +17,17 @@ const RequireAuth = () => {
 	const isIdentityUncertain = isPending
 		|| refreshState.isRefreshing
 		|| (isAuthenticated && !refreshState.hasValidated);
+	const liveIdentity = useRef({ userId: user?.id, role: user?.role, isAuthenticated, isIdentityUncertain });
+	useLayoutEffect(() => {
+		liveIdentity.current = { userId: user?.id, role: user?.role, isAuthenticated, isIdentityUncertain };
+	}, [user?.id, user?.role, isAuthenticated, isIdentityUncertain]);
 
 	useEffect(() => {
 		if (!isIdentityUncertain) return;
 
 		const activeElement = document.activeElement;
 		if (activeElement instanceof HTMLElement && activeElement !== document.body && currentUserId.current !== undefined) {
-			focusBeforeCheck.current = { element: activeElement, userId: currentUserId.current };
+			focusBeforeCheck.current = { element: activeElement, userId: currentUserId.current, role: liveIdentity.current.role };
 		}
 
 		const portals = new Map<HTMLElement, { ariaHidden: string | null; inert: boolean; visibility: string }>();
@@ -80,11 +84,17 @@ const RequireAuth = () => {
 		if (isIdentityUncertain) return;
 		const previousFocus = focusBeforeCheck.current;
 		focusBeforeCheck.current = null;
-		if (previousFocus && previousFocus.userId === user?.id && previousFocus.element.isConnected) {
+		if (previousFocus && isAuthenticated && previousFocus.userId === user?.id && previousFocus.role === user?.role && previousFocus.element.isConnected) {
 			const element = previousFocus.element;
-			requestAnimationFrame(() => element.focus());
+			const frame = requestAnimationFrame(() => {
+				const identity = liveIdentity.current;
+				if (identity.isAuthenticated && !identity.isIdentityUncertain && identity.userId === previousFocus.userId && identity.role === previousFocus.role && element.isConnected) {
+					element.focus();
+				}
+			});
+			return () => cancelAnimationFrame(frame);
 		}
-	}, [isIdentityUncertain, user?.id]);
+	}, [isIdentityUncertain, isAuthenticated, user?.id, user?.role]);
 
 	if (!isAuthenticated) {
 		if (isPending) return <div>Loading...</div>;

@@ -412,4 +412,50 @@ describe('cross-tab session refresh', () => {
 		expect(toc).not.toHaveAttribute('inert');
 		expect(getComputedStyle(toc).visibility).not.toBe('hidden');
 	});
+
+	test('a queued focus restoration cannot refocus account A during a newer account B validation', async () => {
+		const { getByText, getByRole } = await setup();
+		await expect.element(getByText(restrictedBook.title)).toBeInTheDocument();
+		await expect.element(getByRole('status')).not.toBeInTheDocument();
+		const oldRow = document.querySelector('[role="link"][aria-label="Account A restricted bookを読む"]') as HTMLElement;
+		expect(oldRow).toBeInstanceOf(HTMLElement);
+		oldRow.focus();
+		expect(document.activeElement).toBe(oldRow);
+
+		const frames = new Map<number, FrameRequestCallback>();
+		let nextFrameId = 1000;
+		const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+			const id = ++nextFrameId;
+			frames.set(id, callback);
+			return id;
+		});
+		const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id); });
+		try {
+			let resolveSame!: (user: AuthenticatedUser) => void;
+			mocks.getCurrentUser.mockImplementationOnce(() => new Promise<AuthenticatedUser>((resolve) => { resolveSame = resolve; }));
+			await act(async () => window.dispatchEvent(new Event('focus')));
+			await expect.element(getByRole('status')).toBeInTheDocument();
+			await act(async () => resolveSame(adminUser));
+			await expect.element(getByRole('status')).not.toBeInTheDocument();
+			const priorCallbacks = [...frames.values()];
+			expect(priorCallbacks.length).toBeGreaterThan(0);
+
+			let resolveOther!: (user: AuthenticatedUser) => void;
+			mocks.getCurrentUser.mockImplementationOnce(() => new Promise<AuthenticatedUser>((resolve) => { resolveOther = resolve; }));
+			await act(async () => window.dispatchEvent(new Event('focus')));
+			await expect.element(getByRole('status')).toBeInTheDocument();
+			expect(cancelFrame).toHaveBeenCalled();
+			// Invoke the captured stale callback even after cancellation to prove it
+			// rechecks the current auth state rather than trusting the old closure.
+			await act(async () => priorCallbacks.forEach((callback) => callback(performance.now())));
+			expect(document.activeElement).not.toBe(oldRow);
+
+			await act(async () => resolveOther(userB));
+			await expect.element(getByText(userBBook.title)).toBeInTheDocument();
+			expect(document.activeElement).not.toBe(oldRow);
+		} finally {
+			requestFrame.mockRestore();
+			cancelFrame.mockRestore();
+		}
+	});
 });
