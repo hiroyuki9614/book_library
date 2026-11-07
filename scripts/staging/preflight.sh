@@ -12,6 +12,11 @@ file="$1"
 [[ "$(stat -c %u -- "$file")" == "$(id -u)" ]] || fail 'Env file must be owned by current principal'
 mode="$(stat -c %a -- "$file")"
 [[ "$mode" == 600 || "$mode" == 400 ]] || fail 'Env file must have mode 0600 or 0400'
+# Compose gives ambient variables precedence over --env-file; fail closed on such overrides.
+[[ -z "${COMPOSE_PROJECT_NAME:-}" && -z "${COMPOSE_FILE:-}" ]] || fail 'Ambient Compose project/file override forbidden'
+for name in BELIB_STAGE_DB_PASSWORD BELIB_STAGE_AUTH_SECRET BELIB_STAGE_VCS_REF BELIB_STAGE_PORT; do
+  [[ ! -v $name ]] || fail "Ambient $name override forbidden; use staging env file only"
+done
 
 for key in BELIB_STAGE_DB_PASSWORD BELIB_STAGE_AUTH_SECRET BELIB_STAGE_VCS_REF BELIB_STAGE_PORT; do
   [[ "$(grep -Ec "^(${key})=" "$file")" -eq 1 ]] || fail "Missing or duplicate $key (no value displayed)"
@@ -43,5 +48,5 @@ if ss -H -ltn | awk '{print $4}' | grep -Eq "(^|:)${port}$"; then
 fi
 
 # --env-file explicitly replaces implicit production .env interpolation.
-docker compose --env-file "$file" -f "$root/compose.staging.yaml" config --quiet || fail 'Staging Compose configuration invalid'
+docker compose -p belib-isolated-i5 --env-file "$file" -f "$root/compose.staging.yaml" config --quiet || fail 'Staging Compose configuration invalid'
 printf 'PREFLIGHT_PASS host=ubuntu-worker principal=hiroyuki available_disk_kib=%s available_memory_kib=%s port=%s revision=%s compose_project=belib-isolated-i5\n' "$free_kib" "$mem_kib" "$port" "$rev"
