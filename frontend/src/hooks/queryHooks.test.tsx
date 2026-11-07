@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
 	userApiMock: vi.fn(),
 	refreshAuth: vi.fn(),
 	authUserId: 7 as number | null,
-	authRole: 'user' as const,
+	authRole: 'user' as 'user' | 'admin',
 	authIsPending: false,
 }));
 
@@ -33,7 +33,7 @@ vi.mock('@/mocks/userApiMock', () => ({
 
 vi.mock('@/contexts/useAuth', () => ({
 	useAuth: () => ({
-		user: mocks.authUserId === null ? null : { id: mocks.authUserId },
+		user: mocks.authUserId === null ? null : { id: mocks.authUserId, role: mocks.authRole },
 		role: mocks.authUserId === null ? null : mocks.authRole,
 		isPending: mocks.authIsPending,
 		refreshAuth: mocks.refreshAuth,
@@ -191,6 +191,27 @@ describe('React Query hooks', () => {
 		await expect.poll(() => result.current.book).toEqual(account8Book);
 		expect(account8Snapshots).not.toContain(account7Book);
 	});
+
+
+	test('useBook retains an already-open reader after same-user role downgrade', async () => {
+		const book = { id: 77, title: 'Open PDF', fileType: 'pdf' };
+		mocks.authRole = 'admin';
+		mocks.fetchBook.mockResolvedValueOnce(book).mockRejectedValueOnce(new Error('Forbidden'));
+
+		const { result, rerender, act } = await renderHook(() => useBook(77), {
+			wrapper: createWrapper(),
+		});
+		await expect.poll(() => result.current.book).toEqual(book);
+
+		await act(async () => {
+			mocks.authRole = 'user';
+			rerender();
+		});
+		await expect.poll(() => mocks.fetchBook.mock.calls.length).toBe(2);
+		expect(result.current.book).toEqual(book);
+		expect(result.current.error).toBeNull();
+	});
+
 
 	test('useBook passes the selected book id to the API', async () => {
 		const book = { id: 2, title: 'Learning TypeScript', fileType: 'pdf' };
