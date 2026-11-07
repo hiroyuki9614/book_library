@@ -183,6 +183,20 @@ describe('BookTable', () => {
 		await expect.element(getByText('データがありません。')).toBeInTheDocument();
 	});
 
+	test('clamps pagination and disables invalid controls when account-scoped books shrink', async () => {
+		const { getByText, rerender } = await renderBookTable({ itemsPerPage: 2 });
+		await getByText('次へ').click();
+		await expect.element(getByText('2 / 2')).toBeInTheDocument();
+
+		rerender(
+			<BookTable books={[pickBook(1)]} itemsPerPage={2} searchQuery='' sort='newest' isLoading={false} status='all' />,
+		);
+		await expect.element(getByText('1 / 1')).toBeInTheDocument();
+		await expect.element(getByText('React Design Patterns')).toBeInTheDocument();
+		await expect.element(getByText('前へ')).toBeDisabled();
+		await expect.element(getByText('次へ')).toBeDisabled();
+	});
+
 	test('paginates books and moves between pages', async () => {
 		const { getByText } = await renderBookTable({ itemsPerPage: 2 });
 

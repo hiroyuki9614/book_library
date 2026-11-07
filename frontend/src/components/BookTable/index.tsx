@@ -63,11 +63,11 @@ export function BookTable({ books, itemsPerPage, searchQuery, sort, isLoading, s
 	};
 
 	function handlePreviousPage() {
-		if (currentPage > 1) setCurrentPage((prevPage) => prevPage - 1);
+		if (safeCurrentPage > 1) setCurrentPage(safeCurrentPage - 1);
 	}
 
 	function handleNextPage() {
-		if (currentPage < totalPages) setCurrentPage((prevPage) => prevPage + 1);
+		if (safeCurrentPage < totalPages) setCurrentPage(safeCurrentPage + 1);
 	}
 
 	return (
@@ -138,9 +138,9 @@ export function BookTable({ books, itemsPerPage, searchQuery, sort, isLoading, s
 				<TableRow className='block border-0 bg-card hover:bg-card md:table-row'>
 					<TableCell colSpan={columns.length} className='block text-center md:table-cell'>
 						<div className='flex items-center justify-center gap-4 py-4'>
-							<button className='min-h-11 min-w-16 cursor-pointer rounded bg-primary px-3 py-2 text-white disabled:opacity-50' disabled={currentPage === 1} onClick={handlePreviousPage}>前へ</button>
-							<span>{currentPage} / {totalPages}</span>
-							<button className='min-h-11 min-w-16 cursor-pointer rounded bg-primary px-3 py-2 text-white disabled:opacity-50' disabled={currentPage === totalPages} onClick={handleNextPage}>次へ</button>
+							<button className='min-h-11 min-w-16 cursor-pointer rounded bg-primary px-3 py-2 text-white disabled:opacity-50' disabled={safeCurrentPage === 1} onClick={handlePreviousPage}>前へ</button>
+							<span>{safeCurrentPage} / {totalPages}</span>
+							<button className='min-h-11 min-w-16 cursor-pointer rounded bg-primary px-3 py-2 text-white disabled:opacity-50' disabled={safeCurrentPage === totalPages} onClick={handleNextPage}>次へ</button>
 						</div>
 					</TableCell>
 				</TableRow>
