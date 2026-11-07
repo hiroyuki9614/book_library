@@ -34,6 +34,10 @@ rev="$(sed -n 's/^BELIB_STAGE_VCS_REF=//p' "$file")"
 # URL-safe, no delimiter characters: DB password is interpolated into the backend DATABASE_URL.
 grep -Eq '^BELIB_STAGE_DB_PASSWORD=[a-f0-9]{64}$' "$file" || fail 'DB password must be local 64-character hex'
 grep -Eq '^BELIB_STAGE_AUTH_SECRET=[a-f0-9]{64}$' "$file" || fail 'Auth secret must be local 64-character hex'
+db_password="$(sed -n 's/^BELIB_STAGE_DB_PASSWORD=//p' "$file")"
+auth_secret="$(sed -n 's/^BELIB_STAGE_AUTH_SECRET=//p' "$file")"
+[[ "$db_password" != "$auth_secret" ]] || fail 'DB password and auth secret must be distinct'
+unset db_password auth_secret
 
 command -v docker >/dev/null || fail 'Docker CLI missing; do not install with sudo'
 # CLI access does not prove rootless: docker-group access to a rootful daemon is forbidden.

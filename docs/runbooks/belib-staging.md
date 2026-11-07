@@ -28,7 +28,7 @@ envfile="$HOME/.config/belib-staging/i5.env"
 bash scripts/staging/preflight.sh "$envfile"
 ```
 
-The preflight checks the exact i5 hostname/user, local Git revision, staging-only values, no R2/general env keys, >=8 GiB free disk, >=2 GiB available memory, a free port, the **effective local user socket** `unix:///run/user/$(id -u)/docker.sock`, an i5-local Docker daemon reporting the `rootless` security option, Compose availability, and the parsed Compose configuration. Docker CLI access via the rootful system daemon or a remote context is not sufficient. It performs no container or Docker daemon mutation. If a stage project already exists, first inventory it and reuse the legitimate same-owner deployment rather than replacing it.
+The preflight checks the exact i5 hostname/user, local Git revision, staging-only values, distinct database password and auth secret (before checking Docker), no R2/general env keys, >=8 GiB free disk, >=2 GiB available memory, a free port, the **effective local user socket** `unix:///run/user/$(id -u)/docker.sock`, an i5-local Docker daemon reporting the `rootless` security option, Compose availability, and the parsed Compose configuration. Docker CLI access via the rootful system daemon or a remote context is not sufficient. It performs no container or Docker daemon mutation. If a stage project already exists, first inventory it and reuse the legitimate same-owner deployment rather than replacing it.
 
 ## Candidate-only launch (only after successful admission)
 
