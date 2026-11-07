@@ -21,7 +21,7 @@ BELIB_STAGE_VCS_REF=<exact full 40-character Git checkout SHA>
 BELIB_STAGE_PORT=<free unused i5 loopback port, 1024-65535>
 ```
 
-The local file must be 0600/0400 and owned by `hiroyuki`. Do not source it in a shell. Use the same path for all commands below:
+The local file must be 0600/0400 and owned by `hiroyuki`. Do not source it in a shell. Clear any ambient `BELIB_STAGE_*`, `COMPOSE_PROJECT_NAME` and `COMPOSE_FILE` variables before invoking preflight/Compose; do not reuse a Production shell environment. The fixed `-p belib-isolated-i5` prevents accidental project-name changes. Use the same path for all commands below:
 
 ```bash
 envfile="$HOME/.config/belib-staging/i5.env"
@@ -36,10 +36,10 @@ The operator must first review the candidate HEAD, independently confirm existin
 
 ```bash
 envfile="$HOME/.config/belib-staging/i5.env"
-docker compose --env-file "$envfile" -f compose.staging.yaml up -d db
-docker compose --env-file "$envfile" -f compose.staging.yaml --profile migration run --rm migrate
-docker compose --env-file "$envfile" -f compose.staging.yaml up -d --build backend frontend nginx
-docker compose --env-file "$envfile" -f compose.staging.yaml ps
+docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yaml up -d db
+docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yaml --profile migration run --rm migrate
+docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yaml up -d --build backend frontend nginx
+docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yaml ps
 ```
 
 Never execute the launch if preflight fails or if Docker image build would exceed the checked capacity. Use a deliberate per-step review of services and image build size. Since the backend/frontend sources are built locally, the final `BELIB_STAGE_VCS_REF` must match the checkout, not an unrelated production revision.
