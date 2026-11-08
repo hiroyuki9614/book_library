@@ -1,12 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { registerReadingFlush, saveReadingInfo, type ReadStatus } from '@/api/readingInfo';
+import { registerReadingFlush, saveReadingInfo, type ReadStatus, type ReadingInfo } from '@/api/readingInfo';
 
 export function useReadingSave(bookId: number) {
-	const [status, setStatus] = useState<'saved' | 'saving' | 'error'>('saved');
+	const [status, setStatus] = useState<'unknown' | 'saved' | 'saving' | 'error'>('unknown');
 	const latest = useRef<{ position: number | string; readStatus: Exclude<ReadStatus, 'unread'> } | null>(null);
 	const version = useRef(0);
 	const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 	const pending = useRef(false);
+	const confirmInitialStatus = useCallback((info: ReadingInfo) => {
+		if (version.current > 0) return;
+		const hasSavedPosition = (typeof info.currentPosition === 'string' && info.currentPosition.length > 0)
+			|| info.readStatus !== 'unread'
+			|| info.currentPage > 1;
+		setStatus(hasSavedPosition ? 'saved' : 'unknown');
+	}, []);
 	const flush = useCallback(() => {
 		if (timer.current) clearTimeout(timer.current);
 		if (!pending.current || !latest.current) return;
@@ -44,5 +51,5 @@ export function useReadingSave(bookId: number) {
 	const retry = () => {
 		if (latest.current) { save(latest.current.position, latest.current.readStatus); flush(); }
 	};
-	return { save, status, retry };
+	return { save, status, retry, confirmInitialStatus };
 }

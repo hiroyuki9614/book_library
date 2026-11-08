@@ -1,5 +1,5 @@
 type ReadingSaveStatusProps = {
-	status: 'saved' | 'saving' | 'error';
+	status: 'unknown' | 'saved' | 'saving' | 'error';
 	retry: () => void;
 };
 
@@ -9,7 +9,9 @@ export default function ReadingSaveStatus({ status, retry }: ReadingSaveStatusPr
 			? '読書位置を保存できませんでした。'
 			: status === 'saving'
 				? '読書位置を保存中…'
-				: '読書位置を保存済み';
+				: status === 'saved'
+					? '読書位置を保存済み'
+					: '読書位置の保存状態を確認できていません。';
 
 	return (
 		<div
@@ -27,7 +29,7 @@ export default function ReadingSaveStatus({ status, retry }: ReadingSaveStatusPr
 			) : (
 				<>
 					<span aria-hidden='true' title={detail} className='whitespace-nowrap'>
-						{status === 'saving' ? '保存中…' : '✓ 保存済み'}
+						{status === 'saving' ? '保存中…' : status === 'saved' ? '✓ 保存済み' : '未確認'}
 					</span>
 					<span className='sr-only'>{detail}</span>
 				</>

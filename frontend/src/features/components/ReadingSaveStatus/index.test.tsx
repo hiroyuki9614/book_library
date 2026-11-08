@@ -7,6 +7,15 @@ describe('ReadingSaveStatus compact reader header status', () => {
 		await cleanup();
 	});
 
+	test('unknown state stays explicit and never claims the fresh position was saved', async () => {
+		const { container } = await render(<ReadingSaveStatus status='unknown' retry={vi.fn()} />);
+		const element = container.querySelector('[role="status"]');
+		expect(element?.querySelector('[aria-hidden="true"]')?.getAttribute('title')).toBe('読書位置の保存状態を確認できていません。');
+		expect(element?.querySelector('[aria-hidden="true"]')?.textContent).toBe('未確認');
+		expect(element?.querySelector('.sr-only')?.textContent).toBe('読書位置の保存状態を確認できていません。');
+		expect(element?.textContent).not.toContain('保存済み');
+	});
+
 	test('saved state shows a short one-line label but preserves the full accessible announcement', async () => {
 		const { container } = await render(<ReadingSaveStatus status='saved' retry={vi.fn()} />);
 		const element = container.querySelector('[role="status"]');
