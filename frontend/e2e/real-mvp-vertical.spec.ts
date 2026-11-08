@@ -218,8 +218,13 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 30_000 });
 	await expect(page.getByRole('alert')).toHaveCount(0);
 	const viewport = page.getByTestId('pdf-viewport');
+	await expect(viewport).toBeVisible({ timeout: 30_000 });
+	const secondPdfPage = page.locator('[data-pdf-page="2"]');
+	await expect(secondPdfPage).toBeVisible({ timeout: 30_000 });
 	const shown = () => page.evaluate(() => {
-		const viewport = document.querySelector('[data-testid="pdf-viewport"]')!.getBoundingClientRect();
+		const viewportElement = document.querySelector<HTMLElement>('[data-testid="pdf-viewport"]');
+		if (!viewportElement) return undefined;
+		const viewport = viewportElement.getBoundingClientRect();
 		return [...document.querySelectorAll<HTMLElement>('[data-pdf-page]')].map(el => {
 			const r = el.getBoundingClientRect();
 			return { page: Number(el.dataset.pdfPage), area: Math.max(0, Math.min(r.bottom, viewport.bottom) - Math.max(r.top, viewport.top)) * Math.max(0, Math.min(r.right, viewport.right) - Math.max(r.left, viewport.left)) };
