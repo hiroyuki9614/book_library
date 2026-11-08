@@ -41,33 +41,50 @@ def compose_model() -> dict:
                     "BELIB_STAGE_DB_APP_PASSWORD": APP_PASSWORD,
                     "BELIB_STAGE_DB_MIGRATE_PASSWORD": MIGRATE_PASSWORD,
                 },
+                "healthcheck": {},
                 "networks": {"isolated": None},
+                "restart": "unless-stopped",
                 "volumes": [
                     {
                         "type": "volume",
                         "source": "staging-postgres-data",
                         "target": "/var/lib/postgresql/data",
+                        "volume": {},
                     },
                     {
                         "type": "bind",
                         "source": str(ROOT / "scripts/staging/10-belib-staging-roles.sh"),
                         "target": "/docker-entrypoint-initdb.d/10-belib-staging-roles.sh",
                         "read_only": True,
+                        "bind": {},
                     },
                 ],
             },
             "migrate": {
-                "build": {"context": "./backend", "target": "migration"},
+                "build": {
+                    "context": "./backend",
+                    "dockerfile": "Dockerfile",
+                    "target": "migration",
+                },
+                "command": ["npx", "prisma", "migrate", "deploy"],
+                "depends_on": {"db": {"condition": "service_healthy", "required": True}},
+                "entrypoint": None,
                 "environment": {"DATABASE_URL": MIGRATE_DATABASE_URL},
                 "user": "node",
                 "networks": {"isolated": None},
+                "profiles": ["migration"],
+                "restart": "no",
             },
             "backend": {
                 "build": {
                     "context": "./backend",
+                    "dockerfile": "Dockerfile",
                     "target": "runtime",
                     "args": {"VCS_REF": SOURCE_SHA},
                 },
+                "command": None,
+                "depends_on": {"db": {"condition": "service_healthy", "required": True}},
+                "entrypoint": None,
                 "user": "node",
                 "environment": {
                     "DATABASE_URL": APP_DATABASE_URL,
@@ -82,17 +99,20 @@ def compose_model() -> dict:
                 },
                 "networks": {"isolated": None},
                 "expose": ["3000"],
+                "restart": "unless-stopped",
                 "volumes": [
                     {
                         "type": "volume",
                         "source": "staging-book-files",
                         "target": "/home/node",
+                        "volume": {},
                     }
                 ],
             },
             "frontend": {
                 "build": {
                     "context": "./frontend",
+                    "dockerfile": "Dockerfile",
                     "target": "runtime",
                     "args": {
                         "VCS_REF": SOURCE_SHA,
@@ -103,13 +123,23 @@ def compose_model() -> dict:
                         "VITE_PUBLIC_DEMO_ADMIN_PASSWORD": "",
                     },
                 },
+                "command": None,
+                "entrypoint": None,
                 "networks": {"isolated": None},
                 "expose": ["8080"],
+                "restart": "unless-stopped",
             },
             "nginx": {
                 "image": "nginx:1.27-alpine",
+                "command": None,
+                "depends_on": {
+                    "backend": {"condition": "service_started", "required": True},
+                    "frontend": {"condition": "service_started", "required": True},
+                },
+                "entrypoint": None,
                 "ports": [
                     {
+                        "mode": "ingress",
                         "host_ip": "127.0.0.1",
                         "published": str(PORT),
                         "target": 8080,
@@ -122,20 +152,24 @@ def compose_model() -> dict:
                         "source": str(ROOT / "nginx/nginx.conf"),
                         "target": "/etc/nginx/nginx.conf",
                         "read_only": True,
+                        "bind": {},
                     },
                     {
                         "type": "bind",
                         "source": str(ROOT / "scripts/staging/nginx-default.conf"),
                         "target": "/etc/nginx/conf.d/default.conf",
                         "read_only": True,
+                        "bind": {},
                     },
                 ],
                 "networks": {"isolated": None},
+                "restart": "unless-stopped",
             },
         },
         "networks": {
             "isolated": {
                 "internal": True,
+                "ipam": {},
                 "name": "belib-isolated-i5_isolated",
             }
         },
@@ -179,6 +213,10 @@ class CIIsolationGuardTests(unittest.TestCase):
         )
         service_block = service_block.replace(target_line, target_line + f"      {entry}\n", 1)
         return self.compose_source[:start] + service_block + self.compose_source[end:]
+
+    def source_with_service_entry(self, service: str, entry: str) -> str:
+        marker = f"  {service}:\n"
+        return self.compose_source.replace(marker, marker + f"    {entry}\n", 1)
 
     def test_accepts_the_isolated_compose_model_for_exact_pr_head(self):
         guard.validate(
@@ -434,6 +472,103 @@ class CIIsolationGuardTests(unittest.TestCase):
         model = compose_model()
         model["services"]["nginx"]["volumes"][0]["source"] = "/production/nginx.conf"
         self.assert_rejected(model=model)
+
+    def test_rejects_hostile_named_volume_driver_options_in_raw_and_resolved_compose(self):
+        for key, value in (
+            ("driver", "local"),
+            ("driver_opts", {"type": "none", "o": "bind", "device": "/etc"}),
+        ):
+            with self.subTest(key=key):
+                model = compose_model()
+                model["volumes"]["staging-book-files"][key] = value
+                self.assert_rejected(model=model)
+
+        source = self.compose_source.replace(
+            "  staging-book-files: {}\n",
+            "  staging-book-files:\n"
+            "    driver_opts:\n"
+            "      type: none\n"
+            "      o: bind\n"
+            "      device: /etc\n",
+            1,
+        )
+        self.assert_rejected(source=source)
+
+    def test_rejects_extra_service_environment_and_network_settings(self):
+        model = compose_model()
+        model["services"]["migrate"]["init"] = True
+        self.assert_rejected(model=model)
+
+        model = compose_model()
+        model["services"]["backend"]["environment"]["INJECTED_FLAG"] = "true"
+        self.assert_rejected(model=model)
+
+        model = compose_model()
+        model["networks"]["isolated"]["driver_opts"] = {"com.docker.network.bridge.name": "docker0"}
+        self.assert_rejected(model=model)
+
+        self.assert_rejected(
+            source=self.source_with_service_entry("migrate", "init: true")
+        )
+        source = self.compose_source.replace(
+            '      APP_PORT: "3000"\n',
+            '      INJECTED_FLAG: "true"\n      APP_PORT: "3000"\n',
+            1,
+        )
+        self.assert_rejected(source=source)
+        source = self.compose_source.replace(
+            "  isolated:\n    internal: true\n",
+            "  isolated:\n    internal: true\n    driver_opts: {}\n",
+            1,
+        )
+        self.assert_rejected(source=source)
+
+    def test_rejects_migration_command_profile_and_backend_entrypoint_changes(self):
+        model = compose_model()
+        model["services"]["migrate"]["command"] = ["/bin/sh", "-c", "id"]
+        self.assert_rejected(model=model)
+
+        model = compose_model()
+        model["services"]["migrate"]["profiles"] = ["migration", "default"]
+        self.assert_rejected(model=model)
+
+        model = compose_model()
+        model["services"]["backend"]["entrypoint"] = ["/bin/sh"]
+        self.assert_rejected(model=model)
+
+        source = self.compose_source.replace(
+            '    command: ["npx", "prisma", "migrate", "deploy"]\n',
+            '    command: ["/bin/sh", "-c", "id"]\n',
+            1,
+        )
+        self.assert_rejected(source=source)
+        source = self.compose_source.replace(
+            '    profiles: ["migration"]\n',
+            '    profiles: ["migration", "default"]\n',
+            1,
+        )
+        self.assert_rejected(source=source)
+        self.assert_rejected(
+            source=self.source_with_service_entry("backend", 'entrypoint: ["/bin/sh"]')
+        )
+
+    def test_rejects_bind_source_and_nested_mount_options(self):
+        model = compose_model()
+        model["services"]["nginx"]["volumes"][0]["source"] = "/etc/passwd"
+        self.assert_rejected(model=model)
+
+        model = compose_model()
+        model["services"]["nginx"]["volumes"][0]["bind"] = {
+            "create_host_path": True
+        }
+        self.assert_rejected(model=model)
+
+        source = self.compose_source.replace(
+            "./nginx/nginx.conf:/etc/nginx/nginx.conf:ro",
+            "/etc/passwd:/etc/nginx/nginx.conf:ro",
+            1,
+        )
+        self.assert_rejected(source=source)
 
     def test_pr_staging_ci_is_read_only_and_checks_out_exact_head(self):
         workflow = (ROOT / ".github/workflows/staging-ci.yml").read_text(encoding="utf-8")

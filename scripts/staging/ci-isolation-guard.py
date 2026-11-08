@@ -42,7 +42,73 @@ EXPECTED_SOURCE_BUILDS = {
     },
 }
 EXPECTED_BUILD_MODEL_KEYS = {
-    name: set(build) for name, build in EXPECTED_SOURCE_BUILDS.items()
+    name: set(build) | {"dockerfile"}
+    for name, build in EXPECTED_SOURCE_BUILDS.items()
+}
+EXPECTED_SOURCE_ROOT_KEYS = {"name", "services", "networks", "volumes"}
+EXPECTED_SOURCE_SERVICE_KEYS = {
+    "db": {"image", "environment", "volumes", "healthcheck", "restart", "networks"},
+    "migrate": {
+        "profiles", "build", "user", "command", "environment", "depends_on",
+        "restart", "networks",
+    },
+    "backend": {
+        "build", "user", "environment", "volumes", "expose", "depends_on",
+        "restart", "networks",
+    },
+    "frontend": {"build", "expose", "restart", "networks"},
+    "nginx": {"image", "ports", "volumes", "depends_on", "restart", "networks"},
+}
+EXPECTED_SOURCE_ENV_KEYS = {
+    "db": {
+        "POSTGRES_USER", "POSTGRES_DB", "POSTGRES_PASSWORD",
+        "BELIB_STAGE_DB_APP_PASSWORD", "BELIB_STAGE_DB_MIGRATE_PASSWORD",
+    },
+    "migrate": {"DATABASE_URL"},
+    "backend": {
+        "DATABASE_URL", "APP_PORT", "ENVIRONMENT", "FRONTEND_URL",
+        "BETTER_AUTH_URL", "BETTER_AUTH_SECRET", "BOOK_FILE_STORAGE_DRIVER",
+        "BOOK_FILE_STORAGE_ROOT", "NPM_CONFIG_CACHE",
+    },
+}
+EXPECTED_SOURCE_MOUNTS = {
+    "db": [
+        "staging-postgres-data:/var/lib/postgresql/data",
+        "./scripts/staging/10-belib-staging-roles.sh:/docker-entrypoint-initdb.d/10-belib-staging-roles.sh:ro",
+    ],
+    "backend": ["staging-book-files:/home/node"],
+    "nginx": [
+        "./nginx/nginx.conf:/etc/nginx/nginx.conf:ro",
+        "./scripts/staging/nginx-default.conf:/etc/nginx/conf.d/default.conf:ro",
+    ],
+}
+EXPECTED_SERVICE_MODEL_KEYS = {
+    "db": {
+        "command", "entrypoint", "environment", "healthcheck", "image",
+        "networks", "restart", "volumes",
+    },
+    "migrate": {
+        "build", "command", "depends_on", "entrypoint", "environment",
+        "networks", "profiles", "restart", "user",
+    },
+    "backend": {
+        "build", "command", "depends_on", "entrypoint", "environment",
+        "expose", "networks", "restart", "user", "volumes",
+    },
+    "frontend": {
+        "build", "command", "entrypoint", "expose", "networks", "restart",
+    },
+    "nginx": {
+        "command", "depends_on", "entrypoint", "image", "networks", "ports",
+        "restart", "volumes",
+    },
+}
+EXPECTED_COMMANDS = {
+    "db": None,
+    "migrate": ["npx", "prisma", "migrate", "deploy"],
+    "backend": None,
+    "frontend": None,
+    "nginx": None,
 }
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 HEX_SECRET_PATTERN = re.compile(r"[a-f0-9]{64}\Z")
@@ -66,6 +132,164 @@ class GuardError(RuntimeError):
 
 def _strip_yaml_comments(source: str) -> str:
     return "\n".join(line.split("#", 1)[0] for line in source.splitlines())
+
+
+def _source_mapping_entries(
+    lines: list[str], indentation: int, label: str
+) -> list[tuple[int, str, str]]:
+    entries: list[tuple[int, str, str]] = []
+    found: set[str] = set()
+    pattern = re.compile(
+        " " * indentation + r"([A-Za-z_][A-Za-z0-9_-]*)\s*:(?:\s*(.*))?"
+    )
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        actual_indentation = len(line) - len(line.lstrip(" "))
+        if actual_indentation != indentation:
+            continue
+        match = pattern.fullmatch(line)
+        if match is None:
+            raise GuardError(f"{label} uses unsupported YAML mapping syntax")
+        key, value = match.groups()
+        if key in found:
+            raise GuardError(f"{label} contains a duplicate key")
+        found.add(key)
+        entries.append((index, key, (value or "").strip()))
+    return entries
+
+
+def _source_entry_end(
+    entries: list[tuple[int, str, str]], entry_position: int, block_length: int
+) -> int:
+    if entry_position + 1 < len(entries):
+        return entries[entry_position + 1][0]
+    return block_length
+
+
+def _source_shape_contract(source: str) -> None:
+    """Allow only the checked-in raw Compose mappings, mounts, and env keys."""
+    lines = _strip_yaml_comments(source).splitlines()
+    root_entries = _source_mapping_entries(lines, 0, "Staging Compose root")
+    if {key for _, key, _ in root_entries} != EXPECTED_SOURCE_ROOT_KEYS:
+        raise GuardError("Staging Compose root keys are outside the allowlist")
+
+    root_sections: dict[str, list[str]] = {}
+    for position, (_, key, _) in enumerate(root_entries):
+        start = root_entries[position][0] + 1
+        end = _source_entry_end(root_entries, position, len(lines))
+        root_sections[key] = lines[start:end]
+
+    services_lines = root_sections["services"]
+    service_entries = _source_mapping_entries(
+        services_lines, 2, "Staging services mapping"
+    )
+    if {key for _, key, _ in service_entries} != EXPECTED_SERVICES:
+        raise GuardError("Staging service keys are outside the allowlist")
+
+    for position, (service_index, name, _) in enumerate(service_entries):
+        service_end = _source_entry_end(service_entries, position, len(services_lines))
+        service_lines = services_lines[service_index + 1 : service_end]
+        properties = _source_mapping_entries(
+            service_lines, 4, f"{name} service mapping"
+        )
+        property_keys = {key for _, key, _ in properties}
+        if property_keys != EXPECTED_SOURCE_SERVICE_KEYS[name]:
+            raise GuardError(f"{name} service keys are outside the allowlist")
+        property_by_key = {key: (index, value) for index, key, value in properties}
+
+        if property_by_key["networks"][1] != "[isolated]":
+            raise GuardError(f"{name} must use only the isolated network")
+        if name == "migrate":
+            if (
+                property_by_key["profiles"][1] != '["migration"]'
+                or property_by_key["command"][1]
+                != '["npx", "prisma", "migrate", "deploy"]'
+            ):
+                raise GuardError("Migration profile and command must remain allowlisted")
+
+        if name in EXPECTED_SOURCE_ENV_KEYS:
+            env_index, env_value = property_by_key["environment"]
+            if env_value:
+                raise GuardError(f"{name} environment must use an explicit mapping")
+            property_position = next(
+                position
+                for position, (_, key, _) in enumerate(properties)
+                if key == "environment"
+            )
+            env_end = _source_entry_end(properties, property_position, len(service_lines))
+            env_lines = service_lines[env_index + 1 : env_end]
+            env_entries = _source_mapping_entries(
+                env_lines, 6, f"{name} environment mapping"
+            )
+            if {key for _, key, _ in env_entries} != EXPECTED_SOURCE_ENV_KEYS[name]:
+                raise GuardError(f"{name} environment keys are outside the allowlist")
+            if any(
+                line.strip()
+                and len(line) - len(line.lstrip(" ")) > 6
+                for line in env_lines
+            ):
+                raise GuardError(f"{name} environment values must remain scalars")
+
+        expected_mounts = EXPECTED_SOURCE_MOUNTS.get(name)
+        if expected_mounts is not None:
+            volumes_index, volumes_value = property_by_key["volumes"]
+            if volumes_value:
+                raise GuardError(f"{name} mounts must use the checked-in short syntax")
+            property_position = next(
+                position
+                for position, (_, key, _) in enumerate(properties)
+                if key == "volumes"
+            )
+            volumes_end = _source_entry_end(
+                properties, property_position, len(service_lines)
+            )
+            volume_lines = service_lines[volumes_index + 1 : volumes_end]
+            mounts: list[str] = []
+            for line in volume_lines:
+                if not line.strip():
+                    continue
+                if len(line) - len(line.lstrip(" ")) != 6:
+                    raise GuardError(f"{name} mounts must use the checked-in short syntax")
+                mount_match = re.fullmatch(r" {6}-\s+(.+)\s*", line)
+                if mount_match is None:
+                    raise GuardError(f"{name} mounts use unsupported YAML syntax")
+                mounts.append(mount_match.group(1))
+            if mounts != expected_mounts:
+                raise GuardError(f"{name} mount sources are outside the allowlist")
+
+    network_entries = _source_mapping_entries(
+        root_sections["networks"], 2, "Staging networks mapping"
+    )
+    if len(network_entries) != 1 or network_entries[0][1:] != ("isolated", ""):
+        raise GuardError("Staging network keys are outside the allowlist")
+    network_index = network_entries[0][0]
+    network_lines = root_sections["networks"][network_index + 1 :]
+    network_properties = _source_mapping_entries(
+        network_lines, 4, "Staging isolated network mapping"
+    )
+    if len(network_properties) != 1 or network_properties[0][1:] != ("internal", "true"):
+        raise GuardError("Staging isolated network settings are outside the allowlist")
+    if any(
+        line.strip() and len(line) - len(line.lstrip(" ")) > 4
+        for line in network_lines
+    ):
+        raise GuardError("Nested network settings are forbidden")
+
+    volume_entries = _source_mapping_entries(
+        root_sections["volumes"], 2, "Staging volumes mapping"
+    )
+    expected_volume_definitions = {
+        "staging-postgres-data": "{}",
+        "staging-book-files": "{}",
+    }
+    if {key: value for _, key, value in volume_entries} != expected_volume_definitions:
+        raise GuardError("Named volume options are outside the allowlist")
+    if any(
+        line.strip() and len(line) - len(line.lstrip(" ")) > 2
+        for line in root_sections["volumes"]
+    ):
+        raise GuardError("Named volume driver and option settings are forbidden")
 
 
 def _mapping(value: Any, label: str) -> dict[str, Any]:
@@ -229,6 +453,7 @@ def _walk(value: Any):
 def _source_contract(source: str, source_sha: str) -> None:
     code = _strip_yaml_comments(source)
     _source_build_contract(source)
+    _source_shape_contract(source)
     for pattern, description in (
         (r"(?im)^\s*(?:env_file|extends|include)\s*:", "external Compose input"),
         (r"compose\.ya?ml", "production Compose reference"),
@@ -294,7 +519,10 @@ def _source_contract(source: str, source_sha: str) -> None:
 
 
 def _env(service: dict[str, Any], name: str) -> dict[str, Any]:
-    return _mapping(service.get("environment", {}), f"{name} environment")
+    value = service.get("environment", {})
+    if not isinstance(value, dict):
+        raise GuardError(f"{name} environment must be a mapping")
+    return _mapping(value, f"{name} environment")
 
 
 def _mounts(service: dict[str, Any], name: str) -> list[dict[str, Any]]:
@@ -317,6 +545,14 @@ def _check_mount(
     if len(matches) != 1:
         raise GuardError("Staging volume mapping is missing or duplicated")
     mount = matches[0]
+    expected_keys = (
+        {"type", "source", "target", "read_only", "bind"}
+        if mount_type == "bind"
+        else {"type", "source", "target", "volume"}
+    )
+    option_key = "bind" if mount_type == "bind" else "volume"
+    if set(mount) != expected_keys or mount.get(option_key) != {}:
+        raise GuardError("Staging volume options are outside the allowlist")
     actual_source = mount.get("source")
     source_matches = False
     if isinstance(actual_source, str):
@@ -355,14 +591,22 @@ def _validate_model(
     services = model.get("services")
     if not isinstance(services, dict) or set(services) != EXPECTED_SERVICES:
         raise GuardError("Compose must contain only the five isolated staging services")
+    for name, service in services.items():
+        if not isinstance(service, dict) or set(service) != EXPECTED_SERVICE_MODEL_KEYS[name]:
+            raise GuardError(f"{name} service settings are outside the allowlist")
+        if service.get("command") != EXPECTED_COMMANDS[name] or service.get("entrypoint") is not None:
+            raise GuardError(f"{name} command and entrypoint must remain allowlisted")
+        if name == "migrate" and service.get("profiles") != ["migration"]:
+            raise GuardError("Migration service must use only the migration profile")
     networks = model.get("networks")
     if (
         not isinstance(networks, dict)
         or set(networks) != {"isolated"}
         or not isinstance(networks["isolated"], dict)
+        or set(networks["isolated"]) != {"internal", "ipam", "name"}
         or networks["isolated"].get("internal") is not True
+        or networks["isolated"].get("ipam") != {}
         or networks["isolated"].get("name") != f"{COMPOSE_PROJECT}_isolated"
-        or networks["isolated"].get("external") is True
     ):
         raise GuardError("Staging services must use the isolated internal network")
 
@@ -372,17 +616,17 @@ def _validate_model(
         "staging-book-files",
     }:
         raise GuardError("Compose must use only the two staging-owned named volumes")
-    if any(not isinstance(value, dict) or value.get("external") is True for value in volumes.values()):
-        raise GuardError("External volumes are forbidden")
     expected_volume_names = {
         "staging-postgres-data": f"{COMPOSE_PROJECT}_staging-postgres-data",
         "staging-book-files": f"{COMPOSE_PROJECT}_staging-book-files",
     }
     if any(
-        volumes[key].get("name") != expected_name
+        not isinstance(volumes[key], dict)
+        or set(volumes[key]) != {"name"}
+        or volumes[key].get("name") != expected_name
         for key, expected_name in expected_volume_names.items()
     ):
-        raise GuardError("Named volumes must remain inside the staging Compose project")
+        raise GuardError("Named volume drivers and options are outside the allowlist")
 
     for key, value in _walk(model):
         if key.upper().startswith("R2_"):
@@ -405,9 +649,7 @@ def _validate_model(
             raise GuardError("Unsupported or unsafe Compose setting")
 
     for name, service in services.items():
-        if not isinstance(service, dict):
-            raise GuardError(f"{name} service configuration is invalid")
-        if set(service.get("networks", {})) != {"isolated"}:
+        if service.get("networks") != {"isolated": None}:
             raise GuardError("Every service must use only the isolated network")
         if service.get("network_mode") is not None:
             raise GuardError("Host or external network modes are forbidden")
@@ -486,6 +728,7 @@ def _validate_model(
         or not _context_matches(
             migrate_build.get("context"), "backend", compose_root
         )
+        or migrate_build.get("dockerfile") != "Dockerfile"
         or migrate_build.get("target") != "migration"
         or _mounts(migrate, "migrate")
     ):
@@ -520,6 +763,7 @@ def _validate_model(
         backend.get("user") != "node"
         or "image" in backend
         or not _context_matches(backend_build.get("context"), "backend", compose_root)
+        or backend_build.get("dockerfile") != "Dockerfile"
         or backend_build.get("target") != "runtime"
         or backend_build.get("args") != {"VCS_REF": source_sha}
     ):
@@ -551,6 +795,7 @@ def _validate_model(
         or not _context_matches(
             frontend_build.get("context"), "frontend", compose_root
         )
+        or frontend_build.get("dockerfile") != "Dockerfile"
         or frontend_build.get("target") != "runtime"
         or frontend_build.get("args") != expected_frontend_args
         or frontend.get("expose") != ["8080"]
@@ -570,7 +815,10 @@ def _validate_model(
         raise GuardError("Staging nginx must publish exactly one loopback port")
     binding = ports[0]
     if (
-        binding.get("host_ip") != "127.0.0.1"
+        not isinstance(binding, dict)
+        or set(binding) != {"mode", "host_ip", "target", "published", "protocol"}
+        or binding.get("mode") != "ingress"
+        or binding.get("host_ip") != "127.0.0.1"
         or str(binding.get("published")) != str(expected_port)
         or str(binding.get("target")) != "8080"
         or binding.get("protocol", "tcp") != "tcp"
