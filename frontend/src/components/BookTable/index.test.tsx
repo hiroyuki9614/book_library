@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
+import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-react';
 import { BookTable } from './index';
 import { booksData, type Book } from '@/data/booksData';
@@ -127,6 +128,46 @@ describe('BookTable', () => {
 		const row = getBookRow(container, unknownBook.title);
 		expect(row.textContent).toContain('未計測');
 		expect(row.querySelector('[role="progressbar"]')).toBeNull();
+	});
+
+	test('shows measured and unknown progress visibly in mobile book cards', async () => {
+		const measuredBook = { ...pickBook(1), progressPercentage: 34.4 };
+		const unknownBook = { ...pickBook(9), progressPercentage: null };
+		const responsiveDisplayStyles = document.createElement('style');
+		responsiveDisplayStyles.textContent = '.hidden { display: none; } .block { display: block; } @media (min-width: 48rem) { .md\\:table-cell { display: table-cell; } }';
+		document.head.append(responsiveDisplayStyles);
+
+		try {
+			await page.viewport(390, 844);
+			expect(window.matchMedia('(max-width: 767px)').matches).toBe(true);
+			const { container } = await render(
+				<BookTable books={[measuredBook, unknownBook]} itemsPerPage={10} searchQuery='' sort='oldest' isLoading={false} status='all' />,
+			);
+			const measuredRow = getBookRow(container, measuredBook.title);
+			const unknownRow = getBookRow(container, unknownBook.title);
+			const measuredCell = measuredRow.querySelector('td:last-child') as HTMLElement;
+			const unknownCell = unknownRow.querySelector('td:last-child') as HTMLElement;
+
+			expect(measuredRow.querySelectorAll('td')).toHaveLength(6);
+			expect(measuredCell.classList.contains('col-span-2')).toBe(true);
+			expect(measuredCell.classList.contains('block')).toBe(true);
+			expect(getComputedStyle(measuredCell).display).toBe('block');
+			expect(measuredCell.textContent).toContain('34%');
+			expect(measuredCell.querySelector('[role="progressbar"]')?.getAttribute('aria-label')).toBe(`${measuredBook.title} の読書進捗`);
+			expect(measuredCell.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('34');
+
+			expect(unknownRow.querySelectorAll('td')).toHaveLength(6);
+			expect(getComputedStyle(unknownCell).display).toBe('block');
+			expect(unknownCell.textContent).toContain('未計測');
+			expect(unknownCell.querySelector('[role="progressbar"]')).toBeNull();
+
+			await page.viewport(1024, 768);
+			expect(getComputedStyle(measuredCell).display).toBe('table-cell');
+			expect(getComputedStyle(unknownCell).display).toBe('table-cell');
+		} finally {
+			responsiveDisplayStyles.remove();
+			await page.viewport(414, 896);
+		}
 	});
 
 	test('removes inert row actions while keeping one aligned cell per column', async () => {
