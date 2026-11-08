@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Request } from '@playwright/test';
+import { expect, test, type Page, type Request, type Response } from '@playwright/test';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -37,6 +37,120 @@ async function login(page: Page, email: string, loginPassword = password) {
 	await expect(page).toHaveURL('/');
 }
 
+type ReadingInfoBody = {
+	bookId: number;
+	currentPosition: string | null;
+	currentPage: number;
+	progressPercentage: number | null;
+	readStatus: string;
+};
+
+async function patchReadingInfo(page: Page, bookId: number, body: { currentPage: number; progressPercentage?: number | null; readStatus?: 'reading' | 'completed' }) {
+	return page.evaluate(async ({ bookId, body }) => {
+		const response = await fetch(`http://localhost:3000/api/v1/books/${bookId}/reading-info`, {
+			credentials: 'include',
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+		});
+		return { status: response.status, body: await response.json() as ReadingInfoBody };
+	}, { bookId, body });
+}
+
+async function readReadingInfo(page: Page, bookId: number) {
+	return page.evaluate(async ({ bookId }) => {
+		const response = await fetch(`http://localhost:3000/api/v1/books/${bookId}/reading-info`, { credentials: 'include' });
+		return { status: response.status, body: await response.json() as ReadingInfoBody };
+	}, { bookId });
+}
+
+async function assertHomeProgress(page: Page, bookId: number, title: string, expected: 'measured' | 'unmeasured' = 'measured', navigation: 'home' | 'reload' = 'home') {
+	type ListPage = {
+		total: number;
+		page: number;
+		books: Array<{ id: number; title: string; progressPercentage: number | null }>;
+	};
+	const responses = new Map<number, Response>();
+	const onResponse = (response: Response) => {
+		const url = new URL(response.url());
+		if (response.request().method() !== 'GET' || url.pathname !== '/api/v1/books') return;
+		if (url.searchParams.get('limit') !== '100' || !/^\d+$/.test(url.searchParams.get('page') ?? '')) return;
+		const requestedPage = Number(url.searchParams.get('page'));
+		responses.set(requestedPage, response);
+	};
+	page.on('response', onResponse);
+	if (navigation === 'reload') await page.reload();
+	else await page.goto('/');
+	await expect.poll(() => responses.has(1), { timeout: 30_000 }).toBe(true);
+	const firstUrl = new URL(responses.get(1)!.url());
+	expect(firstUrl.origin, 'Home shelf list must come from the configured local backend').toBe('http://localhost:3000');
+	expect(responses.get(1)!.status(), 'Books page 1 must return HTTP 200').toBe(200);
+	const firstBody = await responses.get(1)!.json() as ListPage;
+	expect(firstBody.page, 'Books response page must match its request').toBe(1);
+	const total = firstBody.total;
+	expect(total).toBeGreaterThan(0);
+	const expectedPages = Math.ceil(total / 100);
+	await expect.poll(() => responses.size, { timeout: 30_000 }).toBe(expectedPages);
+	page.off('response', onResponse);
+	const listPages = await Promise.all([...responses.entries()]
+		.sort(([a], [b]) => a - b)
+		.map(async ([requestedPage, response]) => {
+			const url = new URL(response.url());
+			expect(url.origin, `Books page ${requestedPage} must come from the configured local backend`).toBe('http://localhost:3000');
+			expect(response.status(), `Books page ${requestedPage} must return HTTP 200`).toBe(200);
+			if (requestedPage === 1) return firstBody;
+			const body = await response.json() as ListPage;
+			expect(body.page, 'Books response page must match its request').toBe(requestedPage);
+			return body;
+		}));
+
+	listPages.sort((a, b) => a.page - b.page);
+	expect(listPages.map((result) => result.page)).toEqual(Array.from({ length: expectedPages }, (_, index) => index + 1));
+	expect(listPages.every((result) => result.total === total)).toBe(true);
+	const books = listPages.flatMap((result) => result.books);
+	expect(books).toHaveLength(total);
+	expect(new Set(books.map((book) => book.id)).size, 'Books list must not contain duplicate IDs across API pages').toBe(total);
+	const savedBook = books.find((book) => book.id === bookId);
+	expect(savedBook, `${title} must be present in the authenticated Home list`).toBeDefined();
+	expect(savedBook!.title).toBe(title);
+	if (expected === 'unmeasured') {
+		expect(savedBook!.progressPercentage, `${title} must remain server-reported as unmeasured`).toBeNull();
+	} else {
+		expect(typeof savedBook!.progressPercentage).toBe('number');
+		expect(Number.isFinite(savedBook!.progressPercentage)).toBe(true);
+	}
+	const measured = books
+		.map((book) => book.progressPercentage)
+		.filter((progress): progress is number => typeof progress === 'number' && Number.isFinite(progress));
+	const averageLabel = measured.length === 0
+		? `未計測（計測済み0/${total}冊）`
+		: `${Math.round(measured.reduce((sum, progress) => sum + progress, 0) / measured.length)}%（計測済み${measured.length}/${total}冊）`;
+
+	await expect(page.getByText(averageLabel, { exact: true }).first()).toBeVisible();
+	await page.getByRole('textbox', { name: '書籍を検索' }).fill(title);
+	const row = page.getByRole('link', { name: `${title}を読む` });
+	if (expected === 'unmeasured') {
+		await expect(row.getByText('未計測', { exact: true })).toBeVisible();
+		await expect(row.getByRole('progressbar')).toHaveCount(0);
+	} else {
+		const savedProgress = savedBook!.progressPercentage as number;
+		await expect(row.getByText(`${Math.round(savedProgress)}%`, { exact: true })).toBeVisible();
+		await expect(row.getByRole('progressbar', { name: `${title} の読書進捗` }))
+			.toHaveAttribute('aria-valuenow', String(Math.round(savedProgress)));
+	}
+}
+
+async function assertHomeProgressAcrossSession(page: Page, bookId: number, title: string) {
+	await page.setViewportSize({ width: 393, height: 851 });
+	await assertHomeProgress(page, bookId, title);
+	await assertHomeProgress(page, bookId, title, 'measured', 'reload');
+	await page.getByRole('button', { name: 'Toggle Sidebar' }).click();
+	await page.getByRole('button', { name: 'ログアウト', exact: true }).click();
+	await expect(page).toHaveURL('/login');
+	await login(page, metadata.demoEmail);
+	await assertHomeProgress(page, bookId, title);
+}
+
 test('demo user sees only public EPUB/PDF and cannot access a private book or admin API', async ({ page }) => {
 	await login(page, metadata.demoEmail);
 	await expect(page.getByText(metadata.pdfTitle, { exact: true })).toBeVisible();
@@ -67,10 +181,32 @@ test('demo user sees only public EPUB/PDF and cannot access a private book or ad
 test('demo user reads protected PDF and restores its saved page', async ({ page }) => {
 	await page.setViewportSize({ width: 393, height: 851 });
 	await login(page, metadata.demoEmail);
+	const readingInfoPath = `/api/v1/books/${metadata.pdfBookId}/reading-info`;
+	const prepared = await patchReadingInfo(page, metadata.pdfBookId, { currentPage: 2, readStatus: 'completed' });
+	expect(prepared.status).toBe(200);
+	expect(prepared.body).toMatchObject({
+		bookId: metadata.pdfBookId,
+		currentPosition: '2',
+		currentPage: 2,
+		progressPercentage: 100,
+		readStatus: 'completed',
+	});
+	const openReadingInfoResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
+		&& response.request().method() === 'GET');
 	const fileResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.pdfBookId}/file`));
 	await page.getByText(metadata.pdfTitle, { exact: true }).click();
 	await expect(page).toHaveURL(`/reader/${metadata.pdfBookId}`);
 	expect((await fileResponse).headers()['content-type']).toContain('application/pdf');
+	const openReadingInfo = await openReadingInfoResponse;
+	const openReadingInfoBody = await openReadingInfo.json() as ReadingInfoBody;
+	expect(openReadingInfo.status()).toBe(200);
+	expect(openReadingInfoBody).toMatchObject({
+		bookId: metadata.pdfBookId,
+		currentPosition: '2',
+		currentPage: 2,
+		progressPercentage: 100,
+		readStatus: 'completed',
+	});
 
 	const mobileControls = (await page.evaluate(() => innerWidth)) < 768;
 	const pdfFooter = page.getByTestId('pdf-reader-footer');
@@ -79,6 +215,31 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	const operationMenu = page.getByRole('dialog', { name: '操作メニュー' });
 	const menuPageInput = operationMenu.getByRole('spinbutton');
 	const menuProgress = operationMenu.locator('output[aria-live="polite"]');
+	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 30_000 });
+	await expect(page.getByRole('alert')).toHaveCount(0);
+	const viewport = page.getByTestId('pdf-viewport');
+	const shown = () => page.evaluate(() => {
+		const viewport = document.querySelector('[data-testid="pdf-viewport"]')!.getBoundingClientRect();
+		return [...document.querySelectorAll<HTMLElement>('[data-pdf-page]')].map(el => {
+			const r = el.getBoundingClientRect();
+			return { page: Number(el.dataset.pdfPage), area: Math.max(0, Math.min(r.bottom, viewport.bottom) - Math.max(r.top, viewport.top)) * Math.max(0, Math.min(r.right, viewport.right) - Math.max(r.left, viewport.left)) };
+		}).sort((a, b) => b.area - a.area)[0]?.page;
+	});
+	await expect.poll(shown).toBe(2);
+	await expect(page.locator('[data-pdf-page="2"] img')).toBeVisible();
+	if (mobileControls) {
+		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
+		await expect(operationMenu.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
+		await expect(menuPageInput).toHaveValue('2', { timeout: 30_000 });
+		await expect(menuProgress).toHaveText('2 / 2 ページ 100%');
+		await operationMenu.getByRole('button', { name: '前のページへ', exact: true }).click();
+		await expect(menuPageInput).toHaveValue('1');
+		await page.getByRole('button', { name: '閉じる', exact: true }).click();
+	} else {
+		await expect(footerPageInput).toHaveValue('2', { timeout: 30_000 });
+		await pdfFooter.getByRole('button', { name: '前のページへ', exact: true }).click();
+		await expect(footerPageInput).toHaveValue('1');
+	}
 	if (mobileControls) {
 		for (const width of [320, 393]) {
 			await page.setViewportSize({ width, height: 851 });
@@ -107,7 +268,6 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		await expect(pdfFooterProgress).toBeVisible();
 		await expect(pdfFooterProgress).toHaveText('1 / 2 ページ 50%');
 	}
-	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 30_000 });
 	await page.getByRole('button', { name: '目次' }).click();
 	await expect(page.getByRole('button', { name: 'First chapter' })).toBeVisible();
 	await page.getByRole('button', { name: 'First chapter' }).click();
@@ -116,19 +276,10 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	}
 	await expect(page.getByRole('dialog')).toBeHidden();
 
-	const readingInfoPath = `/api/v1/books/${metadata.pdfBookId}/reading-info`;
 	const saveResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
 		&& response.request().method() === 'PATCH'
 		&& response.request().postDataJSON()?.currentPage === 2
 		&& response.request().postDataJSON()?.readStatus === 'completed');
-	const viewport = page.getByTestId('pdf-viewport');
-	const shown = () => page.evaluate(() => {
-		const viewport = document.querySelector('[data-testid="pdf-viewport"]')!.getBoundingClientRect();
-		return [...document.querySelectorAll<HTMLElement>('[data-pdf-page]')].map(el => {
-			const r = el.getBoundingClientRect();
-			return {page:Number(el.dataset.pdfPage),area:Math.max(0,Math.min(r.bottom,viewport.bottom)-Math.max(r.top,viewport.top))*Math.max(0,Math.min(r.right,viewport.right)-Math.max(r.left,viewport.left))};
-		}).sort((a,b)=>b.area-a.area)[0]?.page;
-	});
 	await expect.poll(shown).toBe(1);
 	const firstImage = await page.locator('[data-pdf-page="1"] img').screenshot();
 	const viewportBounds = await viewport.boundingBox();
@@ -191,20 +342,12 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	monitorResizePatches = true;
 	await page.setViewportSize({ width: 851, height: 393 });
 	await expect(viewport).toBeVisible();
-	// Ordinary reading saves are debounced for 750ms. Observe that full window
-	// after resize so a transient EmbedPDF page 1 state cannot hide before reload.
-	await page.waitForTimeout(800);
-	const reloadReadingInfoResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
-		&& response.request().method() === 'GET');
-	await page.reload();
-	const reloadResponse = await reloadReadingInfoResponse;
-	const reloadBody = await reloadResponse.json() as {
-		bookId: number;
-		currentPosition: string | null;
-		currentPage: number;
-		progressPercentage: number | null;
-		readStatus: string;
-	};
+	await expect.poll(shown).toBe(2);
+	// Unmounting the reader flushes any pending debounced save. Await every
+	// observed PATCH and then perform an authenticated server read before any
+	// reopen, so a failed or late save cannot be hidden by a reload.
+	await page.getByRole('link', { name: '本棚に戻る', exact: true }).click();
+	await expect(page).toHaveURL('/');
 	const latePatchResponses = await Promise.all(latePatchRequests.map(async (patch) => {
 		const response = await patch.request.response();
 		let responseBodyDecoded = false;
@@ -226,14 +369,16 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		};
 	}));
 	page.off('request', monitorLatePatches);
+	monitorResizePatches = false;
+	const finalServerRead = await readReadingInfo(page, metadata.pdfBookId);
 	expect({
-		status: reloadResponse.status(),
-		currentPosition: reloadBody.currentPosition,
-		currentPage: reloadBody.currentPage,
-		progressPercentage: reloadBody.progressPercentage,
-		readStatus: reloadBody.readStatus,
+		status: finalServerRead.status,
+		currentPosition: finalServerRead.body.currentPosition,
+		currentPage: finalServerRead.body.currentPage,
+		progressPercentage: finalServerRead.body.progressPercentage,
+		readStatus: finalServerRead.body.readStatus,
 		latePatches: latePatchResponses,
-	}, 'Reload ReadingInfo GET must confirm persisted page 2 before evaluating the visible PDF restore.')
+	}, 'Final server read must confirm persisted page 2 before evaluating the reopened PDF restore.')
 		.toMatchObject({ status: 200, currentPosition: '2', currentPage: 2, progressPercentage: 100, readStatus: 'completed' });
 	expect(latePatchResponses.every((patch) => patch.requestCurrentPage === 2
 		&& patch.requestProgressPercentage === 100
@@ -241,23 +386,78 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		&& (!patch.responseBodyDecoded || (patch.responseCurrentPage === 2 && patch.responseProgressPercentage === 100 && patch.responseReadStatus === 'completed'))),
 	`ReadingInfo PATCH calls after resize must not overwrite page 2; observed ${JSON.stringify(latePatchResponses)}`)
 		.toBe(true);
-	if ((await page.evaluate(() => innerWidth)) < 768) {
-		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
-	}
+	const reopenReadingInfoResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
+		&& response.request().method() === 'GET');
+	await page.goto(`/reader/${metadata.pdfBookId}`);
+	const reopenReadingInfo = await reopenReadingInfoResponse;
+	const reopenReadingInfoBody = await reopenReadingInfo.json() as ReadingInfoBody;
+	expect(reopenReadingInfo.status()).toBe(200);
+	expect(reopenReadingInfoBody).toMatchObject({
+		bookId: metadata.pdfBookId,
+		currentPosition: '2',
+		currentPage: 2,
+		progressPercentage: 100,
+		readStatus: 'completed',
+	});
+	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 30_000 });
+	await expect(page.getByRole('alert')).toHaveCount(0);
 	await expect(footerPageInput).toHaveValue('2', { timeout: 30_000 });
 	await expect.poll(shown).toBe(2);
 	await expect(page.locator('[data-pdf-page="2"] img')).toBeVisible();
+	const reloadReadingInfoResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
+		&& response.request().method() === 'GET');
+	await page.reload();
+	const reloadResponse = await reloadReadingInfoResponse;
+	const reloadBody = await reloadResponse.json() as ReadingInfoBody;
+	expect(reloadResponse.status()).toBe(200);
+	expect(reloadBody).toMatchObject({
+		bookId: metadata.pdfBookId,
+		currentPosition: '2',
+		currentPage: 2,
+		progressPercentage: 100,
+		readStatus: 'completed',
+	});
+	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 30_000 });
+	await expect(page.getByRole('alert')).toHaveCount(0);
+	await expect(footerPageInput).toHaveValue('2', { timeout: 30_000 });
+	await expect.poll(shown).toBe(2);
+	await expect(page.locator('[data-pdf-page="2"] img')).toBeVisible();
+	await assertHomeProgressAcrossSession(page, metadata.pdfBookId, metadata.pdfTitle);
 });
 
 test('demo user opens protected EPUB and persists/restores a CFI', async ({ page }) => {
 	await page.setViewportSize({ width: 393, height: 851 });
 	await login(page, metadata.demoEmail);
+	const unmeasured = await patchReadingInfo(page, metadata.epubBookId, { currentPage: 1, progressPercentage: null, readStatus: 'reading' });
+	expect(unmeasured.status).toBe(200);
+	expect(unmeasured.body).toMatchObject({
+		bookId: metadata.epubBookId,
+		currentPosition: '1',
+		currentPage: 1,
+		progressPercentage: null,
+		readStatus: 'reading',
+	});
+	await assertHomeProgress(page, metadata.epubBookId, metadata.epubTitle, 'unmeasured');
+	const readingInfoPath = `/api/v1/books/${metadata.epubBookId}/reading-info`;
+	const openReadingInfoResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
+		&& response.request().method() === 'GET');
 	const fileResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.epubBookId}/file`));
 	await page.getByText(metadata.epubTitle, { exact: true }).click();
 	await expect(page).toHaveURL(`/reader/${metadata.epubBookId}`);
 	expect((await fileResponse).headers()['content-type']).toContain('application/epub+zip');
+	const openReadingInfo = await openReadingInfoResponse;
+	const openReadingInfoBody = await openReadingInfo.json() as ReadingInfoBody;
+	expect(openReadingInfo.status()).toBe(200);
+	expect(openReadingInfoBody).toMatchObject({
+		bookId: metadata.epubBookId,
+		currentPosition: '1',
+		currentPage: 1,
+		progressPercentage: null,
+		readStatus: 'reading',
+	});
 	await expect(page.getByRole('button', { name: '目次' })).toBeVisible({ timeout: 30_000 });
 	await expect(page.getByTestId('epub-reader-footer').getByText(/本文位置: \d+ \/ \d+/)).toBeVisible();
+	await expect(page.getByRole('alert')).toHaveCount(0);
 	await page.getByRole('button', { name: '目次' }).click();
 	await expect(page.getByRole('button', { name: '第一節' })).toBeVisible();
 	await page.getByRole('button', { name: '第一章' }).click();
@@ -275,20 +475,37 @@ test('demo user opens protected EPUB and persists/restores a CFI', async ({ page
 	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
 	await expect(page.frameLocator('[data-publication-pane="primary"] iframe').first().getByRole('heading', { name: '第二章' })).toBeVisible();
 	expect((await saveResponse).status()).toBe(200);
-	await expect(page.getByText(/100%/)).toBeVisible();
 
-	const result = await page.evaluate(async ({ bookId }) => {
-		const restored = await fetch(`http://localhost:3000/api/v1/books/${bookId}/reading-info`, { credentials: 'include' });
-		return { restoreStatus: restored.status, body: await restored.json() };
-	}, { bookId: metadata.epubBookId });
-	expect(result.restoreStatus).toBe(200);
+	const result = await readReadingInfo(page, metadata.epubBookId);
+	expect(result.status).toBe(200);
 	expect(result.body).toMatchObject({ bookId: metadata.epubBookId, currentPage: 1, progressPercentage: 100, readStatus: 'completed' });
 	expect(result.body.currentPosition).toMatch(/^epubcfi\(/);
+	await expect(page.getByText(new RegExp(`${result.body.progressPercentage}%`))).toBeVisible();
 	await page.setViewportSize({ width: 851, height: 393 });
+	const reloadReadingInfoResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
+		&& response.request().method() === 'GET');
+	await page.evaluate(() => {
+		for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+			const key = localStorage.key(index);
+			if (key?.startsWith('reader-location:')) localStorage.removeItem(key);
+		}
+	});
 	await page.reload();
+	const reloadReadingInfo = await reloadReadingInfoResponse;
+	const reloadReadingInfoBody = await reloadReadingInfo.json() as ReadingInfoBody;
+	expect(reloadReadingInfo.status()).toBe(200);
+	expect(reloadReadingInfoBody).toMatchObject({
+		bookId: metadata.epubBookId,
+		currentPosition: result.body.currentPosition,
+		currentPage: result.body.currentPage,
+		progressPercentage: result.body.progressPercentage,
+		readStatus: result.body.readStatus,
+	});
 	await expect(page.getByRole('button', { name: '目次' })).toBeVisible({ timeout: 30_000 });
 	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
+	await expect(page.getByRole('alert')).toHaveCount(0);
 	await expect(page.frameLocator('[data-publication-pane="primary"] iframe').first().getByRole('heading', { name: '第二章' })).toBeVisible();
+	await assertHomeProgressAcrossSession(page, metadata.epubBookId, metadata.epubTitle);
 });
 
 
