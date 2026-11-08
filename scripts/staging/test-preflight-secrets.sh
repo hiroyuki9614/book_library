@@ -21,7 +21,8 @@ trap 'rm -rf -- "$test_root"' EXIT
 repo_root="$test_root/repo"
 fixture_preflight="$repo_root/scripts/staging/preflight.sh"
 test_bin="$test_root/bin"
-mkdir -p "$(dirname -- "$fixture_preflight")" "$test_bin" "$repo_root/nginx"
+mkdir -p "$(dirname -- "$fixture_preflight")" "$test_bin" "$repo_root/nginx" \
+  "$repo_root/backend" "$repo_root/frontend"
 cp -- "$source_preflight" "$fixture_preflight"
 cp -- "$source_guard" "$repo_root/scripts/staging/ci-isolation-guard.py"
 cp -- "$source_role_init" "$repo_root/scripts/staging/10-belib-staging-roles.sh"
@@ -38,6 +39,7 @@ GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" \
   -c commit.gpgSign=false \
   commit -qm 'Offline staging preflight fixture'
 revision="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" rev-parse HEAD)"
+base_revision="$revision"
 
 # A constrained PATH makes the preflight's Docker CLI check fail without invoking Docker.
 for utility in bash dirname git grep hostname id sed sh stat; do
@@ -237,3 +239,46 @@ grep -F -- '--profile migration config --format json' "$docker_log" >/dev/null |
   fail 'Preflight did not request the fully resolved migration-profile JSON model'
 printf 'PASS: preflight blocks unsafe source-only build.ssh even with safe normalized JSON (exit=%s)\n' "$source_status"
 printf 'PASS: preflight used Compose config only; no Docker build or deployment command ran\n'
+
+# Restore the clean source in the disposable fixture and inject an unapproved
+# interpolation default. The resolved fixture model remains valid on purpose.
+git -C "$repo_root" show "$base_revision:compose.staging.yaml" > "$repo_root/compose.staging.yaml"
+python3 -B - "$repo_root/compose.staging.yaml" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+approved = "BETTER_AUTH_SECRET: ${BELIB_STAGE_AUTH_SECRET:?Set staging-only Better Auth secret}"
+injected = "BETTER_AUTH_SECRET: ${UNRELATED_SECRET:-" + "f" * 64 + "}"
+if source.count(approved) != 1:
+    raise SystemExit("Expected one staging auth-secret source scalar")
+path.write_text(source.replace(approved, injected, 1), encoding="utf-8")
+PY
+git -C "$repo_root" add compose.staging.yaml
+GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" \
+  -c user.name='BeLib staging test' \
+  -c user.email='belib-staging-test@example.invalid' \
+  -c core.hooksPath=/dev/null \
+  -c commit.gpgSign=false \
+  commit -qm 'Unexpected staging environment interpolation fixture'
+revision="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" rev-parse HEAD)"
+source_env_attack="$test_root/preflight-source-env-attack.env"
+write_fixture "$source_env_attack" "$synthetic_secret_a" "$synthetic_secret_b" "$synthetic_secret_c" "$synthetic_secret_d"
+source_env_model="$test_root/compose-source-env-attack.json"
+make_compose_model "$source_env_model" valid
+set +e
+source_env_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$source_env_model" \
+  bash "$fixture_preflight" "$source_env_attack" 2>&1)"
+source_env_status=$?
+set -e
+[[ "$source_env_status" -eq 1 && "$source_env_output" == *'BLOCKED: Staging Compose isolation guard rejected configuration'* ]] || \
+  fail 'Preflight accepted an unapproved raw environment interpolation with a valid resolved model'
+for synthetic_secret in "$synthetic_secret_a" "$synthetic_secret_b" "$synthetic_secret_c" "$synthetic_secret_d"; do
+  [[ "$source_env_output" != *"$synthetic_secret"* ]] || fail 'Raw environment rejection exposed a synthetic credential'
+done
+if grep -Eq '(^| )(up|build)( |$)' "$docker_log"; then
+  fail 'Preflight test invoked a Docker deployment or build command'
+fi
+printf 'PASS: preflight blocks unapproved raw environment interpolation with safe normalized JSON (exit=%s)\n' "$source_env_status"

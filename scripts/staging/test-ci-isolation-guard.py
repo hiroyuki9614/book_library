@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -26,7 +28,7 @@ APP_DATABASE_URL = f"postgresql://belib_staging_app:{APP_PASSWORD}@db:5432/belib
 MIGRATE_DATABASE_URL = f"postgresql://belib_staging_migrate:{MIGRATE_PASSWORD}@db:5432/belib_staging"
 
 
-def compose_model() -> dict:
+def compose_model(root: Path = ROOT) -> dict:
     return {
         "name": guard.COMPOSE_PROJECT,
         "services": {
@@ -41,7 +43,12 @@ def compose_model() -> dict:
                     "BELIB_STAGE_DB_APP_PASSWORD": APP_PASSWORD,
                     "BELIB_STAGE_DB_MIGRATE_PASSWORD": MIGRATE_PASSWORD,
                 },
-                "healthcheck": {},
+                "healthcheck": {
+                    "test": ["CMD-SHELL", guard.EXPECTED_DB_HEALTHCHECK_COMMAND],
+                    "interval": "5s",
+                    "timeout": "5s",
+                    "retries": 12,
+                },
                 "networks": {"isolated": None},
                 "restart": "unless-stopped",
                 "volumes": [
@@ -53,7 +60,7 @@ def compose_model() -> dict:
                     },
                     {
                         "type": "bind",
-                        "source": str(ROOT / "scripts/staging/10-belib-staging-roles.sh"),
+                        "source": str(root / "scripts/staging/10-belib-staging-roles.sh"),
                         "target": "/docker-entrypoint-initdb.d/10-belib-staging-roles.sh",
                         "read_only": True,
                         "bind": {},
@@ -149,14 +156,14 @@ def compose_model() -> dict:
                 "volumes": [
                     {
                         "type": "bind",
-                        "source": str(ROOT / "nginx/nginx.conf"),
+                        "source": str(root / "nginx/nginx.conf"),
                         "target": "/etc/nginx/nginx.conf",
                         "read_only": True,
                         "bind": {},
                     },
                     {
                         "type": "bind",
-                        "source": str(ROOT / "scripts/staging/nginx-default.conf"),
+                        "source": str(root / "scripts/staging/nginx-default.conf"),
                         "target": "/etc/nginx/conf.d/default.conf",
                         "read_only": True,
                         "bind": {},
@@ -218,6 +225,17 @@ class CIIsolationGuardTests(unittest.TestCase):
         marker = f"  {service}:\n"
         return self.compose_source.replace(marker, marker + f"    {entry}\n", 1)
 
+    def populate_compose_root(self, root: Path) -> None:
+        for directory in ("backend", "frontend", "nginx", "scripts/staging"):
+            (root / directory).mkdir(parents=True, exist_ok=True)
+        for relative in (
+            "nginx/nginx.conf",
+            "scripts/staging/10-belib-staging-roles.sh",
+            "scripts/staging/nginx-default.conf",
+        ):
+            (root / relative).write_text("fixture\n", encoding="utf-8")
+        (root / "scripts/staging/10-belib-staging-roles.sh").chmod(0o644)
+
     def test_accepts_the_isolated_compose_model_for_exact_pr_head(self):
         guard.validate(
             source_sha=SOURCE_SHA,
@@ -231,6 +249,112 @@ class CIIsolationGuardTests(unittest.TestCase):
         for source in (self.compose_source, role_script):
             self.assertIn("shobj_description(", source)
             self.assertNotRegex(source, r"(?<!sh)obj_description\s*\(")
+
+    def test_rejects_changed_database_healthcheck_structure_and_model(self):
+        mutations = (
+            ("test", ["CMD-SHELL", "test \"$(true)\" = \"1\""]),
+            ("interval", "30s"),
+            ("timeout", "30s"),
+            ("retries", 1),
+            ("start_period", "1s"),
+        )
+        for key, value in mutations:
+            with self.subTest(key=key):
+                model = compose_model()
+                model["services"]["db"]["healthcheck"][key] = value
+                self.assert_rejected(model=model)
+
+        source = self.compose_source.replace(
+            "      retries: 12\n", "      retries: 13\n", 1
+        )
+        self.assert_rejected(source=source, model=compose_model())
+
+    def test_rejects_unexpected_raw_environment_values_even_when_model_matches(self):
+        for service, values in guard.EXPECTED_SOURCE_ENV_VALUES.items():
+            for key, expected in values.items():
+                with self.subTest(service=service, key=key):
+                    old_line = f"      {key}: {expected}\n"
+                    new_line = f"      {key}: ${{UNRELATED_SECRET}}\n"
+                    source = self.compose_source.replace(old_line, new_line, 1)
+                    self.assertNotEqual(source, self.compose_source)
+                    self.assert_rejected(source=source, model=compose_model())
+
+        source = self.compose_source.replace(
+            "BETTER_AUTH_SECRET: ${BELIB_STAGE_AUTH_SECRET:?Set staging-only Better Auth secret}",
+            "BETTER_AUTH_SECRET: ${UNRELATED_SECRET:-"
+            + "f" * 64
+            + "}",
+            1,
+        )
+        self.assert_rejected(source=source, model=compose_model())
+
+    def test_rejects_symlinked_checkout_build_and_bind_paths(self):
+        for component in ("backend", "frontend", "nginx", "scripts"):
+            with self.subTest(component=component), tempfile.TemporaryDirectory() as temp:
+                temporary_root = Path(temp)
+                repo = temporary_root / "checkout"
+                repo.mkdir()
+                self.populate_compose_root(repo)
+                outside = temporary_root / "outside"
+                outside.mkdir()
+                external_scripts = outside / "scripts"
+                (external_scripts / "staging").mkdir(parents=True)
+                for relative in (
+                    "10-belib-staging-roles.sh",
+                    "nginx-default.conf",
+                ):
+                    (external_scripts / "staging" / relative).write_text(
+                        "fixture\n", encoding="utf-8"
+                    )
+
+                link = repo / component
+                if component == "scripts":
+                    shutil.rmtree(link)
+                    link.symlink_to(external_scripts, target_is_directory=True)
+                else:
+                    shutil.rmtree(link)
+                    if component == "nginx":
+                        (outside / "nginx.conf").write_text("fixture\n", encoding="utf-8")
+                    link.symlink_to(outside, target_is_directory=True)
+
+                with self.assertRaises(guard.GuardError):
+                    guard.validate(
+                        source_sha=SOURCE_SHA,
+                        checkout_sha=SOURCE_SHA,
+                        compose_source=self.compose_source,
+                        compose_model=compose_model(repo),
+                        compose_root=repo,
+                    )
+
+    def test_rejects_out_of_repo_traversal_in_resolved_build_and_bind_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temporary_root = Path(temp)
+            repo = temporary_root / "checkout"
+            repo.mkdir()
+            self.populate_compose_root(repo)
+
+            model = compose_model(repo)
+            model["services"]["backend"]["build"]["context"] = "../checkout/backend"
+            with self.assertRaises(guard.GuardError):
+                guard.validate(
+                    source_sha=SOURCE_SHA,
+                    checkout_sha=SOURCE_SHA,
+                    compose_source=self.compose_source,
+                    compose_model=model,
+                    compose_root=repo,
+                )
+
+            model = compose_model(repo)
+            traversing_path = repo / "nginx" / ".." / "nginx" / "nginx.conf"
+            model["services"]["nginx"]["volumes"][0]["source"] = str(traversing_path)
+            with self.assertRaises(guard.GuardError):
+                guard.validate(
+                    source_sha=SOURCE_SHA,
+                    checkout_sha=SOURCE_SHA,
+                    compose_source=self.compose_source,
+                    compose_model=model,
+                    compose_root=repo,
+                )
 
     def test_rejects_short_or_unmatched_source_revision(self):
         self.assert_rejected(source_sha=SOURCE_SHA[:12])

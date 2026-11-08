@@ -71,6 +71,76 @@ EXPECTED_SOURCE_ENV_KEYS = {
         "BOOK_FILE_STORAGE_ROOT", "NPM_CONFIG_CACHE",
     },
 }
+MIGRATE_DATABASE_URL_SOURCE = (
+    "postgresql://belib_staging_migrate:"
+    "${BELIB_STAGE_DB_MIGRATE_PASSWORD:?Set staging-only migration password}"
+    "@db:5432/belib_staging"
+)
+APP_DATABASE_URL_SOURCE = (
+    "postgresql://belib_staging_app:"
+    "${BELIB_STAGE_DB_APP_PASSWORD:?Set staging-only app password}"
+    "@db:5432/belib_staging"
+)
+EXPECTED_SOURCE_ENV_VALUES = {
+    "db": {
+        "POSTGRES_USER": "belib_staging_bootstrap",
+        "POSTGRES_DB": "belib_staging",
+        "POSTGRES_PASSWORD": "${BELIB_STAGE_DB_BOOTSTRAP_PASSWORD:?Set staging-only bootstrap password}",
+        "BELIB_STAGE_DB_APP_PASSWORD": "${BELIB_STAGE_DB_APP_PASSWORD:?Set staging-only app password}",
+        "BELIB_STAGE_DB_MIGRATE_PASSWORD": "${BELIB_STAGE_DB_MIGRATE_PASSWORD:?Set staging-only migration password}",
+    },
+    "migrate": {"DATABASE_URL": MIGRATE_DATABASE_URL_SOURCE},
+    "backend": {
+        "DATABASE_URL": APP_DATABASE_URL_SOURCE,
+        "APP_PORT": '"3000"',
+        "ENVIRONMENT": "test",
+        "FRONTEND_URL": "https://stg-bl.hiroyuki9614.com",
+        "BETTER_AUTH_URL": "https://stg-bl.hiroyuki9614.com",
+        "BETTER_AUTH_SECRET": "${BELIB_STAGE_AUTH_SECRET:?Set staging-only Better Auth secret}",
+        "BOOK_FILE_STORAGE_DRIVER": "local",
+        "BOOK_FILE_STORAGE_ROOT": "/home/node/books",
+        "NPM_CONFIG_CACHE": "/tmp/npm-cache",
+    },
+}
+DB_HEALTHCHECK_SQL = (
+    "SELECT 1 WHERE current_user = 'belib_staging_app'",
+    "AND shobj_description((SELECT oid FROM pg_database WHERE datname = current_database()), 'pg_database') = 'belib-staging-role-bootstrap-v1'",
+    "AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_app' AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit)",
+    "AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_migrate' AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit)",
+    "AND has_database_privilege(current_user, current_database(), 'CONNECT')",
+    "AND NOT has_database_privilege(current_user, current_database(), 'CREATE')",
+    "AND NOT has_database_privilege(current_user, current_database(), 'TEMPORARY')",
+    "AND has_schema_privilege(current_user, 'public', 'USAGE')",
+    "AND NOT has_schema_privilege(current_user, 'public', 'CREATE')",
+    "AND (SELECT nspowner = (SELECT oid FROM pg_roles WHERE rolname = 'belib_staging_migrate') FROM pg_namespace WHERE nspname = 'public')",
+)
+EXPECTED_DB_HEALTHCHECK_COMMAND = (
+    'test "$$(psql -X -w -U belib_staging_app -d belib_staging -tAc '
+    '"'
+    + " ".join(DB_HEALTHCHECK_SQL)
+    + '")" = "1"'
+)
+EXPECTED_DB_HEALTHCHECK_SOURCE = "\n".join(
+    [
+        "    healthcheck:",
+        "      test:",
+        "        - CMD-SHELL",
+        "        - >-",
+        '          test "$$(psql -X -w -U belib_staging_app -d belib_staging -tAc',
+        f'          "{DB_HEALTHCHECK_SQL[0]}',
+        *(f"          {line}" for line in DB_HEALTHCHECK_SQL[1:-1]),
+        f'          {DB_HEALTHCHECK_SQL[-1]}\")\" = \"1\"',
+        "      interval: 5s",
+        "      timeout: 5s",
+        "      retries: 12",
+    ]
+)
+EXPECTED_DB_HEALTHCHECK_MODEL = {
+    "test": ["CMD-SHELL", EXPECTED_DB_HEALTHCHECK_COMMAND],
+    "interval": "5s",
+    "timeout": "5s",
+    "retries": 12,
+}
 EXPECTED_SOURCE_MOUNTS = {
     "db": [
         "staging-postgres-data:/var/lib/postgresql/data",
@@ -112,16 +182,6 @@ EXPECTED_COMMANDS = {
 }
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 HEX_SECRET_PATTERN = re.compile(r"[a-f0-9]{64}\Z")
-MIGRATE_DATABASE_URL_SOURCE = (
-    "postgresql://belib_staging_migrate:"
-    "${BELIB_STAGE_DB_MIGRATE_PASSWORD:?Set staging-only migration password}"
-    "@db:5432/belib_staging"
-)
-APP_DATABASE_URL_SOURCE = (
-    "postgresql://belib_staging_app:"
-    "${BELIB_STAGE_DB_APP_PASSWORD:?Set staging-only app password}"
-    "@db:5432/belib_staging"
-)
 ROLE_INIT_SOURCE = "scripts/staging/10-belib-staging-roles.sh"
 ROLE_INIT_TARGET = "/docker-entrypoint-initdb.d/10-belib-staging-roles.sh"
 
@@ -224,12 +284,33 @@ def _source_shape_contract(source: str) -> None:
             )
             if {key for _, key, _ in env_entries} != EXPECTED_SOURCE_ENV_KEYS[name]:
                 raise GuardError(f"{name} environment keys are outside the allowlist")
+            if {
+                key: value for _, key, value in env_entries
+            } != EXPECTED_SOURCE_ENV_VALUES[name]:
+                raise GuardError(f"{name} environment values are outside the allowlist")
             if any(
                 line.strip()
                 and len(line) - len(line.lstrip(" ")) > 6
                 for line in env_lines
             ):
                 raise GuardError(f"{name} environment values must remain scalars")
+
+        if name == "db":
+            healthcheck_index, healthcheck_value = property_by_key["healthcheck"]
+            healthcheck_position = next(
+                position
+                for position, (_, key, _) in enumerate(properties)
+                if key == "healthcheck"
+            )
+            healthcheck_end = _source_entry_end(
+                properties, healthcheck_position, len(service_lines)
+            )
+            if (
+                healthcheck_value
+                or tuple(service_lines[healthcheck_index:healthcheck_end])
+                != tuple(EXPECTED_DB_HEALTHCHECK_SOURCE.splitlines())
+            ):
+                raise GuardError("PostgreSQL healthcheck source is outside the allowlist")
 
         expected_mounts = EXPECTED_SOURCE_MOUNTS.get(name)
         if expected_mounts is not None:
@@ -532,6 +613,43 @@ def _mounts(service: dict[str, Any], name: str) -> list[dict[str, Any]]:
     return value
 
 
+def _checked_repo_path(value: Any, compose_root: Path) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    raw_path = Path(value)
+    if ".." in raw_path.parts:
+        return None
+    try:
+        root = Path(compose_root).resolve(strict=True)
+        candidate = raw_path if raw_path.is_absolute() else root / raw_path
+        relative = candidate.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not relative.parts:
+        return None
+
+    current = root
+    for part in relative.parts:
+        if part in {".", ".."}:
+            return None
+        current = current / part
+        try:
+            component_stat = current.lstat()
+            resolved = current.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if stat.S_ISLNK(component_stat.st_mode) or resolved != current:
+            return None
+    return current
+
+
+def _repo_path_matches(value: Any, expected: str, compose_root: Path) -> bool:
+    actual_path = _checked_repo_path(value, compose_root)
+    expected_path = _checked_repo_path(expected, compose_root)
+    return actual_path is not None and actual_path == expected_path
+
+
 def _check_mount(
     mounts: list[dict[str, Any]],
     *,
@@ -557,10 +675,7 @@ def _check_mount(
     source_matches = False
     if isinstance(actual_source, str):
         if mount_type == "bind":
-            actual_path = Path(actual_source)
-            if not actual_path.is_absolute():
-                actual_path = compose_root / actual_path
-            source_matches = actual_path.resolve() == (compose_root / source).resolve()
+            source_matches = _repo_path_matches(actual_source, source, compose_root)
         else:
             source_matches = actual_source == source
     if mount.get("type") != mount_type or not source_matches:
@@ -570,12 +685,7 @@ def _check_mount(
 
 
 def _context_matches(value: Any, expected: str, compose_root: Path) -> bool:
-    if not isinstance(value, str):
-        return False
-    context = Path(value)
-    if not context.is_absolute():
-        context = compose_root / context
-    return context.resolve() == (compose_root / expected).resolve()
+    return _repo_path_matches(value, expected, compose_root)
 
 
 def _validate_model(
@@ -676,6 +786,8 @@ def _validate_model(
         or db_env.get("POSTGRES_DB") != "belib_staging"
     ):
         raise GuardError("PostgreSQL must use the isolated bootstrap identity and default init entrypoint")
+    if db.get("healthcheck") != EXPECTED_DB_HEALTHCHECK_MODEL:
+        raise GuardError("PostgreSQL healthcheck is outside the staging allowlist")
     bootstrap_password = db_env.get("POSTGRES_PASSWORD")
     app_password = db_env.get("BELIB_STAGE_DB_APP_PASSWORD")
     migrate_password = db_env.get("BELIB_STAGE_DB_MIGRATE_PASSWORD")
