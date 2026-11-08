@@ -2,7 +2,15 @@
 
 This is a **non-production candidate**, not evidence that the i5 environment is running. Read current `AGENTS.md` and the PV3 Work Prompt `agents/prompts/2026-11-07/belib-isolated-test-environment.md` on its approved branch before each operation. Confirm i5 host/principal and the existing start gate independently. Never deploy this on KAGOYA.
 
-At this checkpoint, rootless Docker is still missing on i5. The commands below are instructions for a later, independently admitted staging operation; they have not been run and are blocked until the approved `hiroyuki` rootless Docker socket and existing start gate are verified. Do not retry the known Docker failure or use a rootful/remote Docker daemon.
+## Current gate: no deployment or seed
+
+This candidate may be retained as a draft PR, but it is **not approved for staging deployment or seeding**. An independent read-only review identified unresolved P2 risks. Do not launch or migrate the staging Compose project, run the synthetic seed, or treat deployment/browser acceptance as complete until each risk has a reviewed resolution and the staging operation is separately admitted. Offline tests do not clear this gate.
+
+- **Fixture cleanup path race:** on failure, cleanup checks the fixture path and then unlinks it by pathname. A concurrent replacement between those operations is still possible. Cleanup is best-effort and must not be described or relied on as guaranteed race-free rollback.
+- **First-use book volume permissions:** it has not been established that a new `staging-book-files` named volume is writable by the nonroot `node` account. The seed fails closed if its write probe fails; a supported nonroot setup is undecided.
+- **Database privilege boundary:** Compose initializes PostgreSQL with `POSTGRES_USER=belib_staging`, and the backend, migration job, and seed currently use that same account. In the PostgreSQL image this is the bootstrap account; its use as the application/seed runtime account has not been resolved to a least-privileged role design. The seed's database/user identity check does not establish that the account is non-superuser.
+
+Read-only checks below cannot clear this gate. The launch, migration, seed, and rollback commands are future reference only and must not be run until every P2 has a reviewed resolution and separate staging admission. No deployment or seed is evidenced by this runbook.
 
 ## Safety boundaries
 
@@ -23,7 +31,7 @@ BELIB_STAGE_VCS_REF=<exact full 40-character Git checkout SHA>
 BELIB_STAGE_PORT=<free unused i5 loopback port, 1024-65535>
 ```
 
-The local file must be 0600/0400 and owned by `hiroyuki`. Do not source it in a shell. Clear any ambient `BELIB_STAGE_*`, `COMPOSE_PROJECT_NAME` and `COMPOSE_FILE` variables before invoking preflight/Compose; do not reuse a Production shell environment. The fixed `-p belib-isolated-i5` prevents accidental project-name changes. Use the same path for all commands below:
+The local file must be 0600/0400 and owned by `hiroyuki`. Do not source it in a shell. Clear any ambient `BELIB_STAGE_*`, `COMPOSE_PROJECT_NAME` and `COMPOSE_FILE` variables before invoking preflight/Compose; do not reuse a Production shell environment. The fixed `-p belib-isolated-i5` prevents accidental project-name changes. The seed wrapper independently checks that this file has only the four staging keys, validates their formats and distinct DB/Auth secrets, and confirms its revision matches a clean checked-out Git tree before opening seed credentials. It snapshots the validated env file into a sealed descriptor for Compose to avoid reopening a replaceable path. Use the same path for all commands below:
 
 ```bash
 envfile="$HOME/.config/belib-staging/i5.env"
@@ -32,7 +40,7 @@ bash scripts/staging/preflight.sh "$envfile"
 
 The preflight checks the exact i5 hostname/user, local Git revision, staging-only values, distinct database password and auth secret (before checking Docker), no R2/general env keys, >=8 GiB free disk, >=2 GiB available memory, a free port, the **effective local user socket** `unix:///run/user/$(id -u)/docker.sock`, an i5-local Docker daemon reporting the `rootless` security option, Compose availability, and the parsed Compose configuration. Docker CLI access via the rootful system daemon or a remote context is not sufficient. It performs no container or Docker daemon mutation. If a stage project already exists, first inventory it and reuse the legitimate same-owner deployment rather than replacing it.
 
-## Candidate-only launch (only after successful admission)
+## Candidate-only launch (currently blocked)
 
 The operator must first review the candidate HEAD, independently confirm existing project and volume ownership, and keep the above values private. The following is **not** a production deployment procedure:
 
@@ -46,7 +54,7 @@ docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yam
 
 Never execute the launch if preflight fails or if Docker image build would exceed the checked capacity. Use a deliberate per-step review of services and image build size. Since the backend/frontend sources are built locally, the final `BELIB_STAGE_VCS_REF` must match the checkout, not an unrelated production revision.
 
-## Synthetic-only seed (candidate code)
+## Synthetic-only seed (currently blocked)
 
 After the isolated PostgreSQL migration succeeds, the optional one-off seed adds two synthetic `.invalid` credential users, two tiny deterministic books, local EPUB/PDF files, and admin-role permissions only. The general `user` role receives no permission for either book. It uses Better Auth's password hashing and never deletes existing books. The database URL, storage driver, exact local fixture root, and absence of cloud/production environment keys are checked before seed writes; the connected database identity is checked before writes as well.
 
@@ -67,20 +75,17 @@ mkdir -p "$HOME/.config/belib-staging"
 )
 ```
 
-Create this file once and retain it unchanged for seed retries; the command refuses to overwrite an existing file. Do not use shell tracing while creating or using credentials. The seed rejects duplicate passwords, either staging secret reused as a test password, additional credential-file lines, symlinks, and any mode other than 0600. The account passwords are read only from this file. The file is mounted read-only only for the one-off seed container; it is not added to the four-key stage env file or passed as a command argument. The one-off container starts as UID 0 inside the verified rootless user namespace to read the owner-only mount, changes the local fixture directory owner to the backend `node` account, then drops to `node` before database or fixture writes. This does not use host root or `sudo`; never use this procedure with rootful or remote Docker.
+Create this file once and retain it unchanged for seed retries; the command refuses to overwrite an existing file. Do not use shell tracing while creating or using credentials. The current wrapper uses this as a host-only mode-0600 credential file, not a Docker secret or volume: after source, env-file, and local rootless-Docker checks succeed, it opens the path without following symlinks and verifies that it is a regular file owned by `hiroyuki`. It passes the already-open file as inherited stdin to the one-off container. Passwords are not placed in command arguments, environment variables, Compose mounts, or output. The seed requires exactly the two password lines, rejects duplicate passwords and either staging secret reused as a test password, limits input size, and fails before database writes if stdin is empty or malformed.
 
-Run only after admission, successful migration, and independent review of the exact staging project. This uses the named staging project, standalone staging Compose file, no dependency startup, and mounts the credentials read-only for this execution only:
+The one-off service explicitly runs as the image's `node` account, and the seed independently rejects UID 0 or any account other than `node`. Before connecting to PostgreSQL or writing fixtures, it probes whether `/var/lib/belib/books` permits that nonroot account to create and remove a file. The seed never changes volume ownership or permissions. The current runtime image does not create this directory as `node`, so a newly created named volume may fail the probe. If it does, stop: node-writable access to the named `staging-book-files` volume is an unmet prerequisite. Do not use UID 0, `chown`, `chmod`, `sudo`, or a rootful/remote daemon to work around it; resume only after a separately approved, supported nonroot volume setup establishes the required write access.
+
+Run only after admission, successful migration, and independent review of the exact staging project:
 
 ```bash
-envfile="$HOME/.config/belib-staging/i5.env"
-seed_file="$HOME/.config/belib-staging/seed-credentials"
-docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yaml run \
-  --rm --no-deps --build --user 0:0 \
-  --volume "$seed_file:/run/secrets/belib-staging-seed-credentials:ro" \
-  backend node dist/scripts/seed-staging.js
+python3 scripts/staging/seed.py
 ```
 
-The seed is additive and idempotent. It never removes a book or overwrites a fixture file whose content differs from the deterministic bytes. If it stops partway through, leave the isolated volumes intact and rerun the same command after correcting the cause; the DB writes are transactional and the exact synthetic files are safe to reuse. There is no automatic rollback. To undo a successful seed while retaining both volumes, review the project and run this narrowly scoped SQL transaction against the named staging database. It matches the synthetic book titles, author, and description, and the reserved `.invalid` account emails only:
+The seed is additive and idempotent. It never removes a book or overwrites a fixture file whose content differs from the deterministic bytes. If a seed attempt fails after creating fixture files, it best-effort checks that each path is a regular file inside the fixture root and still matches the recorded device, inode, and expected bytes before unlinking it. The check and pathname unlink are separate operations, so concurrent replacement can race with cleanup; this is not guaranteed race-free rollback. Paths that fail a check are left untouched. The DB writes remain transactional; inspect the isolated volume after a failed seed and before any retry. To undo a successful seed while retaining both volumes, review the project and run this narrowly scoped SQL transaction against the named staging database. It matches the synthetic book titles, author, and description, and the reserved `.invalid` account emails only:
 
 ```bash
 envfile="$HOME/.config/belib-staging/i5.env"

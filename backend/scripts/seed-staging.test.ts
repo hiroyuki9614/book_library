@@ -1,15 +1,19 @@
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { afterEach, describe, expect, test } from 'vitest';
 import {
+	assertDirectoryWritableByNode,
 	assertFreshOrSeededCatalog,
+	assertSeedRuntimeUser,
 	assertStagingSeedEnvironment,
 	createStagingEpubFixture,
 	createStagingPdfFixture,
 	readStagingSeedCredentials,
 	STAGING_FIXTURE_ROOT,
+	withStagingFixtureFiles,
 } from './seed-staging.js';
 
 const databasePassword = randomBytes(32).toString('hex');
@@ -26,6 +30,17 @@ const validEnvironment = (): NodeJS.ProcessEnv => ({
 });
 
 const temporaryDirectories: string[] = [];
+
+function syntheticFixture(fileName: string, bytes = Buffer.from(`synthetic content for ${fileName}`)) {
+	const isPdf = fileName.endsWith('.pdf');
+	return {
+		fileName,
+		extension: isPdf ? ('pdf' as const) : ('epub' as const),
+		mimeType: isPdf ? ('application/pdf' as const) : ('application/epub+zip' as const),
+		title: fileName,
+		bytes,
+	};
+}
 
 afterEach(async () => {
 	await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -140,29 +155,130 @@ describe('offline synthetic staging seed safety', () => {
 		).toThrow(/fresh book catalog/);
 	});
 
-	test('reads two distinct disposable passwords only from a mode-0600 file', async () => {
+	test('accepts the image node account, rejects UID 0, and verifies volume write access', async () => {
+		expect(() => assertSeedRuntimeUser(1000, 1000, 'node')).not.toThrow();
+		expect(() => assertSeedRuntimeUser(0, 0, 'root')).toThrow(/nonroot node account/);
+		expect(() => assertSeedRuntimeUser(1000, 0, 'node')).toThrow(/nonroot node account/);
+		expect(() => assertSeedRuntimeUser(1000, 1000, 'hiroyuki')).toThrow(/nonroot node account/);
+
 		const directory = await mkdtemp(join(tmpdir(), 'belib-staging-seed-test-'));
 		temporaryDirectories.push(directory);
-		const path = join(directory, 'credentials');
-		await writeFile(path, `admin_password=${adminPassword}\nreader_password=${readerPassword}\n`, { mode: 0o600 });
-		await chmod(path, 0o600);
+		await expect(assertDirectoryWritableByNode(directory)).resolves.toBeUndefined();
+		await chmod(directory, 0o555);
+		await expect(assertDirectoryWritableByNode(directory)).rejects.toThrow(/already be writable by the nonroot node account/);
+		await chmod(directory, 0o700);
+	});
 
-		const result = await readStagingSeedCredentials(path, validEnvironment());
+	test('reads two distinct disposable passwords from bounded stdin input', async () => {
+		const input = Readable.from([Buffer.from(`admin_password=${adminPassword}\nreader_password=${readerPassword}\n`)]);
+		const result = await readStagingSeedCredentials(input, validEnvironment());
 		expect(result.adminPassword === adminPassword).toBe(true);
 		expect(result.readerPassword === readerPassword).toBe(true);
 	});
 
-	test('rejects credentials that reuse a staging secret or have loose file permissions', async () => {
+	test('does not skip missing, malformed, oversized, or reused stdin credentials', async () => {
+		await expect(readStagingSeedCredentials(Readable.from([]), validEnvironment())).rejects.toThrow(/requires credential input on stdin/);
+		await expect(
+			readStagingSeedCredentials(Readable.from([Buffer.from(`admin_password=${adminPassword}\n`)]), validEnvironment()),
+		).rejects.toThrow(/exactly the admin and reader password lines/);
+		await expect(
+			readStagingSeedCredentials(Readable.from([Buffer.alloc(257, 0x61)]), validEnvironment()),
+		).rejects.toThrow(/input is too large/);
+		await expect(
+			readStagingSeedCredentials(
+				Readable.from([Buffer.from(`admin_password=${databasePassword}\nreader_password=${readerPassword}\n`)]),
+				validEnvironment(),
+			),
+		).rejects.toThrow(/independent of each other and both staging secrets/);
+	});
+
+	test('removes only fixture files created by this invocation when the injected database transaction fails', async () => {
 		const directory = await mkdtemp(join(tmpdir(), 'belib-staging-seed-test-'));
 		temporaryDirectories.push(directory);
-		const path = join(directory, 'credentials');
-		await writeFile(path, `admin_password=${databasePassword}\nreader_password=${readerPassword}\n`, { mode: 0o600 });
-		await chmod(path, 0o600);
-		await expect(readStagingSeedCredentials(path, validEnvironment())).rejects.toThrow();
+		const createdFixture = syntheticFixture('created.epub');
+		const existingFixture = syntheticFixture('existing.pdf');
+		const existingPath = join(directory, existingFixture.fileName);
+		const unrelatedPath = join(directory, 'unrelated.txt');
+		await writeFile(existingPath, existingFixture.bytes, { mode: 0o644 });
+		await chmod(existingPath, 0o644);
+		await writeFile(unrelatedPath, 'leave this file alone');
 
-		await writeFile(path, `admin_password=${adminPassword}\nreader_password=${readerPassword}\n`, { mode: 0o644 });
-		await chmod(path, 0o644);
-		await expect(readStagingSeedCredentials(path, validEnvironment())).rejects.toThrow(/mode-0600/);
+		await expect(
+			withStagingFixtureFiles(directory, [createdFixture, existingFixture], async () => {
+				throw new Error('injected database transaction failure');
+			}),
+		).rejects.toThrow('injected database transaction failure');
+
+		await expect(readFile(join(directory, createdFixture.fileName))).rejects.toThrow();
+		expect(await readFile(existingPath)).toEqual(existingFixture.bytes);
+		expect(await readFile(unrelatedPath, 'utf8')).toBe('leave this file alone');
+	});
+
+	test('keeps successful fixture files and reuses identical files on a repeated seed', async () => {
+		const directory = await mkdtemp(join(tmpdir(), 'belib-staging-seed-test-'));
+		temporaryDirectories.push(directory);
+		const fixture = syntheticFixture('idempotent.epub');
+		const filePath = join(directory, fixture.fileName);
+		let transactionCount = 0;
+
+		await withStagingFixtureFiles(directory, [fixture], async () => {
+			transactionCount += 1;
+		});
+		const original = await lstat(filePath);
+		await withStagingFixtureFiles(directory, [fixture], async () => {
+			transactionCount += 1;
+		});
+
+		expect(transactionCount).toBe(2);
+		expect((await lstat(filePath)).ino).toBe(original.ino);
+		expect(await readFile(filePath)).toEqual(fixture.bytes);
+	});
+
+	test('fails closed for traversal and symlink fixture paths and leaves directories untouched', async () => {
+		const directory = await mkdtemp(join(tmpdir(), 'belib-staging-seed-test-'));
+		const outsideDirectory = await mkdtemp(join(tmpdir(), 'belib-staging-seed-outside-'));
+		temporaryDirectories.push(directory, outsideDirectory);
+		const outsideBytes = Buffer.from('outside fixture target');
+		const outsidePath = join(outsideDirectory, 'outside.epub');
+		const symlinkPath = join(directory, 'escaped.epub');
+		await writeFile(outsidePath, outsideBytes);
+		await symlink(outsidePath, symlinkPath);
+
+		const createdFixture = syntheticFixture('created-before-symlink.epub');
+		await expect(
+			withStagingFixtureFiles(directory, [createdFixture, syntheticFixture('escaped.epub', outsideBytes)], async () => {
+				throw new Error('transaction must not run');
+			}),
+		).rejects.toThrow(/regular file/);
+		await expect(readFile(join(directory, createdFixture.fileName))).rejects.toThrow();
+		expect((await lstat(symlinkPath)).isSymbolicLink()).toBe(true);
+		expect(await readFile(outsidePath)).toEqual(outsideBytes);
+		await expect(
+			withStagingFixtureFiles(directory, [syntheticFixture('../outside.epub')], async () => undefined),
+		).rejects.toThrow(/single file inside the isolated fixture root/);
+
+		const replacedSymlinkFixture = syntheticFixture('owned-replaced-by-symlink.epub', outsideBytes);
+		const replacedSymlinkPath = join(directory, replacedSymlinkFixture.fileName);
+		await expect(
+			withStagingFixtureFiles(directory, [replacedSymlinkFixture], async () => {
+				await rm(replacedSymlinkPath);
+				await symlink(outsidePath, replacedSymlinkPath);
+				throw new Error('injected database transaction failure');
+			}),
+		).rejects.toThrow('injected database transaction failure');
+		expect((await lstat(replacedSymlinkPath)).isSymbolicLink()).toBe(true);
+		expect(await readFile(outsidePath)).toEqual(outsideBytes);
+
+		const replacedDirectoryFixture = syntheticFixture('owned-replaced-by-directory.epub');
+		const replacedDirectoryPath = join(directory, replacedDirectoryFixture.fileName);
+		await expect(
+			withStagingFixtureFiles(directory, [replacedDirectoryFixture], async () => {
+				await rm(replacedDirectoryPath);
+				await mkdir(replacedDirectoryPath);
+				throw new Error('injected database transaction failure');
+			}),
+		).rejects.toThrow('injected database transaction failure');
+		expect((await lstat(replacedDirectoryPath)).isDirectory()).toBe(true);
 	});
 
 	test('creates a deterministic valid EPUB ZIP with the required first uncompressed mimetype entry', () => {

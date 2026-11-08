@@ -1,5 +1,6 @@
-import { createHash } from 'node:crypto';
-import { chown, chmod, lstat, readFile, realpath, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { lstat, open, readFile, realpath, unlink } from 'node:fs/promises';
+import { userInfo } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hashPassword, verifyPassword } from 'better-auth/crypto';
@@ -7,7 +8,6 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { PrismaClient } from '../prisma/generated/prisma/client.js';
 
-export const STAGING_CREDENTIALS_PATH = '/run/secrets/belib-staging-seed-credentials';
 export const STAGING_FIXTURE_ROOT = '/var/lib/belib/books';
 
 const STAGING_DEFAULT_CATEGORY = '未分類';
@@ -18,6 +18,7 @@ const FIXTURE_DESCRIPTION = 'Deterministic synthetic fixture for isolated BeLib 
 const EPUB_TITLE = 'BeLib i5 Synthetic EPUB Fixture';
 const PDF_TITLE = 'BeLib i5 Synthetic PDF Fixture';
 const SYNTHETIC_BOOK_TITLES = [EPUB_TITLE, PDF_TITLE] as const;
+const MAX_CREDENTIAL_INPUT_BYTES = 256;
 
 type SyntheticFixture = {
 	fileName: string;
@@ -25,6 +26,15 @@ type SyntheticFixture = {
 	mimeType: 'application/epub+zip' | 'application/pdf';
 	title: string;
 	bytes: Buffer;
+};
+
+type OwnedFixtureFile = {
+	fileName: string;
+	filePath: string;
+	device: number;
+	inode: number;
+	bytes: Buffer;
+	complete: boolean;
 };
 
 type SeedCredentials = {
@@ -82,6 +92,12 @@ export function assertStagingSeedEnvironment(env: NodeJS.ProcessEnv) {
 	}
 }
 
+export function assertSeedRuntimeUser(uid: number | undefined, euid: number | undefined, username: string) {
+	if (uid === undefined || euid === undefined || uid === 0 || euid === 0 || uid !== euid || username !== 'node') {
+		fail('The staging seed must run as the nonroot node account');
+	}
+}
+
 export function assertFreshOrSeededCatalog(
 	books: Array<{ title: string; authorName: string | null; description: string | null; deletedAt: Date | null }>,
 ) {
@@ -101,28 +117,31 @@ export function assertFreshOrSeededCatalog(
 }
 
 export async function readStagingSeedCredentials(
-	credentialsPath: string,
+	input: AsyncIterable<Uint8Array>,
 	env: NodeJS.ProcessEnv,
 ): Promise<SeedCredentials> {
 	assertStagingSeedEnvironment(env);
 	const databasePassword = getDatabasePassword(env.DATABASE_URL!);
 	const authSecret = env.BETTER_AUTH_SECRET!;
-	let metadata;
+	if (!input || typeof input[Symbol.asyncIterator] !== 'function') {
+		fail('The staging seed requires credential input on stdin');
+	}
+	const chunks: Buffer[] = [];
+	let totalBytes = 0;
 	try {
-		metadata = await lstat(credentialsPath);
-	} catch {
-		fail('The separate staging seed credentials file is unavailable');
+		for await (const chunk of input) {
+			totalBytes += chunk.byteLength;
+			if (totalBytes > MAX_CREDENTIAL_INPUT_BYTES) {
+				fail('The staging seed credential input is too large');
+			}
+			chunks.push(Buffer.from(chunk));
+		}
+	} catch (error) {
+		if (error instanceof StagingSeedError) throw error;
+		fail('The staging seed credential input cannot be read');
 	}
-	if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== 0o600 || metadata.size > 256) {
-		fail('The staging seed credentials file must be a regular mode-0600 file');
-	}
-
-	let contents: string;
-	try {
-		contents = await readFile(credentialsPath, 'utf8');
-	} catch {
-		fail('The separate staging seed credentials file cannot be read');
-	}
+	if (totalBytes === 0) fail('The staging seed requires credential input on stdin');
+	const contents = Buffer.concat(chunks, totalBytes).toString('utf8');
 	const lines = contents.split(/\r?\n/);
 	if (lines.at(-1) === '') lines.pop();
 	if (lines.length !== 2) {
@@ -320,53 +339,63 @@ async function assertFixtureRoot(envRoot: string) {
 	return STAGING_FIXTURE_ROOT;
 }
 
-async function prepareFixtureRootForBackend(root: string) {
-	if (process.getuid?.() !== 0 || process.geteuid?.() !== 0) {
-		fail('The one-off seed must read the mode-0600 file as container UID 0 on the verified rootless runtime');
-	}
-	let nodeUid: number | undefined;
-	let nodeGid: number | undefined;
+
+export async function assertDirectoryWritableByNode(directory: string) {
+	const probePath = resolve(directory, `.belib-staging-seed-write-probe-${randomUUID()}`);
+	let probeHandle: Awaited<ReturnType<typeof open>> | undefined;
+	let created = false;
 	try {
-		const passwd = await readFile('/etc/passwd', 'utf8');
-		const nodeLine = passwd.split('\n').find((line) => line.startsWith('node:'));
-		const fields = nodeLine?.split(':');
-		nodeUid = Number(fields?.[2]);
-		nodeGid = Number(fields?.[3]);
+		probeHandle = await open(probePath, 'wx', 0o600);
+		created = true;
+		await probeHandle.close();
+		probeHandle = undefined;
+		await unlink(probePath);
+		created = false;
 	} catch {
-		fail('The runtime node account cannot be resolved');
-	}
-	if (!Number.isSafeInteger(nodeUid) || !Number.isSafeInteger(nodeGid) || nodeUid === 0 || nodeGid === 0) {
-		fail('The runtime node account is invalid');
-	}
-	if (!process.setgroups || !process.setgid || !process.setuid) {
-		fail('The runtime cannot drop privileges to the backend node account');
-	}
-	try {
-		const rootMetadata = await lstat(root);
-		if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink() || (await realpath(root)) !== root) {
-			fail('The isolated local fixture root changed before ownership setup');
-		}
-		if (rootMetadata.uid !== nodeUid || rootMetadata.gid !== nodeGid) {
-			await chown(root, nodeUid!, nodeGid!);
-		}
-		process.setgroups([nodeGid]);
-		process.setgid(nodeGid);
-		process.setuid(nodeUid);
-	} catch {
-		fail('The seed could not drop to the backend runtime user for fixture creation');
-	}
-	if (
-		process.getuid?.() !== nodeUid ||
-		process.geteuid?.() !== nodeUid ||
-		process.getgid?.() !== nodeGid ||
-		process.getegid?.() !== nodeGid
-	) {
-		fail('The seed did not drop to the backend runtime user');
+		if (probeHandle) await probeHandle.close().catch(() => undefined);
+		if (created) await unlink(probePath).catch(() => undefined);
+		fail('The staging book volume must already be writable by the nonroot node account; the seed will not change its owner or permissions');
 	}
 }
 
-async function assertOrWriteFixtureFile(root: string, fixture: SyntheticFixture) {
-	const filePath = resolve(root, fixture.fileName);
+function getFixtureFilePath(root: string, fileName: string) {
+	if (root !== resolve(root) || !fileName || fileName === '.' || fileName === '..' || /[\\/]/.test(fileName)) {
+		fail('A synthetic fixture path must be a single file inside the isolated fixture root');
+	}
+	const filePath = resolve(root, fileName);
+	if (resolve(filePath, '..') !== root) {
+		fail('A synthetic fixture path must be a single file inside the isolated fixture root');
+	}
+	return filePath;
+}
+
+async function assertSafeFixtureDirectory(root: string) {
+	if (root !== resolve(root)) {
+		fail('The isolated local fixture root must be an absolute canonical directory');
+	}
+	let metadata;
+	try {
+		metadata = await lstat(root);
+	} catch {
+		fail('The isolated local fixture root cannot be inspected');
+	}
+	if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+		fail('The isolated local fixture root must be a real directory');
+	}
+	let resolvedRoot: string;
+	try {
+		resolvedRoot = await realpath(root);
+	} catch {
+		fail('The isolated local fixture root cannot be resolved');
+	}
+	if (resolvedRoot !== root) {
+		fail('The isolated local fixture root resolves outside its exact path');
+	}
+}
+
+async function assertOrWriteFixtureFile(root: string, fixture: SyntheticFixture, ownedFiles: OwnedFixtureFile[]) {
+	await assertSafeFixtureDirectory(root);
+	const filePath = getFixtureFilePath(root, fixture.fileName);
 	const assertExisting = async () => {
 		let metadata;
 		try {
@@ -376,6 +405,14 @@ async function assertOrWriteFixtureFile(root: string, fixture: SyntheticFixture)
 		}
 		if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o004) === 0) {
 			fail('An existing synthetic fixture must be a readable regular file');
+		}
+		try {
+			if ((await realpath(filePath)) !== filePath) {
+				fail('An existing synthetic fixture resolves outside its exact path');
+			}
+		} catch (error) {
+			if (error instanceof StagingSeedError) throw error;
+			fail('An existing synthetic fixture path cannot be resolved');
 		}
 		let current: Buffer;
 		try {
@@ -388,20 +425,92 @@ async function assertOrWriteFixtureFile(root: string, fixture: SyntheticFixture)
 		}
 	};
 
+	let fileHandle: Awaited<ReturnType<typeof open>>;
 	try {
-		await lstat(filePath);
-		await assertExisting();
+		fileHandle = await open(filePath, 'wx', 0o644);
 	} catch (error) {
-		if (error instanceof StagingSeedError || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-		try {
-			await writeFile(filePath, fixture.bytes, { flag: 'wx', mode: 0o644 });
-			await chmod(filePath, 0o644);
-		} catch (writeError) {
-			if ((writeError as NodeJS.ErrnoException).code !== 'EEXIST') {
-				fail('A synthetic fixture file could not be written to the local staging volume');
-			}
-			await assertExisting();
+		if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+			fail('A synthetic fixture file could not be created on the local staging volume');
 		}
+		await assertExisting();
+		return;
+	}
+
+	let writeFailed = false;
+	try {
+		const metadata = await fileHandle.stat();
+		const ownedFile = {
+			fileName: fixture.fileName,
+			filePath,
+			device: metadata.dev,
+			inode: metadata.ino,
+			bytes: fixture.bytes,
+			complete: false,
+		};
+		ownedFiles.push(ownedFile);
+		await fileHandle.writeFile(fixture.bytes);
+		await fileHandle.chmod(0o644);
+		ownedFile.complete = true;
+	} catch {
+		writeFailed = true;
+	} finally {
+		await fileHandle.close().catch(() => {
+			writeFailed = true;
+		});
+	}
+	if (writeFailed) {
+		fail('A synthetic fixture file could not be written to the local staging volume');
+	}
+}
+
+async function removeOwnedFixtureFiles(root: string, ownedFiles: OwnedFixtureFile[]) {
+	if (ownedFiles.length === 0) return;
+	try {
+		await assertSafeFixtureDirectory(root);
+	} catch {
+		return;
+	}
+
+	for (const ownedFile of [...ownedFiles].reverse()) {
+		try {
+			const filePath = getFixtureFilePath(root, ownedFile.fileName);
+			if (filePath !== ownedFile.filePath) continue;
+			const metadata = await lstat(filePath);
+			if (
+				!metadata.isFile() ||
+				metadata.isSymbolicLink() ||
+				metadata.dev !== ownedFile.device ||
+				metadata.ino !== ownedFile.inode ||
+				(await realpath(filePath)) !== filePath
+			) {
+				continue;
+			}
+			const current = await readFile(filePath);
+			const contentMatches = ownedFile.complete
+				? current.equals(ownedFile.bytes)
+				: current.length <= ownedFile.bytes.length && ownedFile.bytes.subarray(0, current.length).equals(current);
+			if (!contentMatches) {
+				continue;
+			}
+			await unlink(filePath);
+		} catch {
+			// Keep any path whose ownership cannot be confirmed during rollback.
+		}
+	}
+}
+
+export async function withStagingFixtureFiles<T>(
+	root: string,
+	fixtures: SyntheticFixture[],
+	transaction: () => Promise<T>,
+): Promise<T> {
+	const ownedFiles: OwnedFixtureFile[] = [];
+	try {
+		for (const fixture of fixtures) await assertOrWriteFixtureFile(root, fixture, ownedFiles);
+		return await transaction();
+	} catch (error) {
+		await removeOwnedFixtureFiles(root, ownedFiles);
+		throw error;
 	}
 }
 
@@ -543,12 +652,11 @@ async function upsertSyntheticBookFile(
 }
 
 async function main() {
+	assertSeedRuntimeUser(process.getuid?.(), process.geteuid?.(), userInfo().username);
 	assertStagingSeedEnvironment(process.env);
-	if (process.getuid?.() !== 0 || process.geteuid?.() !== 0) {
-		fail('Run only as container UID 0 on the verified rootless staging runtime to read the mode-0600 secret mount');
-	}
-	const credentials = await readStagingSeedCredentials(STAGING_CREDENTIALS_PATH, process.env);
+	const credentials = await readStagingSeedCredentials(process.stdin, process.env);
 	const fixtureRoot = await assertFixtureRoot(process.env.BOOK_FILE_STORAGE_ROOT!);
+	await assertDirectoryWritableByNode(fixtureRoot);
 	const pool = new Pool({ connectionString: process.env.DATABASE_URL! });
 	const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
 
@@ -558,11 +666,8 @@ async function main() {
 			select: { title: true, authorName: true, description: true, deletedAt: true },
 		});
 		assertFreshOrSeededCatalog(existingBooks);
-		await prepareFixtureRootForBackend(fixtureRoot);
 		const fixtures = createSyntheticFixtures();
-		for (const fixture of fixtures) await assertOrWriteFixtureFile(fixtureRoot, fixture);
-
-		await prisma.$transaction(async (transaction) => {
+		const seedTransaction = () => prisma.$transaction(async (transaction) => {
 			const userRole = await transaction.role.upsert({
 				where: { name: 'user' },
 				update: {},
@@ -611,6 +716,7 @@ async function main() {
 				});
 			}
 		});
+		await withStagingFixtureFiles(fixtureRoot, fixtures, seedTransaction);
 	} finally {
 		await prisma.$disconnect();
 		await pool.end();
