@@ -2,6 +2,8 @@
 
 This is a **non-production candidate**, not evidence that the i5 environment is running. Read current `AGENTS.md` and the PV3 Work Prompt `agents/prompts/2026-11-07/belib-isolated-test-environment.md` on its approved branch before each operation. Confirm i5 host/principal and the existing start gate independently. Never deploy this on KAGOYA.
 
+At this checkpoint, rootless Docker is still missing on i5. The commands below are instructions for a later, independently admitted staging operation; they have not been run and are blocked until the approved `hiroyuki` rootless Docker socket and existing start gate are verified. Do not retry the known Docker failure or use a rootful/remote Docker daemon.
+
 ## Safety boundaries
 
 - Use `compose.staging.yaml` **alone**; never combine it with `compose.yaml` or the existing production `.env`.
@@ -43,6 +45,115 @@ docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yam
 ```
 
 Never execute the launch if preflight fails or if Docker image build would exceed the checked capacity. Use a deliberate per-step review of services and image build size. Since the backend/frontend sources are built locally, the final `BELIB_STAGE_VCS_REF` must match the checkout, not an unrelated production revision.
+
+## Synthetic-only seed (candidate code)
+
+After the isolated PostgreSQL migration succeeds, the optional one-off seed adds two synthetic `.invalid` credential users, two tiny deterministic books, local EPUB/PDF files, and admin-role permissions only. The general `user` role receives no permission for either book. It uses Better Auth's password hashing and never deletes existing books. The database URL, storage driver, exact local fixture root, and absence of cloud/production environment keys are checked before seed writes; the connected database identity is checked before writes as well.
+
+Keep the stage env file above unchanged at exactly its original four keys. Create a separate credentials file outside the repository for the disposable accounts. The two independent values below are generated directly into a mode-0600 file; they are not placed in shell arguments, environment variables, or output:
+
+```bash
+seed_file="$HOME/.config/belib-staging/seed-credentials"
+mkdir -p "$HOME/.config/belib-staging"
+(
+  set -e
+  set -C
+  umask 077
+  printf 'admin_password=' > "$seed_file"
+  openssl rand -hex 32 >> "$seed_file"
+  printf 'reader_password=' >> "$seed_file"
+  openssl rand -hex 32 >> "$seed_file"
+  chmod 600 "$seed_file"
+)
+```
+
+Create this file once and retain it unchanged for seed retries; the command refuses to overwrite an existing file. Do not use shell tracing while creating or using credentials. The seed rejects duplicate passwords, either staging secret reused as a test password, additional credential-file lines, symlinks, and any mode other than 0600. The account passwords are read only from this file. The file is mounted read-only only for the one-off seed container; it is not added to the four-key stage env file or passed as a command argument. The one-off container starts as UID 0 inside the verified rootless user namespace to read the owner-only mount, changes the local fixture directory owner to the backend `node` account, then drops to `node` before database or fixture writes. This does not use host root or `sudo`; never use this procedure with rootful or remote Docker.
+
+Run only after admission, successful migration, and independent review of the exact staging project. This uses the named staging project, standalone staging Compose file, no dependency startup, and mounts the credentials read-only for this execution only:
+
+```bash
+envfile="$HOME/.config/belib-staging/i5.env"
+seed_file="$HOME/.config/belib-staging/seed-credentials"
+docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yaml run \
+  --rm --no-deps --build --user 0:0 \
+  --volume "$seed_file:/run/secrets/belib-staging-seed-credentials:ro" \
+  backend node dist/scripts/seed-staging.js
+```
+
+The seed is additive and idempotent. It never removes a book or overwrites a fixture file whose content differs from the deterministic bytes. If it stops partway through, leave the isolated volumes intact and rerun the same command after correcting the cause; the DB writes are transactional and the exact synthetic files are safe to reuse. There is no automatic rollback. To undo a successful seed while retaining both volumes, review the project and run this narrowly scoped SQL transaction against the named staging database. It matches the synthetic book titles, author, and description, and the reserved `.invalid` account emails only:
+
+```bash
+envfile="$HOME/.config/belib-staging/i5.env"
+docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yaml exec -T db \
+  psql -v ON_ERROR_STOP=1 -U belib_staging -d belib_staging <<'SQL'
+BEGIN;
+DELETE FROM role_book_permissions
+WHERE book_id IN (
+  SELECT id FROM books
+  WHERE author_name = 'BeLib Staging Fixture'
+    AND description = 'Deterministic synthetic fixture for isolated BeLib staging.'
+    AND title IN ('BeLib i5 Synthetic EPUB Fixture', 'BeLib i5 Synthetic PDF Fixture')
+);
+DELETE FROM book_files
+WHERE book_id IN (
+  SELECT id FROM books
+  WHERE author_name = 'BeLib Staging Fixture'
+    AND description = 'Deterministic synthetic fixture for isolated BeLib staging.'
+    AND title IN ('BeLib i5 Synthetic EPUB Fixture', 'BeLib i5 Synthetic PDF Fixture')
+)
+AND file_url IN ('belib-staging-synthetic.epub', 'belib-staging-synthetic.pdf');
+DELETE FROM reading_infos
+WHERE book_id IN (
+  SELECT id FROM books
+  WHERE author_name = 'BeLib Staging Fixture'
+    AND description = 'Deterministic synthetic fixture for isolated BeLib staging.'
+    AND title IN ('BeLib i5 Synthetic EPUB Fixture', 'BeLib i5 Synthetic PDF Fixture')
+)
+OR user_id IN (
+  SELECT id FROM users
+  WHERE (email = 'staging-admin@belib.invalid' AND name = 'Synthetic Staging Admin')
+     OR (email = 'staging-reader@belib.invalid' AND name = 'Synthetic Staging Reader')
+);
+DELETE FROM books
+WHERE author_name = 'BeLib Staging Fixture'
+  AND description = 'Deterministic synthetic fixture for isolated BeLib staging.'
+  AND title IN ('BeLib i5 Synthetic EPUB Fixture', 'BeLib i5 Synthetic PDF Fixture');
+DELETE FROM accounts
+WHERE user_id IN (
+  SELECT id FROM users
+  WHERE (email = 'staging-admin@belib.invalid' AND name = 'Synthetic Staging Admin')
+     OR (email = 'staging-reader@belib.invalid' AND name = 'Synthetic Staging Reader')
+);
+DELETE FROM users
+WHERE (email = 'staging-admin@belib.invalid' AND name = 'Synthetic Staging Admin')
+   OR (email = 'staging-reader@belib.invalid' AND name = 'Synthetic Staging Reader');
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM book_files
+    WHERE file_url IN ('belib-staging-synthetic.epub', 'belib-staging-synthetic.pdf')
+  ) THEN
+    RAISE EXCEPTION 'Synthetic fixture paths are still referenced';
+  END IF;
+END
+$$;
+COMMIT;
+SQL
+```
+
+If the transaction aborts or its file-reference check fails, do not run the filesystem cleanup. Only after it commits, remove the two known synthetic files from the same named local book volume:
+
+```bash
+envfile="$HOME/.config/belib-staging/i5.env"
+docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yaml run \
+  --rm --no-deps backend rm -f -- \
+  /var/lib/belib/books/belib-staging-synthetic.epub \
+  /var/lib/belib/books/belib-staging-synthetic.pdf
+```
+
+Keep the migration-managed `未分類` category and both staging volumes. Do not use `docker compose down -v` or any volume deletion as rollback.
+
+Offline checks for this step are `npm --prefix backend test -- scripts/seed-staging.test.ts` and `npm --prefix backend run build`. They validate generated file structure and fail-closed guards without Docker or a database; they are **not** staging acceptance evidence and do not replace the physical i5 browser checks below.
 
 ## Acceptance after actual i5 deployment
 
