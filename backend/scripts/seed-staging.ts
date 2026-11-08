@@ -28,15 +28,6 @@ type SyntheticFixture = {
 	bytes: Buffer;
 };
 
-type OwnedFixtureFile = {
-	fileName: string;
-	filePath: string;
-	device: number;
-	inode: number;
-	bytes: Buffer;
-	complete: boolean;
-};
-
 type SeedCredentials = {
 	adminPassword: string;
 	readerPassword: string;
@@ -393,7 +384,7 @@ async function assertSafeFixtureDirectory(root: string) {
 	}
 }
 
-async function assertOrWriteFixtureFile(root: string, fixture: SyntheticFixture, ownedFiles: OwnedFixtureFile[]) {
+async function assertOrWriteFixtureFile(root: string, fixture: SyntheticFixture) {
 	await assertSafeFixtureDirectory(root);
 	const filePath = getFixtureFilePath(root, fixture.fileName);
 	const assertExisting = async () => {
@@ -438,19 +429,8 @@ async function assertOrWriteFixtureFile(root: string, fixture: SyntheticFixture,
 
 	let writeFailed = false;
 	try {
-		const metadata = await fileHandle.stat();
-		const ownedFile = {
-			fileName: fixture.fileName,
-			filePath,
-			device: metadata.dev,
-			inode: metadata.ino,
-			bytes: fixture.bytes,
-			complete: false,
-		};
-		ownedFiles.push(ownedFile);
 		await fileHandle.writeFile(fixture.bytes);
 		await fileHandle.chmod(0o644);
-		ownedFile.complete = true;
 	} catch {
 		writeFailed = true;
 	} finally {
@@ -462,56 +442,13 @@ async function assertOrWriteFixtureFile(root: string, fixture: SyntheticFixture,
 		fail('A synthetic fixture file could not be written to the local staging volume');
 	}
 }
-
-async function removeOwnedFixtureFiles(root: string, ownedFiles: OwnedFixtureFile[]) {
-	if (ownedFiles.length === 0) return;
-	try {
-		await assertSafeFixtureDirectory(root);
-	} catch {
-		return;
-	}
-
-	for (const ownedFile of [...ownedFiles].reverse()) {
-		try {
-			const filePath = getFixtureFilePath(root, ownedFile.fileName);
-			if (filePath !== ownedFile.filePath) continue;
-			const metadata = await lstat(filePath);
-			if (
-				!metadata.isFile() ||
-				metadata.isSymbolicLink() ||
-				metadata.dev !== ownedFile.device ||
-				metadata.ino !== ownedFile.inode ||
-				(await realpath(filePath)) !== filePath
-			) {
-				continue;
-			}
-			const current = await readFile(filePath);
-			const contentMatches = ownedFile.complete
-				? current.equals(ownedFile.bytes)
-				: current.length <= ownedFile.bytes.length && ownedFile.bytes.subarray(0, current.length).equals(current);
-			if (!contentMatches) {
-				continue;
-			}
-			await unlink(filePath);
-		} catch {
-			// Keep any path whose ownership cannot be confirmed during rollback.
-		}
-	}
-}
-
 export async function withStagingFixtureFiles<T>(
 	root: string,
 	fixtures: SyntheticFixture[],
 	transaction: () => Promise<T>,
 ): Promise<T> {
-	const ownedFiles: OwnedFixtureFile[] = [];
-	try {
-		for (const fixture of fixtures) await assertOrWriteFixtureFile(root, fixture, ownedFiles);
-		return await transaction();
-	} catch (error) {
-		await removeOwnedFixtureFiles(root, ownedFiles);
-		throw error;
-	}
+	for (const fixture of fixtures) await assertOrWriteFixtureFile(root, fixture);
+	return transaction();
 }
 
 async function assertConnectedDatabase(prisma: PrismaClient) {

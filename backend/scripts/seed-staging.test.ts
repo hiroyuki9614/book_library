@@ -192,7 +192,7 @@ describe('offline synthetic staging seed safety', () => {
 		).rejects.toThrow(/independent of each other and both staging secrets/);
 	});
 
-	test('removes only fixture files created by this invocation when the injected database transaction fails', async () => {
+	test('retains fixture and unrelated files when the injected database transaction fails', async () => {
 		const directory = await mkdtemp(join(tmpdir(), 'belib-staging-seed-test-'));
 		temporaryDirectories.push(directory);
 		const createdFixture = syntheticFixture('created.epub');
@@ -209,9 +209,37 @@ describe('offline synthetic staging seed safety', () => {
 			}),
 		).rejects.toThrow('injected database transaction failure');
 
-		await expect(readFile(join(directory, createdFixture.fileName))).rejects.toThrow();
+		expect(await readFile(join(directory, createdFixture.fileName))).toEqual(createdFixture.bytes);
 		expect(await readFile(existingPath)).toEqual(existingFixture.bytes);
 		expect(await readFile(unrelatedPath, 'utf8')).toBe('leave this file alone');
+
+		let retryCompleted = false;
+		await withStagingFixtureFiles(directory, [createdFixture, existingFixture], async () => {
+			retryCompleted = true;
+		});
+		expect(retryCompleted).toBe(true);
+		expect(await readFile(join(directory, createdFixture.fileName))).toEqual(createdFixture.bytes);
+	});
+
+	test('retains an incomplete file after a write failure and refuses to overwrite it', async () => {
+		const directory = await mkdtemp(join(tmpdir(), 'belib-staging-seed-test-'));
+		temporaryDirectories.push(directory);
+		const incompleteFixture = syntheticFixture('incomplete-write.epub');
+		(incompleteFixture as { bytes: Buffer }).bytes = {} as unknown as Buffer;
+		const filePath = join(directory, incompleteFixture.fileName);
+
+		await expect(withStagingFixtureFiles(directory, [incompleteFixture], async () => undefined)).rejects.toThrow(
+			/could not be written/,
+		);
+		expect((await lstat(filePath)).isFile()).toBe(true);
+		expect(await readFile(filePath)).toEqual(Buffer.alloc(0));
+		await chmod(filePath, 0o644);
+
+		const completeFixture = syntheticFixture(incompleteFixture.fileName);
+		await expect(withStagingFixtureFiles(directory, [completeFixture], async () => undefined)).rejects.toThrow(
+			/differs from the deterministic content/,
+		);
+		expect(await readFile(filePath)).toEqual(Buffer.alloc(0));
 	});
 
 	test('keeps successful fixture files and reuses identical files on a repeated seed', async () => {
@@ -241,8 +269,10 @@ describe('offline synthetic staging seed safety', () => {
 		const outsideBytes = Buffer.from('outside fixture target');
 		const outsidePath = join(outsideDirectory, 'outside.epub');
 		const symlinkPath = join(directory, 'escaped.epub');
+		const unrelatedPath = join(directory, 'unrelated.txt');
 		await writeFile(outsidePath, outsideBytes);
 		await symlink(outsidePath, symlinkPath);
+		await writeFile(unrelatedPath, 'leave this file alone');
 
 		const createdFixture = syntheticFixture('created-before-symlink.epub');
 		await expect(
@@ -250,12 +280,24 @@ describe('offline synthetic staging seed safety', () => {
 				throw new Error('transaction must not run');
 			}),
 		).rejects.toThrow(/regular file/);
-		await expect(readFile(join(directory, createdFixture.fileName))).rejects.toThrow();
+		expect(await readFile(join(directory, createdFixture.fileName))).toEqual(createdFixture.bytes);
 		expect((await lstat(symlinkPath)).isSymbolicLink()).toBe(true);
 		expect(await readFile(outsidePath)).toEqual(outsideBytes);
+		expect(await readFile(unrelatedPath, 'utf8')).toBe('leave this file alone');
 		await expect(
 			withStagingFixtureFiles(directory, [syntheticFixture('../outside.epub')], async () => undefined),
 		).rejects.toThrow(/single file inside the isolated fixture root/);
+		expect(await readFile(join(directory, createdFixture.fileName))).toEqual(createdFixture.bytes);
+
+		const mismatchedFixture = syntheticFixture('do-not-overwrite.epub');
+		const mismatchedPath = join(directory, mismatchedFixture.fileName);
+		const existingBytes = Buffer.from('existing file requiring inspection');
+		await writeFile(mismatchedPath, existingBytes);
+		await chmod(mismatchedPath, 0o644);
+		await expect(withStagingFixtureFiles(directory, [mismatchedFixture], async () => undefined)).rejects.toThrow(
+			/differs from the deterministic content/,
+		);
+		expect(await readFile(mismatchedPath)).toEqual(existingBytes);
 
 		const replacedSymlinkFixture = syntheticFixture('owned-replaced-by-symlink.epub', outsideBytes);
 		const replacedSymlinkPath = join(directory, replacedSymlinkFixture.fileName);
@@ -279,6 +321,7 @@ describe('offline synthetic staging seed safety', () => {
 			}),
 		).rejects.toThrow('injected database transaction failure');
 		expect((await lstat(replacedDirectoryPath)).isDirectory()).toBe(true);
+		expect(await readFile(unrelatedPath, 'utf8')).toBe('leave this file alone');
 	});
 
 	test('creates a deterministic valid EPUB ZIP with the required first uncompressed mimetype entry', () => {
