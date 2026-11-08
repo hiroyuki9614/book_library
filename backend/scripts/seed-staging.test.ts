@@ -1,0 +1,220 @@
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, test } from 'vitest';
+import {
+	assertFreshOrSeededCatalog,
+	assertStagingSeedEnvironment,
+	createStagingEpubFixture,
+	createStagingPdfFixture,
+	readStagingSeedCredentials,
+	STAGING_FIXTURE_ROOT,
+} from './seed-staging.js';
+
+const databasePassword = randomBytes(32).toString('hex');
+const authSecret = randomBytes(32).toString('hex');
+const adminPassword = randomBytes(32).toString('hex');
+const readerPassword = randomBytes(32).toString('hex');
+
+const validEnvironment = (): NodeJS.ProcessEnv => ({
+	DATABASE_URL: `postgresql://belib_staging:${databasePassword}@db:5432/belib_staging`,
+	BETTER_AUTH_SECRET: authSecret,
+	ENVIRONMENT: 'test',
+	BOOK_FILE_STORAGE_DRIVER: 'local',
+	BOOK_FILE_STORAGE_ROOT: STAGING_FIXTURE_ROOT,
+});
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+	await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
+
+function testCrc32(bytes: Buffer) {
+	let crc = 0xffffffff;
+	for (const byte of bytes) {
+		crc ^= byte;
+		for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+	}
+	return (crc ^ 0xffffffff) >>> 0;
+}
+
+function readEpubEntries(bytes: Buffer) {
+	const entries: Array<{ name: string; method: number; checksum: number; bytes: Buffer }> = [];
+	let offset = 0;
+	while (bytes.readUInt32LE(offset) === 0x04034b50) {
+		const method = bytes.readUInt16LE(offset + 8);
+		const compressedSize = bytes.readUInt32LE(offset + 18);
+		const nameLength = bytes.readUInt16LE(offset + 26);
+		const extraLength = bytes.readUInt16LE(offset + 28);
+		const nameStart = offset + 30;
+		const dataStart = nameStart + nameLength + extraLength;
+		entries.push({
+			name: bytes.subarray(nameStart, nameStart + nameLength).toString('utf8'),
+			method,
+			checksum: bytes.readUInt32LE(offset + 14),
+			bytes: bytes.subarray(dataStart, dataStart + compressedSize),
+		});
+		offset = dataStart + compressedSize;
+	}
+	return { entries, centralOffset: offset };
+}
+
+describe('offline synthetic staging seed safety', () => {
+	test('accepts only the exact staging database identity and local fixture root', () => {
+		expect(() => assertStagingSeedEnvironment(validEnvironment())).not.toThrow();
+	});
+
+	test('rejects a shared database password and Better Auth secret', () => {
+		const env = validEnvironment();
+		env.BETTER_AUTH_SECRET = databasePassword;
+		expect(() => assertStagingSeedEnvironment(env)).toThrow(/must be distinct/);
+	});
+
+	test.each([
+		['wrong host', (env: NodeJS.ProcessEnv) => (env.DATABASE_URL = `postgresql://belib_staging:${databasePassword}@production-db:5432/belib_staging`)],
+		['wrong database user', (env: NodeJS.ProcessEnv) => (env.DATABASE_URL = `postgresql://production:${databasePassword}@db:5432/belib_staging`)],
+		['wrong database name', (env: NodeJS.ProcessEnv) => (env.DATABASE_URL = `postgresql://belib_staging:${databasePassword}@db:5432/production`)],
+		['wrong storage root', (env: NodeJS.ProcessEnv) => (env.BOOK_FILE_STORAGE_ROOT = '/srv/books')],
+		['non-local storage', (env: NodeJS.ProcessEnv) => (env.BOOK_FILE_STORAGE_DRIVER = 'r2')],
+		['R2 configuration', (env: NodeJS.ProcessEnv) => (env.R2_ACCESS_KEY_ID = 'synthetic-only-test-value')],
+		['production configuration', (env: NodeJS.ProcessEnv) => (env.PRODUCTION_DATABASE_URL = 'synthetic-only-test-value')],
+	])('fails closed for %s', (_caseName, changeEnvironment) => {
+		const env = validEnvironment();
+		changeEnvironment(env);
+		expect(() => assertStagingSeedEnvironment(env)).toThrow();
+	});
+
+	test('allows an empty catalog or only the two active synthetic seed books', () => {
+		expect(() => assertFreshOrSeededCatalog([])).not.toThrow();
+		expect(() =>
+			assertFreshOrSeededCatalog([
+				{
+					title: 'BeLib i5 Synthetic EPUB Fixture',
+					authorName: 'BeLib Staging Fixture',
+					description: 'Deterministic synthetic fixture for isolated BeLib staging.',
+					deletedAt: null,
+				},
+				{
+					title: 'BeLib i5 Synthetic PDF Fixture',
+					authorName: 'BeLib Staging Fixture',
+					description: 'Deterministic synthetic fixture for isolated BeLib staging.',
+					deletedAt: null,
+				},
+			]),
+		).not.toThrow();
+	});
+
+	test('refuses to seed over any other, duplicate, or soft-deleted book', () => {
+		expect(() =>
+			assertFreshOrSeededCatalog([
+				{ title: 'Existing book', authorName: 'A reader', description: null, deletedAt: null },
+			]),
+		).toThrow(/fresh book catalog/);
+		expect(() =>
+			assertFreshOrSeededCatalog([
+				{
+					title: 'BeLib i5 Synthetic EPUB Fixture',
+					authorName: 'BeLib Staging Fixture',
+					description: 'Deterministic synthetic fixture for isolated BeLib staging.',
+					deletedAt: null,
+				},
+				{
+					title: 'BeLib i5 Synthetic EPUB Fixture',
+					authorName: 'BeLib Staging Fixture',
+					description: 'Deterministic synthetic fixture for isolated BeLib staging.',
+					deletedAt: null,
+				},
+			]),
+		).toThrow(/fresh book catalog/);
+		expect(() =>
+			assertFreshOrSeededCatalog([
+				{
+					title: 'BeLib i5 Synthetic EPUB Fixture',
+					authorName: 'BeLib Staging Fixture',
+					description: 'Deterministic synthetic fixture for isolated BeLib staging.',
+					deletedAt: new Date('2026-01-01T00:00:00.000Z'),
+				},
+			]),
+		).toThrow(/fresh book catalog/);
+	});
+
+	test('reads two distinct disposable passwords only from a mode-0600 file', async () => {
+		const directory = await mkdtemp(join(tmpdir(), 'belib-staging-seed-test-'));
+		temporaryDirectories.push(directory);
+		const path = join(directory, 'credentials');
+		await writeFile(path, `admin_password=${adminPassword}\nreader_password=${readerPassword}\n`, { mode: 0o600 });
+		await chmod(path, 0o600);
+
+		const result = await readStagingSeedCredentials(path, validEnvironment());
+		expect(result.adminPassword === adminPassword).toBe(true);
+		expect(result.readerPassword === readerPassword).toBe(true);
+	});
+
+	test('rejects credentials that reuse a staging secret or have loose file permissions', async () => {
+		const directory = await mkdtemp(join(tmpdir(), 'belib-staging-seed-test-'));
+		temporaryDirectories.push(directory);
+		const path = join(directory, 'credentials');
+		await writeFile(path, `admin_password=${databasePassword}\nreader_password=${readerPassword}\n`, { mode: 0o600 });
+		await chmod(path, 0o600);
+		await expect(readStagingSeedCredentials(path, validEnvironment())).rejects.toThrow();
+
+		await writeFile(path, `admin_password=${adminPassword}\nreader_password=${readerPassword}\n`, { mode: 0o644 });
+		await chmod(path, 0o644);
+		await expect(readStagingSeedCredentials(path, validEnvironment())).rejects.toThrow(/mode-0600/);
+	});
+
+	test('creates a deterministic valid EPUB ZIP with the required first uncompressed mimetype entry', () => {
+		const epub = createStagingEpubFixture();
+		expect(epub.subarray(0, 4).toString('binary')).toBe('PK\u0003\u0004');
+		expect(epub).toEqual(createStagingEpubFixture());
+		expect(epub.length).toBeLessThan(16_384);
+
+		const { entries, centralOffset } = readEpubEntries(epub);
+		expect(entries[0]).toMatchObject({ name: 'mimetype', method: 0 });
+		expect(entries[0]?.bytes.toString('utf8')).toBe('application/epub+zip');
+		for (const entry of entries) expect(testCrc32(entry.bytes)).toBe(entry.checksum);
+		expect(epub.readUInt32LE(centralOffset)).toBe(0x02014b50);
+		const endOffset = epub.length - 22;
+		expect(epub.readUInt32LE(endOffset)).toBe(0x06054b50);
+		expect(epub.readUInt16LE(endOffset + 10)).toBe(entries.length);
+		expect(epub.readUInt32LE(endOffset + 16)).toBe(centralOffset);
+		let centralCursor = centralOffset;
+		for (const entry of entries) {
+			expect(epub.readUInt32LE(centralCursor)).toBe(0x02014b50);
+			const nameLength = epub.readUInt16LE(centralCursor + 28);
+			const extraLength = epub.readUInt16LE(centralCursor + 30);
+			const commentLength = epub.readUInt16LE(centralCursor + 32);
+			expect(epub.subarray(centralCursor + 46, centralCursor + 46 + nameLength).toString('utf8')).toBe(entry.name);
+			expect(epub.readUInt32LE(centralCursor + 16)).toBe(entry.checksum);
+			expect(epub.readUInt32LE(centralCursor + 42)).toBeLessThan(centralOffset);
+			centralCursor += 46 + nameLength + extraLength + commentLength;
+		}
+		expect(centralCursor).toBe(endOffset);
+		expect(endOffset - centralOffset).toBe(epub.readUInt32LE(endOffset + 12));
+		const content = new Map(entries.map((entry) => [entry.name, entry.bytes.toString('utf8')]));
+		expect(content.get('META-INF/container.xml')).toContain('OEBPS/content.opf');
+		expect(content.get('OEBPS/content.opf')).toContain('<spine><itemref idref="chapter"/></spine>');
+		expect(content.get('OEBPS/nav.xhtml')).toContain('epub:type="toc"');
+		expect(content.get('OEBPS/chapter.xhtml')).toContain('only synthetic text');
+	});
+
+	test('creates a deterministic two-page PDF with valid cross-reference offsets', () => {
+		const pdf = createStagingPdfFixture();
+		const source = pdf.toString('latin1');
+		expect(pdf.subarray(0, 8).toString('ascii')).toBe('%PDF-1.4');
+		expect(pdf).toEqual(createStagingPdfFixture());
+		expect(source).toContain('/Count 2');
+		expect([...source.matchAll(/\/Type \/Page\b/g)]).toHaveLength(2);
+		expect(source).toContain('Synthetic BeLib staging PDF - Page 1');
+		expect(source).toContain('Synthetic BeLib staging PDF - Page 2');
+
+		const xrefOffset = Number(/startxref\n(\d+)/.exec(source)?.[1]);
+		const xrefLines = source.slice(xrefOffset).split('\n');
+		const objectOffsets = xrefLines.slice(3, 10).map((line) => Number(line.slice(0, 10)));
+		for (const [index, offset] of objectOffsets.entries()) {
+			expect(source.slice(offset, offset + `${index + 1} 0 obj`.length)).toBe(`${index + 1} 0 obj`);
+		}
+	});
+});
