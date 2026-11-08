@@ -1,0 +1,67 @@
+name: BeLib staging CD approval handoff
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Open same-repository PR number
+        required: true
+        type: string
+      source_sha:
+        description: Full immutable PR head SHA
+        required: true
+        type: string
+      approve_staging:
+        description: Owner approval to hand this exact candidate to the existing staging supervisor
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: belib-staging-cd-belib-isolated-i5
+  cancel-in-progress: false
+
+jobs:
+  staging-admission-handoff:
+    name: Validate and issue staging admission receipt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted main handoff code
+        uses: actions/checkout@v4
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
+
+      - name: Validate exact-head evidence and write receipt
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
+          INPUT_APPROVE_STAGING: ${{ inputs.approve_staging }}
+        run: |
+          python3 -B scripts/staging/test-cd-handoff.py
+          python3 -B scripts/staging/cd-handoff.py \
+            --receipt-path "$RUNNER_TEMP/belib-staging-handoff.json"
+
+      - name: Publish admission receipt for the existing staging supervisor
+        uses: actions/upload-artifact@v4
+        with:
+          name: belib-staging-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/belib-staging-handoff.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Record handoff status
+        run: |
+          {
+            echo "Staging admission receipt published for supervisor pickup."
+            echo "Supervisor transport started: false"
+            echo "Deployment started: false"
+            echo "Deployment asserted: false"
+          } >> "$GITHUB_STEP_SUMMARY"

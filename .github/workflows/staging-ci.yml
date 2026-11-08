@@ -1,0 +1,187 @@
+name: BeLib staging PR CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: belib-staging-ci-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Staging Backend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Backend install
+        working-directory: backend
+        run: npm ci
+
+      - name: Backend tests
+        working-directory: backend
+        run: npm test
+
+      - name: Backend build
+        working-directory: backend
+        run: npm run build
+
+      - name: Prisma schema validation
+        working-directory: backend
+        run: npx prisma validate --schema prisma/schema.prisma
+
+  frontend:
+    name: Staging Frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Frontend install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Frontend tests
+        working-directory: frontend
+        run: npm test
+
+      - name: Frontend node-side tests
+        working-directory: frontend
+        run: npm run test:node
+
+      - name: Frontend lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Frontend build
+        working-directory: frontend
+        run: npm run build
+
+  reader-playwright:
+    name: Reader Playwright
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: reader_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d reader_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      E2E_DATABASE_URL: postgresql://ci:ci-only-password@127.0.0.1:5432/reader_e2e
+      E2E_ADMIN_EMAIL: admin-e2e@example.invalid
+      E2E_ADMIN_NAME: E2E Administrator
+      E2E_ADMIN_PASSWORD: ci-admin-password-42
+      E2E_MVP_PASSWORD: ci-demo-password-42
+      E2E_BOOK_FILE_STORAGE_ROOT: /tmp/belib-reader-e2e-storage
+      E2E_MVP_METADATA_PATH: /tmp/belib-reader-e2e-metadata.json
+      BOOK_FILE_STORAGE_DRIVER: local
+      BOOK_FILE_STORAGE_ROOT: /tmp/belib-reader-e2e-storage
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Backend install
+        working-directory: backend
+        run: npm ci
+
+      - name: Frontend install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Japanese fonts for vertical reader layout
+        run: sudo apt-get install -y --no-install-recommends -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 fonts-noto-cjk
+
+      - name: Real EPUB and PDF reader rendering
+        working-directory: frontend
+        run: npm run test:readers
+
+      - name: Reader API Playwright E2E
+        working-directory: frontend
+        run: npm run test:e2e
+
+  staging-compose:
+    name: Staging Compose Isolation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Verify staging Compose isolation
+        env:
+          STAGING_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 -B scripts/staging/test-ci-isolation-guard.py
+          mkdir -p "$RUNNER_TEMP/compose-home" "$RUNNER_TEMP/compose-docker-config"
+          : > "$RUNNER_TEMP/staging-empty.env"
+          env -i \
+            PATH="$PATH" \
+            HOME="$RUNNER_TEMP/compose-home" \
+            DOCKER_CONFIG="$RUNNER_TEMP/compose-docker-config" \
+            BELIB_STAGE_DB_BOOTSTRAP_PASSWORD=1111111111111111111111111111111111111111111111111111111111111111 \
+            BELIB_STAGE_AUTH_SECRET=2222222222222222222222222222222222222222222222222222222222222222 \
+            BELIB_STAGE_DB_APP_PASSWORD=3333333333333333333333333333333333333333333333333333333333333333 \
+            BELIB_STAGE_DB_MIGRATE_PASSWORD=4444444444444444444444444444444444444444444444444444444444444444 \
+            BELIB_STAGE_VCS_REF="$STAGING_SOURCE_SHA" \
+            BELIB_STAGE_PORT=49199 \
+            docker compose \
+              --project-name belib-isolated-i5 \
+              --env-file "$RUNNER_TEMP/staging-empty.env" \
+              --file compose.staging.yaml \
+              --profile migration \
+              config --format json > "$RUNNER_TEMP/staging-compose.json"
+          python3 -B scripts/staging/ci-isolation-guard.py \
+            --source-sha "$STAGING_SOURCE_SHA" \
+            --compose-source compose.staging.yaml \
+            --compose-json "$RUNNER_TEMP/staging-compose.json" \
+            --port 49199
