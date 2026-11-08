@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, open, readFile, realpath, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, realpath, unlink } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +8,8 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { PrismaClient } from '../prisma/generated/prisma/client.js';
 
-export const STAGING_FIXTURE_ROOT = '/var/lib/belib/books';
+export const STAGING_VOLUME_ROOT = '/home/node';
+export const STAGING_FIXTURE_ROOT = `${STAGING_VOLUME_ROOT}/books`;
 
 const STAGING_DEFAULT_CATEGORY = '未分類';
 const SYNTHETIC_AUTHOR = 'BeLib Staging Fixture';
@@ -305,29 +306,99 @@ function createSyntheticFixtures(): SyntheticFixture[] {
 	];
 }
 
-async function assertFixtureRoot(envRoot: string) {
-	if (envRoot !== STAGING_FIXTURE_ROOT) {
-		fail('Book fixture root must be exactly /var/lib/belib/books');
+function assertVolumeMountInfo(mountInfo: string, mountRoot: string) {
+	const mounted = mountInfo.split(/\r?\n/).some((line) => {
+		const fields = line.split(' - ', 1)[0]?.split(' ');
+		return fields?.[4] === mountRoot;
+	});
+	if (!mounted) {
+		fail(`The dedicated staging book volume must be mounted at ${STAGING_VOLUME_ROOT}`);
 	}
-	let metadata;
+}
+
+export async function prepareStagingFixtureRoot(
+	envRoot: string,
+	mountInfo: string,
+	paths: { volumeRoot?: string; fixtureRoot?: string } = {},
+) {
+	const volumeRoot = paths.volumeRoot ?? STAGING_VOLUME_ROOT;
+	const fixtureRoot = paths.fixtureRoot ?? STAGING_FIXTURE_ROOT;
+	if (
+		envRoot !== fixtureRoot ||
+		resolve(fixtureRoot, '..') !== resolve(volumeRoot) ||
+		fixtureRoot.split('/').at(-1) !== 'books'
+	) {
+		fail(`Book storage must use the exact isolated local fixture root ${STAGING_FIXTURE_ROOT}`);
+	}
+	assertVolumeMountInfo(mountInfo, volumeRoot);
+
+	const runtimeUid = process.getuid?.();
+	if (runtimeUid === undefined || runtimeUid === 0) {
+		fail('The staging fixture volume must be initialized by the nonroot node account');
+	}
+	let volumeMetadata;
 	try {
-		metadata = await lstat(STAGING_FIXTURE_ROOT);
+		volumeMetadata = await lstat(volumeRoot);
 	} catch {
-		fail('The isolated local fixture volume is not mounted');
+		fail('The dedicated staging book volume mount cannot be inspected');
 	}
-	if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-		fail('The isolated local fixture root must be a real directory');
+	if (!volumeMetadata.isDirectory() || volumeMetadata.isSymbolicLink() || volumeMetadata.uid !== runtimeUid) {
+		fail('The dedicated staging book volume mount must be a real directory owned by node');
 	}
-	let resolvedRoot: string;
+	if ((volumeMetadata.mode & 0o022) !== 0) {
+		fail('The dedicated staging book volume mount must not be group- or world-writable');
+	}
+	let resolvedVolumeRoot: string;
 	try {
-		resolvedRoot = await realpath(STAGING_FIXTURE_ROOT);
+		resolvedVolumeRoot = await realpath(volumeRoot);
+	} catch {
+		fail('The dedicated staging book volume mount cannot be resolved');
+	}
+	if (resolvedVolumeRoot !== volumeRoot) {
+		fail('The dedicated staging book volume mount resolves outside its exact path');
+	}
+	let volumeEntries: string[];
+	try {
+		volumeEntries = await readdir(volumeRoot);
+	} catch {
+		fail('The dedicated staging book volume contents cannot be inspected');
+	}
+	if (volumeEntries.some((entry) => entry !== 'books' && !entry.startsWith('.'))) {
+		fail('The dedicated staging book volume has unexpected top-level content; inspect it before using the books subdirectory');
+	}
+
+	let fixtureMetadata;
+	try {
+		fixtureMetadata = await lstat(fixtureRoot);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+			fail('The staging fixture root cannot be inspected');
+		}
+		try {
+			await mkdir(fixtureRoot, { mode: 0o700 });
+			fixtureMetadata = await lstat(fixtureRoot);
+		} catch {
+			fail('The nonroot node account could not initialize its private staging books directory');
+		}
+	}
+	if (
+		!fixtureMetadata.isDirectory() ||
+		fixtureMetadata.isSymbolicLink() ||
+		fixtureMetadata.uid !== runtimeUid ||
+		(fixtureMetadata.mode & 0o022) !== 0
+	) {
+		fail('The isolated local fixture root must be a real directory owned by node');
+	}
+	let resolvedFixtureRoot: string;
+	try {
+		resolvedFixtureRoot = await realpath(fixtureRoot);
 	} catch {
 		fail('The isolated local fixture root cannot be resolved');
 	}
-	if (resolvedRoot !== STAGING_FIXTURE_ROOT) {
-		fail('The isolated local fixture root resolves outside its exact mount path');
+	if (resolvedFixtureRoot !== fixtureRoot) {
+		fail('The isolated local fixture root resolves outside its exact path');
 	}
-	return STAGING_FIXTURE_ROOT;
+	return fixtureRoot;
 }
 
 
@@ -394,8 +465,14 @@ async function assertOrWriteFixtureFile(root: string, fixture: SyntheticFixture)
 		} catch {
 			fail('An existing synthetic fixture file cannot be inspected');
 		}
-		if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o004) === 0) {
-			fail('An existing synthetic fixture must be a readable regular file');
+		if (
+			!metadata.isFile() ||
+			metadata.isSymbolicLink() ||
+			metadata.uid !== process.getuid?.() ||
+			(metadata.mode & 0o400) === 0 ||
+			(metadata.mode & 0o022) !== 0
+		) {
+			fail('An existing synthetic fixture must be an owner-readable regular file owned by node');
 		}
 		try {
 			if ((await realpath(filePath)) !== filePath) {
@@ -418,7 +495,7 @@ async function assertOrWriteFixtureFile(root: string, fixture: SyntheticFixture)
 
 	let fileHandle: Awaited<ReturnType<typeof open>>;
 	try {
-		fileHandle = await open(filePath, 'wx', 0o644);
+		fileHandle = await open(filePath, 'wx', 0o600);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
 			fail('A synthetic fixture file could not be created on the local staging volume');
@@ -430,7 +507,6 @@ async function assertOrWriteFixtureFile(root: string, fixture: SyntheticFixture)
 	let writeFailed = false;
 	try {
 		await fileHandle.writeFile(fixture.bytes);
-		await fileHandle.chmod(0o644);
 	} catch {
 		writeFailed = true;
 	} finally {
@@ -592,7 +668,13 @@ async function main() {
 	assertSeedRuntimeUser(process.getuid?.(), process.geteuid?.(), userInfo().username);
 	assertStagingSeedEnvironment(process.env);
 	const credentials = await readStagingSeedCredentials(process.stdin, process.env);
-	const fixtureRoot = await assertFixtureRoot(process.env.BOOK_FILE_STORAGE_ROOT!);
+	let mountInfo: string;
+	try {
+		mountInfo = await readFile('/proc/self/mountinfo', 'utf8');
+	} catch {
+		fail('The staging seed cannot verify its dedicated book volume mount');
+	}
+	const fixtureRoot = await prepareStagingFixtureRoot(process.env.BOOK_FILE_STORAGE_ROOT!, mountInfo);
 	await assertDirectoryWritableByNode(fixtureRoot);
 	const pool = new Pool({ connectionString: process.env.DATABASE_URL! });
 	const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });

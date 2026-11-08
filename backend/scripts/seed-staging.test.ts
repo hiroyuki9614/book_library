@@ -13,6 +13,8 @@ import {
 	createStagingPdfFixture,
 	readStagingSeedCredentials,
 	STAGING_FIXTURE_ROOT,
+	STAGING_VOLUME_ROOT,
+	prepareStagingFixtureRoot,
 	withStagingFixtureFiles,
 } from './seed-staging.js';
 
@@ -77,6 +79,76 @@ function readEpubEntries(bytes: Buffer) {
 }
 
 describe('offline synthetic staging seed safety', () => {
+	test('initializes a private books directory under the mounted node-owned volume and verifies write access', async () => {
+		const volumeRoot = await mkdtemp(join(tmpdir(), 'belib-staging-volume-'));
+		temporaryDirectories.push(volumeRoot);
+		const fixtureRoot = join(volumeRoot, 'books');
+		const mountInfo = `36 25 0:32 / ${volumeRoot} rw,relatime - ext4 /dev/rootless-volume rw`;
+
+		expect(STAGING_VOLUME_ROOT).toBe('/home/node');
+		expect(STAGING_FIXTURE_ROOT).toBe('/home/node/books');
+		await expect(prepareStagingFixtureRoot(fixtureRoot, mountInfo, { volumeRoot, fixtureRoot })).resolves.toBe(fixtureRoot);
+		expect((await lstat(fixtureRoot)).mode & 0o777).toBe(0o700);
+		await expect(assertDirectoryWritableByNode(fixtureRoot)).resolves.toBeUndefined();
+	});
+
+	test('refuses an absent volume mount, an unexpected storage root, a symlink mount, and unwritable initialization', async () => {
+		const volumeRoot = await mkdtemp(join(tmpdir(), 'belib-staging-volume-'));
+		temporaryDirectories.push(volumeRoot);
+		const fixtureRoot = join(volumeRoot, 'books');
+		const mountInfo = `36 25 0:32 / ${volumeRoot} rw,relatime - ext4 /dev/rootless-volume rw`;
+
+		await expect(prepareStagingFixtureRoot(fixtureRoot, '', { volumeRoot, fixtureRoot })).rejects.toThrow(/must be mounted/);
+		await expect(prepareStagingFixtureRoot('/tmp/other-books', mountInfo, { volumeRoot, fixtureRoot })).rejects.toThrow(
+			/exact isolated local fixture root/,
+		);
+
+		const linkedVolumeParent = await mkdtemp(join(tmpdir(), 'belib-staging-volume-link-'));
+		temporaryDirectories.push(linkedVolumeParent);
+		const linkedTarget = join(linkedVolumeParent, 'real-volume');
+		await mkdir(linkedTarget);
+		const linkedVolume = join(linkedVolumeParent, 'linked-volume');
+		await symlink(linkedTarget, linkedVolume);
+		const linkedFixtureRoot = join(linkedVolume, 'books');
+		const linkedMountInfo = `36 25 0:32 / ${linkedVolume} rw,relatime - ext4 /dev/rootless-volume rw`;
+		await expect(
+			prepareStagingFixtureRoot(linkedFixtureRoot, linkedMountInfo, { volumeRoot: linkedVolume, fixtureRoot: linkedFixtureRoot }),
+		).rejects.toThrow(/real directory owned by node/);
+
+		const legacyVolumeRoot = await mkdtemp(join(tmpdir(), 'belib-staging-volume-'));
+		temporaryDirectories.push(legacyVolumeRoot);
+		const legacyFixtureRoot = join(legacyVolumeRoot, 'books');
+		const legacyFile = join(legacyVolumeRoot, 'legacy-file.epub');
+		await writeFile(legacyFile, 'preserve existing content');
+		const legacyMountInfo = `36 25 0:32 / ${legacyVolumeRoot} rw,relatime - ext4 /dev/rootless-volume rw`;
+		await expect(
+			prepareStagingFixtureRoot(legacyFixtureRoot, legacyMountInfo, {
+				volumeRoot: legacyVolumeRoot,
+				fixtureRoot: legacyFixtureRoot,
+			}),
+		).rejects.toThrow(/unexpected top-level content/);
+		expect(await readFile(legacyFile, 'utf8')).toBe('preserve existing content');
+
+		const unsafeVolumeRoot = await mkdtemp(join(tmpdir(), 'belib-staging-volume-'));
+		temporaryDirectories.push(unsafeVolumeRoot);
+		const unsafeFixtureRoot = join(unsafeVolumeRoot, 'books');
+		const unsafeMountInfo = `36 25 0:32 / ${unsafeVolumeRoot} rw,relatime - ext4 /dev/rootless-volume rw`;
+		await chmod(unsafeVolumeRoot, 0o777);
+		await expect(
+			prepareStagingFixtureRoot(unsafeFixtureRoot, unsafeMountInfo, { volumeRoot: unsafeVolumeRoot, fixtureRoot: unsafeFixtureRoot }),
+		).rejects.toThrow(/must not be group- or world-writable/);
+		await chmod(unsafeVolumeRoot, 0o700);
+
+		await chmod(volumeRoot, 0o555);
+		try {
+			await expect(prepareStagingFixtureRoot(fixtureRoot, mountInfo, { volumeRoot, fixtureRoot })).rejects.toThrow(
+				/could not initialize its private staging books directory/,
+			);
+		} finally {
+			await chmod(volumeRoot, 0o700);
+		}
+	});
+
 	test('accepts only the exact staging database identity and local fixture root', () => {
 		expect(() => assertStagingSeedEnvironment(validEnvironment())).not.toThrow();
 	});

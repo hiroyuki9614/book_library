@@ -40,6 +40,7 @@ services:
       target: runtime
       args:
         VCS_REF: ${BELIB_STAGE_VCS_REF:?Set full reviewed staging SHA}
+    user: node
     environment:
       DATABASE_URL: postgresql://belib_staging:${BELIB_STAGE_DB_PASSWORD:?Set staging-only DB password}@db:5432/belib_staging
       APP_PORT: "3000"
@@ -48,10 +49,12 @@ services:
       BETTER_AUTH_URL: http://127.0.0.1:${BELIB_STAGE_PORT:?Set free i5 loopback port}
       BETTER_AUTH_SECRET: ${BELIB_STAGE_AUTH_SECRET:?Set staging-only Better Auth secret}
       BOOK_FILE_STORAGE_DRIVER: local
-      BOOK_FILE_STORAGE_ROOT: /var/lib/belib/books
+      BOOK_FILE_STORAGE_ROOT: /home/node/books
+      NPM_CONFIG_CACHE: /tmp/npm-cache
       # No R2 settings: synthetic books stay on this isolated local volume.
     volumes:
-      - staging-book-files:/var/lib/belib/books
+      # Empty-volume copy-up preserves the pre-existing node-owned home directory metadata.
+      - staging-book-files:/home/node
     expose: ["3000"]
     depends_on:
       db:

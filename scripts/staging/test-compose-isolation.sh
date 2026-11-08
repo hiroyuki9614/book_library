@@ -40,4 +40,20 @@ fi
 grep -Fq '      - "127.0.0.1:${BELIB_STAGE_PORT:?Set free i5 loopback port}:8080"' "$compose_file" || \
   fail 'The nginx host port must remain bound to the staging loopback address'
 
-printf 'PASS: staging network is internal, standalone, R2-free, and loopback-published\n'
+if ! awk '
+  /^  backend:[[:space:]]*$/ { in_backend = 1; next }
+  in_backend && /^  [^[:space:]#]/ { in_backend = 0 }
+  in_backend && /^    user:[[:space:]]*node[[:space:]]*$/ { has_node_user = 1 }
+  in_backend && /^      BOOK_FILE_STORAGE_ROOT:[[:space:]]*\/home\/node\/books[[:space:]]*$/ { has_storage_root = 1 }
+  in_backend && /^      NPM_CONFIG_CACHE:[[:space:]]*\/tmp\/npm-cache[[:space:]]*$/ { has_ephemeral_npm_cache = 1 }
+  in_backend && /^      - staging-book-files:\/home\/node[[:space:]]*$/ { has_volume_mount = 1 }
+  END { exit !(has_node_user && has_storage_root && has_ephemeral_npm_cache && has_volume_mount) }
+' "$compose_file"; then
+  fail 'The backend must run as node, keep npm cache ephemeral, and use its dedicated volume at /home/node with storage rooted at /home/node/books'
+fi
+grep -Fxq '  staging-book-files: {}' "$compose_file" || fail 'The isolated named book volume must remain declared'
+if grep -Fq '/var/lib/belib/books' "$compose_file"; then
+  fail 'The staging backend must not retain the root-owned /var/lib storage path'
+fi
+
+printf 'PASS: staging network is internal, standalone, R2-free, loopback-published, and uses the node-owned persistent book volume\n'

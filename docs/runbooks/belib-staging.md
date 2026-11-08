@@ -4,10 +4,10 @@ This is a **non-production candidate**, not evidence that the i5 environment is 
 
 ## Current gate: no deployment or seed
 
-This candidate may be retained as a draft PR, but it is **not approved for staging deployment or seeding**. An independent read-only review identified three P2 risks. This candidate remediates the fixture cleanup race by retaining fixture paths after failures and never unlinking them. The two P2 risks below remain unresolved. Do not launch or migrate the staging Compose project, run the synthetic seed, or treat deployment/browser acceptance as complete until both remaining risks have reviewed resolutions and the staging operation is separately admitted. Offline tests do not clear this gate.
+This candidate may be retained as a draft PR, but it is **not approved for staging deployment or seeding**. An independent read-only review identified three P2 risks. The fixture cleanup race is remediated by retaining fixture paths after failures and never unlinking them. This candidate also resolves the book-volume initialization code gate with a node-owned image mount point and a fail-closed nonroot write probe. These source changes are not staging acceptance. The PostgreSQL bootstrap-role privilege boundary remains unresolved, and the i5 rootless Docker CLI/socket is unavailable. Do not launch, migrate, or seed the staging Compose project, or treat deployment/browser acceptance as complete. Offline tests do not clear this gate.
 
-- **First-use book volume permissions:** it has not been established that a new `staging-book-files` named volume is writable by the nonroot `node` account. The seed fails closed if its write probe fails; a supported nonroot setup is undecided.
 - **Database privilege boundary:** Compose initializes PostgreSQL with `POSTGRES_USER=belib_staging`, and the backend, migration job, and seed currently use that same account. In the PostgreSQL image this is the bootstrap account; its use as the application/seed runtime account has not been resolved to a least-privileged role design. The seed's database/user identity check does not establish that the account is non-superuser.
+- **i5 Docker admission:** the rootless Docker CLI/socket needed to inspect and verify the persistent volume is unavailable for this candidate run. Runtime volume ownership and write access have not been observed on i5.
 
 Read-only checks below cannot clear this gate. The launch, migration, seed, and rollback commands are future reference only and must not be run until every P2 has a reviewed resolution and separate staging admission. No deployment or seed is evidenced by this runbook.
 
@@ -41,7 +41,7 @@ The preflight checks the exact i5 hostname/user, local Git revision, staging-onl
 
 ## Candidate-only launch (currently blocked)
 
-The operator must first review the candidate HEAD, independently confirm existing project and volume ownership, and keep the above values private. The following is **not** a production deployment procedure:
+The operator must first review the candidate HEAD, independently confirm existing project and volume ownership, and keep the above values private. For any pre-existing `staging-book-files` volume, inspect that the `/home/node/books` layout is already in use and there is no non-hidden book data at `/home/node`; a mismatch blocks startup until separately reviewed. The seed also rejects such root-level data without moving or deleting it. The following is **not** a production deployment procedure:
 
 ```bash
 envfile="$HOME/.config/belib-staging/i5.env"
@@ -76,7 +76,7 @@ mkdir -p "$HOME/.config/belib-staging"
 
 Create this file once and retain it unchanged for seed retries; the command refuses to overwrite an existing file. Do not use shell tracing while creating or using credentials. The current wrapper uses this as a host-only mode-0600 credential file, not a Docker secret or volume: after source, env-file, and local rootless-Docker checks succeed, it opens the path without following symlinks and verifies that it is a regular file owned by `hiroyuki`. It passes the already-open file as inherited stdin to the one-off container. Passwords are not placed in command arguments, environment variables, Compose mounts, or output. The seed requires exactly the two password lines, rejects duplicate passwords and either staging secret reused as a test password, limits input size, and fails before database writes if stdin is empty or malformed.
 
-The one-off service explicitly runs as the image's `node` account, and the seed independently rejects UID 0 or any account other than `node`. Before connecting to PostgreSQL or writing fixtures, it probes whether `/var/lib/belib/books` permits that nonroot account to create and remove a file. The seed never changes volume ownership or permissions. The current runtime image does not create this directory as `node`, so a newly created named volume may fail the probe. If it does, stop: node-writable access to the named `staging-book-files` volume is an unmet prerequisite. Do not use UID 0, `chown`, `chmod`, `sudo`, or a rootful/remote daemon to work around it; resume only after a separately approved, supported nonroot volume setup establishes the required write access.
+The backend service and one-off seed explicitly run as the image's `node` account, and the seed independently rejects UID 0 or any account other than `node`. The dedicated `staging-book-files` named volume mounts at the pre-existing `/home/node` directory, which the [Node 22 slim image recipe](https://github.com/nodejs/docker-node/blob/main/22/bookworm-slim/Dockerfile#L371-L375) creates for UID/GID 1000 with `--create-home`. Docker copies the destination contents into a new empty volume by default; Moby's [volume copy-up implementation](https://github.com/moby/moby/blob/master/daemon/container/container_unix.go#L1756-L1784) uses `fs.CopyDir` to copy the pre-existing directory, including its filesystem metadata. The seed verifies that `/home/node` is an actual mount point owned by its nonroot UID, refuses unexpected non-hidden top-level content, creates `/home/node/books` as that user with mode `0700` when absent, then probes file creation and removal before connecting to PostgreSQL. Compose keeps the npm cache under `/tmp` so it does not add incidental cache data to the book volume. The seed never changes volume ownership or permissions. Docker does not reinitialize a nonempty volume, so any existing volume that is not node-owned, contains unexpected root-level data, or is not writable fails closed and must not be repaired by this procedure. Do not use UID 0, `chown`, runtime `chmod`, `sudo`, or a rootful/remote daemon to work around a failed check. This copy-up behavior and the first-use write probe have automated offline coverage, but actual i5 volume ownership remains unverified until the unavailable rootless Docker CLI/socket is restored and staging admission is separately granted. See [Docker volume copy-up behavior](https://docs.docker.com/engine/storage/volumes/#mounting-a-volume-over-existing-data).
 
 Run only after admission, successful migration, and independent review of the exact staging project:
 
@@ -151,13 +151,13 @@ If the transaction aborts or its file-reference check fails, do not run the file
 envfile="$HOME/.config/belib-staging/i5.env"
 docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yaml run \
   --rm --no-deps backend rm -f -- \
-  /var/lib/belib/books/belib-staging-synthetic.epub \
-  /var/lib/belib/books/belib-staging-synthetic.pdf
+  /home/node/books/belib-staging-synthetic.epub \
+  /home/node/books/belib-staging-synthetic.pdf
 ```
 
 Keep the migration-managed `未分類` category and both staging volumes. Do not use `docker compose down -v` or any volume deletion as rollback.
 
-Offline checks for this step are `npm --prefix backend test -- scripts/seed-staging.test.ts` and `npm --prefix backend run build`. They validate generated file structure and fail-closed guards without Docker or a database; they are **not** staging acceptance evidence and do not replace the physical i5 browser checks below.
+Offline checks for this step are `bash scripts/staging/test-compose-isolation.sh`, `python3 scripts/staging/test-seed-wrapper.py`, `npm --prefix backend test -- scripts/seed-staging.test.ts`, and `npm --prefix backend run build`. They validate the isolated volume mapping, wrapper guards, nonroot directory initialization and fail-closed seed checks without Docker or a database; they are **not** staging acceptance evidence and do not replace the physical i5 volume and browser checks below.
 
 ## Acceptance after actual i5 deployment
 
