@@ -1,5 +1,7 @@
-name: BeLib staging CD approval handoff
+name: BeLib protected staging evidence handoff
 
+# This workflow becomes dispatchable only after its trusted definition is on main.
+# A dispatch selected on an unmerged or otherwise mutable branch cannot run the job.
 on:
   workflow_dispatch:
     inputs:
@@ -11,8 +13,8 @@ on:
         description: Full immutable PR head SHA
         required: true
         type: string
-      approve_staging:
-        description: Owner approval to hand this exact candidate to the existing staging supervisor
+      request_supervisor_review:
+        description: Owner request to send evidence to the existing supervisor; this does not authorize deployment
         required: true
         default: false
         type: boolean
@@ -28,31 +30,35 @@ concurrency:
 
 jobs:
   staging-admission-handoff:
-    name: Validate and issue staging admission receipt
+    name: Validate exact candidate evidence for independent supervisor review
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.workflow_ref == 'hiroyuki9614/book_library/.github/workflows/staging-cd.yml@refs/heads/main' &&
+      github.workflow_sha == github.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Checkout trusted main handoff code
+      - name: Checkout the immutable trusted workflow revision
         uses: actions/checkout@v4
         with:
-          ref: refs/heads/main
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
-      - name: Validate exact-head evidence and write receipt
+      - name: Validate candidate and authoritative workflow evidence
         env:
           GITHUB_TOKEN: ${{ github.token }}
           INPUT_PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
           INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
-          INPUT_APPROVE_STAGING: ${{ inputs.approve_staging }}
+          INPUT_REQUEST_SUPERVISOR_REVIEW: ${{ inputs.request_supervisor_review }}
         run: |
           python3 -B scripts/staging/test-cd-handoff.py
           python3 -B scripts/staging/cd-handoff.py \
             --receipt-path "$RUNNER_TEMP/belib-staging-handoff.json"
 
-      - name: Publish admission receipt for the existing staging supervisor
+      - name: Publish candidate check evidence for existing-supervisor verification
         uses: actions/upload-artifact@v4
         with:
-          name: belib-staging-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          name: belib-staging-checks-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/belib-staging-handoff.json
           if-no-files-found: error
           retention-days: 14
@@ -60,8 +66,10 @@ jobs:
       - name: Record handoff status
         run: |
           {
-            echo "Staging admission receipt published for supervisor pickup."
-            echo "Supervisor transport started: false"
+            echo "Candidate CI and workflow provenance checks passed for the exact source SHA."
+            echo "Candidate source CI is not trusted staging admission."
+            echo "Independent existing-supervisor provenance verification: pending."
+            echo "Deployment authorized: false"
             echo "Deployment started: false"
             echo "Deployment asserted: false"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -73,8 +73,8 @@ def compose_model() -> dict:
                     "DATABASE_URL": APP_DATABASE_URL,
                     "APP_PORT": "3000",
                     "ENVIRONMENT": "test",
-                    "FRONTEND_URL": f"http://127.0.0.1:{PORT}",
-                    "BETTER_AUTH_URL": f"http://127.0.0.1:{PORT}",
+                    "FRONTEND_URL": "https://stg-bl.hiroyuki9614.com",
+                    "BETTER_AUTH_URL": "https://stg-bl.hiroyuki9614.com",
                     "BETTER_AUTH_SECRET": AUTH_SECRET,
                     "BOOK_FILE_STORAGE_DRIVER": "local",
                     "BOOK_FILE_STORAGE_ROOT": "/home/node/books",
@@ -96,7 +96,7 @@ def compose_model() -> dict:
                     "target": "runtime",
                     "args": {
                         "VCS_REF": SOURCE_SHA,
-                        "VITE_API_BASE_URL": f"http://127.0.0.1:{PORT}",
+                        "VITE_API_BASE_URL": "https://stg-bl.hiroyuki9614.com",
                         "VITE_PUBLIC_DEMO_EMAIL": "",
                         "VITE_PUBLIC_DEMO_PASSWORD": "",
                         "VITE_PUBLIC_DEMO_ADMIN_EMAIL": "",
@@ -125,7 +125,7 @@ def compose_model() -> dict:
                     },
                     {
                         "type": "bind",
-                        "source": str(ROOT / "nginx/conf.d/default.conf"),
+                        "source": str(ROOT / "scripts/staging/nginx-default.conf"),
                         "target": "/etc/nginx/conf.d/default.conf",
                         "read_only": True,
                     },
@@ -175,6 +175,12 @@ class CIIsolationGuardTests(unittest.TestCase):
             compose_model=compose_model(),
         )
 
+    def test_database_comment_marker_uses_shared_object_lookup(self):
+        role_script = (ROOT / "scripts/staging/10-belib-staging-roles.sh").read_text(encoding="utf-8")
+        for source in (self.compose_source, role_script):
+            self.assertIn("shobj_description(", source)
+            self.assertNotRegex(source, r"(?<!sh)obj_description\s*\(")
+
     def test_rejects_short_or_unmatched_source_revision(self):
         self.assert_rejected(source_sha=SOURCE_SHA[:12])
         self.assert_rejected(checkout_sha="b" * 40)
@@ -182,6 +188,19 @@ class CIIsolationGuardTests(unittest.TestCase):
     def test_rejects_source_revision_that_is_not_pinned_in_both_images(self):
         model = compose_model()
         model["services"]["backend"]["build"]["args"]["VCS_REF"] = "main"
+        self.assert_rejected(model=model)
+
+    def test_rejects_extra_backend_or_migration_build_arguments(self):
+        model = compose_model()
+        model["services"]["backend"]["build"]["args"]["API_TOKEN"] = "injected"
+        self.assert_rejected(model=model)
+
+        model = compose_model()
+        model["services"]["migrate"]["build"]["args"] = {"DATABASE_PASSWORD": "injected"}
+        self.assert_rejected(model=model)
+
+        model = compose_model()
+        model["services"]["migrate"]["build"]["args"] = {"VCS_REF": SOURCE_SHA}
         self.assert_rejected(model=model)
         model = compose_model()
         model["services"]["frontend"]["build"]["args"]["VCS_REF"] = "latest"

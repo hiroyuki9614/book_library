@@ -57,7 +57,7 @@ BEGIN
     RAISE EXCEPTION 'The dedicated staging database is not freshly owned by its bootstrap role';
   END IF;
 
-  IF obj_description((SELECT oid FROM pg_database WHERE datname = 'belib_staging'), 'pg_database') IS NOT NULL THEN
+  IF shobj_description((SELECT oid FROM pg_database WHERE datname = 'belib_staging'), 'pg_database') IS NOT NULL THEN
     RAISE EXCEPTION 'The dedicated staging database already has an initialization marker';
   END IF;
 

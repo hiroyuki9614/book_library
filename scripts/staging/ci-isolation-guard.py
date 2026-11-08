@@ -86,6 +86,8 @@ def _source_contract(source: str, source_sha: str) -> None:
 
     if "BELIB_STAGE_DB_PASSWORD" in code:
         raise GuardError("The legacy single-password database identity is forbidden")
+    if "shobj_description(" not in code or re.search(r"(?<!sh)obj_description\s*\(", code):
+        raise GuardError("The database bootstrap marker must use shared-object description lookup")
     required_role_lines = (
         "POSTGRES_USER: belib_staging_bootstrap",
         "POSTGRES_DB: belib_staging",
@@ -324,6 +326,7 @@ def _validate_model(
             migrate.get("build", {}).get("context"), "backend", compose_root
         )
         or migrate.get("build", {}).get("target") != "migration"
+        or migrate.get("build", {}).get("args") not in (None, {})
         or _mounts(migrate, "migrate")
     ):
         raise GuardError("Migration service must use only the isolated staging database")
@@ -335,8 +338,8 @@ def _validate_model(
         "DATABASE_URL": expected_app_database_url,
         "APP_PORT": "3000",
         "ENVIRONMENT": "test",
-        "FRONTEND_URL": f"http://127.0.0.1:{expected_port_text}",
-        "BETTER_AUTH_URL": f"http://127.0.0.1:{expected_port_text}",
+        "FRONTEND_URL": "https://stg-bl.hiroyuki9614.com",
+        "BETTER_AUTH_URL": "https://stg-bl.hiroyuki9614.com",
         "BETTER_AUTH_SECRET": None,
         "BOOK_FILE_STORAGE_DRIVER": "local",
         "BOOK_FILE_STORAGE_ROOT": "/home/node/books",
@@ -358,7 +361,7 @@ def _validate_model(
         or "image" in backend
         or not _context_matches(backend_build.get("context"), "backend", compose_root)
         or backend_build.get("target") != "runtime"
-        or backend_build.get("args", {}).get("VCS_REF") != source_sha
+        or backend_build.get("args") != {"VCS_REF": source_sha}
     ):
         raise GuardError("Backend image must be built from the exact PR head SHA")
     backend_mounts = _mounts(backend, "backend")
@@ -376,7 +379,7 @@ def _validate_model(
     frontend_build = frontend.get("build", {})
     expected_frontend_args = {
         "VCS_REF": source_sha,
-        "VITE_API_BASE_URL": f"http://127.0.0.1:{expected_port_text}",
+        "VITE_API_BASE_URL": "https://stg-bl.hiroyuki9614.com",
         "VITE_PUBLIC_DEMO_EMAIL": "",
         "VITE_PUBLIC_DEMO_PASSWORD": "",
         "VITE_PUBLIC_DEMO_ADMIN_EMAIL": "",
@@ -426,7 +429,7 @@ def _validate_model(
         nginx_mounts,
         target="/etc/nginx/conf.d/default.conf",
         mount_type="bind",
-        source="nginx/conf.d/default.conf",
+        source="scripts/staging/nginx-default.conf",
         compose_root=compose_root,
         read_only=True,
     )

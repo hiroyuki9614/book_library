@@ -20,7 +20,7 @@ services:
         - >-
           test "$$(psql -X -w -U belib_staging_app -d belib_staging -tAc
           "SELECT 1 WHERE current_user = 'belib_staging_app'
-          AND obj_description((SELECT oid FROM pg_database WHERE datname = current_database()), 'pg_database') = 'belib-staging-role-bootstrap-v1'
+          AND shobj_description((SELECT oid FROM pg_database WHERE datname = current_database()), 'pg_database') = 'belib-staging-role-bootstrap-v1'
           AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_app' AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit)
           AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_migrate' AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit)
           AND has_database_privilege(current_user, current_database(), 'CONNECT')
@@ -61,8 +61,8 @@ services:
       DATABASE_URL: postgresql://belib_staging_app:${BELIB_STAGE_DB_APP_PASSWORD:?Set staging-only app password}@db:5432/belib_staging
       APP_PORT: "3000"
       ENVIRONMENT: test
-      FRONTEND_URL: http://127.0.0.1:${BELIB_STAGE_PORT:?Set free i5 loopback port}
-      BETTER_AUTH_URL: http://127.0.0.1:${BELIB_STAGE_PORT:?Set free i5 loopback port}
+      FRONTEND_URL: https://stg-bl.hiroyuki9614.com
+      BETTER_AUTH_URL: https://stg-bl.hiroyuki9614.com
       BETTER_AUTH_SECRET: ${BELIB_STAGE_AUTH_SECRET:?Set staging-only Better Auth secret}
       BOOK_FILE_STORAGE_DRIVER: local
       BOOK_FILE_STORAGE_ROOT: /home/node/books
@@ -84,7 +84,7 @@ services:
       target: runtime
       args:
         VCS_REF: ${BELIB_STAGE_VCS_REF:?Set full reviewed staging SHA}
-        VITE_API_BASE_URL: http://127.0.0.1:${BELIB_STAGE_PORT:?Set free i5 loopback port}
+        VITE_API_BASE_URL: https://stg-bl.hiroyuki9614.com
         VITE_PUBLIC_DEMO_EMAIL: ""
         VITE_PUBLIC_DEMO_PASSWORD: ""
         VITE_PUBLIC_DEMO_ADMIN_EMAIL: ""
@@ -99,7 +99,7 @@ services:
       - "127.0.0.1:${BELIB_STAGE_PORT:?Set free i5 loopback port}:8080"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./scripts/staging/nginx-default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       backend:
         condition: service_started

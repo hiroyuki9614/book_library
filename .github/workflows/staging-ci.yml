@@ -1,4 +1,6 @@
-name: BeLib staging PR CI
+# Candidate-source CI runs PR-controlled code with a read-only token. Its success is never CD trust or staging approval.
+name: BeLib candidate source CI (not staging admission)
+run-name: "Candidate source CI only (PR #${{ github.event.pull_request.number }})"
 
 on:
   pull_request:
