@@ -149,6 +149,9 @@ for (const config of [
 			await page.getByRole('combobox').click();
 			await page.getByRole('option', { name: mode, exact: true }).click();
 			await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
+			await page.getByRole('button', { name: '目次', exact: true }).click();
+			await page.getByRole('button', { name: '第一章', exact: true }).click();
+			await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
 			if (!config.vertical && mode === '常に見開き') {
 				const geometry = await page.locator('[data-publication-pane="primary"] iframe').first().evaluate((frame) => {
 					const viewer = frame.closest('[data-reader-viewport]') as HTMLElement;
