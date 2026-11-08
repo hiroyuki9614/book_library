@@ -16,6 +16,34 @@ from typing import Any
 COMPOSE_PROJECT = "belib-isolated-i5"
 EXPECTED_CI_PORT = 49199
 EXPECTED_SERVICES = {"db", "migrate", "backend", "frontend", "nginx"}
+EXPECTED_SOURCE_BUILDS = {
+    "migrate": {
+        "context": "./backend",
+        "target": "migration",
+    },
+    "backend": {
+        "context": "./backend",
+        "target": "runtime",
+        "args": {
+            "VCS_REF": "${BELIB_STAGE_VCS_REF:?Set full reviewed staging SHA}",
+        },
+    },
+    "frontend": {
+        "context": "./frontend",
+        "target": "runtime",
+        "args": {
+            "VCS_REF": "${BELIB_STAGE_VCS_REF:?Set full reviewed staging SHA}",
+            "VITE_API_BASE_URL": "https://stg-bl.hiroyuki9614.com",
+            "VITE_PUBLIC_DEMO_EMAIL": '""',
+            "VITE_PUBLIC_DEMO_PASSWORD": '""',
+            "VITE_PUBLIC_DEMO_ADMIN_EMAIL": '""',
+            "VITE_PUBLIC_DEMO_ADMIN_PASSWORD": '""',
+        },
+    },
+}
+EXPECTED_BUILD_MODEL_KEYS = {
+    name: set(build) for name, build in EXPECTED_SOURCE_BUILDS.items()
+}
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 HEX_SECRET_PATTERN = re.compile(r"[a-f0-9]{64}\Z")
 MIGRATE_DATABASE_URL_SOURCE = (
@@ -57,6 +85,137 @@ def _mapping(value: Any, label: str) -> dict[str, Any]:
     return result
 
 
+def _source_build_contract(source: str) -> None:
+    """Check the original YAML build blocks before Compose can normalize them."""
+    code = _strip_yaml_comments(source)
+    if re.search(r"(?m)^\s*<<\s*:", code) or re.search(
+        r"(?:^|[\s:[{,])[&*][A-Za-z0-9_-]+(?=$|[\s,}\]])", code
+    ):
+        raise GuardError("YAML aliases and merge keys are forbidden in staging Compose")
+
+    lines = code.splitlines()
+    in_services = False
+    current_service: str | None = None
+    found_services: set[str] = set()
+    build_counts = {name: 0 for name in EXPECTED_SOURCE_BUILDS}
+    services_sections = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if not stripped:
+            index += 1
+            continue
+        if "\t" in line[: len(line) - len(line.lstrip())]:
+            raise GuardError("Tabs are forbidden in staging Compose indentation")
+        if indent == 0:
+            if stripped == "services:":
+                services_sections += 1
+                if services_sections != 1:
+                    raise GuardError("Staging Compose must have one services mapping")
+                in_services = True
+                current_service = None
+            else:
+                in_services = False
+                current_service = None
+            index += 1
+            continue
+        if not in_services:
+            index += 1
+            continue
+        if indent == 2:
+            service_match = re.fullmatch(r"  ([A-Za-z0-9][A-Za-z0-9_-]*):\s*", line)
+            if service_match is None:
+                raise GuardError("Staging service keys must use the checked-in YAML form")
+            current_service = service_match.group(1)
+            found_services.add(current_service)
+            index += 1
+            continue
+        if indent != 4:
+            index += 1
+            continue
+
+        build_match = re.fullmatch(
+            r" {4}(?:build|'build'|\"build\")\s*:(.*)", line
+        )
+        if build_match is None:
+            index += 1
+            continue
+        if current_service not in EXPECTED_SOURCE_BUILDS:
+            raise GuardError("Build is forbidden for this staging service")
+        if build_match.group(1).strip():
+            raise GuardError("Staging build must use an explicit allowlisted mapping")
+
+        actual_build: dict[str, Any] = {}
+        actual_args: dict[str, str] = {}
+        in_args = False
+        child_index = index + 1
+        while child_index < len(lines):
+            child = lines[child_index]
+            if not child.strip():
+                child_index += 1
+                continue
+            if "\t" in child[: len(child) - len(child.lstrip())]:
+                raise GuardError("Tabs are forbidden in staging build indentation")
+            child_indent = len(child) - len(child.lstrip(" "))
+            if child_indent <= 4:
+                break
+            if child_indent == 6:
+                child_match = re.fullmatch(
+                    r" {6}([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)", child
+                )
+                if child_match is None:
+                    raise GuardError("Staging build keys must use the checked-in YAML form")
+                key, raw_value = child_match.groups()
+                if key in actual_build:
+                    raise GuardError("Duplicate staging build key")
+                if key == "args":
+                    if raw_value.strip():
+                        raise GuardError("Staging build args must use an explicit allowlisted mapping")
+                    actual_build[key] = actual_args
+                    in_args = True
+                else:
+                    value = raw_value.strip()
+                    if not value:
+                        raise GuardError("Staging build values must be explicit scalars")
+                    actual_build[key] = value
+                    in_args = False
+            elif child_indent == 8 and in_args:
+                arg_match = re.fullmatch(
+                    r" {8}([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)", child
+                )
+                if arg_match is None:
+                    raise GuardError("Staging build args must use the checked-in YAML form")
+                arg_name, raw_value = arg_match.groups()
+                if arg_name in actual_args:
+                    raise GuardError("Duplicate staging build argument")
+                value = raw_value.strip()
+                if not value:
+                    raise GuardError("Staging build arguments must be explicit scalars")
+                actual_args[arg_name] = value
+            else:
+                raise GuardError("Nested or unsupported staging build syntax is forbidden")
+            child_index += 1
+
+        if actual_build != EXPECTED_SOURCE_BUILDS[current_service]:
+            raise GuardError(f"{current_service} build keys or values are outside the staging allowlist")
+        build_counts[current_service] += 1
+        index = child_index
+
+    if services_sections != 1 or found_services != EXPECTED_SERVICES:
+        raise GuardError("Staging Compose must declare exactly the five expected services")
+    if build_counts != {name: 1 for name in EXPECTED_SOURCE_BUILDS}:
+        raise GuardError("Each staging build service must have exactly one allowlisted build")
+
+
+def _build(service: dict[str, Any], name: str) -> dict[str, Any]:
+    build = service.get("build")
+    if not isinstance(build, dict) or set(build) != EXPECTED_BUILD_MODEL_KEYS[name]:
+        raise GuardError(f"{name} build contains unsupported or unsafe build settings")
+    return build
+
+
 def _walk(value: Any):
     if isinstance(value, dict):
         for key, child in value.items():
@@ -69,6 +228,7 @@ def _walk(value: Any):
 
 def _source_contract(source: str, source_sha: str) -> None:
     code = _strip_yaml_comments(source)
+    _source_build_contract(source)
     for pattern, description in (
         (r"(?im)^\s*(?:env_file|extends|include)\s*:", "external Compose input"),
         (r"compose\.ya?ml", "production Compose reference"),
@@ -317,21 +477,22 @@ def _validate_model(
         f"postgresql://belib_staging_app:{app_password}@db:5432/belib_staging"
     )
     migrate = services["migrate"]
+    migrate_build = _build(migrate, "migrate")
     migrate_env = _env(migrate, "migrate")
     if (
         migrate_env != {"DATABASE_URL": expected_migrate_database_url}
         or migrate.get("user") != "node"
         or "image" in migrate
         or not _context_matches(
-            migrate.get("build", {}).get("context"), "backend", compose_root
+            migrate_build.get("context"), "backend", compose_root
         )
-        or migrate.get("build", {}).get("target") != "migration"
-        or migrate.get("build", {}).get("args") not in (None, {})
+        or migrate_build.get("target") != "migration"
         or _mounts(migrate, "migrate")
     ):
         raise GuardError("Migration service must use only the isolated staging database")
 
     backend = services["backend"]
+    backend_build = _build(backend, "backend")
     backend_env = _env(backend, "backend")
     expected_port_text = str(expected_port)
     expected_backend_env = {
@@ -355,7 +516,6 @@ def _validate_model(
     expected_backend_env["BETTER_AUTH_SECRET"] = auth_secret
     if backend_env != expected_backend_env:
         raise GuardError("Backend environment must remain staging-local")
-    backend_build = backend.get("build", {})
     if (
         backend.get("user") != "node"
         or "image" in backend
@@ -376,7 +536,7 @@ def _validate_model(
     )
 
     frontend = services["frontend"]
-    frontend_build = frontend.get("build", {})
+    frontend_build = _build(frontend, "frontend")
     expected_frontend_args = {
         "VCS_REF": source_sha,
         "VITE_API_BASE_URL": "https://stg-bl.hiroyuki9614.com",
@@ -457,10 +617,10 @@ def validate(
     _validate_model(compose_model, source_sha, expected_port, root)
 
 
-def _checkout_sha() -> str:
+def _checkout_sha(compose_root: Path) -> str:
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "-C", str(compose_root), "rev-parse", "HEAD"],
             check=True,
             capture_output=True,
             text=True,
@@ -483,7 +643,7 @@ def main() -> int:
         model = json.loads(args.compose_json.read_text(encoding="utf-8"))
         validate(
             source_sha=args.source_sha,
-            checkout_sha=_checkout_sha(),
+            checkout_sha=_checkout_sha(args.compose_source.resolve().parent),
             compose_source=source,
             compose_model=model,
             expected_port=args.port,

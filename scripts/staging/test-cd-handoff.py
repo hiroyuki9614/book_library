@@ -544,7 +544,7 @@ class CDHandoffTests(unittest.TestCase):
         self.assertNotIn("ssh", workflow.lower())
         self.assertNotIn("sudo", workflow.lower())
         self.assertNotIn("docker compose", workflow.lower())
-        self.assertIn("actions/upload-artifact@v4", workflow)
+        self.assertIn("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", workflow)
         self.assertIn("Deployment authorized: false", workflow)
         self.assertIn("Independent existing-supervisor provenance verification: pending.", workflow)
 

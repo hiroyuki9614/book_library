@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Read-only i5 admission check. Never sources the env file or changes Docker state.
 set -euo pipefail
+umask 077
 
 fail() { printf 'BLOCKED: %s\n' "$*" >&2; exit 1; }
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
@@ -13,9 +14,9 @@ file="$1"
 mode="$(stat -c %a -- "$file")"
 [[ "$mode" == 600 || "$mode" == 400 ]] || fail 'Env file must have mode 0600 or 0400'
 # Compose gives ambient variables precedence over --env-file; reject all ambient staging,
-# Compose, Docker, and database credential inputs before reading the host-only file.
-if compgen -e | grep -Eq '^(BELIB_STAGE_|COMPOSE_|DOCKER_|DATABASE_URL$|DIRECT_URL$|POSTGRES_|BETTER_AUTH_SECRET$|R2_|AWS_|S3_|PROD_|PRODUCTION_|VITE_PUBLIC_DEMO_|BELIB_FRONTEND_)'; then
-  fail 'Ambient staging, Docker, Compose, or database overrides are forbidden; use the staging env file only'
+# Compose, Docker, database, and SSH-agent credential inputs before reading the host-only file.
+if compgen -e | grep -Eq '^(BELIB_STAGE_|COMPOSE_|DOCKER_|DATABASE_URL$|DIRECT_URL$|POSTGRES_|BETTER_AUTH_SECRET$|R2_|AWS_|S3_|PROD_|PRODUCTION_|VITE_PUBLIC_DEMO_|BELIB_FRONTEND_|SSH_AUTH_SOCK$|SSH_AGENT_PID$|GIT_SSH_COMMAND$)'; then
+  fail 'Ambient staging, Docker, Compose, database, or SSH-agent overrides are forbidden; use the staging env file only'
 fi
 
 allowed_keys='BELIB_STAGE_DB_BOOTSTRAP_PASSWORD|BELIB_STAGE_DB_APP_PASSWORD|BELIB_STAGE_DB_MIGRATE_PASSWORD|BELIB_STAGE_AUTH_SECRET|BELIB_STAGE_VCS_REF|BELIB_STAGE_PORT'
@@ -70,6 +71,22 @@ if ss -H -ltn | awk '{print $4}' | grep -Eq "(^|:)${port}$"; then
   fail 'Proposed staging loopback port is already bound; inspect existing deployment before choosing another'
 fi
 
-# --env-file explicitly replaces implicit production .env interpolation.
-docker compose -p belib-isolated-i5 --env-file "$file" -f "$root/compose.staging.yaml" config --quiet || fail 'Staging Compose configuration invalid'
+# Compose config resolves the staging source and env file without contacting the daemon,
+# creating resources, or launching a build. Keep its resolved model and diagnostics private:
+# the model contains the synthetic staging credentials from the host-only env file.
+command -v python3 >/dev/null || fail 'Python 3 is required for the staging isolation guard'
+compose_tmpdir="$(mktemp -d)" || fail 'Could not create a private Compose validation directory'
+trap 'rm -rf -- "$compose_tmpdir"' EXIT
+compose_json="$compose_tmpdir/compose.json"
+compose_diagnostics="$compose_tmpdir/compose.stderr"
+if ! docker compose -p belib-isolated-i5 --env-file "$file" \
+  -f "$root/compose.staging.yaml" --profile migration config --format json \
+  >"$compose_json" 2>"$compose_diagnostics"; then
+  fail 'Staging Compose configuration invalid'
+fi
+python3 -B "$root/scripts/staging/ci-isolation-guard.py" \
+  --source-sha "$rev" \
+  --compose-source "$root/compose.staging.yaml" \
+  --compose-json "$compose_json" \
+  --port "$port" || fail 'Staging Compose isolation guard rejected configuration'
 printf 'PREFLIGHT_PASS host=ubuntu-worker principal=hiroyuki available_disk_kib=%s available_memory_kib=%s port=%s revision=%s compose_project=belib-isolated-i5\n' "$free_kib" "$mem_kib" "$port" "$rev"

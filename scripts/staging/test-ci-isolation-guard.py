@@ -167,6 +167,19 @@ class CIIsolationGuardTests(unittest.TestCase):
                 compose_model=compose_model() if model is None else model,
             )
 
+    def source_with_build_entry(self, service: str, entry: str) -> str:
+        marker = f"  {service}:\n"
+        start = self.compose_source.index(marker)
+        next_service = re.search(r"(?m)^  [A-Za-z0-9][A-Za-z0-9_-]*:\s*$", self.compose_source[start + len(marker):])
+        end = start + len(marker) + next_service.start() if next_service else len(self.compose_source)
+        service_block = self.compose_source[start:end]
+        target_line = next(
+            line for line in service_block.splitlines(keepends=True)
+            if re.fullmatch(r"      target: [^\n]+\n?", line)
+        )
+        service_block = service_block.replace(target_line, target_line + f"      {entry}\n", 1)
+        return self.compose_source[:start] + service_block + self.compose_source[end:]
+
     def test_accepts_the_isolated_compose_model_for_exact_pr_head(self):
         guard.validate(
             source_sha=SOURCE_SHA,
@@ -205,6 +218,89 @@ class CIIsolationGuardTests(unittest.TestCase):
         model = compose_model()
         model["services"]["frontend"]["build"]["args"]["VCS_REF"] = "latest"
         self.assert_rejected(model=model)
+
+    def test_rejects_unsafe_buildkit_controls_in_every_staging_build(self):
+        unsafe_options = {
+            "ssh": ("default", ["default"], {"default": "/run/ssh-agent.sock"}),
+            "network": ("host",),
+            "entitlements": (["security.insecure"], ["network.host"]),
+            "secrets": (["id=token,src=/run/secrets/token"],),
+            "cache_from": (["example.invalid/cache:latest"],),
+            "cache_to": (["type=registry,ref=example.invalid/cache:latest"],),
+            "extra_contexts": ({"other": "../other"},),
+            "additional_contexts": ({"other": "../other"},),
+            "dockerfile_inline": ("FROM scratch",),
+            "extra_hosts": (["host.docker.internal:host-gateway"],),
+            "privileged": (True,),
+            "ulimits": ({"nofile": {"soft": 1024, "hard": 2048}},),
+        }
+        for service in ("migrate", "backend", "frontend"):
+            for key, values in unsafe_options.items():
+                for value in values:
+                    with self.subTest(service=service, key=key, value=value):
+                        model = compose_model()
+                        model["services"][service]["build"][key] = value
+                        self.assert_rejected(model=model)
+
+    def test_rejects_unsafe_source_build_entries_even_if_normalization_drops_them(self):
+        source_entries = (
+            "ssh: default",
+            "ssh: [default]",
+            "network: host",
+            "entitlements: [security.insecure]",
+            "secrets: [id=token,src=/run/secrets/token]",
+            "cache_from: [example.invalid/cache:latest]",
+            "cache_to: [type=registry,ref=example.invalid/cache:latest]",
+            "extra_contexts: {other: ../other}",
+            "additional_contexts: {other: ../other}",
+            "dockerfile_inline: 'FROM scratch'",
+        )
+        for service in ("migrate", "backend", "frontend"):
+            for entry in source_entries:
+                with self.subTest(service=service, entry=entry):
+                    # The model stays valid to represent Compose normalization that
+                    # discards or fails to expose the unsafe source-only property.
+                    self.assert_rejected(
+                        source=self.source_with_build_entry(service, entry),
+                        model=compose_model(),
+                    )
+
+    def test_rejects_unexpected_build_services_and_service_builds(self):
+        for service in ("db", "nginx"):
+            model = compose_model()
+            model["services"][service]["build"] = {
+                "context": "./backend",
+                "target": "runtime",
+                "ssh": "default",
+            }
+            self.assert_rejected(model=model)
+
+        model = compose_model()
+        model["services"]["worker"] = {
+            "build": {"context": "./backend", "target": "runtime", "ssh": "default"}
+        }
+        self.assert_rejected(model=model)
+
+        source = self.compose_source.replace(
+            "    image: postgres:16.14-bookworm\n",
+            "    image: postgres:16.14-bookworm\n"
+            "    build:\n"
+            "      context: ./backend\n"
+            "      target: runtime\n",
+            1,
+        )
+        self.assert_rejected(source=source, model=compose_model())
+
+        source = self.compose_source.replace(
+            "\nnetworks:\n",
+            "\n  worker:\n"
+            "    build:\n"
+            "      context: ./backend\n"
+            "      target: runtime\n"
+            "\nnetworks:\n",
+            1,
+        )
+        self.assert_rejected(source=source, model=compose_model())
 
     def test_rejects_unpinned_compose_source_revision(self):
         source = self.compose_source.replace(
@@ -352,6 +448,12 @@ class CIIsolationGuardTests(unittest.TestCase):
         self.assertIn("config --format json", workflow)
         self.assertNotRegex(workflow, r"(?m)^\s*docker compose .*?\bup\b")
         self.assertNotIn("BELIB_STAGE_DB_PASSWORD=", workflow)
+        checkout_ref = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+        setup_node_ref = "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
+        action_refs = re.findall(r"(?m)^\s*uses:\s*([^\s#]+)", workflow)
+        self.assertEqual(action_refs.count(checkout_ref), 4)
+        self.assertEqual(action_refs.count(setup_node_ref), 3)
+        self.assertTrue(all(re.fullmatch(r"actions/[a-z-]+@[0-9a-f]{40}", ref) for ref in action_refs))
         expected_fake_names = {
             "BELIB_STAGE_DB_BOOTSTRAP_PASSWORD",
             "BELIB_STAGE_DB_APP_PASSWORD",
