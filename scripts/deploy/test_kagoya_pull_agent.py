@@ -127,6 +127,13 @@ class FakeDocker:
                     "command": None,
                     "entrypoint": None,
                     "expose": ["8080"],
+                    "healthcheck": {
+                        "test": ["CMD", "busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"],
+                        "interval": "30s",
+                        "timeout": "3s",
+                        "start_period": "10s",
+                        "retries": 3,
+                    },
                     "image": f"belib-frontend:{source_sha}",
                     "logging": {
                         "driver": "json-file",
@@ -428,6 +435,13 @@ class ProductionComposeIdentityTests(unittest.TestCase):
             "command": None,
             "entrypoint": None,
             "expose": ["8080"],
+            "healthcheck": {
+                "test": ["CMD", "busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"],
+                "interval": "30s",
+                "timeout": "3s",
+                "start_period": "10s",
+                "retries": 3,
+            },
             "image": "belib-frontend:70d1cc7128bda0d2d5a925a8ca93bf6920693d42",
             "logging": {
                 "driver": "json-file",
@@ -1318,6 +1332,20 @@ class PullAgentDeploymentTests(unittest.TestCase):
             self.run_deploy(lambda _base_url: None)
         self.assertEqual(self.docker.current_id, OLD_ID)
         self.assertFalse(any("build" in argv or "up" in argv for argv, _env in self.docker.commands))
+
+    def test_rejects_unapproved_frontend_healthcheck_before_build_or_switch(self):
+        self.docker.frontend_compose_overrides["healthcheck"] = {
+                "test": ["CMD", "busybox", "wget", "-q", "-O", "/dev/null", "http://example.test/"],
+            "interval": "30s",
+            "timeout": "3s",
+            "start_period": "10s",
+            "retries": 3,
+        }
+        with self.assertRaisesRegex(DeployError, "healthcheck differs from the approved loopback probe"):
+            self.run_deploy(lambda _base_url: None)
+        self.assertEqual(self.docker.current_id, OLD_ID)
+        compose_commands = [argv for argv, _env in self.docker.commands if argv[:2] == ["docker", "compose"]]
+        self.assertFalse(any("build" in argv or "up" in argv for argv in compose_commands))
 
     def test_rejects_unapproved_service_and_database_contract_changes(self):
         self.docker.other_service_overrides["helper"] = {"privileged": True}
