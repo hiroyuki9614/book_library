@@ -3,9 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
 	assertDirectoryWritableByNode,
+	assertConnectedDatabase,
 	assertFreshOrSeededCatalog,
 	assertSeedRuntimeUser,
 	assertStagingSeedEnvironment,
@@ -24,7 +25,7 @@ const adminPassword = randomBytes(32).toString('hex');
 const readerPassword = randomBytes(32).toString('hex');
 
 const validEnvironment = (): NodeJS.ProcessEnv => ({
-	DATABASE_URL: `postgresql://belib_staging:${databasePassword}@db:5432/belib_staging`,
+	DATABASE_URL: `postgresql://belib_staging_app:${databasePassword}@db:5432/belib_staging`,
 	BETTER_AUTH_SECRET: authSecret,
 	ENVIRONMENT: 'test',
 	BOOK_FILE_STORAGE_DRIVER: 'local',
@@ -159,14 +160,30 @@ describe('offline synthetic staging seed safety', () => {
 		expect(() => assertStagingSeedEnvironment(env)).toThrow(/must be distinct/);
 	});
 
+	test('accepts only the non-superuser application database identity', async () => {
+		const query = vi.fn().mockResolvedValue([
+			{ database: 'belib_staging', username: 'belib_staging_app', isSuperuser: false },
+		]);
+		await expect(assertConnectedDatabase({ $queryRaw: query } as unknown as Parameters<typeof assertConnectedDatabase>[0])).resolves.toBeUndefined();
+
+		const superuserQuery = vi.fn().mockResolvedValue([
+			{ database: 'belib_staging', username: 'belib_staging_app', isSuperuser: true },
+		]);
+		await expect(
+			assertConnectedDatabase({ $queryRaw: superuserQuery } as unknown as Parameters<typeof assertConnectedDatabase>[0]),
+		).rejects.toThrow(/non-superuser belib_staging_app/);
+	});
+
 	test.each([
-		['wrong host', (env: NodeJS.ProcessEnv) => (env.DATABASE_URL = `postgresql://belib_staging:${databasePassword}@production-db:5432/belib_staging`)],
+		['wrong host', (env: NodeJS.ProcessEnv) => (env.DATABASE_URL = `postgresql://belib_staging_app:${databasePassword}@production-db:5432/belib_staging`)],
 		['wrong database user', (env: NodeJS.ProcessEnv) => (env.DATABASE_URL = `postgresql://production:${databasePassword}@db:5432/belib_staging`)],
-		['wrong database name', (env: NodeJS.ProcessEnv) => (env.DATABASE_URL = `postgresql://belib_staging:${databasePassword}@db:5432/production`)],
+		['bootstrap superuser', (env: NodeJS.ProcessEnv) => (env.DATABASE_URL = `postgresql://belib_staging_bootstrap:${databasePassword}@db:5432/belib_staging`)],
+		['wrong database name', (env: NodeJS.ProcessEnv) => (env.DATABASE_URL = `postgresql://belib_staging_app:${databasePassword}@db:5432/production`)],
 		['wrong storage root', (env: NodeJS.ProcessEnv) => (env.BOOK_FILE_STORAGE_ROOT = '/srv/books')],
 		['non-local storage', (env: NodeJS.ProcessEnv) => (env.BOOK_FILE_STORAGE_DRIVER = 'r2')],
 		['R2 configuration', (env: NodeJS.ProcessEnv) => (env.R2_ACCESS_KEY_ID = 'synthetic-only-test-value')],
 		['production configuration', (env: NodeJS.ProcessEnv) => (env.PRODUCTION_DATABASE_URL = 'synthetic-only-test-value')],
+		['PostgreSQL bootstrap configuration', (env: NodeJS.ProcessEnv) => (env.POSTGRES_PASSWORD = 'synthetic-only-test-value')],
 	])('fails closed for %s', (_caseName, changeEnvironment) => {
 		const env = validEnvironment();
 		changeEnvironment(env);

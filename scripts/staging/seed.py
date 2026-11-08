@@ -26,7 +26,9 @@ SOURCE_CHECK_TIMEOUT_SECONDS = 5
 ENV_FILE_MAX_BYTES = 1024
 STAGING_ENV_KEYS = frozenset(
     {
-        "BELIB_STAGE_DB_PASSWORD",
+        "BELIB_STAGE_DB_BOOTSTRAP_PASSWORD",
+        "BELIB_STAGE_DB_APP_PASSWORD",
+        "BELIB_STAGE_DB_MIGRATE_PASSWORD",
         "BELIB_STAGE_AUTH_SECRET",
         "BELIB_STAGE_VCS_REF",
         "BELIB_STAGE_PORT",
@@ -164,7 +166,7 @@ def read_staging_env_file(env_fd: int) -> tuple[bytes, dict[str, str]]:
     if lines and lines[-1] == "":
         lines.pop()
     if len(lines) != len(STAGING_ENV_KEYS) or any(not line or "\r" in line for line in lines):
-        raise SeedWrapperError("The staging env file must contain exactly the four staging keys")
+        raise SeedWrapperError("The staging env file must contain exactly the six staging keys")
 
     values: dict[str, str] = {}
     for line in lines:
@@ -176,15 +178,21 @@ def read_staging_env_file(env_fd: int) -> tuple[bytes, dict[str, str]]:
         values[name] = value
 
     if set(values) != STAGING_ENV_KEYS:
-        raise SeedWrapperError("The staging env file must contain exactly the four staging keys")
+        raise SeedWrapperError("The staging env file must contain exactly the six staging keys")
 
-    database_password = values["BELIB_STAGE_DB_PASSWORD"]
+    database_passwords = (
+        values["BELIB_STAGE_DB_BOOTSTRAP_PASSWORD"],
+        values["BELIB_STAGE_DB_APP_PASSWORD"],
+        values["BELIB_STAGE_DB_MIGRATE_PASSWORD"],
+    )
     auth_secret = values["BELIB_STAGE_AUTH_SECRET"]
     revision = values["BELIB_STAGE_VCS_REF"]
     port = values["BELIB_STAGE_PORT"]
     if (
-        len(database_password) != 64
-        or any(character not in "0123456789abcdef" for character in database_password)
+        any(
+            len(password) != 64 or any(character not in "0123456789abcdef" for character in password)
+            for password in database_passwords
+        )
         or len(auth_secret) != 64
         or any(character not in "0123456789abcdef" for character in auth_secret)
         or len(revision) != 40
@@ -195,8 +203,8 @@ def read_staging_env_file(env_fd: int) -> tuple[bytes, dict[str, str]]:
         or not 1024 <= int(port, 10) <= 65535
     ):
         raise SeedWrapperError("The staging env file contains an invalid staging value")
-    if database_password == auth_secret:
-        raise SeedWrapperError("The staging database password and Better Auth secret must be distinct")
+    if len(set((*database_passwords, auth_secret))) != 4:
+        raise SeedWrapperError("Bootstrap, app, migration, and Better Auth secrets must all be distinct")
 
     return contents, values
 
@@ -417,11 +425,23 @@ def build_compose_command(repo_root: Path, env_file: Path, endpoint: Path) -> li
 
 
 def reject_ambient_overrides(environment: Mapping[str, str]) -> None:
-    """Reject inherited settings that can redirect Docker, Compose, or stage values."""
-    forbidden_prefixes = ("DOCKER_", "COMPOSE_", "BELIB_STAGE_")
-    if any(name.upper().startswith(forbidden_prefixes) for name in environment):
+    """Reject inherited settings that can redirect Compose or leak runtime credentials."""
+    forbidden_prefixes = (
+        "DOCKER_",
+        "COMPOSE_",
+        "BELIB_STAGE_",
+        "POSTGRES_",
+        "R2_",
+        "AWS_",
+        "S3_",
+        "PROD_",
+        "PRODUCTION_",
+        "VITE_PUBLIC_DEMO_",
+    )
+    forbidden_names = {"DATABASE_URL", "DIRECT_URL", "BETTER_AUTH_SECRET"}
+    if any(name.upper().startswith(forbidden_prefixes) or name.upper() in forbidden_names for name in environment):
         raise SeedWrapperError(
-            "Remove inherited Docker, Compose, and BELIB_STAGE_ overrides before running the staging seed"
+            "Remove inherited staging, database, Docker, Compose, production, and secret overrides before running the staging seed"
         )
 
 

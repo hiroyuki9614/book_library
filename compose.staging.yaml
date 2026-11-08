@@ -6,13 +6,29 @@ services:
   db:
     image: postgres:16.14-bookworm
     environment:
-      POSTGRES_USER: belib_staging
+      POSTGRES_USER: belib_staging_bootstrap
       POSTGRES_DB: belib_staging
-      POSTGRES_PASSWORD: ${BELIB_STAGE_DB_PASSWORD:?Set staging-only DB password}
+      POSTGRES_PASSWORD: ${BELIB_STAGE_DB_BOOTSTRAP_PASSWORD:?Set staging-only bootstrap password}
+      BELIB_STAGE_DB_APP_PASSWORD: ${BELIB_STAGE_DB_APP_PASSWORD:?Set staging-only app password}
+      BELIB_STAGE_DB_MIGRATE_PASSWORD: ${BELIB_STAGE_DB_MIGRATE_PASSWORD:?Set staging-only migration password}
     volumes:
       - staging-postgres-data:/var/lib/postgresql/data
+      - ./scripts/staging/10-belib-staging-roles.sh:/docker-entrypoint-initdb.d/10-belib-staging-roles.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U belib_staging -d belib_staging"]
+      test:
+        - CMD-SHELL
+        - >-
+          test "$$(psql -X -w -U belib_staging_app -d belib_staging -tAc
+          "SELECT 1 WHERE current_user = 'belib_staging_app'
+          AND obj_description((SELECT oid FROM pg_database WHERE datname = current_database()), 'pg_database') = 'belib-staging-role-bootstrap-v1'
+          AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_app' AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit)
+          AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_migrate' AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit)
+          AND has_database_privilege(current_user, current_database(), 'CONNECT')
+          AND NOT has_database_privilege(current_user, current_database(), 'CREATE')
+          AND NOT has_database_privilege(current_user, current_database(), 'TEMPORARY')
+          AND has_schema_privilege(current_user, 'public', 'USAGE')
+          AND NOT has_schema_privilege(current_user, 'public', 'CREATE')
+          AND (SELECT nspowner = (SELECT oid FROM pg_roles WHERE rolname = 'belib_staging_migrate') FROM pg_namespace WHERE nspname = 'public')")" = "1"
       interval: 5s
       timeout: 5s
       retries: 12
@@ -27,7 +43,7 @@ services:
     user: node
     command: ["npx", "prisma", "migrate", "deploy"]
     environment:
-      DATABASE_URL: postgresql://belib_staging:${BELIB_STAGE_DB_PASSWORD:?Set staging-only DB password}@db:5432/belib_staging
+      DATABASE_URL: postgresql://belib_staging_migrate:${BELIB_STAGE_DB_MIGRATE_PASSWORD:?Set staging-only migration password}@db:5432/belib_staging
     depends_on:
       db:
         condition: service_healthy
@@ -42,7 +58,7 @@ services:
         VCS_REF: ${BELIB_STAGE_VCS_REF:?Set full reviewed staging SHA}
     user: node
     environment:
-      DATABASE_URL: postgresql://belib_staging:${BELIB_STAGE_DB_PASSWORD:?Set staging-only DB password}@db:5432/belib_staging
+      DATABASE_URL: postgresql://belib_staging_app:${BELIB_STAGE_DB_APP_PASSWORD:?Set staging-only app password}@db:5432/belib_staging
       APP_PORT: "3000"
       ENVIRONMENT: test
       FRONTEND_URL: http://127.0.0.1:${BELIB_STAGE_PORT:?Set free i5 loopback port}

@@ -5,6 +5,7 @@ import importlib.util
 import fcntl
 import os
 import socket
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -24,13 +25,18 @@ SPEC.loader.exec_module(seed_wrapper)
 
 
 TEST_SOURCE_SHA = "a" * 40
-TEST_DB_PASSWORD = "1" * 64
-TEST_AUTH_SECRET = "2" * 64
+TEST_BOOTSTRAP_PASSWORD = "1" * 64
+TEST_DB_PASSWORD = "2" * 64
+TEST_MIGRATE_PASSWORD = "3" * 64
+TEST_AUTH_SECRET = "4" * 64
+ROLE_INIT_SCRIPT = Path(__file__).with_name("10-belib-staging-roles.sh")
 
 
 def staging_env_contents(**overrides: str) -> bytes:
     values = {
-        "BELIB_STAGE_DB_PASSWORD": TEST_DB_PASSWORD,
+        "BELIB_STAGE_DB_BOOTSTRAP_PASSWORD": TEST_BOOTSTRAP_PASSWORD,
+        "BELIB_STAGE_DB_APP_PASSWORD": TEST_DB_PASSWORD,
+        "BELIB_STAGE_DB_MIGRATE_PASSWORD": TEST_MIGRATE_PASSWORD,
         "BELIB_STAGE_AUTH_SECRET": TEST_AUTH_SECRET,
         "BELIB_STAGE_VCS_REF": TEST_SOURCE_SHA,
         "BELIB_STAGE_PORT": "18080",
@@ -161,6 +167,20 @@ class SeedWrapperDockerGuardTests(unittest.TestCase):
             "COMPOSE_FILE",
             "COMPOSE_PROJECT_NAME",
             "BELIB_STAGE_PORT",
+            "BELIB_STAGE_DB_BOOTSTRAP_PASSWORD",
+            "BELIB_STAGE_DB_APP_PASSWORD",
+            "BELIB_STAGE_DB_MIGRATE_PASSWORD",
+            "POSTGRES_PASSWORD",
+            "POSTGRES_USER",
+            "DATABASE_URL",
+            "DIRECT_URL",
+            "BETTER_AUTH_SECRET",
+            "R2_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "S3_ENDPOINT",
+            "PRODUCTION_DATABASE_URL",
+            "PROD_API_URL",
+            "VITE_PUBLIC_DEMO_API_URL",
         ):
             with self.subTest(variable=variable):
                 with self.assertRaises(seed_wrapper.SeedWrapperError):
@@ -372,13 +392,18 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
     def test_rejects_malformed_or_unsafe_env_values_before_source_check(self) -> None:
         invalid_contents = (
             staging_env_contents() + b"DATABASE_URL=synthetic\n",
+            staging_env_contents() + b"POSTGRES_PASSWORD=synthetic\n",
+            staging_env_contents() + b"R2_ACCESS_KEY_ID=synthetic\n",
+            staging_env_contents() + b"BELIB_STAGE_DB_ROOT_PASSWORD=synthetic\n",
             b"x" * (seed_wrapper.ENV_FILE_MAX_BYTES + 1),
             staging_env_contents().replace(b"BELIB_STAGE_PORT=18080\n", b""),
             staging_env_contents().replace(b"BELIB_STAGE_PORT=18080\n", b"BELIB_STAGE_PORT=18080\nBELIB_STAGE_PORT=18081\n"),
-            staging_env_contents(BELIB_STAGE_DB_PASSWORD="x" * 64),
+            staging_env_contents(BELIB_STAGE_DB_APP_PASSWORD="x" * 64),
             staging_env_contents(BELIB_STAGE_VCS_REF="A" * 40),
             staging_env_contents(BELIB_STAGE_PORT="0800"),
             staging_env_contents(BELIB_STAGE_AUTH_SECRET=TEST_DB_PASSWORD),
+            staging_env_contents(BELIB_STAGE_DB_MIGRATE_PASSWORD=TEST_DB_PASSWORD),
+            staging_env_contents(BELIB_STAGE_DB_BOOTSTRAP_PASSWORD=TEST_AUTH_SECRET),
         )
         for index, contents in enumerate(invalid_contents):
             with self.subTest(index=index), patch.object(seed_wrapper, "verify_reviewed_source") as verify_source:
@@ -386,6 +411,106 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
                 with self.assertRaises(seed_wrapper.SeedWrapperError):
                     seed_wrapper.validate_staging_admission(self.root, self.env_file, os.getuid())
                 verify_source.assert_not_called()
+
+    def run_postgres_role_init(self, **overrides: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir(exist_ok=True)
+        capture_path = self.root / "psql-capture"
+        psql_stub = fake_bin / "psql"
+        psql_stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "capture = open(os.environ['TEST_PSQL_CAPTURE'], 'wb')\n"
+            "capture.write(('\\0'.join(sys.argv[1:])).encode('utf-8'))\n"
+            "capture.write(b'\\n--STDIN--\\n')\n"
+            "capture.write(sys.stdin.buffer.read())\n"
+            "capture.write(b'\\n--ROLE-PASSWORD-ENV--\\n')\n"
+            "for name in ('BELIB_STAGE_DB_APP_PASSWORD', 'BELIB_STAGE_DB_MIGRATE_PASSWORD'):\n"
+            "    capture.write(f'{name}={int(name in os.environ)}\\n'.encode('ascii'))\n"
+            "capture.close()\n",
+            encoding="ascii",
+        )
+        psql_stub.chmod(0o700)
+
+        environment = {
+            "PATH": f"{fake_bin}:{os.defpath}",
+            "HOME": str(self.root),
+            "DATABASE_ALREADY_EXISTS": "",
+            "POSTGRES_USER": "belib_staging_bootstrap",
+            "POSTGRES_DB": "belib_staging",
+            "POSTGRES_PASSWORD": TEST_BOOTSTRAP_PASSWORD,
+            "BELIB_STAGE_DB_APP_PASSWORD": TEST_DB_PASSWORD,
+            "BELIB_STAGE_DB_MIGRATE_PASSWORD": TEST_MIGRATE_PASSWORD,
+            "ROLE_INIT_SCRIPT": str(ROLE_INIT_SCRIPT),
+            "TEST_PSQL_CAPTURE": str(capture_path),
+        }
+        environment.update(overrides)
+        result = subprocess.run(
+            [
+                "/bin/bash",
+                "-Ee",
+                "-o",
+                "pipefail",
+                "-c",
+                'source "$ROLE_INIT_SCRIPT"; if [[ ! -v BELIB_STAGE_DB_APP_PASSWORD && ! -v BELIB_STAGE_DB_MIGRATE_PASSWORD && ! -v value && "$-" != *u* ]]; then printf "ROLE_CREDENTIALS_CLEARED\\n"; else exit 23; fi',
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result, capture_path
+
+    def test_postgres_role_init_uses_fresh_volume_guard_and_secret_safe_psql_prompts(self) -> None:
+        self.assertFalse(ROLE_INIT_SCRIPT.stat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+        result, capture_path = self.run_postgres_role_init()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "ROLE_CREDENTIALS_CLEARED\n")
+
+        psql_input = capture_path.read_bytes()
+        arguments, psql_input = psql_input.split(b"\n--STDIN--\n", 1)
+        sql_and_prompts, role_password_environment = psql_input.split(b"\n--ROLE-PASSWORD-ENV--\n", 1)
+        self.assertIn(b"--no-psqlrc", arguments)
+        self.assertIn(b"--no-password", arguments)
+        self.assertIn(b"ON_ERROR_STOP=1", arguments)
+        self.assertIn(b"belib_staging_bootstrap", arguments)
+        self.assertIn(b"belib_staging", arguments)
+        for password in (TEST_DB_PASSWORD.encode(), TEST_MIGRATE_PASSWORD.encode()):
+            self.assertNotIn(password, arguments)
+            self.assertEqual(sql_and_prompts.count(password), 2)
+        self.assertNotIn(TEST_BOOTSTRAP_PASSWORD.encode(), sql_and_prompts)
+        self.assertEqual(
+            role_password_environment,
+            b"BELIB_STAGE_DB_APP_PASSWORD=0\nBELIB_STAGE_DB_MIGRATE_PASSWORD=0\n",
+        )
+        self.assertNotIn(TEST_DB_PASSWORD, result.stdout)
+        self.assertNotIn(TEST_MIGRATE_PASSWORD, result.stderr)
+
+        init_lines = sql_and_prompts.splitlines()
+        app_password_line = init_lines.index(b"\\password belib_staging_app")
+        migrate_password_line = init_lines.index(b"\\password belib_staging_migrate")
+        self.assertEqual(init_lines[app_password_line + 1 : app_password_line + 3], [TEST_DB_PASSWORD.encode()] * 2)
+        self.assertEqual(init_lines[migrate_password_line + 1 : migrate_password_line + 3], [TEST_MIGRATE_PASSWORD.encode()] * 2)
+        self.assertIn(b"LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS", sql_and_prompts)
+        self.assertIn(b"ALTER SCHEMA public OWNER TO belib_staging_migrate", sql_and_prompts)
+        self.assertIn(b"REVOKE CREATE ON DATABASE belib_staging FROM belib_staging_migrate", sql_and_prompts)
+        self.assertIn(b"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO belib_staging_app", sql_and_prompts)
+        self.assertIn(b"GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO belib_staging_app", sql_and_prompts)
+        self.assertIn(b"belib-staging-role-bootstrap-v1", sql_and_prompts)
+        self.assertIn(b"role_assertions", sql_and_prompts)
+
+    def test_postgres_role_init_refuses_existing_volume_and_sql_unsafe_credentials(self) -> None:
+        existing_volume, existing_capture = self.run_postgres_role_init(DATABASE_ALREADY_EXISTS="true")
+        self.assertNotEqual(existing_volume.returncode, 0)
+        self.assertRegex(existing_volume.stderr, "fresh data volume")
+        self.assertFalse(existing_capture.exists())
+
+        unsafe_password = "a" * 63 + "'"
+        unsafe_value, unsafe_capture = self.run_postgres_role_init(BELIB_STAGE_DB_APP_PASSWORD=unsafe_password)
+        self.assertNotEqual(unsafe_value.returncode, 0)
+        self.assertIn("BELIB_STAGE_DB_APP_PASSWORD", unsafe_value.stderr)
+        self.assertNotIn(unsafe_password, unsafe_value.stderr)
+        self.assertFalse(unsafe_capture.exists())
 
     def test_rejects_revision_mismatch_before_checking_worktree(self) -> None:
         process, popen, selector_factory = self.status_probe()

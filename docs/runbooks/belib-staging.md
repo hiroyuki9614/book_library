@@ -4,9 +4,10 @@ This is a **non-production candidate**, not evidence that the i5 environment is 
 
 ## Current gate: no deployment or seed
 
-This candidate may be retained as a draft PR, but it is **not approved for staging deployment or seeding**. An independent read-only review identified three P2 risks. The fixture cleanup race is remediated by retaining fixture paths after failures and never unlinking them. This candidate also resolves the book-volume initialization code gate with a node-owned image mount point and a fail-closed nonroot write probe. These source changes are not staging acceptance. The PostgreSQL bootstrap-role privilege boundary remains unresolved, and the i5 rootless Docker CLI/socket is unavailable. Do not launch, migrate, or seed the staging Compose project, or treat deployment/browser acceptance as complete. Offline tests do not clear this gate.
+This candidate may be retained as a draft PR, but it is **not approved for staging deployment or seeding**. The fixture cleanup race is remediated by retaining fixture paths after failures and never unlinking them. The book-volume code gate uses a node-owned image mount point and a fail-closed nonroot write probe. The PostgreSQL bootstrap-role boundary is now implemented in this source candidate with offline checks, but neither role initialization nor volume ownership has been observed on i5. The i5 rootless Docker CLI/socket remains unavailable. Do not launch, migrate, or seed the staging Compose project, or treat deployment/browser acceptance as complete. Offline tests do not clear this gate.
 
-- **Database privilege boundary:** Compose initializes PostgreSQL with `POSTGRES_USER=belib_staging`, and the backend, migration job, and seed currently use that same account. In the PostgreSQL image this is the bootstrap account; its use as the application/seed runtime account has not been resolved to a least-privileged role design. The seed's database/user identity check does not establish that the account is non-superuser.
+- **Database privilege boundary:** the source candidate initializes the isolated `belib_staging` database with `belib_staging_bootstrap` as the official image's one-time superuser. A non-executable init hook requires a fresh data directory, checks the database and public schema are empty, creates distinct `belib_staging_app` and `belib_staging_migrate` login roles, and records a role-bootstrap marker. The migration role owns `public`, receives schema DDL only, and has no final database `CREATE` or `TEMPORARY` privilege. The app/seed role receives database `CONNECT`, schema `USAGE`, table `SELECT/INSERT/UPDATE/DELETE`, and sequence `USAGE/SELECT/UPDATE`; it has no schema `CREATE`, database `CREATE/TEMPORARY`, or grant options. Future migration-created tables and sequences receive the same runtime grants by default. The seed also checks its live connection is `belib_staging_app` and not a superuser. The app, migration, and bootstrap passwords use separate host-only keys and must all differ from each other and the auth secret.
+- **Fresh-volume guard:** the official PostgreSQL entrypoint runs this `.sh` hook only while initializing an empty data directory. The hook additionally requires `DATABASE_ALREADY_EXISTS` to be empty, the exact bootstrap/database identity, no prior marker/runtime roles, and no objects or unexpected schemas in `public`. Existing data directories skip initialization; the app-role database healthcheck requires the marker and expected non-superuser roles, so an old or partial volume stays unhealthy and dependent services do not start. No bootstrap DDL is run against an existing database.
 - **i5 Docker admission:** the rootless Docker CLI/socket needed to inspect and verify the persistent volume is unavailable for this candidate run. Runtime volume ownership and write access have not been observed on i5.
 
 Read-only checks below cannot clear this gate. The launch, migration, seed, and rollback commands are future reference only and must not be run until every P2 has a reviewed resolution and separate staging admission. No deployment or seed is evidenced by this runbook.
@@ -21,23 +22,29 @@ Read-only checks below cannot clear this gate. The launch, migration, seed, and 
 
 ## Read-only preflight
 
-After the normal owner gate admits the i5 `hiroyuki` principal and resource inspection, create an **outside-repository** mode-0600 file `~/.config/belib-staging/i5.env` containing only the four keys below. Generate independent disposable values locally; never copy production secrets, and never paste values into Git, issues, logs, or chat. Use `openssl rand -hex 32` on i5 for both secrets; a 64-character lowercase hex value is required.
+After the normal owner gate admits the i5 `hiroyuki` principal and resource inspection, create an **outside-repository** mode-0600 file `~/.config/belib-staging/i5.env` containing only the six keys below. Generate independent disposable values locally; never copy production secrets, and never paste values into Git, issues, logs, or chat. Generate each of the four credential values independently with `openssl rand -hex 32` on i5; each must be 64 lowercase hexadecimal characters.
 
 ```text
-BELIB_STAGE_DB_PASSWORD=<new i5-local 64-character hex>
-BELIB_STAGE_AUTH_SECRET=<different new i5-local 64-character hex>
+BELIB_STAGE_DB_BOOTSTRAP_PASSWORD=<new i5-local 64-character hex>
+BELIB_STAGE_DB_APP_PASSWORD=<different i5-local 64-character hex>
+BELIB_STAGE_DB_MIGRATE_PASSWORD=<different i5-local 64-character hex>
+BELIB_STAGE_AUTH_SECRET=<different i5-local 64-character hex>
 BELIB_STAGE_VCS_REF=<exact full 40-character Git checkout SHA>
 BELIB_STAGE_PORT=<free unused i5 loopback port, 1024-65535>
 ```
 
-The local file must be 0600/0400 and owned by `hiroyuki`. Do not source it in a shell. Clear any ambient `BELIB_STAGE_*`, `COMPOSE_PROJECT_NAME` and `COMPOSE_FILE` variables before invoking preflight/Compose; do not reuse a Production shell environment. The fixed `-p belib-isolated-i5` prevents accidental project-name changes. The seed wrapper independently checks that this file has only the four staging keys, validates their formats and distinct DB/Auth secrets, and confirms its revision matches a clean checked-out Git tree before opening seed credentials. It snapshots the validated env file into a sealed descriptor for Compose to avoid reopening a replaceable path. Use the same path for all commands below:
+The local file must be 0600/0400 and owned by `hiroyuki`. Do not source it in a shell. Clear ambient staging, Compose, Docker, database, production, and R2 overrides before invoking preflight/Compose; do not reuse a Production shell environment. The fixed `-p belib-isolated-i5` prevents accidental project-name changes. The preflight and seed wrapper independently enforce the exact six-key allowlist, validate formats and pairwise secret separation, and confirm the revision matches a clean checked-out Git tree before proceeding. The seed wrapper snapshots the validated env file into a sealed descriptor for Compose to avoid reopening a replaceable path. Use the same path for all commands below:
 
 ```bash
 envfile="$HOME/.config/belib-staging/i5.env"
 bash scripts/staging/preflight.sh "$envfile"
 ```
 
-The preflight checks the exact i5 hostname/user, local Git revision, staging-only values, distinct database password and auth secret (before checking Docker), no R2/general env keys, >=8 GiB free disk, >=2 GiB available memory, a free port, the **effective local user socket** `unix:///run/user/$(id -u)/docker.sock`, an i5-local Docker daemon reporting the `rootless` security option, Compose availability, and the parsed Compose configuration. Docker CLI access via the rootful system daemon or a remote context is not sufficient. It performs no container or Docker daemon mutation. If a stage project already exists, first inventory it and reuse the legitimate same-owner deployment rather than replacing it.
+The preflight checks the exact i5 hostname/user, local Git revision, six-key staging-only file, pairwise-distinct credentials, no ambient staging/Docker/Compose/database/production overrides, no R2/general env keys, >=8 GiB free disk, >=2 GiB available memory, a free port, the **effective local user socket** `unix:///run/user/$(id -u)/docker.sock`, an i5-local Docker daemon reporting the `rootless` security option, Compose availability, and the parsed Compose configuration. Docker CLI access via the rootful system daemon or a remote context is not sufficient. It performs no container or Docker daemon mutation. If a stage project already exists, first inventory it and reuse the legitimate same-owner deployment rather than replacing it.
+
+The official Postgres image makes the configured `POSTGRES_USER` the initialization superuser and creates `POSTGRES_DB` under that account. This candidate names it `belib_staging_bootstrap` and gives it only the bootstrap password. The mounted `scripts/staging/10-belib-staging-roles.sh` is deliberately non-executable, so the official entrypoint sources it in its fresh-volume initialization shell. It checks that `DATABASE_ALREADY_EXISTS` is empty and that `belib_staging` is the expected empty database before creating roles. Passwords are passed to `psql`'s `\password` prompts over stdin; they are not SQL literals or psql command-line arguments. The hook validates the hex-only format, checks app/migration/bootstrap passwords are distinct, asserts the app and migration role flags, effective database/schema privileges, migration schema ownership, default table/sequence grants, and password initialization, then clears the app/migration password variables from the initialization process. The bootstrap account is absent from backend, migration, seed, and database-healthcheck connections.
+
+The database healthcheck connects locally as `belib_staging_app` and requires the role-bootstrap marker plus non-superuser app/migration attributes, app `CONNECT` and schema `USAGE`, and no app database/schema creation privileges. On an existing volume, the official entrypoint skips initialization; without the marker and role contract the healthcheck fails and dependent services remain stopped. Do not try to repair or reinitialize such a volume with this hook.
 
 ## Candidate-only launch (currently blocked)
 
@@ -55,9 +62,9 @@ Never execute the launch if preflight fails or if Docker image build would excee
 
 ## Synthetic-only seed (currently blocked)
 
-After the isolated PostgreSQL migration succeeds, the optional one-off seed adds two synthetic `.invalid` credential users, two tiny deterministic books, local EPUB/PDF files, and admin-role permissions only. The general `user` role receives no permission for either book. It uses Better Auth's password hashing and never deletes existing books. The database URL, storage driver, exact local fixture root, and absence of cloud/production environment keys are checked before seed writes; the connected database identity is checked before writes as well.
+After the isolated PostgreSQL migration succeeds, the optional one-off seed adds two synthetic `.invalid` credential users, two tiny deterministic books, local EPUB/PDF files, and admin-role permissions only. The general `user` role receives no permission for either book. It uses Better Auth's password hashing and never deletes existing books. The database URL must use `belib_staging_app`; before seed writes the script checks the exact local fixture root, absence of cloud/production environment keys, and a live database identity whose role is not a superuser.
 
-Keep the stage env file above unchanged at exactly its original four keys. Create a separate credentials file outside the repository for the disposable accounts. The two independent values below are generated directly into a mode-0600 file; they are not placed in shell arguments, environment variables, or output:
+Keep the stage env file above unchanged at exactly its original six keys. Create a separate credentials file outside the repository for the disposable accounts. The two independent values below are generated directly into a mode-0600 file; they are not placed in shell arguments, environment variables, or output:
 
 ```bash
 seed_file="$HOME/.config/belib-staging/seed-credentials"
@@ -89,7 +96,7 @@ The seed is additive and idempotent. It never removes a book or overwrites a fix
 ```bash
 envfile="$HOME/.config/belib-staging/i5.env"
 docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yaml exec -T db \
-  psql -v ON_ERROR_STOP=1 -U belib_staging -d belib_staging <<'SQL'
+  psql -v ON_ERROR_STOP=1 -U belib_staging_app -d belib_staging <<'SQL'
 BEGIN;
 DELETE FROM role_book_permissions
 WHERE book_id IN (
@@ -157,7 +164,7 @@ docker compose -p belib-isolated-i5 --env-file "$envfile" -f compose.staging.yam
 
 Keep the migration-managed `未分類` category and both staging volumes. Do not use `docker compose down -v` or any volume deletion as rollback.
 
-Offline checks for this step are `bash scripts/staging/test-compose-isolation.sh`, `python3 scripts/staging/test-seed-wrapper.py`, `npm --prefix backend test -- scripts/seed-staging.test.ts`, and `npm --prefix backend run build`. They validate the isolated volume mapping, wrapper guards, nonroot directory initialization and fail-closed seed checks without Docker or a database; they are **not** staging acceptance evidence and do not replace the physical i5 volume and browser checks below.
+Offline checks for this step are `bash scripts/staging/test-compose-isolation.sh`, `python3 scripts/staging/test-seed-wrapper.py`, `npm --prefix backend test -- scripts/seed-staging.test.ts`, and `npm --prefix backend run build`. They validate the separate bootstrap/app/migration connections, fresh-volume-only role SQL, strict host env allowlist, ambient override guards, production Compose separation, isolated volume mapping, nonroot directory initialization, and fail-closed seed checks without Docker or a database. They are **not** staging acceptance evidence and do not replace the physical i5 volume and browser checks below.
 
 ## Acceptance after actual i5 deployment
 

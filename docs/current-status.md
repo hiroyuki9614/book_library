@@ -1,6 +1,6 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-11-08
+- Updated: 2026-11-09
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
 - Current main checkpoint for the scoped frontend release candidate: `f8d69c7f1f9a6676ff268ef3da7d815232a779d2`
 - The prior 2026-10-27 implementation snapshot remains historical; this scoped update does not refresh unrelated R2 or portfolio branch state.
@@ -10,7 +10,7 @@
 - The portfolio MVP is live. The detailed immutable deployment and production-browser evidence is in [the 2026-10-26 production release record](records/2026-10-26-mvp-production-release.md).
 - Scoped update (2026-10-01): Home/BookTable reading-evidence behavior below; this is not a fresh R2 or production acceptance.
 
-## 2026-11-08 isolated i5 staging storage candidate
+## 2026-11-09 isolated i5 staging storage and PostgreSQL role candidate
 
 The staging-only Compose backend explicitly runs as `node` and mounts its
 dedicated persistent book volume over the Node image's pre-existing
@@ -18,10 +18,10 @@ dedicated persistent book volume over the Node image's pre-existing
 directory into a new volume. The seed verifies the mount point and owner,
 refuses unexpected top-level book data, creates `/home/node/books` as `node`
 with mode `0700`, and probes nonroot file creation/removal before connecting
-to the staging database. Offline Compose, wrapper, and Vitest checks cover this path. This source change is not runtime
-volume evidence: the i5 rootless Docker CLI/socket is unavailable, so staging
-startup and seed remain blocked. The separate PostgreSQL bootstrap-role
-privilege boundary is still unresolved and was not changed in this candidate.
+to the staging database. Offline Compose, wrapper, initializer, and Vitest
+checks cover the source contract. Neither role initialization nor book-volume
+ownership has been observed on i5. The rootless Docker CLI/socket remains
+unavailable, so staging startup and seed remain blocked.
 
 ## 2026-11-04 stale admin-list follow-up
 

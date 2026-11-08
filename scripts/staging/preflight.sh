@@ -12,18 +12,19 @@ file="$1"
 [[ "$(stat -c %u -- "$file")" == "$(id -u)" ]] || fail 'Env file must be owned by current principal'
 mode="$(stat -c %a -- "$file")"
 [[ "$mode" == 600 || "$mode" == 400 ]] || fail 'Env file must have mode 0600 or 0400'
-# Compose gives ambient variables precedence over --env-file; fail closed on such overrides.
-[[ -z "${COMPOSE_PROJECT_NAME:-}" && -z "${COMPOSE_FILE:-}" ]] || fail 'Ambient Compose project/file override forbidden'
-for name in BELIB_STAGE_DB_PASSWORD BELIB_STAGE_AUTH_SECRET BELIB_STAGE_VCS_REF BELIB_STAGE_PORT; do
-  [[ ! -v $name ]] || fail "Ambient $name override forbidden; use staging env file only"
-done
+# Compose gives ambient variables precedence over --env-file; reject all ambient staging,
+# Compose, Docker, and database credential inputs before reading the host-only file.
+if compgen -e | grep -Eq '^(BELIB_STAGE_|COMPOSE_|DOCKER_|DATABASE_URL$|DIRECT_URL$|POSTGRES_|BETTER_AUTH_SECRET$|R2_|AWS_|S3_|PROD_|PRODUCTION_|VITE_PUBLIC_DEMO_|BELIB_FRONTEND_)'; then
+  fail 'Ambient staging, Docker, Compose, or database overrides are forbidden; use the staging env file only'
+fi
 
-for key in BELIB_STAGE_DB_PASSWORD BELIB_STAGE_AUTH_SECRET BELIB_STAGE_VCS_REF BELIB_STAGE_PORT; do
+allowed_keys='BELIB_STAGE_DB_BOOTSTRAP_PASSWORD|BELIB_STAGE_DB_APP_PASSWORD|BELIB_STAGE_DB_MIGRATE_PASSWORD|BELIB_STAGE_AUTH_SECRET|BELIB_STAGE_VCS_REF|BELIB_STAGE_PORT'
+if grep -Ev "^(${allowed_keys})=[^[:space:]]+$" "$file" >/dev/null; then
+  fail 'Staging env must contain only the six approved staging keys'
+fi
+for key in BELIB_STAGE_DB_BOOTSTRAP_PASSWORD BELIB_STAGE_DB_APP_PASSWORD BELIB_STAGE_DB_MIGRATE_PASSWORD BELIB_STAGE_AUTH_SECRET BELIB_STAGE_VCS_REF BELIB_STAGE_PORT; do
   [[ "$(grep -Ec "^(${key})=" "$file")" -eq 1 ]] || fail "Missing or duplicate $key (no value displayed)"
 done
-if grep -Eq '^(R2_|DATABASE_URL=|POSTGRES_|BETTER_AUTH_SECRET=|VITE_PUBLIC_DEMO_|BELIB_FRONTEND_IMAGE=)' "$file"; then
-  fail 'Production/general environment keys are forbidden in staging env'
-fi
 
 port="$(sed -n 's/^BELIB_STAGE_PORT=//p' "$file")"
 rev="$(sed -n 's/^BELIB_STAGE_VCS_REF=//p' "$file")"
@@ -31,13 +32,17 @@ rev="$(sed -n 's/^BELIB_STAGE_VCS_REF=//p' "$file")"
 [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || fail 'Revision must be full lowercase 40-character Git SHA'
 [[ "$(git -C "$root" rev-parse HEAD)" == "$rev" ]] || fail 'Checked-out Git HEAD differs from staging revision'
 [[ -z "$(git -C "$root" status --porcelain)" ]] || fail 'Dirty source tree: fixed staging SHA cannot describe local changes'
-# URL-safe, no delimiter characters: DB password is interpolated into the backend DATABASE_URL.
-grep -Eq '^BELIB_STAGE_DB_PASSWORD=[a-f0-9]{64}$' "$file" || fail 'DB password must be local 64-character hex'
-grep -Eq '^BELIB_STAGE_AUTH_SECRET=[a-f0-9]{64}$' "$file" || fail 'Auth secret must be local 64-character hex'
-db_password="$(sed -n 's/^BELIB_STAGE_DB_PASSWORD=//p' "$file")"
+# Hex-only values are safe for Compose interpolation, libpq URLs, and psql password prompts.
+for key in BELIB_STAGE_DB_BOOTSTRAP_PASSWORD BELIB_STAGE_DB_APP_PASSWORD BELIB_STAGE_DB_MIGRATE_PASSWORD BELIB_STAGE_AUTH_SECRET; do
+  grep -Eq "^${key}=[a-f0-9]{64}$" "$file" || fail "$key must be a local 64-character lowercase hex value"
+done
+bootstrap_password="$(sed -n 's/^BELIB_STAGE_DB_BOOTSTRAP_PASSWORD=//p' "$file")"
+app_password="$(sed -n 's/^BELIB_STAGE_DB_APP_PASSWORD=//p' "$file")"
+migrate_password="$(sed -n 's/^BELIB_STAGE_DB_MIGRATE_PASSWORD=//p' "$file")"
 auth_secret="$(sed -n 's/^BELIB_STAGE_AUTH_SECRET=//p' "$file")"
-[[ "$db_password" != "$auth_secret" ]] || fail 'DB password and auth secret must be distinct'
-unset db_password auth_secret
+[[ "$bootstrap_password" != "$app_password" && "$bootstrap_password" != "$migrate_password" && "$bootstrap_password" != "$auth_secret" && "$app_password" != "$migrate_password" && "$app_password" != "$auth_secret" && "$migrate_password" != "$auth_secret" ]] || fail 'Bootstrap, app, migration, and auth secrets must all be distinct'
+unset bootstrap_password app_password migrate_password auth_secret
+grep -Eq '^BELIB_STAGE_AUTH_SECRET=[a-f0-9]{64}$' "$file" || fail 'Auth secret must be local 64-character hex'
 
 command -v docker >/dev/null || fail 'Docker CLI missing; do not install with sudo'
 # CLI access does not prove rootless: docker-group access to a rootful daemon is forbidden.

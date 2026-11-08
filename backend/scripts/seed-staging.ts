@@ -46,9 +46,9 @@ function fail(message: string): never {
 }
 
 function getDatabasePassword(databaseUrl: string) {
-	const match = /^postgresql:\/\/belib_staging:([a-f0-9]{64})@db:5432\/belib_staging$/.exec(databaseUrl);
+	const match = /^postgresql:\/\/belib_staging_app:([a-f0-9]{64})@db:5432\/belib_staging$/.exec(databaseUrl);
 	if (!match) {
-		fail('DATABASE_URL must target db:5432/belib_staging as belib_staging with the staging-only password format');
+		fail('DATABASE_URL must target db:5432/belib_staging as belib_staging_app with the staging-only password format');
 	}
 	return match[1]!;
 }
@@ -57,6 +57,7 @@ export function assertStagingSeedEnvironment(env: NodeJS.ProcessEnv) {
 	const forbiddenName = Object.keys(env).find(
 		(name) =>
 			/^(?:R2|AWS|S3|PROD|PRODUCTION)_/i.test(name) ||
+			/^POSTGRES_/i.test(name) ||
 			/^BELIB_STAGE_/i.test(name) ||
 			/^PG(?:HOST|PORT|DATABASE|USER|PASSWORD|SERVICE|SERVICEFILE|SSLMODE)$/i.test(name) ||
 			name.startsWith('VITE_PUBLIC_DEMO_') ||
@@ -527,17 +528,24 @@ export async function withStagingFixtureFiles<T>(
 	return transaction();
 }
 
-async function assertConnectedDatabase(prisma: PrismaClient) {
+export async function assertConnectedDatabase(prisma: Pick<PrismaClient, '$queryRaw'>) {
 	let identity;
 	try {
-		identity = await prisma.$queryRaw<Array<{ database: string; username: string }>>`
-			SELECT current_database() AS "database", current_user AS "username"
+		identity = await prisma.$queryRaw<Array<{ database: string; username: string; isSuperuser: boolean }>>`
+			SELECT current_database() AS "database", current_user AS "username", rol.rolsuper AS "isSuperuser"
+			FROM pg_roles AS rol
+			WHERE rol.rolname = current_user
 		`;
 	} catch {
 		fail('The staging database identity check failed');
 	}
-	if (identity.length !== 1 || identity[0]?.database !== 'belib_staging' || identity[0]?.username !== 'belib_staging') {
-		fail('The connected database is not exactly belib_staging as belib_staging');
+	if (
+		identity.length !== 1 ||
+		identity[0]?.database !== 'belib_staging' ||
+		identity[0]?.username !== 'belib_staging_app' ||
+		identity[0]?.isSuperuser !== false
+	) {
+		fail('The connected database must be belib_staging as the non-superuser belib_staging_app role');
 	}
 }
 

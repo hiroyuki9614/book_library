@@ -4,7 +4,8 @@ set -euo pipefail
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-compose_file="$(cd -- "$script_dir/../.." && pwd -P)/compose.staging.yaml"
+repo_root="$(cd -- "$script_dir/../.." && pwd -P)"
+compose_file="$repo_root/compose.staging.yaml"
 [[ -f "$compose_file" ]] || fail 'Cannot find compose.staging.yaml'
 
 if ! awk '
@@ -56,4 +57,30 @@ if grep -Fq '/var/lib/belib/books' "$compose_file"; then
   fail 'The staging backend must not retain the root-owned /var/lib storage path'
 fi
 
-printf 'PASS: staging network is internal, standalone, R2-free, loopback-published, and uses the node-owned persistent book volume\n'
+roles_file="$script_dir/10-belib-staging-roles.sh"
+[[ -f "$roles_file" && ! -x "$roles_file" ]] || fail 'The PostgreSQL role initializer must remain a non-executable official-image init hook'
+grep -Fq '      POSTGRES_USER: belib_staging_bootstrap' "$compose_file" || fail 'PostgreSQL init must use its distinct bootstrap superuser'
+grep -Fq 'POSTGRES_PASSWORD: ${BELIB_STAGE_DB_BOOTSTRAP_PASSWORD:' "$compose_file" || fail 'The bootstrap role must use its own staging-only password key'
+grep -Fq '      - ./scripts/staging/10-belib-staging-roles.sh:/docker-entrypoint-initdb.d/10-belib-staging-roles.sh:ro' "$compose_file" || fail 'Role setup must use the read-only official initialization path'
+grep -Fq '      BELIB_STAGE_DB_APP_PASSWORD: ${BELIB_STAGE_DB_APP_PASSWORD:' "$compose_file" || fail 'The app password must be distinct and available only to fresh-volume initialization'
+grep -Fq '      BELIB_STAGE_DB_MIGRATE_PASSWORD: ${BELIB_STAGE_DB_MIGRATE_PASSWORD:' "$compose_file" || fail 'The migration password must be distinct and available only to fresh-volume initialization'
+grep -Fq 'DATABASE_URL: postgresql://belib_staging_migrate:${BELIB_STAGE_DB_MIGRATE_PASSWORD:' "$compose_file" || fail 'Migrations must connect through the non-superuser migration role'
+grep -Fq 'DATABASE_URL: postgresql://belib_staging_app:${BELIB_STAGE_DB_APP_PASSWORD:' "$compose_file" || fail 'Backend runtime and seed must connect through the non-superuser app role'
+if grep -Eq 'DATABASE_URL: postgresql://belib_staging_bootstrap' "$compose_file"; then
+  fail 'The bootstrap superuser must never be used by the application, migration, or seed connection'
+fi
+grep -Fq 'psql -X -w -U belib_staging_app -d belib_staging' "$compose_file" || fail 'The database healthcheck must not use the bootstrap account'
+grep -Fq 'DATABASE_ALREADY_EXISTS' "$roles_file" || fail 'Role initialization must explicitly reject existing data volumes'
+grep -Fq 'FROM pg_authid' "$roles_file" || fail 'Role initialization must assert both runtime passwords were set'
+[[ "$(grep -Fc 'AND NOT rolsuper' "$roles_file")" -eq 2 ]] || fail 'Role initialization must assert both runtime roles are not superusers'
+grep -Fq "OR has_schema_privilege(app_oid, 'public', 'CREATE')" "$roles_file" || fail 'Role initialization must assert the app cannot create schema objects'
+if grep -Eq 'postgresql://belib_staging:' "$compose_file" "$roles_file"; then
+  fail 'No staging runtime connection may use the bootstrap role'
+fi
+
+# Keep the staging project and data objects out of the production Compose contract.
+if grep -Eq 'belib-isolated-i5|staging-postgres-data|staging-book-files|belib_staging' "$repo_root/compose.yaml"; then
+  fail 'Production Compose must not reference the isolated staging project or data'
+fi
+
+printf 'PASS: staging roles are separated, initialization is fresh-volume-only, production Compose stays separate, and the node-owned book volume contract remains intact\n'
