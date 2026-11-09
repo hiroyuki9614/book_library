@@ -138,6 +138,9 @@ class SourceTreeGuardTests(unittest.TestCase):
             snapshot_source = snapshot / "backend/source.ts"
             self.assertEqual(snapshot_source.read_text(encoding="ascii"), "export const staging = true;\n")
             self.assertEqual(snapshot_source.stat().st_mode & 0o777, 0o644)
+            revision_marker = snapshot / guard.SNAPSHOT_REVISION_FILE.decode("ascii")
+            self.assertEqual(revision_marker.read_text(encoding="ascii"), f"{self.revision}\n")
+            self.assertEqual(revision_marker.stat().st_mode & 0o777, 0o444)
             self.assertFalse((snapshot / "frontend/dist/production.js").exists())
 
             (self.root / "backend/source.ts").write_text("export const staging = false;\n", encoding="ascii")

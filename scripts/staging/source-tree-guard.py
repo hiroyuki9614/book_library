@@ -24,6 +24,7 @@ DOCKERFILE_INPUTS = (
     b"scripts/staging/Dockerfile.backend.staging",
     b"scripts/staging/Dockerfile.frontend.staging",
 )
+SNAPSHOT_REVISION_FILE = b".belib-staging-source-sha"
 SNAPSHOT_SUPPORT_FILES = (
     b"compose.staging.yaml",
     b"nginx/nginx.conf",
@@ -435,6 +436,24 @@ def sha_derived_build_snapshot(root: Path, revision: str) -> Iterator[Path]:
             content = (snapshot / os.fsdecode(ignore_file)).read_bytes()
             patterns = dockerignore_patterns(content)
             verify_context(snapshot, prefix, set(entries), patterns)
+
+        revision_path = os.path.join(snapshot_bytes, SNAPSHOT_REVISION_FILE)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            revision_fd = os.open(revision_path, flags, 0o444)
+        except OSError as exc:
+            raise SourceTreeBlocked("The verified staging snapshot identity could not be recorded") from exc
+        try:
+            contents = (revision + "\n").encode("ascii")
+            offset = 0
+            while offset < len(contents):
+                written = os.write(revision_fd, contents[offset:])
+                if written <= 0:
+                    raise SourceTreeBlocked("The verified staging snapshot identity could not be recorded")
+                offset += written
+            os.fchmod(revision_fd, 0o444)
+        finally:
+            os.close(revision_fd)
 
         yield snapshot
     finally:

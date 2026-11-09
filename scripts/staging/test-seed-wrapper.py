@@ -4,6 +4,7 @@
 import importlib.util
 import fcntl
 import os
+import shutil
 import socket
 import stat
 import subprocess
@@ -30,6 +31,24 @@ TEST_DB_PASSWORD = "2" * 64
 TEST_MIGRATE_PASSWORD = "3" * 64
 TEST_AUTH_SECRET = "4" * 64
 ROLE_INIT_SCRIPT = Path(__file__).with_name("10-belib-staging-roles.sh")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def make_verified_snapshot(test_case: unittest.TestCase, source_sha: str = TEST_SOURCE_SHA) -> Path:
+    snapshot = Path(tempfile.mkdtemp(prefix="belib-staging-source-test-", dir="/tmp"))
+    test_case.addCleanup(shutil.rmtree, snapshot, ignore_errors=True)
+    for relative in seed_wrapper.SNAPSHOT_REQUIRED_DIRECTORIES:
+        (snapshot / relative).mkdir(parents=True, exist_ok=True)
+    for relative in seed_wrapper.SNAPSHOT_REQUIRED_FILES:
+        destination = snapshot / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source = REPO_ROOT / relative
+        destination.write_bytes(source.read_bytes())
+        destination.chmod(source.stat().st_mode & 0o777)
+    revision_marker = snapshot / seed_wrapper.SNAPSHOT_REVISION_FILE
+    revision_marker.write_text(f"{source_sha}\n", encoding="ascii")
+    revision_marker.chmod(0o444)
+    return snapshot
 
 
 def staging_env_contents(**overrides: str) -> bytes:
@@ -443,17 +462,25 @@ class SeedWrapperDockerGuardTests(unittest.TestCase):
     def test_main_does_not_open_credentials_if_docker_guard_fails(self) -> None:
         account = SimpleNamespace(pw_uid=os.getuid(), pw_dir=str(self.root))
         stderr = StringIO()
-        env_fd = os.open(os.devnull, os.O_RDONLY)
+        env_fd = seed_wrapper.create_sealed_env_snapshot(staging_env_contents())
         with (
             patch.object(seed_wrapper.pwd, "getpwnam", return_value=account),
             patch.object(seed_wrapper.socket, "gethostname", return_value="ubuntu-worker"),
-            patch.object(seed_wrapper, "validate_staging_admission", return_value=(env_fd, {})),
+            patch.object(
+                seed_wrapper,
+                "validate_staging_admission",
+                return_value=(env_fd, {"BELIB_STAGE_VCS_REF": TEST_SOURCE_SHA}),
+            ),
             patch.object(seed_wrapper, "validate_docker_runtime", side_effect=seed_wrapper.SeedWrapperError("guard")),
             patch.object(seed_wrapper, "open_private_regular_file") as open_credentials,
             patch.dict(os.environ, {}, clear=True),
             redirect_stderr(stderr),
         ):
-            result = seed_wrapper.main(invoked_by_launcher=True)
+            result = seed_wrapper.main(
+                invoked_by_launcher=True,
+                build_root=make_verified_snapshot(self),
+                source_sha=TEST_SOURCE_SHA,
+            )
 
         self.assertEqual(result, 1)
         open_credentials.assert_not_called()
@@ -753,6 +780,144 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0)
         self.assertEqual(process.reads, [1])
 
+    def test_missing_or_mismatched_snapshot_fails_before_env_docker_or_credentials(self) -> None:
+        valid_snapshot = make_verified_snapshot(self)
+        cases = (
+            ("missing snapshot", None, TEST_SOURCE_SHA),
+            ("wrong snapshot SHA", valid_snapshot, "b" * 40),
+            ("checkout instead of snapshot", REPO_ROOT, TEST_SOURCE_SHA),
+        )
+        for case, build_root, source_sha in cases:
+            with self.subTest(case=case):
+                stderr = StringIO()
+                with (
+                    patch.object(seed_wrapper, "validate_staging_admission") as env_admission,
+                    patch.object(seed_wrapper, "create_private_docker_config") as docker_config,
+                    patch.object(seed_wrapper, "validate_docker_runtime") as docker_runtime,
+                    patch.object(seed_wrapper, "open_private_regular_file") as open_credentials,
+                    patch.object(seed_wrapper.subprocess, "run") as compose_run,
+                    patch.dict(os.environ, {}, clear=True),
+                    redirect_stderr(stderr),
+                ):
+                    result = seed_wrapper.main(
+                        invoked_by_launcher=True,
+                        build_root=build_root,
+                        source_sha=source_sha,
+                    )
+
+                self.assertEqual(result, 1)
+                self.assertIn("BLOCKED:", stderr.getvalue())
+                env_admission.assert_not_called()
+                docker_config.assert_not_called()
+                docker_runtime.assert_not_called()
+                open_credentials.assert_not_called()
+                compose_run.assert_not_called()
+
+    def test_seed_build_uses_snapshot_after_checkout_compose_is_mutated(self) -> None:
+        checkout = self.root / "mutable-checkout"
+        fake_seed_file = checkout / "scripts/staging/seed.py"
+        fake_seed_file.parent.mkdir(parents=True)
+        fake_seed_file.write_text("# seed module location fixture\n", encoding="ascii")
+        mutable_compose = checkout / "compose.staging.yaml"
+        mutable_compose.write_text(
+            "name: attacker-controlled\nservices:\n  backend:\n    build: {context: /production}\n"
+            "    env_file: /production/.env\n",
+            encoding="ascii",
+        )
+        build_root = make_verified_snapshot(self)
+        account = SimpleNamespace(pw_uid=os.getuid(), pw_dir=str(self.root))
+        endpoint = Path(f"/run/user/{os.getuid()}/docker.sock")
+        env_fd = seed_wrapper.create_sealed_env_snapshot(staging_env_contents())
+        credential_fd = os.open(self.credentials, os.O_RDONLY)
+        docker_config_temporary = tempfile.TemporaryDirectory(prefix="belib-seed-test-docker-")
+        captured: dict[str, object] = {}
+
+        def docker_runtime(uid, home, environment, docker_config):
+            return (
+                "/usr/bin/docker",
+                endpoint,
+                seed_wrapper.docker_environment(home, docker_config),
+            )
+
+        def compose_runner(command, **kwargs):
+            captured["command"] = command
+            captured["kwargs"] = kwargs
+            env_path = Path(command[command.index("--env-file") + 1])
+            env_descriptor = os.open(env_path, os.O_RDONLY)
+            try:
+                captured["staging_env"] = os.pread(
+                    env_descriptor,
+                    seed_wrapper.ENV_FILE_MAX_BYTES,
+                    0,
+                )
+            finally:
+                os.close(env_descriptor)
+            return subprocess.CompletedProcess(command, 0)
+
+        try:
+            with (
+                patch.object(seed_wrapper, "__file__", str(fake_seed_file)),
+                patch.object(seed_wrapper.pwd, "getpwnam", return_value=account),
+                patch.object(seed_wrapper.socket, "gethostname", return_value="ubuntu-worker"),
+                patch.object(
+                    seed_wrapper,
+                    "validate_staging_admission",
+                    return_value=(env_fd, {"BELIB_STAGE_VCS_REF": TEST_SOURCE_SHA}),
+                ) as env_admission,
+                patch.object(seed_wrapper, "create_private_docker_config", return_value=docker_config_temporary),
+                patch.object(seed_wrapper, "validate_docker_runtime", side_effect=docker_runtime),
+                patch.object(seed_wrapper, "verify_private_docker_config"),
+                patch.object(seed_wrapper, "verify_trusted_docker_plugins"),
+                patch.object(seed_wrapper, "open_private_regular_file", return_value=credential_fd) as open_credentials,
+                patch.object(seed_wrapper.os, "dup2"),
+                patch.object(seed_wrapper.subprocess, "run", side_effect=compose_runner),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                result = seed_wrapper.main(
+                    invoked_by_launcher=True,
+                    build_root=build_root,
+                    source_sha=TEST_SOURCE_SHA,
+                )
+        finally:
+            docker_config_temporary.cleanup()
+
+        self.assertEqual(result, 0)
+        env_admission.assert_called_once_with(checkout, Path(self.root / ".config/belib-staging/i5.env"), os.getuid())
+        open_credentials.assert_called_once_with(
+            self.root / ".config/belib-staging/seed-credentials", os.getuid()
+        )
+        command = captured["command"]
+        kwargs = captured["kwargs"]
+        self.assertEqual(kwargs["cwd"], build_root)
+        self.assertEqual(command[command.index("--project-directory") + 1], str(build_root))
+        self.assertEqual(command[command.index("-f") + 1], str(build_root / "compose.staging.yaml"))
+        self.assertIn("/production", mutable_compose.read_text(encoding="ascii"))
+
+        snapshot_compose = (build_root / "compose.staging.yaml").read_text(encoding="utf-8")
+        self.assertNotIn("/production", snapshot_compose)
+        self.assertNotIn("PRODUCTION_DATABASE_URL", snapshot_compose)
+        self.assertNotIn("R2_ACCESS_KEY_ID", snapshot_compose)
+        self.assertIn("context: ./backend", snapshot_compose)
+        self.assertIn("context: ./frontend", snapshot_compose)
+        for context, dockerfile in (
+            ("backend", "../scripts/staging/Dockerfile.backend.staging"),
+            ("frontend", "../scripts/staging/Dockerfile.frontend.staging"),
+        ):
+            context_path = (build_root / context).resolve()
+            dockerfile_path = (context_path / dockerfile).resolve()
+            self.assertTrue(context_path.is_relative_to(build_root))
+            self.assertTrue(dockerfile_path.is_relative_to(build_root))
+            self.assertTrue(dockerfile_path.is_file())
+
+        environment = kwargs["env"]
+        self.assertEqual(set(environment), {"PATH", "HOME", "USER", "LOGNAME", "DOCKER_CONFIG"})
+        staging_keys = {
+            line.split(b"=", 1)[0].decode("ascii")
+            for line in captured["staging_env"].splitlines()
+        }
+        self.assertEqual(staging_keys, seed_wrapper.STAGING_ENV_KEYS)
+        self.assertFalse(any(key.startswith(("R2_", "AWS_", "PRODUCTION_", "PROD_")) for key in environment))
+
     def test_main_never_opens_credentials_for_admission_failures(self) -> None:
         account = SimpleNamespace(pw_uid=os.getuid(), pw_dir=str(self.root))
         failure_cases = (
@@ -783,6 +948,9 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
 
                 def wrong_owner(file_descriptor):
                     metadata = real_fstat(file_descriptor)
+                    descriptor_path = Path(os.readlink(f"/proc/self/fd/{file_descriptor}"))
+                    if descriptor_path.name == seed_wrapper.SNAPSHOT_REVISION_FILE:
+                        return metadata
                     return SimpleNamespace(
                         st_dev=metadata.st_dev,
                         st_ino=metadata.st_ino,
@@ -816,7 +984,11 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
                     fstat_patch,
                     redirect_stderr(stdout),
                 ):
-                    result = seed_wrapper.main(invoked_by_launcher=True)
+                    result = seed_wrapper.main(
+                        invoked_by_launcher=True,
+                        build_root=make_verified_snapshot(self),
+                        source_sha=TEST_SOURCE_SHA,
+                    )
 
                 self.assertEqual(result, 1)
                 open_credentials.assert_not_called()
@@ -848,7 +1020,11 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
             ) as run_command,
             patch.dict(os.environ, {}, clear=True),
         ):
-            result = seed_wrapper.main(invoked_by_launcher=True)
+            result = seed_wrapper.main(
+                invoked_by_launcher=True,
+                build_root=make_verified_snapshot(self),
+                source_sha=TEST_SOURCE_SHA,
+            )
 
         self.assertEqual(result, 0)
         open_credentials.assert_called_once_with(self.credentials, os.getuid())

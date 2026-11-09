@@ -10,9 +10,10 @@ import os
 import pwd
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import nullcontext, redirect_stderr
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -190,6 +191,139 @@ class LaunchOperationTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--project-directory") + 1], str(snapshot))
         self.assertEqual(command[command.index("-f") + 1], str(snapshot / "compose.staging.yaml"))
+
+    def test_snapshot_failure_stops_before_preflight_docker_or_staging_env(self) -> None:
+        account = pwd.getpwuid(os.getuid())
+        source_sha = "a" * 40
+
+        class SnapshotFailure(Exception):
+            pass
+
+        class FailingSnapshotContext:
+            def __enter__(self):
+                raise SnapshotFailure("missing or mismatched fixed-SHA snapshot")
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        fake_source_guard = type(
+            "FakeSourceGuard",
+            (),
+            {
+                "SourceTreeBlocked": SnapshotFailure,
+                "sha_derived_build_snapshot": lambda self, root, revision: FailingSnapshotContext(),
+            },
+        )()
+        fake_seed = type("FakeSeed", (), {"SeedWrapperError": RuntimeError})()
+        stderr = io.StringIO()
+        arguments = [
+            "--source-sha", source_sha,
+            "--env-file", str(Path(account.pw_dir) / ".config/belib-staging/i5.env"),
+            "seed",
+        ]
+        with (
+            patch.object(launch, "verify_python_runtime"),
+            patch.object(launch, "reject_caller_environment"),
+            patch.object(launch, "EXPECTED_USER", account.pw_name),
+            patch.object(launch, "EXPECTED_UID", account.pw_uid),
+            patch.object(launch, "EXPECTED_HOME", Path(account.pw_dir)),
+            patch.object(launch, "EXPECTED_HOST", "test-host"),
+            patch.object(launch.socket, "gethostname", return_value="test-host"),
+            patch.object(launch, "EXPECTED_REPO_ROOT", ROOT),
+            patch.object(launch, "validate_handoff_receipt"),
+            patch.object(launch, "load_seed_module", return_value=fake_seed),
+            patch.object(launch, "_checked_repo_branch"),
+            patch.object(launch, "project_lock", return_value=nullcontext()),
+            patch.object(launch, "load_source_tree_guard", return_value=fake_source_guard),
+            patch.object(launch, "_run_preflight") as preflight,
+            patch.object(launch, "_trusted_rootless_context") as docker_context,
+            patch.object(launch, "_validate_compose_model") as compose_validation,
+            patch.dict(os.environ, {}, clear=True),
+            redirect_stderr(stderr),
+        ):
+            result = launch.main(arguments)
+
+        self.assertEqual(result, 1)
+        self.assertIn("fixed-SHA staging build snapshot could not be verified", stderr.getvalue())
+        preflight.assert_not_called()
+        docker_context.assert_not_called()
+        compose_validation.assert_not_called()
+
+    def test_seed_handoff_passes_the_verified_snapshot_and_sha(self) -> None:
+        account = pwd.getpwuid(os.getuid())
+        source_sha = "a" * 40
+
+        class SnapshotFailure(Exception):
+            pass
+
+        class YieldSnapshotContext:
+            def __init__(self, path: Path) -> None:
+                self.path = path
+
+            def __enter__(self):
+                return self.path
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        with tempfile.TemporaryDirectory(prefix="belib-staging-source-launch-test-", dir="/tmp") as directory:
+            snapshot = Path(directory)
+            fake_source_guard = type(
+                "FakeSourceGuard",
+                (),
+                {
+                    "SourceTreeBlocked": SnapshotFailure,
+                    "sha_derived_build_snapshot": lambda self, root, revision: YieldSnapshotContext(snapshot),
+                },
+            )()
+            seed_main = Mock(return_value=0)
+            seed = SimpleNamespace(
+                SeedWrapperError=RuntimeError,
+                validate_build_snapshot=Mock(),
+                validate_staging_admission=Mock(
+                    return_value=(os.open(os.devnull, os.O_RDONLY), {"BELIB_STAGE_VCS_REF": source_sha})
+                ),
+                create_private_docker_config=Mock(
+                    return_value=SimpleNamespace(name="/tmp/test-docker-config", cleanup=Mock())
+                ),
+                verify_exact_source_context=Mock(),
+                assert_clean_source_worktree=Mock(),
+                main=seed_main,
+            )
+            env_file = Path(account.pw_dir) / ".config/belib-staging/i5.env"
+            arguments = ["--source-sha", source_sha, "--env-file", str(env_file), "seed"]
+            with (
+                patch.object(launch, "verify_python_runtime"),
+                patch.object(launch, "reject_caller_environment"),
+                patch.object(launch, "EXPECTED_USER", account.pw_name),
+                patch.object(launch, "EXPECTED_UID", account.pw_uid),
+                patch.object(launch, "EXPECTED_HOME", Path(account.pw_dir)),
+                patch.object(launch, "EXPECTED_HOST", "test-host"),
+                patch.object(launch.socket, "gethostname", return_value="test-host"),
+                patch.object(launch, "EXPECTED_REPO_ROOT", ROOT),
+                patch.object(launch, "validate_handoff_receipt"),
+                patch.object(launch, "load_seed_module", return_value=seed),
+                patch.object(launch, "_checked_repo_branch"),
+                patch.object(launch, "project_lock", return_value=nullcontext()),
+                patch.object(launch, "load_source_tree_guard", return_value=fake_source_guard),
+                patch.object(launch, "_run_preflight"),
+                patch.object(
+                    launch,
+                    "_trusted_rootless_context",
+                    return_value=({"PATH": "/usr/bin:/bin"}, Path("/run/user/1000/docker.sock")),
+                ),
+                patch.object(launch, "_validate_compose_model"),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                result = launch.main(arguments)
+
+            self.assertEqual(result, 0)
+            seed.validate_build_snapshot.assert_called_once_with(snapshot, ROOT, source_sha)
+            seed_main.assert_called_once_with(
+                invoked_by_launcher=True,
+                build_root=snapshot,
+                source_sha=source_sha,
+            )
 
     def test_changed_build_context_and_image_digest_are_rejected(self) -> None:
         model = ci_tests.compose_model(ROOT)

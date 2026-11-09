@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import pwd
+import re
 import selectors
 import socket
 import stat
@@ -25,6 +26,20 @@ DOCKER_INFO_TIMEOUT_SECONDS = 10
 DOCKER_INFO_MAX_OUTPUT_BYTES = 4096
 SOURCE_CHECK_TIMEOUT_SECONDS = 5
 ENV_FILE_MAX_BYTES = 1024
+SOURCE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
+SNAPSHOT_REVISION_FILE = ".belib-staging-source-sha"
+SNAPSHOT_REQUIRED_DIRECTORIES = ("backend", "frontend", "nginx", "scripts", "scripts/staging")
+SNAPSHOT_REQUIRED_FILES = (
+    "compose.staging.yaml",
+    "backend/.dockerignore",
+    "frontend/.dockerignore",
+    "nginx/nginx.conf",
+    "scripts/staging/10-belib-staging-roles.sh",
+    "scripts/staging/ci-isolation-guard.py",
+    "scripts/staging/nginx-default.conf",
+    "scripts/staging/Dockerfile.backend.staging",
+    "scripts/staging/Dockerfile.frontend.staging",
+)
 DOCKER_CLI = "/usr/bin/docker"
 DOCKER_PLUGIN_DIR = Path("/usr/libexec/docker/cli-plugins")
 DOCKER_PLUGIN_SEARCH_DIRS = (
@@ -527,6 +542,84 @@ def build_compose_command(repo_root: Path, env_file: Path, endpoint: Path) -> li
     ]
 
 
+def validate_build_snapshot(
+    snapshot_root: Path | None,
+    checkout_root: Path,
+    source_sha: str | None,
+) -> Path:
+    """Require the verified SHA-derived tree before reading staging secrets or Docker state."""
+    if (
+        not isinstance(snapshot_root, Path)
+        or not isinstance(source_sha, str)
+        or not SOURCE_SHA_PATTERN.fullmatch(source_sha)
+    ):
+        raise SeedWrapperError("A verified fixed-SHA staging build snapshot is required")
+    if not snapshot_root.is_absolute():
+        raise SeedWrapperError("The verified staging build snapshot path must be absolute")
+
+    try:
+        root_metadata = os.lstat(snapshot_root)
+        resolved_root = snapshot_root.resolve(strict=True)
+        resolved_checkout = checkout_root.resolve(strict=True)
+    except OSError as error:
+        raise SeedWrapperError("The verified staging build snapshot is unavailable") from error
+
+    if (
+        not stat.S_ISDIR(root_metadata.st_mode)
+        or stat.S_ISLNK(root_metadata.st_mode)
+        or root_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(root_metadata.st_mode) != 0o700
+        or resolved_root != snapshot_root
+        or resolved_root.parent != Path("/tmp")
+        or not resolved_root.name.startswith("belib-staging-source-")
+        or resolved_root == resolved_checkout
+        or resolved_checkout in resolved_root.parents
+    ):
+        raise SeedWrapperError("The staging build snapshot does not match the verified source tree")
+
+    for relative in SNAPSHOT_REQUIRED_DIRECTORIES:
+        path = resolved_root / relative
+        try:
+            metadata = os.lstat(path)
+        except OSError as error:
+            raise SeedWrapperError("The verified staging build snapshot is incomplete") from error
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise SeedWrapperError("The verified staging build snapshot contains an unsafe directory")
+
+    for relative in SNAPSHOT_REQUIRED_FILES:
+        path = resolved_root / relative
+        try:
+            metadata = os.lstat(path)
+        except OSError as error:
+            raise SeedWrapperError("The verified staging build snapshot is incomplete") from error
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise SeedWrapperError("The verified staging build snapshot contains an unsafe file")
+
+    revision_path = resolved_root / SNAPSHOT_REVISION_FILE
+    revision_fd = -1
+    try:
+        revision_fd = os.open(
+            revision_path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        revision_metadata = os.fstat(revision_fd)
+        revision = os.read(revision_fd, 42)
+    except OSError as error:
+        raise SeedWrapperError("The staging build snapshot has no verified source identity") from error
+    finally:
+        if revision_fd >= 0:
+            os.close(revision_fd)
+    if (
+        not stat.S_ISREG(revision_metadata.st_mode)
+        or revision_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(revision_metadata.st_mode) != 0o444
+        or revision != f"{source_sha}\n".encode("ascii")
+    ):
+        raise SeedWrapperError("The staging build snapshot does not match the selected source SHA")
+
+    return resolved_root
+
+
 def reject_ambient_overrides(environment: Mapping[str, str]) -> None:
     """Reject inherited settings that can redirect Compose or leak runtime credentials."""
     forbidden_prefixes = (
@@ -775,7 +868,12 @@ def validate_docker_runtime(
     return docker_cli, endpoint, docker_env
 
 
-def main(*, invoked_by_launcher: bool = False) -> int:
+def main(
+    *,
+    invoked_by_launcher: bool = False,
+    build_root: Path | None = None,
+    source_sha: str | None = None,
+) -> int:
     env_snapshot_fd = -1
     credential_fd = -1
     docker_config_temporary = None
@@ -789,6 +887,8 @@ def main(*, invoked_by_launcher: bool = False) -> int:
         reject_ambient_overrides(os.environ)
         if not invoked_by_launcher:
             raise SeedWrapperError("Invoke the staging seed only through scripts/staging/launch-guard.py")
+        repo_root = Path(__file__).resolve(strict=True).parents[2]
+        build_root = validate_build_snapshot(build_root, repo_root, source_sha)
         account = pwd.getpwnam("hiroyuki")
         if account.pw_uid == 0 or os.getuid() != account.pw_uid or os.geteuid() != account.pw_uid:
             raise SeedWrapperError("Run the staging seed wrapper as host user hiroyuki")
@@ -798,8 +898,9 @@ def main(*, invoked_by_launcher: bool = False) -> int:
         home = Path(account.pw_dir)
         credentials_path = home / ".config" / "belib-staging" / "seed-credentials"
         env_file = home / ".config" / "belib-staging" / "i5.env"
-        repo_root = Path(__file__).resolve(strict=True).parents[2]
-        env_snapshot_fd, _stage_values = validate_staging_admission(repo_root, env_file, account.pw_uid)
+        env_snapshot_fd, stage_values = validate_staging_admission(repo_root, env_file, account.pw_uid)
+        if stage_values["BELIB_STAGE_VCS_REF"] != source_sha:
+            raise SeedWrapperError("Staging env revision differs from the verified build snapshot")
         docker_config_temporary = create_private_docker_config(account.pw_uid)
         docker_config = Path(docker_config_temporary.name)
         docker_cli, endpoint, docker_env = validate_docker_runtime(
@@ -819,14 +920,13 @@ def main(*, invoked_by_launcher: bool = False) -> int:
             os.close(credential_fd)
             credential_fd = -1
 
-        os.chdir(repo_root)
         os.set_inheritable(env_snapshot_fd, True)
         snapshot_path = Path(f"/proc/{os.getpid()}/fd/{env_snapshot_fd}")
-        command = build_compose_command(repo_root, snapshot_path, endpoint)
+        command = build_compose_command(build_root, snapshot_path, endpoint)
         command[0] = docker_cli
         verify_private_docker_config(docker_config, account.pw_uid)
         verify_trusted_docker_plugins()
-        result = subprocess.run(command, env=docker_env, check=False)
+        result = subprocess.run(command, cwd=build_root, env=docker_env, check=False)
         return result.returncode
     except SeedWrapperError as error:
         print(f"BLOCKED: {error}", file=sys.stderr)

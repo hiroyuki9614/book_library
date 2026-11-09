@@ -432,67 +432,79 @@ def main(argv: list[str] | None = None) -> int:
             env_snapshot_fd = -1
             docker_config_temporary = None
             try:
-                _run_preflight(repo_root, args.env_file)
-                try:
-                    env_snapshot_fd, values = seed.validate_staging_admission(
-                        repo_root, args.env_file, EXPECTED_UID
-                    )
-                except seed.SeedWrapperError as error:
-                    raise LaunchBlocked(str(error)) from error
-                if values["BELIB_STAGE_VCS_REF"] != args.source_sha:
-                    raise LaunchBlocked("Staging env revision differs from the selected source SHA")
-
-                try:
-                    docker_config_temporary = seed.create_private_docker_config(EXPECTED_UID)
-                except seed.SeedWrapperError as error:
-                    raise LaunchBlocked(str(error)) from error
-                docker_config = Path(docker_config_temporary.name)
-                docker_environment, endpoint = _trusted_rootless_context(
-                    seed, EXPECTED_UID, EXPECTED_HOME, docker_config
-                )
-                os.set_inheritable(env_snapshot_fd, True)
-                try:
-                    seed.verify_exact_source_context(repo_root, args.source_sha)
-                    seed.assert_clean_source_worktree(repo_root)
-                except seed.SeedWrapperError as error:
-                    raise LaunchBlocked(str(error)) from error
-
                 source_guard = load_source_tree_guard(repo_root)
-                with source_guard.sha_derived_build_snapshot(repo_root, args.source_sha) as build_root:
-                    _validate_compose_model(
-                        build_root,
-                        env_snapshot_fd,
-                        values,
-                        docker_environment,
-                        args.source_sha,
-                    )
-                    _checked_repo_branch(seed, repo_root)
-                    try:
-                        seed.verify_exact_source_context(repo_root, args.source_sha)
-                        seed.assert_clean_source_worktree(repo_root)
-                    except seed.SeedWrapperError as error:
-                        raise LaunchBlocked(str(error)) from error
+                try:
+                    with source_guard.sha_derived_build_snapshot(repo_root, args.source_sha) as build_root:
+                        try:
+                            seed.validate_build_snapshot(build_root, repo_root, args.source_sha)
+                        except seed.SeedWrapperError as error:
+                            raise LaunchBlocked(str(error)) from error
 
-                    if args.operation == "seed":
-                        return seed.main(invoked_by_launcher=True)
+                        _run_preflight(repo_root, args.env_file)
+                        try:
+                            env_snapshot_fd, values = seed.validate_staging_admission(
+                                repo_root, args.env_file, EXPECTED_UID
+                            )
+                        except seed.SeedWrapperError as error:
+                            raise LaunchBlocked(str(error)) from error
+                        if values["BELIB_STAGE_VCS_REF"] != args.source_sha:
+                            raise LaunchBlocked("Staging env revision differs from the selected source SHA")
 
-                    env_path = Path(f"/proc/{os.getpid()}/fd/{env_snapshot_fd}")
-                    command = build_compose_command(
-                        args.operation,
-                        repo_root=build_root,
-                        env_file=env_path,
-                    )
-                    result = subprocess.run(
-                        command,
-                        cwd=build_root,
-                        env=docker_environment,
-                        stdin=subprocess.DEVNULL,
-                        check=False,
-                        pass_fds=(env_snapshot_fd,),
-                    )
-                    if result.returncode != 0:
-                        print("BLOCKED: Guarded staging Compose operation failed", file=sys.stderr)
-                    return result.returncode
+                        try:
+                            docker_config_temporary = seed.create_private_docker_config(EXPECTED_UID)
+                        except seed.SeedWrapperError as error:
+                            raise LaunchBlocked(str(error)) from error
+                        docker_config = Path(docker_config_temporary.name)
+                        docker_environment, endpoint = _trusted_rootless_context(
+                            seed, EXPECTED_UID, EXPECTED_HOME, docker_config
+                        )
+                        os.set_inheritable(env_snapshot_fd, True)
+                        try:
+                            seed.verify_exact_source_context(repo_root, args.source_sha)
+                            seed.assert_clean_source_worktree(repo_root)
+                        except seed.SeedWrapperError as error:
+                            raise LaunchBlocked(str(error)) from error
+
+                        _validate_compose_model(
+                            build_root,
+                            env_snapshot_fd,
+                            values,
+                            docker_environment,
+                            args.source_sha,
+                        )
+                        _checked_repo_branch(seed, repo_root)
+                        try:
+                            seed.verify_exact_source_context(repo_root, args.source_sha)
+                            seed.assert_clean_source_worktree(repo_root)
+                        except seed.SeedWrapperError as error:
+                            raise LaunchBlocked(str(error)) from error
+
+                        if args.operation == "seed":
+                            return seed.main(
+                                invoked_by_launcher=True,
+                                build_root=build_root,
+                                source_sha=args.source_sha,
+                            )
+
+                        env_path = Path(f"/proc/{os.getpid()}/fd/{env_snapshot_fd}")
+                        command = build_compose_command(
+                            args.operation,
+                            repo_root=build_root,
+                            env_file=env_path,
+                        )
+                        result = subprocess.run(
+                            command,
+                            cwd=build_root,
+                            env=docker_environment,
+                            stdin=subprocess.DEVNULL,
+                            check=False,
+                            pass_fds=(env_snapshot_fd,),
+                        )
+                        if result.returncode != 0:
+                            print("BLOCKED: Guarded staging Compose operation failed", file=sys.stderr)
+                        return result.returncode
+                except source_guard.SourceTreeBlocked as error:
+                    raise LaunchBlocked("The fixed-SHA staging build snapshot could not be verified") from error
             finally:
                 if env_snapshot_fd >= 0:
                     os.close(env_snapshot_fd)
