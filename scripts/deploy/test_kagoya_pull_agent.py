@@ -147,8 +147,6 @@ class FakeDocker:
                             "VITE_API_BASE_URL": (env or {}).get("VITE_API_BASE_URL"),
                             "VITE_PUBLIC_DEMO_EMAIL": (env or {}).get("VITE_PUBLIC_DEMO_EMAIL", ""),
                             "VITE_PUBLIC_DEMO_PASSWORD": (env or {}).get("VITE_PUBLIC_DEMO_PASSWORD", ""),
-                            "VITE_PUBLIC_DEMO_ADMIN_EMAIL": (env or {}).get("VITE_PUBLIC_DEMO_ADMIN_EMAIL", ""),
-                            "VITE_PUBLIC_DEMO_ADMIN_PASSWORD": (env or {}).get("VITE_PUBLIC_DEMO_ADMIN_PASSWORD", ""),
                             "PUBLIC_DEMO_ACCOUNTS_SHA256": (env or {}).get("PUBLIC_DEMO_ACCOUNTS_SHA256", ""),
                         },
                         "context": str((checkout / "frontend").resolve()),
@@ -1607,7 +1605,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 self.docker.up_targets.clear()
         self.config["agent_uid"] = os.getuid()
 
-    def test_explicit_public_accounts_reach_build_only_after_role_checks(self):
+    def test_explicit_public_accounts_are_verified_but_admin_credentials_do_not_reach_build(self):
         self.config['publish_demo_accounts'] = True
         args = {**empty_build_args(), 'VITE_PUBLIC_DEMO_EMAIL': 'user@example.test',
                 'VITE_PUBLIC_DEMO_PASSWORD': 'synthetic-user-pass',
@@ -1619,8 +1617,21 @@ class PullAgentDeploymentTests(unittest.TestCase):
         self.assertFalse(result['no_op'])
         self.assertEqual(verify.call_count, 2)
         build_env = next(env for argv, env in self.docker.commands if 'build' in argv)
-        for key, value in args.items(): self.assertEqual(build_env[key], value)
+        for key, value in args.items():
+            if key.startswith('VITE_PUBLIC_DEMO_ADMIN'):
+                self.assertNotIn(key, build_env)
+            else:
+                self.assertEqual(build_env[key], value)
+        self.assertFalse(any(key.startswith('VITE_PUBLIC_DEMO_ADMIN') for key in build_env))
         self.assertEqual(self.docker.up_targets, ['frontend'])
+
+    def test_rejects_admin_demo_compose_build_args_before_build_or_switch(self):
+        self.docker.frontend_build_arg_overrides['VITE_PUBLIC_DEMO_ADMIN_EMAIL'] = 'build-boundary-placeholder'
+        with self.assertRaises(DeployError):
+            self.run_deploy(lambda _base_url: None)
+        self.assertEqual(self.docker.current_id, OLD_ID)
+        self.assertEqual(self.docker.up_targets, [])
+        self.assertFalse(any('build' in argv for argv, _env in self.docker.commands))
 
     def test_public_account_auth_failure_stops_before_build(self):
         self.config["publish_demo_accounts"] = True

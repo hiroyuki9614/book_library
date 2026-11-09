@@ -38,13 +38,37 @@ class PublicDemoAccountTests(unittest.TestCase):
     def test_explicit_pair_mapping_and_fingerprint(self):
         args, data = load_accounts(self.config)
         self.assertEqual(data, self.data)
-        self.assertEqual(args['VITE_PUBLIC_DEMO_ADMIN_EMAIL'], 'admin@example.test')
+        self.assertEqual(set(args), {
+            'VITE_PUBLIC_DEMO_EMAIL',
+            'VITE_PUBLIC_DEMO_PASSWORD',
+            'PUBLIC_DEMO_ACCOUNTS_SHA256',
+        })
+        self.assertEqual(args['VITE_PUBLIC_DEMO_EMAIL'], self.data['user']['email'])
         self.assertEqual(args['VITE_PUBLIC_DEMO_PASSWORD'], 'synthetic-user-pass')
         self.assertEqual(args['PUBLIC_DEMO_ACCOUNTS_SHA256'], hashlib.sha256(self.path.read_bytes()).hexdigest())
         old = args['PUBLIC_DEMO_ACCOUNTS_SHA256']
         self.data['admin']['password'] = 'different-synthetic-pass'
         self.save()
         self.assertNotEqual(load_accounts(self.config)[0]['PUBLIC_DEMO_ACCOUNTS_SHA256'], old)
+
+    def test_frontend_build_contract_excludes_admin_and_keeps_user_demo(self):
+        root = Path(__file__).resolve().parents[2]
+        dockerfile = (root / 'frontend' / 'Dockerfile').read_text(encoding='utf-8')
+        compose = (root / 'compose.yaml').read_text(encoding='utf-8')
+        declarations = set()
+        for line in dockerfile.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2 and parts[0] in {'ARG', 'ENV'}:
+                declarations.add((parts[0], parts[1].split('=', 1)[0]))
+        self.assertFalse(any(name.startswith('VITE_PUBLIC_DEMO_ADMIN') for _, name in declarations))
+        self.assertNotIn('VITE_PUBLIC_DEMO_ADMIN', compose)
+        for name in ('VITE_PUBLIC_DEMO_EMAIL', 'VITE_PUBLIC_DEMO_PASSWORD'):
+            self.assertIn(('ARG', name), declarations)
+            self.assertIn(('ENV', name), declarations)
+            self.assertIn(name, compose)
+        build_args = empty_build_args()
+        self.assertFalse(any(name.startswith('VITE_PUBLIC_DEMO_ADMIN') for name in build_args))
+        self.assertTrue({'VITE_PUBLIC_DEMO_EMAIL', 'VITE_PUBLIC_DEMO_PASSWORD'} <= set(build_args))
 
     def test_partial_unapproved_or_mixed_identity_fails_closed(self):
         for mutate in (lambda d: d.update(intentionally_public=False),

@@ -17,7 +17,6 @@ class PublicDemoError(RuntimeError):
 def empty_build_args() -> dict[str, str]:
     return {key: '' for key in (
         'VITE_PUBLIC_DEMO_EMAIL', 'VITE_PUBLIC_DEMO_PASSWORD',
-        'VITE_PUBLIC_DEMO_ADMIN_EMAIL', 'VITE_PUBLIC_DEMO_ADMIN_PASSWORD',
         'PUBLIC_DEMO_ACCOUNTS_SHA256',
     )}
 
@@ -63,8 +62,6 @@ def load_accounts(config: dict) -> tuple[dict[str, str], dict | None]:
     return {
         'VITE_PUBLIC_DEMO_EMAIL': data['user']['email'],
         'VITE_PUBLIC_DEMO_PASSWORD': data['user']['password'],
-        'VITE_PUBLIC_DEMO_ADMIN_EMAIL': data['admin']['email'],
-        'VITE_PUBLIC_DEMO_ADMIN_PASSWORD': data['admin']['password'],
         'PUBLIC_DEMO_ACCOUNTS_SHA256': hashlib.sha256(raw).hexdigest(),
     }, data
 

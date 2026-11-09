@@ -444,17 +444,19 @@ def _frontend_compose_env(
     image_ref: str,
 ) -> dict[str, str]:
     email, password = public_demo_credentials
-    return {
+    env = {
         "COMPOSE_PROFILES": "",
         "VCS_REF": source_sha,
         "BELIB_FRONTEND_IMAGE": image_ref,
         "VITE_API_BASE_URL": config["expected_api_base_url"],
         "VITE_PUBLIC_DEMO_EMAIL": email,
         "VITE_PUBLIC_DEMO_PASSWORD": password,
-        "VITE_PUBLIC_DEMO_ADMIN_EMAIL": "",
-        "VITE_PUBLIC_DEMO_ADMIN_PASSWORD": "",
         "PUBLIC_DEMO_ACCOUNTS_SHA256": "",
         **config.get("_public_demo_build_args", {}),
+    }
+    return {
+        key: value for key, value in env.items()
+        if not key.startswith("VITE_PUBLIC_DEMO_ADMIN")
     }
 
 

@@ -353,7 +353,7 @@ def validate_frontend_service(
             raise ComposeIdentityError("The frontend build arguments differ from the operator-approved values")
     else:
         old_keys = {'VCS_REF', 'VITE_API_BASE_URL', 'VITE_PUBLIC_DEMO_EMAIL', 'VITE_PUBLIC_DEMO_PASSWORD'}
-        new_keys = old_keys | {'VITE_PUBLIC_DEMO_ADMIN_EMAIL', 'VITE_PUBLIC_DEMO_ADMIN_PASSWORD', 'PUBLIC_DEMO_ACCOUNTS_SHA256'}
+        new_keys = old_keys | {'PUBLIC_DEMO_ACCOUNTS_SHA256'}
         if not isinstance(args, dict) or set(args) not in (old_keys, new_keys):
             raise ComposeIdentityError("The frontend build argument set differs from the approved contract")
         if (
@@ -363,8 +363,14 @@ def validate_frontend_service(
         ):
             raise ComposeIdentityError("The frontend public demo credential shape is invalid")
         public_args = {'VITE_PUBLIC_DEMO_EMAIL': public_demo_credentials[0], 'VITE_PUBLIC_DEMO_PASSWORD': public_demo_credentials[1],
-                       'VITE_PUBLIC_DEMO_ADMIN_EMAIL': '', 'VITE_PUBLIC_DEMO_ADMIN_PASSWORD': '', 'PUBLIC_DEMO_ACCOUNTS_SHA256': ''}
+                       'PUBLIC_DEMO_ACCOUNTS_SHA256': ''}
         if expected_public_demo_args is not None:
+            if not isinstance(expected_public_demo_args, dict):
+                raise ComposeIdentityError('The expected public demo argument set is invalid')
+            expected_public_demo_args = {
+                key: value for key, value in expected_public_demo_args.items()
+                if not (isinstance(key, str) and key.startswith('VITE_PUBLIC_DEMO_ADMIN'))
+            }
             if set(expected_public_demo_args) != set(public_args):
                 raise ComposeIdentityError('The expected public demo argument set is invalid')
             public_args = expected_public_demo_args
@@ -464,6 +470,9 @@ def bootstrap_preflight(container_name: str, production_env_file: str, *, agent_
     clean_env = os.environ.copy()
     clean_env.pop("VITE_API_BASE_URL", None)
     clean_env.pop("COMPOSE_PROFILES", None)
+    for key in tuple(clean_env):
+        if key.startswith("VITE_PUBLIC_DEMO_ADMIN"):
+            clean_env.pop(key, None)
     clean_env.update(
         {
             "COMPOSE_PROFILES": "",
@@ -471,8 +480,6 @@ def bootstrap_preflight(container_name: str, production_env_file: str, *, agent_
             "BELIB_FRONTEND_IMAGE": f"belib-frontend:{PROBE_SHA}",
             "VITE_PUBLIC_DEMO_EMAIL": "",
             "VITE_PUBLIC_DEMO_PASSWORD": "",
-            "VITE_PUBLIC_DEMO_ADMIN_EMAIL": "",
-            "VITE_PUBLIC_DEMO_ADMIN_PASSWORD": "",
             "PUBLIC_DEMO_ACCOUNTS_SHA256": "",
         }
     )
