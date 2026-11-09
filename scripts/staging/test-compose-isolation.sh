@@ -12,140 +12,19 @@ nginx_site="$repo_root/scripts/staging/nginx-default.conf"
 
 assert_safe_staging_bind_mounts() {
   local candidate="$1"
-  awk \
-    -v s1='./scripts/staging/10-belib-staging-roles.sh' \
-    -v t1='/docker-entrypoint-initdb.d/10-belib-staging-roles.sh' \
-    -v s2='./nginx/nginx.conf' \
-    -v t2='/etc/nginx/nginx.conf' \
-    -v s3='./scripts/staging/nginx-default.conf' \
-    -v t3='/etc/nginx/conf.d/default.conf' '
-      function trim(value) {
-        sub(/^[[:space:]]+/, "", value)
-        sub(/[[:space:]]+$/, "", value)
-        return value
-      }
-      function expected_index(source) {
-        if (source == s1) return 1
-        if (source == s2) return 2
-        if (source == s3) return 3
-        return 0
-      }
-      function leading_spaces(value) {
-        match(value, /[^ ]/)
-        return RSTART ? RSTART - 1 : length(value)
-      }
-      function finish_bind() {
-        if (!bind_started) return
-        if (bind_create_host_path_count != 1 || bind_create_host_path_value != "false") {
-          bind_mapping_invalid = 1
-        }
-        bind_started = 0
-        bind_create_host_path_count = 0
-        bind_create_host_path_value = ""
-      }
-      function finish_mount() {
-        if (!in_mount) return
-        finish_bind()
-        mount_index = expected_index(mount_source)
-        if (mount_index == 0) {
-          in_mount = 0
-          return
-        }
-        mount_count[mount_index]++
-        expected_target = (mount_index == 1 ? t1 : mount_index == 2 ? t2 : t3)
-        if (mount_kind != "bind" || mount_target != expected_target ||
-            read_only_count != 1 || read_only_value != "true" ||
-            bind_count != 1 || create_host_path_count != 1 || bind_mapping_invalid) {
-          invalid = 1
-        }
-        in_mount = 0
-      }
-      /^      - / {
-        finish_mount()
-        in_mount = 1
-        mount_kind = ""
-        mount_source = ""
-        mount_target = ""
-        read_only_count = 0
-        read_only_value = ""
-        bind_started = 0
-        bind_count = 0
-        bind_create_host_path_count = 0
-        bind_create_host_path_value = ""
-        create_host_path_count = 0
-        bind_mapping_invalid = 0
-        if ($0 ~ /^      - type:[[:space:]]*/) {
-          mount_kind = $0
-          sub(/^      - type:[[:space:]]*/, "", mount_kind)
-          mount_kind = trim(mount_kind)
-        }
-        next
-      }
-      in_mount {
-        if ($0 ~ /^[[:space:]]*($|#)/) next
-        indent = leading_spaces($0)
-        if (indent <= 6) {
-          finish_mount()
-          next
-        }
-        if (indent <= 8) finish_bind()
-        if ($0 ~ /^        type:[[:space:]]*/) {
-          mount_kind = $0
-          sub(/^        type:[[:space:]]*/, "", mount_kind)
-          mount_kind = trim(mount_kind)
-          next
-        }
-        if ($0 ~ /^        source:[[:space:]]*/) {
-          mount_source = $0
-          sub(/^        source:[[:space:]]*/, "", mount_source)
-          mount_source = trim(mount_source)
-          next
-        }
-        if ($0 ~ /^        target:[[:space:]]*/) {
-          mount_target = $0
-          sub(/^        target:[[:space:]]*/, "", mount_target)
-          mount_target = trim(mount_target)
-          next
-        }
-        if ($0 ~ /^        read_only:[[:space:]]*/) {
-          read_only_count++
-          read_only_value = $0
-          sub(/^        read_only:[[:space:]]*/, "", read_only_value)
-          read_only_value = trim(read_only_value)
-          next
-        }
-        if ($0 ~ /^        bind:[[:space:]]*$/) {
-          bind_count++
-          bind_started = 1
-          bind_create_host_path_count = 0
-          bind_create_host_path_value = ""
-          next
-        }
-        if ($0 ~ /create_host_path/) {
-          create_host_path_count++
-          value = $0
-          sub(/^.*create_host_path[[:space:]]*:[[:space:]]*/, "", value)
-          value = trim(value)
-          if (indent == 10 && bind_started) {
-            bind_create_host_path_count++
-            if (bind_create_host_path_count == 1) {
-              bind_create_host_path_value = value
-            } else {
-              bind_mapping_invalid = 1
-            }
-          } else {
-            bind_mapping_invalid = 1
-          }
-          next
-        }
-      }
-      END {
-        finish_mount()
-        if (invalid || mount_count[1] != 1 || mount_count[2] != 1 || mount_count[3] != 1) {
-          exit 1
-        }
-      }
-    ' "$candidate"
+  /usr/bin/python3 -I -B - "$script_dir/ci-isolation-guard.py" "$candidate" <<'PY'
+import runpy
+import sys
+from pathlib import Path
+
+guard = runpy.run_path(sys.argv[1])
+try:
+    guard["_source_contract"](
+        Path(sys.argv[2]).read_text(encoding="utf-8"), "a" * 40
+    )
+except (guard["GuardError"], OSError, UnicodeError, ValueError):
+    raise SystemExit(1)
+PY
 }
 
 mutate_bind_mount_fixture() {
@@ -154,81 +33,103 @@ mutate_bind_mount_fixture() {
   local mount_source="$3"
   local property="$4"
   local mutation="$5"
-  awk \
-    -v target_source="$mount_source" \
-    -v target_property="$property" \
-    -v mutation="$mutation" '
-      /^      - / { current_source = ""; target_mount = 0 }
-      /^        source:[[:space:]]*/ {
-        current_source = $0
-        sub(/^        source:[[:space:]]*/, "", current_source)
-        sub(/[[:space:]]+$/, "", current_source)
-        target_mount = current_source == target_source
-        print
-        next
-      }
-      target_mount && target_property == "read_only" && /^        read_only:[[:space:]]*true[[:space:]]*$/ {
-        changed++
-        if (mutation != "removed") print "        read_only: false"
-        next
-      }
-      target_mount && target_property == "create_host_path" && /^          create_host_path:[[:space:]]*false[[:space:]]*$/ {
-        changed++
-        if (mutation == "true") {
-          print "          create_host_path: true"
-        } else if (mutation == "sibling") {
-          print "        volume:"
-          print "          create_host_path: false"
-          injected++
-        } else if (mutation == "repeated-bind") {
-          print "        bind:"
-          print "          create_host_path: false"
-          injected++
-        }
-        next
-      }
-      { print }
-      END {
-        if (changed != 1 ||
-            ((mutation == "sibling" || mutation == "repeated-bind") && injected != 1)) exit 1
-      }
-    ' "$source_file" > "$output_file"
-}
+  /usr/bin/python3 -I -B - "$source_file" "$output_file" "$mount_source" "$property" "$mutation" <<'PY'
+import sys
+from pathlib import Path
 
-assert_bind_scope_fixture_shape() {
-  local candidate="$1"
-  local mount_source="$2"
-  local mutation="$3"
-  awk \
-    -v target_source="$mount_source" \
-    -v mutation="$mutation" '
-      /^      - / {
-        current_source = ""
-        target_mount = 0
-        current_bind = 0
-      }
-      /^        source:[[:space:]]*/ {
-        current_source = $0
-        sub(/^        source:[[:space:]]*/, "", current_source)
-        sub(/[[:space:]]+$/, "", current_source)
-        target_mount = current_source == target_source
-        next
-      }
-      target_mount && mutation == "sibling" && /^        volume:[[:space:]]*$/ { sibling_count++ }
-      target_mount && mutation == "sibling" && /^          create_host_path:[[:space:]]*false[[:space:]]*$/ {
-        if (sibling_count == 1) misplaced_count++
-      }
-      target_mount && mutation == "repeated-bind" && /^        bind:[[:space:]]*$/ {
-        current_bind++
-        target_bind_count++
-      }
-      target_mount && mutation == "repeated-bind" && current_bind == 2 && /^          create_host_path:[[:space:]]*false[[:space:]]*$/ { misplaced_count++ }
-      END {
-        if (mutation == "sibling") exit !(sibling_count == 1 && misplaced_count == 1)
-        if (mutation == "repeated-bind") exit !(target_bind_count == 2 && misplaced_count == 1)
-        exit 1
-      }
-    ' "$candidate"
+source_path, output_path = map(Path, sys.argv[1:3])
+mount_source, property, mutation = sys.argv[3:6]
+lines = source_path.read_text(encoding="utf-8").splitlines(keepends=True)
+source_line = f"        source: {mount_source}\n"
+source_indexes = [index for index, line in enumerate(lines) if line == source_line]
+if len(source_indexes) != 1:
+    raise SystemExit(1)
+source_index = source_indexes[0]
+mount_start = next(
+    (index for index in range(source_index, -1, -1) if lines[index].startswith("      - ")),
+    None,
+)
+if mount_start is None:
+    raise SystemExit(1)
+mount_end = len(lines)
+for index in range(source_index + 1, len(lines)):
+    line = lines[index]
+    if not line.strip() or line.lstrip().startswith("#"):
+        continue
+    indentation = len(line) - len(line.lstrip(" "))
+    if indentation <= 6:
+        mount_end = index
+        break
+mount_lines = lines[mount_start:mount_end]
+host_path_indexes = [
+    index for index, line in enumerate(mount_lines)
+    if line == "          create_host_path: false\n"
+]
+bind_indexes = [
+    index for index, line in enumerate(mount_lines)
+    if line == "        bind:\n"
+]
+if len(host_path_indexes) != 1 or len(bind_indexes) != 1:
+    raise SystemExit(1)
+host_path_index = host_path_indexes[0]
+bind_index = bind_indexes[0]
+
+if property == "read_only" and mutation in {"removed", "false"}:
+    read_only_indexes = [
+        index for index, line in enumerate(mount_lines)
+        if line == "        read_only: true\n"
+    ]
+    if len(read_only_indexes) != 1:
+        raise SystemExit(1)
+    read_only_index = read_only_indexes[0]
+    if mutation == "removed":
+        del mount_lines[read_only_index]
+    else:
+        mount_lines[read_only_index] = "        read_only: false\n"
+elif property == "create_host_path" and mutation in {"removed", "true"}:
+    if mutation == "removed":
+        del mount_lines[host_path_index]
+    else:
+        mount_lines[host_path_index] = "          create_host_path: true\n"
+elif property == "structure" and mutation == "comment-safe":
+    mount_lines[host_path_index] = "          create_host_path: false # explicit safe value\n"
+elif property == "structure" and mutation == "inline-empty-bind":
+    mount_lines.append("        bind: {}\n")
+elif property == "structure" and mutation == "duplicate-bind":
+    mount_lines.extend(("        bind:\n", "          create_host_path: false\n"))
+elif property == "structure" and mutation == "duplicate-create-host-path":
+    mount_lines.insert(host_path_index + 1, "          create_host_path: true\n")
+elif property == "structure" and mutation == "quoted-bind-key":
+    mount_lines.append('        "bind": {}\n')
+elif property == "structure" and mutation == "quoted-create-host-path":
+    mount_lines[host_path_index] = '          "create_host_path": false\n'
+elif property == "structure" and mutation == "unsafe-option":
+    mount_lines.insert(host_path_index + 1, "          propagation: rshared\n")
+elif property == "structure" and mutation == "nested-option":
+    mount_lines[host_path_index:host_path_index + 1] = [
+        "          create_host_path:\n",
+        "            enabled: true\n",
+    ]
+elif property == "structure" and mutation == "sibling":
+    mount_lines.extend(("        volume:\n", "          create_host_path: false\n"))
+elif property == "structure" and mutation == "repeated-bind":
+    mount_lines.extend(("        bind:\n", "          create_host_path: false\n"))
+elif property == "structure" and mutation == "yaml-alias":
+    mount_lines[bind_index:host_path_index + 1] = [
+        "        bind: &safe_bind\n",
+        "          create_host_path: false\n",
+        "        bind: *safe_bind\n",
+    ]
+elif property == "structure" and mutation == "flow-bind":
+    mount_lines[bind_index:host_path_index + 1] = [
+        "        bind: { create_host_path: false }\n",
+    ]
+else:
+    raise SystemExit(1)
+
+lines[mount_start:mount_end] = mount_lines
+output_path.write_text("".join(lines), encoding="utf-8")
+PY
 }
 
 if ! awk '
@@ -282,11 +183,21 @@ grep -Fq '        target: /etc/nginx/conf.d/default.conf' "$compose_file" || \
 if ! assert_safe_staging_bind_mounts "$compose_file"; then
   fail 'Every fixed PostgreSQL/nginx bind mount must be read-only and set bind.create_host_path: false'
 fi
+safe_case_count=1
 
 # Exercise the assertion against temporary fixture copies so each unsafe
 # setting is rejected without changing the real Compose file.
 fixture_dir="$(mktemp -d)"
 trap 'rm -rf -- "$fixture_dir"' EXIT
+safe_fixture="$fixture_dir/safe-comment.yaml"
+if ! mutate_bind_mount_fixture \
+  "$compose_file" "$safe_fixture" './scripts/staging/10-belib-staging-roles.sh' structure comment-safe; then
+  fail 'Could not create the safe commented bind fixture'
+fi
+if ! assert_safe_staging_bind_mounts "$safe_fixture"; then
+  fail 'The shell regression rejected a safe bind mapping with a trailing comment'
+fi
+safe_case_count=$((safe_case_count + 1))
 negative_case_count=0
 mount_index=0
 for mount_source in \
@@ -316,21 +227,52 @@ for mount_source in \
 done
 [[ "$negative_case_count" -eq 12 ]] || fail 'The bind mount negative fixture matrix is incomplete'
 scope_negative_case_count=0
-for mutation in sibling repeated-bind; do
-  fixture="$fixture_dir/scope-${mutation}.yaml"
-  mount_source='./scripts/staging/10-belib-staging-roles.sh'
-  if ! mutate_bind_mount_fixture "$compose_file" "$fixture" "$mount_source" create_host_path "$mutation"; then
-    fail "Could not create the $mutation bind-scope fixture for $mount_source"
-  fi
-  if ! assert_bind_scope_fixture_shape "$fixture" "$mount_source" "$mutation"; then
-    fail "The $mutation fixture did not place its create_host_path value in the intended out-of-scope mapping"
-  fi
-  if assert_safe_staging_bind_mounts "$fixture"; then
-    fail "The shell regression accepted the $mutation bind-scope fixture for $mount_source"
-  fi
-  scope_negative_case_count=$((scope_negative_case_count + 1))
+scope_mount_index=0
+for mount_source in \
+  './scripts/staging/10-belib-staging-roles.sh' \
+  './nginx/nginx.conf' \
+  './scripts/staging/nginx-default.conf'; do
+  scope_mount_index=$((scope_mount_index + 1))
+  for mutation in sibling repeated-bind; do
+    fixture="$fixture_dir/scope-${scope_mount_index}-${mutation}.yaml"
+    if ! mutate_bind_mount_fixture "$compose_file" "$fixture" "$mount_source" structure "$mutation"; then
+      fail "Could not create the $mutation bind-scope fixture for $mount_source"
+    fi
+    if assert_safe_staging_bind_mounts "$fixture"; then
+      fail "The shell regression accepted the $mutation bind-scope fixture for $mount_source"
+    fi
+    scope_negative_case_count=$((scope_negative_case_count + 1))
+  done
 done
-[[ "$scope_negative_case_count" -eq 2 ]] || fail 'The bind-scope negative fixture checks are incomplete'
+[[ "$scope_negative_case_count" -eq 6 ]] || fail 'The bind-scope negative fixture matrix is incomplete'
+structure_negative_case_count=0
+structure_mount_index=0
+for mount_source in \
+  './scripts/staging/10-belib-staging-roles.sh' \
+  './nginx/nginx.conf' \
+  './scripts/staging/nginx-default.conf'; do
+  structure_mount_index=$((structure_mount_index + 1))
+  for mutation in \
+    inline-empty-bind \
+    duplicate-bind \
+    duplicate-create-host-path \
+    quoted-bind-key \
+    quoted-create-host-path \
+    unsafe-option \
+    nested-option \
+    yaml-alias \
+    flow-bind; do
+    fixture="$fixture_dir/structure-${structure_mount_index}-${mutation}.yaml"
+    if ! mutate_bind_mount_fixture "$compose_file" "$fixture" "$mount_source" structure "$mutation"; then
+      fail "Could not create the $mutation bind structure fixture for $mount_source"
+    fi
+    if assert_safe_staging_bind_mounts "$fixture"; then
+      fail "The shell regression accepted the $mutation bind structure fixture for $mount_source"
+    fi
+    structure_negative_case_count=$((structure_negative_case_count + 1))
+  done
+done
+[[ "$structure_negative_case_count" -eq 27 ]] || fail 'The bind structure negative fixture matrix is incomplete'
 [[ "$(grep -Fc 'proxy_set_header Host stg-bl.hiroyuki9614.com;' "$nginx_site")" -eq 3 ]] || \
   fail 'Every staging upstream route must receive the canonical Host header'
 [[ "$(grep -Fc 'proxy_set_header X-Forwarded-Host stg-bl.hiroyuki9614.com;' "$nginx_site")" -eq 3 ]] || \
@@ -396,4 +338,5 @@ if grep -Eq 'belib-isolated-i5|staging-postgres-data|staging-book-files|belib_st
   fail 'Production Compose must not reference the isolated staging project or data'
 fi
 
-printf 'PASS: 3 staging bind mounts are read-only with host-path creation disabled; 12 unsafe mount fixtures and 2 bind-scope fixtures fail closed; roles, database markers, origins, proxy headers, production separation, and node-owned book volume remain intact\n'
+printf 'PASS: 3 staging bind mounts are read-only with host-path creation disabled; %s safe fixture cases and %s unsafe/scope/structure fixtures fail closed; roles, database markers, origins, proxy headers, production separation, and node-owned book volume remain intact\n' \
+  "$safe_case_count" "$((negative_case_count + scope_negative_case_count + structure_negative_case_count))"

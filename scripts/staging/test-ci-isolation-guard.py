@@ -843,6 +843,17 @@ class CIIsolationGuardTests(unittest.TestCase):
         }
         self.assert_rejected(model=model)
 
+    def test_rejects_shadowed_bind_mapping_even_when_normalized_options_are_empty(self):
+        source = self.compose_source.replace(
+            "          create_host_path: false\n",
+            "          create_host_path: false\n        bind: {}\n",
+            1,
+        )
+        self.assertNotEqual(source, self.compose_source)
+        # Compose can normalize the duplicate mapping to the allowlisted empty
+        # option object, so the raw source contract must reject the shadowing.
+        self.assert_rejected(source=source, model=compose_model())
+
     def test_rejects_unsafe_named_volume_mount_options(self):
         model = compose_model()
         model["services"]["db"]["volumes"][0]["volume"] = {"nocopy": True}
