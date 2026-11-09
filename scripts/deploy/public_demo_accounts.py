@@ -14,11 +14,48 @@ class PublicDemoError(RuntimeError):
     pass
 
 
+PUBLIC_DEMO_VITE_PREFIX = 'VITE_PUBLIC_DEMO_'
+PUBLIC_DEMO_USER_BUILD_KEYS = frozenset({
+    'VITE_PUBLIC_DEMO_EMAIL',
+    'VITE_PUBLIC_DEMO_PASSWORD',
+})
+LEGACY_ADMIN_BUILD_KEYS = frozenset({
+    'VITE_PUBLIC_DEMO_ADMIN_EMAIL',
+    'VITE_PUBLIC_DEMO_ADMIN_PASSWORD',
+})
+
+
+def drop_legacy_admin_build_args(values: dict) -> dict:
+    """Drop only the two retired admin keys and reject other public-demo names."""
+    if not isinstance(values, dict):
+        raise PublicDemoError('Public demo build argument names are invalid')
+    allowed = PUBLIC_DEMO_USER_BUILD_KEYS | LEGACY_ADMIN_BUILD_KEYS
+    if any(
+        isinstance(key, str)
+        and key.startswith(PUBLIC_DEMO_VITE_PREFIX)
+        and key not in allowed
+        for key in values
+    ):
+        raise PublicDemoError('Unsupported public demo build argument name')
+    return {key: value for key, value in values.items() if key not in LEGACY_ADMIN_BUILD_KEYS}
+
+
 def empty_build_args() -> dict[str, str]:
     return {key: '' for key in (
         'VITE_PUBLIC_DEMO_EMAIL', 'VITE_PUBLIC_DEMO_PASSWORD',
-        'PUBLIC_DEMO_ACCOUNTS_SHA256',
+        'PUBLIC_DEMO_USER_BUILD_SHA256',
     )}
+
+
+def _public_user_build_fingerprint(user: dict[str, str]) -> str:
+    """Fingerprint only the intentionally public pair compiled into the frontend."""
+    public_inputs = json.dumps(
+        {'email': user['email'], 'password': user['password']},
+        ensure_ascii=False,
+        separators=(',', ':'),
+        sort_keys=True,
+    ).encode('utf-8')
+    return hashlib.sha256(public_inputs).hexdigest()
 
 
 def load_accounts(config: dict) -> tuple[dict[str, str], dict | None]:
@@ -62,7 +99,7 @@ def load_accounts(config: dict) -> tuple[dict[str, str], dict | None]:
     return {
         'VITE_PUBLIC_DEMO_EMAIL': data['user']['email'],
         'VITE_PUBLIC_DEMO_PASSWORD': data['user']['password'],
-        'PUBLIC_DEMO_ACCOUNTS_SHA256': hashlib.sha256(raw).hexdigest(),
+        'PUBLIC_DEMO_USER_BUILD_SHA256': _public_user_build_fingerprint(data['user']),
     }, data
 
 

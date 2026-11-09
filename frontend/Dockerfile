@@ -14,9 +14,9 @@ RUN npm run build
 
 FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
 ARG VCS_REF
-ARG PUBLIC_DEMO_ACCOUNTS_SHA256=""
+ARG PUBLIC_DEMO_USER_BUILD_SHA256=""
 LABEL org.opencontainers.image.revision=${VCS_REF}
-LABEL com.belib.public-demo-accounts-sha256=${PUBLIC_DEMO_ACCOUNTS_SHA256}
+LABEL com.belib.public-demo-user-build-sha256=${PUBLIC_DEMO_USER_BUILD_SHA256}
 COPY --from=build /app/dist /usr/share/nginx/html
 USER root
 RUN chmod -R a+rX /usr/share/nginx/html
