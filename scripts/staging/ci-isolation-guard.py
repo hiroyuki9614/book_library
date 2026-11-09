@@ -190,13 +190,28 @@ EXPECTED_DB_HEALTHCHECK_MODEL = {
 }
 EXPECTED_SOURCE_MOUNTS = {
     "db": [
-        "staging-postgres-data:/var/lib/postgresql/data",
-        "./scripts/staging/10-belib-staging-roles.sh:/docker-entrypoint-initdb.d/10-belib-staging-roles.sh:ro",
+        "      - staging-postgres-data:/var/lib/postgresql/data",
+        "      - type: bind",
+        "        source: ./scripts/staging/10-belib-staging-roles.sh",
+        "        target: /docker-entrypoint-initdb.d/10-belib-staging-roles.sh",
+        "        read_only: true",
+        "        bind:",
+        "          create_host_path: false",
     ],
-    "backend": ["staging-book-files:/home/node"],
+    "backend": ["      - staging-book-files:/home/node"],
     "nginx": [
-        "./nginx/nginx.conf:/etc/nginx/nginx.conf:ro",
-        "./scripts/staging/nginx-default.conf:/etc/nginx/conf.d/default.conf:ro",
+        "      - type: bind",
+        "        source: ./nginx/nginx.conf",
+        "        target: /etc/nginx/nginx.conf",
+        "        read_only: true",
+        "        bind:",
+        "          create_host_path: false",
+        "      - type: bind",
+        "        source: ./scripts/staging/nginx-default.conf",
+        "        target: /etc/nginx/conf.d/default.conf",
+        "        read_only: true",
+        "        bind:",
+        "          create_host_path: false",
     ],
 }
 EXPECTED_SERVICE_MODEL_KEYS = {
@@ -370,7 +385,7 @@ def _source_shape_contract(source: str) -> None:
         if expected_mounts is not None:
             volumes_index, volumes_value = property_by_key["volumes"]
             if volumes_value:
-                raise GuardError(f"{name} mounts must use the checked-in short syntax")
+                raise GuardError(f"{name} mounts must use the checked-in list syntax")
             property_position = next(
                 position
                 for position, (_, key, _) in enumerate(properties)
@@ -380,16 +395,7 @@ def _source_shape_contract(source: str) -> None:
                 properties, property_position, len(service_lines)
             )
             volume_lines = service_lines[volumes_index + 1 : volumes_end]
-            mounts: list[str] = []
-            for line in volume_lines:
-                if not line.strip():
-                    continue
-                if len(line) - len(line.lstrip(" ")) != 6:
-                    raise GuardError(f"{name} mounts must use the checked-in short syntax")
-                mount_match = re.fullmatch(r" {6}-\s+(.+)\s*", line)
-                if mount_match is None:
-                    raise GuardError(f"{name} mounts use unsupported YAML syntax")
-                mounts.append(mount_match.group(1))
+            mounts = [line.rstrip() for line in volume_lines if line.strip()]
             if mounts != expected_mounts:
                 raise GuardError(f"{name} mount sources are outside the allowlist")
 
@@ -614,10 +620,14 @@ def _source_contract(source: str, source_sha: str) -> None:
         "POSTGRES_PASSWORD: ${BELIB_STAGE_DB_BOOTSTRAP_PASSWORD:?Set staging-only bootstrap password}",
         "BELIB_STAGE_DB_APP_PASSWORD: ${BELIB_STAGE_DB_APP_PASSWORD:?Set staging-only app password}",
         "BELIB_STAGE_DB_MIGRATE_PASSWORD: ${BELIB_STAGE_DB_MIGRATE_PASSWORD:?Set staging-only migration password}",
-        f"./{ROLE_INIT_SOURCE}:{ROLE_INIT_TARGET}:ro",
     )
     if any(code.count(line) != 1 for line in required_role_lines):
         raise GuardError("PostgreSQL must use the distinct bootstrap identity and read-only role initializer")
+    if (
+        code.count(f"source: ./{ROLE_INIT_SOURCE}") != 1
+        or code.count(f"target: {ROLE_INIT_TARGET}") != 1
+    ):
+        raise GuardError("PostgreSQL role initializer mount must remain unique and isolated")
 
     expected_vcs_line = "VCS_REF: ${BELIB_STAGE_VCS_REF:?Set full reviewed staging SHA}"
     vcs_lines = [
@@ -763,6 +773,28 @@ def _repo_path_matches(value: Any, expected: str, compose_root: Path) -> bool:
     return actual_path is not None and actual_path == expected_path
 
 
+def _safe_mount_shape_summary(mount: dict[str, Any], option_key: str) -> str:
+    """Describe only mount structure and known boolean flags in CI diagnostics."""
+    mount_keys = sorted(key for key in mount if isinstance(key, str))
+    options = mount.get(option_key)
+    option_keys = (
+        sorted(key for key in options if isinstance(key, str))
+        if isinstance(options, dict)
+        else []
+    )
+    boolean_flags: dict[str, bool] = {}
+    if type(mount.get("read_only")) is bool:
+        boolean_flags["read_only"] = mount["read_only"]
+    if isinstance(options, dict):
+        for key in ("create_host_path", "nocopy"):
+            if type(options.get(key)) is bool:
+                boolean_flags[f"{option_key}.{key}"] = options[key]
+    return (
+        f"(mount keys={mount_keys}; {option_key} option keys={option_keys}; "
+        f"boolean flags={boolean_flags})"
+    )
+
+
 def _check_mount(
     mounts: list[dict[str, Any]],
     *,
@@ -782,8 +814,38 @@ def _check_mount(
         else {"type", "source", "target", "volume"}
     )
     option_key = "bind" if mount_type == "bind" else "volume"
-    if set(mount) != expected_keys or mount.get(option_key) != {}:
-        raise GuardError("Staging volume options are outside the allowlist")
+    actual_keys = set(mount)
+    keys_match = actual_keys == expected_keys
+    if (
+        mount_type == "volume"
+        and actual_keys == expected_keys | {"read_only"}
+        and mount.get("read_only") is False
+    ):
+        keys_match = True
+    allowed_options = (
+        ({}, {"create_host_path": False})
+        if mount_type == "bind"
+        else (
+            {},
+            {"nocopy": False},
+            {"subpath": ""},
+            {"nocopy": False, "subpath": ""},
+        )
+    )
+    options = mount.get(option_key)
+    options_match = isinstance(options, dict) and any(
+        set(options) == set(allowed)
+        and all(
+            type(options[key]) is type(value) and options[key] == value
+            for key, value in allowed.items()
+        )
+        for allowed in allowed_options
+    )
+    if not keys_match or not options_match:
+        raise GuardError(
+            "Staging volume options are outside the allowlist "
+            f"{_safe_mount_shape_summary(mount, option_key)}"
+        )
     actual_source = mount.get("source")
     source_matches = False
     if isinstance(actual_source, str):

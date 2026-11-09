@@ -14,7 +14,12 @@ services:
       BELIB_STAGE_DB_MIGRATE_PASSWORD: ${BELIB_STAGE_DB_MIGRATE_PASSWORD:?Set staging-only migration password}
     volumes:
       - staging-postgres-data:/var/lib/postgresql/data
-      - ./scripts/staging/10-belib-staging-roles.sh:/docker-entrypoint-initdb.d/10-belib-staging-roles.sh:ro
+      - type: bind
+        source: ./scripts/staging/10-belib-staging-roles.sh
+        target: /docker-entrypoint-initdb.d/10-belib-staging-roles.sh
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
       test:
         - CMD-SHELL
@@ -106,8 +111,18 @@ services:
     ports:
       - "127.0.0.1:${BELIB_STAGE_PORT:?Set free i5 loopback port}:8080"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./scripts/staging/nginx-default.conf:/etc/nginx/conf.d/default.conf:ro
+      - type: bind
+        source: ./nginx/nginx.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./scripts/staging/nginx-default.conf
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       backend:
         condition: service_started

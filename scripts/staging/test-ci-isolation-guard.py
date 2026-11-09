@@ -258,6 +258,23 @@ class CIIsolationGuardTests(unittest.TestCase):
             compose_model=compose_model(),
         )
 
+    def test_accepts_github_compose_normalized_mount_defaults(self):
+        model = compose_model()
+        for service in model["services"].values():
+            for mount in service.get("volumes", []):
+                if mount["type"] == "bind":
+                    mount["bind"] = {"create_host_path": False}
+                else:
+                    mount["volume"] = {"nocopy": False, "subpath": ""}
+                    mount["read_only"] = False
+
+        guard.validate(
+            source_sha=SOURCE_SHA,
+            checkout_sha=SOURCE_SHA,
+            compose_source=self.compose_source,
+            compose_model=model,
+        )
+
     def test_rejects_mutable_or_substituted_compose_images(self):
         for service, expected in guard.EXPECTED_SOURCE_IMAGES.items():
             tag_only = expected.split("@", 1)[0]
@@ -813,11 +830,56 @@ class CIIsolationGuardTests(unittest.TestCase):
         self.assert_rejected(model=model)
 
         source = self.compose_source.replace(
-            "./nginx/nginx.conf:/etc/nginx/nginx.conf:ro",
-            "/etc/passwd:/etc/nginx/nginx.conf:ro",
+            "        source: ./nginx/nginx.conf\n",
+            "        source: /etc/passwd\n",
             1,
         )
         self.assert_rejected(source=source)
+
+        model = compose_model()
+        model["services"]["nginx"]["volumes"][0]["bind"] = {
+            "create_host_path": False,
+            "propagation": "rprivate",
+        }
+        self.assert_rejected(model=model)
+
+    def test_rejects_unsafe_named_volume_mount_options(self):
+        model = compose_model()
+        model["services"]["db"]["volumes"][0]["volume"] = {"nocopy": True}
+        self.assert_rejected(model=model)
+
+        model = compose_model()
+        model["services"]["backend"]["volumes"][0]["volume"] = {
+            "nocopy": False,
+            "subpath": "outside",
+        }
+        self.assert_rejected(model=model)
+
+        model = compose_model()
+        model["services"]["backend"]["volumes"][0]["read_only"] = True
+        self.assert_rejected(model=model)
+
+    def test_mount_option_diagnostics_exclude_values_and_paths(self):
+        model = compose_model()
+        model["services"]["nginx"]["volumes"][0]["source"] = "/private/source-path"
+        model["services"]["nginx"]["volumes"][0]["bind"] = {
+            "create_host_path": True,
+            "review_secret_fixture": "do-not-print-this",
+        }
+        with self.assertRaises(guard.GuardError) as raised:
+            guard.validate(
+                source_sha=SOURCE_SHA,
+                checkout_sha=SOURCE_SHA,
+                compose_source=self.compose_source,
+                compose_model=model,
+            )
+
+        message = str(raised.exception)
+        self.assertIn("mount keys=", message)
+        self.assertIn("create_host_path", message)
+        self.assertIn("True", message)
+        self.assertNotIn("/private/source-path", message)
+        self.assertNotIn("do-not-print-this", message)
 
     def test_pr_staging_ci_is_read_only_and_checks_out_exact_head(self):
         workflow = (ROOT / ".github/workflows/staging-ci.yml").read_text(encoding="utf-8")

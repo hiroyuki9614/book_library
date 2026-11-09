@@ -50,10 +50,14 @@ grep -Fq "      BETTER_AUTH_URL: $canonical_origin" "$compose_file" || \
   fail 'The Better Auth origin must use the canonical HTTPS origin'
 grep -Fq "        VITE_API_BASE_URL: $canonical_origin" "$compose_file" || \
   fail 'The frontend build API origin must use the canonical HTTPS origin'
-grep -Fq './nginx/nginx.conf:/etc/nginx/nginx.conf:ro' "$compose_file" || \
+grep -Fq '        source: ./nginx/nginx.conf' "$compose_file" || \
   fail 'The staging service must retain the shared nginx main config'
-grep -Fq './scripts/staging/nginx-default.conf:/etc/nginx/conf.d/default.conf:ro' "$compose_file" || \
+grep -Fq '        target: /etc/nginx/nginx.conf' "$compose_file" || \
+  fail 'The staging nginx main config must retain its target path'
+grep -Fq '        source: ./scripts/staging/nginx-default.conf' "$compose_file" || \
   fail 'The staging service must use its staging-only nginx site config'
+grep -Fq '        target: /etc/nginx/conf.d/default.conf' "$compose_file" || \
+  fail 'The staging nginx site config must retain its target path'
 [[ "$(grep -Fc 'proxy_set_header Host stg-bl.hiroyuki9614.com;' "$nginx_site")" -eq 3 ]] || \
   fail 'Every staging upstream route must receive the canonical Host header'
 [[ "$(grep -Fc 'proxy_set_header X-Forwarded-Host stg-bl.hiroyuki9614.com;' "$nginx_site")" -eq 3 ]] || \
@@ -91,7 +95,8 @@ roles_file="$script_dir/10-belib-staging-roles.sh"
 [[ -f "$roles_file" && ! -x "$roles_file" ]] || fail 'The PostgreSQL role initializer must remain a non-executable official-image init hook'
 grep -Fq '      POSTGRES_USER: belib_staging_bootstrap' "$compose_file" || fail 'PostgreSQL init must use its distinct bootstrap superuser'
 grep -Fq 'POSTGRES_PASSWORD: ${BELIB_STAGE_DB_BOOTSTRAP_PASSWORD:' "$compose_file" || fail 'The bootstrap role must use its own staging-only password key'
-grep -Fq '      - ./scripts/staging/10-belib-staging-roles.sh:/docker-entrypoint-initdb.d/10-belib-staging-roles.sh:ro' "$compose_file" || fail 'Role setup must use the read-only official initialization path'
+grep -Fq '        source: ./scripts/staging/10-belib-staging-roles.sh' "$compose_file" || fail 'Role setup must mount the official initialization source'
+grep -Fq '        target: /docker-entrypoint-initdb.d/10-belib-staging-roles.sh' "$compose_file" || fail 'Role setup must use the official initialization target'
 grep -Fq '      BELIB_STAGE_DB_APP_PASSWORD: ${BELIB_STAGE_DB_APP_PASSWORD:' "$compose_file" || fail 'The app password must be distinct and available only to fresh-volume initialization'
 grep -Fq '      BELIB_STAGE_DB_MIGRATE_PASSWORD: ${BELIB_STAGE_DB_MIGRATE_PASSWORD:' "$compose_file" || fail 'The migration password must be distinct and available only to fresh-volume initialization'
 grep -Fq 'DATABASE_URL: postgresql://belib_staging_migrate:${BELIB_STAGE_DB_MIGRATE_PASSWORD:' "$compose_file" || fail 'Migrations must connect through the non-superuser migration role'
