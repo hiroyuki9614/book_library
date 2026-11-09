@@ -12,6 +12,9 @@ export type ReadingInfo = {
 
 const READING_SESSION_USER_HEADER = 'X-BeLib-User-Id';
 
+let readingSaveGeneration = 0;
+const inFlightReadingSaves = new Set<AbortController>();
+
 function getReadingUserId(userId: number | undefined) {
 	return userId !== undefined && Number.isSafeInteger(userId) && userId > 0 ? userId : null;
 }
@@ -29,8 +32,22 @@ export async function fetchReadingInfo(bookId: number, userId?: number): Promise
 // Keep writes ordered across reader remounts too. A slow older PATCH must finish
 // before a newer position can be submitted for the same book in this tab. The
 // scope key prevents a queued save from one account being reused after logout.
+// Auth transitions also advance the generation before reader teardown, so a
+// cleanup flush retains its original identity and cannot start a stale PATCH.
 const pendingSaves = new Map<string, Promise<ReadingInfo>>();
 const readingFlushes = new Map<string, Set<() => void>>();
+
+export function getReadingSaveGeneration() {
+	return readingSaveGeneration;
+}
+
+export function invalidateReadingSaves() {
+	readingSaveGeneration += 1;
+	pendingSaves.clear();
+	readingFlushes.clear();
+	for (const controller of inFlightReadingSaves) controller.abort();
+	inFlightReadingSaves.clear();
+}
 
 function getReadingScopeKey(bookId: number, userId?: number) {
 	return `${userId === undefined ? 'anonymous' : `user:${userId}`}:book:${bookId}`;
@@ -53,8 +70,10 @@ export function saveReadingInfo(
 	readStatus: Exclude<ReadStatus, 'unread'> = 'reading',
 	progressPercentage?: number | null,
 	userId?: number,
+	generation?: number,
 ): Promise<ReadingInfo> {
 	const sessionUserId = getReadingUserId(userId);
+	const requestGeneration = generation ?? readingSaveGeneration;
 	const positionBody = typeof position === 'number'
 		? { currentPage: position, readStatus }
 		: { currentPosition: position, readStatus };
@@ -64,11 +83,22 @@ export function saveReadingInfo(
 	const previous = pendingSaves.get(scopeKey) ?? Promise.resolve();
 	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 	if (sessionUserId !== null) headers[READING_SESSION_USER_HEADER] = String(sessionUserId);
-	const next = previous.catch(() => undefined).then(() => apiFetch<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`, {
-		method: 'PATCH',
-		headers,
-		body: JSON.stringify(body),
-	}));
+	const next = previous.catch(() => undefined).then(() => {
+		if (requestGeneration !== readingSaveGeneration) {
+			throw new Error('Reading save invalidated by authentication change');
+		}
+
+		const controller = new AbortController();
+		inFlightReadingSaves.add(controller);
+		return apiFetch<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`, {
+			method: 'PATCH',
+			headers,
+			body: JSON.stringify(body),
+			signal: controller.signal,
+		}).finally(() => {
+			inFlightReadingSaves.delete(controller);
+		});
+	});
 	pendingSaves.set(scopeKey, next);
 	void next.finally(() => {
 		if (pendingSaves.get(scopeKey) === next) pendingSaves.delete(scopeKey);
