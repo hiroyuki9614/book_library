@@ -47,7 +47,7 @@ async function sessionCookieHeader(response: Response) {
 
 async function assertSessionCookiePresent(response: Response) {
 	const header = await sessionCookieHeader(response);
-	const hasSessionCookie = /session_token=[REDACTED]
+	const hasSessionCookie = /session_token=/i.test(header);
 	// Keep the cookie value out of assertion output while proving that the
 	// cross-origin sign-in response set the Better Auth session cookie.
 	expect(hasSessionCookie, 'Better Auth sign-in must set a session cookie').toBe(true);
@@ -55,7 +55,7 @@ async function assertSessionCookiePresent(response: Response) {
 
 async function assertSessionCookieCleared(response: Response) {
 	const header = await sessionCookieHeader(response);
-	const clearsSessionCookie = /session_token=[REDACTED]
+	const clearsSessionCookie = /session_token=/i.test(header)
 		&& (/(?:^|;)\s*max-age=0(?:;|$)/i.test(header) || /expires=thu, 01 jan 1970/i.test(header));
 	// Keep the cookie value out of assertion output while proving that the
 	// cross-origin sign-out response expires the Better Auth session cookie.
