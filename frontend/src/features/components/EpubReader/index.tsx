@@ -117,6 +117,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 		let ready = false;
 		let readyToPersist = false;
 		let initialLocation = '';
+		let observedAtEnd = false;
 		let resizeFrame = 0;
 		let lastSize = { width: viewer.clientWidth, height: viewer.clientHeight };
 		const book = ePub(epubData) as unknown as RuntimeBook;
@@ -132,6 +133,10 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 		const relocated = (location: Location) => {
 			if (disposed || !location.start?.cfi) return;
 			const cfi = location.start.cfi;
+			// Delayed, unchanged layout observations are not reader movement. In
+			// particular, a restored CFI may be on the second page of a spread.
+			const positionChanged = initialLocation !== cfi || observedAtEnd !== Boolean(location.atEnd);
+			observedAtEnd = Boolean(location.atEnd);
 			const index = book.locations.locationFromCfi(cfi);
 			const last = book.locations.total;
 			const atPublicationStart = Boolean(
@@ -145,7 +150,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 			setTotalPage(last >= 0 ? last + 1 : 0);
 			if (location.start.displayed) setScreenPage({ ...location.start.displayed, section: location.start.index + 1 });
 			setBounds({ start: !!location.atStart, end: !!location.atEnd });
-			if (readyToPersist) {
+			if (readyToPersist && positionChanged) {
 				currentCfiRef.current = cfi;
 				localStorage.setItem(storageKey, cfi);
 				save(cfi, location.atEnd ? 'completed' : 'reading');

@@ -29,16 +29,17 @@ export async function headingToc(sections: PublicationSection[], request: (url: 
 	return entries;
 }
 
-// epub.js uses the OPF page progression to arrange columns, and also injects
-// direction:rtl on <html>. Keep that column order while preserving the original
-// text direction in body blocks. Low specificity lets the publisher's own CSS
+// Column progression follows the reader direction; text bidi follows the source.
+// Capture it before pagination changes <html>/<body>, or consult the source when
+// called from a content hook. Low specificity lets the publisher's own CSS
 // and dir attributes continue to control individual blocks and mixed scripts.
 export function preserveTextDirection(doc: Document, source?: Document) {
 	const root = doc.documentElement;
 	const injected = root.style.direction;
-	root.style.direction = source?.documentElement.style.direction ?? '';
+	const priority = root.style.getPropertyPriority('direction');
+	root.style.setProperty('direction', source?.documentElement.style.direction ?? '', source?.documentElement.style.getPropertyPriority('direction') ?? '');
 	const direction = doc.defaultView?.getComputedStyle(doc.body).direction ?? 'ltr';
-	root.style.direction = injected;
+	root.style.setProperty('direction', injected, priority);
 	if (doc.getElementById('belib-text-direction')) return;
 	const style = doc.createElement('style');
 	style.id = 'belib-text-direction';
