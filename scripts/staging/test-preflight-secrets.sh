@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline secret-validation regression check. Uses only synthetic fixtures and a controlled PATH.
+# Offline preflight trust-boundary and secret-validation checks with synthetic fixtures.
 set -euo pipefail
 
 fail() { printf 'BLOCKED: %s\n' "$*" >&2; exit 1; }
@@ -28,6 +28,7 @@ mkdir -p "$(dirname -- "$fixture_preflight")" "$test_bin" "$repo_root/nginx" \
   "$repo_root/.github/workflows" \
   "$repo_root/backend" "$repo_root/frontend"
 cp -- "$source_preflight" "$fixture_preflight"
+chmod 700 "$fixture_preflight"
 missing_docker_cli="$test_root/trusted-docker-unavailable"
 python3 -B - "$fixture_preflight" "$missing_docker_cli" <<'PY'
 import sys
@@ -61,7 +62,7 @@ revision="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root
 base_revision="$revision"
 
 # The missing pinned executable makes this fixture fail before any Docker invocation.
-for utility in bash dirname git grep hostname id sed sh stat; do
+for utility in bash dirname grep hostname id sed sh stat; do
   utility_path="$(command -v "$utility")"
   [[ -x "$utility_path" ]] || fail "Required test utility unavailable: $utility"
   ln -s -- "$utility_path" "$test_bin/$utility"
@@ -82,8 +83,8 @@ write_fixture() {
 equal_env="$test_root/equal.env"
 write_fixture "$equal_env" "$synthetic_secret_a" "$synthetic_secret_a" "$synthetic_secret_c" "$synthetic_secret_d"
 set +e
-equal_output="$(/usr/bin/env -i PATH="$test_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-  bash "$fixture_preflight" "$equal_env" 2>&1)"
+equal_output="$(/usr/bin/env -i PATH="$test_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  /bin/bash --noprofile --norc "$fixture_preflight" "$equal_env" 2>&1)"
 equal_status=$?
 set -e
 [[ "$equal_status" -eq 1 && "$equal_output" == *'BLOCKED: Bootstrap, app, migration, and auth secrets must all be distinct'* ]] || \
@@ -94,8 +95,8 @@ printf 'PASS: equal synthetic secrets rejected before Docker check (exit=%s)\n' 
 distinct_env="$test_root/distinct.env"
 write_fixture "$distinct_env" "$synthetic_secret_a" "$synthetic_secret_b" "$synthetic_secret_c" "$synthetic_secret_d"
 set +e
-distinct_output="$(/usr/bin/env -i PATH="$test_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-  bash "$fixture_preflight" "$distinct_env" 2>&1)"
+distinct_output="$(/usr/bin/env -i PATH="$test_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  /bin/bash --noprofile --norc "$fixture_preflight" "$distinct_env" 2>&1)"
 distinct_status=$?
 set -e
 [[ "$distinct_status" -eq 1 && "$distinct_output" == *'BLOCKED: Trusted Docker CLI missing or unsafe; do not use a PATH fallback'* ]] || \
@@ -108,8 +109,8 @@ printf 'BELIB_STAGE_DB_PASSWORD=%s\nBELIB_STAGE_AUTH_SECRET=%s\nBELIB_STAGE_VCS_
   "$synthetic_secret_a" "$synthetic_secret_d" "$revision" > "$legacy_env"
 chmod 600 "$legacy_env"
 set +e
-legacy_output="$(/usr/bin/env -i PATH="$test_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-  bash "$fixture_preflight" "$legacy_env" 2>&1)"
+legacy_output="$(/usr/bin/env -i PATH="$test_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  /bin/bash --noprofile --norc "$fixture_preflight" "$legacy_env" 2>&1)"
 legacy_status=$?
 set -e
 [[ "$legacy_status" -eq 1 && "$legacy_output" == *'BLOCKED: Staging env must contain only the six approved staging keys'* ]] || \
@@ -118,7 +119,7 @@ printf 'PASS: legacy single-password env rejected before Docker check (exit=%s)\
 
 integration_bin="$test_root/integration-bin"
 mkdir -p "$integration_bin"
-for utility in bash dirname git grep hostname id sed sh stat awk mktemp rm cat python3; do
+for utility in bash dirname grep hostname id sed sh stat awk mktemp rm cat python3; do
   utility_path="$(command -v "$utility")"
   [[ -x "$utility_path" ]] || fail "Required integration utility unavailable: $utility"
   ln -s -- "$utility_path" "$integration_bin/$utility"
@@ -222,6 +223,14 @@ valid_model="$test_root/compose-valid.json"
 make_compose_model "$valid_model" valid
 docker_log="$test_root/docker-calls.log"
 
+# Use a dirty synthetic checkout to prove Git shims cannot fabricate a clean status.
+git_attack_repo="$test_root/git-attack-repo"
+cp -a -- "$repo_root" "$git_attack_repo"
+git_attack_preflight="$git_attack_repo/scripts/staging/preflight.sh"
+git_attack_env="$test_root/git-attack.env"
+printf '\n# synthetic dirty-worktree regression\n' >> "$git_attack_repo/compose.staging.yaml"
+write_fixture "$git_attack_env" "$synthetic_secret_a" "$synthetic_secret_b" "$synthetic_secret_c" "$synthetic_secret_d"
+
 grep -F "readonly docker_cli='/usr/bin/docker'" "$source_preflight" >/dev/null || \
   fail 'Host preflight is not pinned to the trusted absolute Docker executable'
 [[ -x "$integration_bin/docker" ]] || fail 'Expected fake PATH Docker binary is unavailable'
@@ -229,9 +238,9 @@ grep -F "readonly docker_cli='/usr/bin/docker'" "$source_preflight" >/dev/null |
 # A PATH-only fake Docker binary cannot satisfy the pinned executable check.
 runtime_path_log="$test_root/path-docker-calls.log"
 set +e
-runtime_path_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+runtime_path_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$runtime_path_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-  bash "$fixture_preflight" "$valid_env" 2>&1)"
+  /bin/bash --noprofile --norc "$fixture_preflight" "$valid_env" 2>&1)"
 runtime_path_status=$?
 set -e
 [[ "$runtime_path_status" -eq 1 && "$runtime_path_output" == *'BLOCKED: Trusted Docker CLI missing or unsafe; do not use a PATH fallback'* ]] || \
@@ -239,12 +248,60 @@ set -e
 [[ ! -s "$runtime_path_log" ]] || fail 'PATH fake Docker binary was invoked by the trust-boundary check'
 printf 'PASS: PATH Docker stub cannot satisfy the pinned runtime binary check\n'
 
+# An exported git() function that lies about status must not admit the dirty fixture.
+function_git_log="$test_root/function-git-calls.log"
+set +e
+function_git_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_ATTACK_REPO="$git_attack_repo" FUNCTION_GIT_LOG="$function_git_log" \
+  /bin/bash --noprofile --norc -c '
+git() {
+  printf "%s\\n" "$*" >> "$FUNCTION_GIT_LOG"
+  case " $* " in
+    *" rev-parse "*) /usr/bin/git -C "$GIT_ATTACK_REPO" rev-parse --verify HEAD ;;
+    *" status "*) printf "" ;;
+    *) /usr/bin/git "$@" ;;
+  esac
+}
+export -f git
+exec /bin/bash --noprofile --norc "$1" "$2"
+' _ "$git_attack_preflight" "$git_attack_env" 2>&1)"
+function_git_status=$?
+set -e
+[[ "$function_git_status" -eq 1 && "$function_git_output" == *'BLOCKED: Ambient Git shell function is forbidden'* ]] || \
+  fail 'Exported git() that fabricates a clean status was not rejected'
+[[ ! -s "$function_git_log" ]] || fail 'Exported git() ran before preflight rejected it'
+printf 'PASS: exported git() cannot conceal a dirty synthetic checkout\n'
+
+# A PATH git shim that fabricates the same clean outputs must be rejected before execution.
+path_git_bin="$test_root/path-git-bin"
+path_git_log="$test_root/path-git-calls.log"
+mkdir -p "$path_git_bin"
+cat > "$path_git_bin/git" <<SH
+#!/bin/bash
+printf 'called\\n' >> '$path_git_log'
+case " \$* " in
+  *" rev-parse "*) exec /usr/bin/git -C '$git_attack_repo' rev-parse --verify HEAD ;;
+  *" status "*) exit 0 ;;
+  *) exec /usr/bin/git "\$@" ;;
+esac
+SH
+chmod 700 "$path_git_bin/git"
+set +e
+path_git_output="$(/usr/bin/env -i PATH="$path_git_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  /bin/bash --noprofile --norc "$git_attack_preflight" "$git_attack_env" 2>&1)"
+path_git_status=$?
+set -e
+[[ "$path_git_status" -eq 1 && "$path_git_output" == *'BLOCKED: Git must resolve to trusted /usr/bin/git on PATH'* ]] || \
+  fail 'PATH git shim was not rejected'
+[[ ! -s "$path_git_log" ]] || fail 'PATH git shim ran before preflight rejected it'
+printf 'PASS: PATH git shim cannot conceal a dirty synthetic checkout\n'
+
 # A user-owned executable cannot become a trusted Docker CLI just by using an absolute path.
 untrusted_path_log="$test_root/untrusted-docker-calls.log"
 set +e
-untrusted_path_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+untrusted_path_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$untrusted_path_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-  bash "$fixture_preflight_untrusted" "$valid_env" 2>&1)"
+  /bin/bash --noprofile --norc "$fixture_preflight_untrusted" "$valid_env" 2>&1)"
 untrusted_path_status=$?
 set -e
 [[ "$untrusted_path_status" -eq 1 && "$untrusted_path_output" == *'BLOCKED: Trusted Docker CLI must be root-owned with a valid permission mode'* ]] || \
@@ -255,9 +312,9 @@ printf 'PASS: user-owned absolute Docker executable rejected before invocation\n
 # An exported Bash function that fabricates an allowed rootless host must be rejected.
 function_docker_log="$test_root/function-docker-calls.log"
 set +e
-function_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+function_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   FUNCTION_DOCKER_LOG="$function_docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-  bash -c '
+  /bin/bash --noprofile --norc -c '
 docker() {
   printf "%s\\n" "$*" >> "$FUNCTION_DOCKER_LOG"
   case "$*" in
@@ -271,7 +328,7 @@ docker() {
   esac
 }
 export -f docker
-exec bash "$1" "$2"
+exec /bin/bash --noprofile --norc "$1" "$2"
 ' _ "$fixture_preflight" "$valid_env" 2>&1)"
 function_status=$?
 set -e
@@ -285,8 +342,8 @@ startup_override="$test_root/bash-env-override"
 : > "$startup_override"
 for startup_name in BASH_ENV ENV; do
   set +e
-  startup_output="$(/usr/bin/env -i PATH="$integration_bin" "$startup_name=$startup_override" \
-    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null bash "$fixture_preflight" "$valid_env" 2>&1)"
+  startup_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" "$startup_name=$startup_override" \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null /bin/bash --noprofile --norc "$fixture_preflight" "$valid_env" 2>&1)"
   startup_status=$?
   set -e
   [[ "$startup_status" -eq 1 && "$startup_output" == *'BLOCKED: Bash startup overrides are forbidden'* ]] || \
@@ -302,18 +359,43 @@ alias docker='printf "spoofed Docker output\\n"'
 unset BASH_ENV
 SH
 set +e
-alias_output="$(/usr/bin/env -i PATH="$integration_bin" BASH_ENV="$alias_override" \
-  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null bash "$fixture_preflight" "$valid_env" 2>&1)"
+alias_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" BASH_ENV="$alias_override" \
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null /bin/bash --noprofile --norc "$fixture_preflight" "$valid_env" 2>&1)"
 alias_status=$?
 set -e
 [[ "$alias_status" -eq 1 && "$alias_output" == *'BLOCKED: Ambient Docker alias is forbidden'* ]] || \
   fail 'Docker alias from a Bash startup file was not rejected'
 printf 'PASS: Docker alias from Bash startup file rejected before Docker\n'
 
+# The executable's sanitized shebang must prevent startup code from running at all,
+# including code that unsets BASH_ENV and exports a git() function to hide a dirty tree.
+startup_marker="$test_root/bash-env-started"
+startup_git_override="$test_root/bash-env-git-override"
+cat > "$startup_git_override" <<SH
+printf 'started\\n' > '$startup_marker'
+git() {
+  case " \$* " in
+    *" rev-parse "*) /usr/bin/git -C '$git_attack_repo' rev-parse --verify HEAD ;;
+    *" status "*) printf "" ;;
+    *) /usr/bin/git "\$@" ;;
+  esac
+}
+export -f git
+unset BASH_ENV
+SH
 set +e
-valid_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+startup_git_output="$(BASH_ENV="$startup_git_override" "$git_attack_preflight" "$git_attack_env" 2>&1)"
+startup_git_status=$?
+set -e
+[[ "$startup_git_status" -eq 1 && "$startup_git_output" == *'BLOCKED: Dirty source tree: fixed staging SHA cannot describe local changes'* ]] || \
+  fail 'Sanitized executable did not use trusted Git after hostile BASH_ENV input'
+[[ ! -e "$startup_marker" ]] || fail 'BASH_ENV startup code ran before preflight despite the clean shebang boundary'
+printf 'PASS: BASH_ENV startup code is cleared before Bash starts\n'
+
+set +e
+valid_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-  bash "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
+  /bin/bash --noprofile --norc "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
 valid_status=$?
 set -e
 [[ "$valid_status" -eq 0 && "$valid_output" == *'STAGING_COMPOSE_GUARD_PASS '* && "$valid_output" == *'PREFLIGHT_PASS '* ]] || \
@@ -328,9 +410,9 @@ printf 'PASS: preflight passes only after offline resolved-model guard (exit=%s)
 for override in 'BUILDX_BUILDER=remote' 'BUILDKIT_HOST=tcp://builder.invalid:1234'; do
   calls_before="$(wc -l < "$docker_log")"
   set +e
-  override_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  override_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
     "$override" STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-    bash "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
+    /bin/bash --noprofile --norc "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
   override_status=$?
   set -e
   [[ "$override_status" -eq 1 && "$override_output" == *'BLOCKED: Ambient staging, Docker, Buildx, BuildKit, Compose, database, or SSH-agent overrides are forbidden'* ]] || \
@@ -346,9 +428,9 @@ done
 remote_buildx_info="$test_root/buildx-remote.txt"
 printf 'Name: remote\nDriver: remote\n\nNodes:\nName: remote0\nEndpoint: tcp://builder.invalid:1234\nStatus: running\n' > "$remote_buildx_info"
 set +e
-remote_builder_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+remote_builder_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$remote_buildx_info" \
-  bash "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
+  /bin/bash --noprofile --norc "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
 remote_builder_status=$?
 set -e
 [[ "$remote_builder_status" -eq 1 && "$remote_builder_output" == *'BLOCKED: Selected Buildx builder must use the local docker driver'* ]] || \
@@ -362,9 +444,9 @@ printf 'PASS: preselected remote Buildx builder rejected without exposing creden
 wrong_socket_buildx_info="$test_root/buildx-wrong-socket.txt"
 printf 'Name: default\nDriver: docker\n\nNodes:\nName: default\nEndpoint: unix:///run/user/1001/docker.sock\nStatus: running\n' > "$wrong_socket_buildx_info"
 set +e
-wrong_socket_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+wrong_socket_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$wrong_socket_buildx_info" \
-  bash "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
+  /bin/bash --noprofile --norc "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
 wrong_socket_status=$?
 set -e
 [[ "$wrong_socket_status" -eq 1 && "$wrong_socket_output" == *'BLOCKED: Selected Buildx builder is not bound to this i5 rootless Docker socket'* ]] || \
@@ -375,9 +457,9 @@ printf 'PASS: local Buildx driver bound to a different user socket rejected (exi
 unsafe_model="$test_root/compose-unsafe.json"
 make_compose_model "$unsafe_model" unsafe-model
 set +e
-model_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+model_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$unsafe_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-  bash "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
+  /bin/bash --noprofile --norc "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
 model_status=$?
 set -e
 [[ "$model_status" -eq 1 && "$model_output" == *'BLOCKED: Staging Compose isolation guard rejected configuration'* ]] || \
@@ -416,9 +498,9 @@ write_fixture "$source_attack_env" "$synthetic_secret_a" "$synthetic_secret_b" "
 source_model="$test_root/compose-source-attack.json"
 make_compose_model "$source_model" valid
 set +e
-source_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+source_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$source_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-  bash "$fixture_preflight_synthetic" "$source_attack_env" 2>&1)"
+  /bin/bash --noprofile --norc "$fixture_preflight_synthetic" "$source_attack_env" 2>&1)"
 source_status=$?
 set -e
 [[ "$source_status" -eq 1 && "$source_output" == *'BLOCKED: Staging Compose isolation guard rejected configuration'* ]] || \
@@ -462,9 +544,9 @@ write_fixture "$source_env_attack" "$synthetic_secret_a" "$synthetic_secret_b" "
 source_env_model="$test_root/compose-source-env-attack.json"
 make_compose_model "$source_env_model" valid
 set +e
-source_env_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+source_env_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$source_env_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-  bash "$fixture_preflight_synthetic" "$source_env_attack" 2>&1)"
+  /bin/bash --noprofile --norc "$fixture_preflight_synthetic" "$source_env_attack" 2>&1)"
 source_env_status=$?
 set -e
 [[ "$source_env_status" -eq 1 && "$source_env_output" == *'BLOCKED: Staging Compose isolation guard rejected configuration'* ]] || \

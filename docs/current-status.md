@@ -27,6 +27,20 @@ daemon rootless security option, and Docker Compose v5.7.0 were verified on
 i5. No staging containers or volumes were present, and no staging HTTP/TLS
 service was available. Deployment and seed remain blocked pending admission.
 
+Dated correction (2026-11-09, i5 staging preflight P2): independent review of
+parent `61ccbf8173a28d9314ac763821b7cc7930267177` found that Git status could
+be spoofed through an exported `git()` function or a PATH shim, and that an
+in-script `BASH_ENV` check could not stop startup code that had already unset
+itself. The preflight now starts through an absolute `/usr/bin/env -S -i`
+shebang before Bash startup, pins and checks `/usr/bin/git`, checks the Git
+PATH resolution, and uses absolute identity executables. The runbook requires
+direct execution of the preflight file; explicit `bash scripts/staging/preflight.sh`
+invocation bypasses the sanitized shebang and is unsupported. Offline
+`test-preflight-secrets.sh` passed 21 checks, including synthetic dirty-tree
+Git-function, PATH-shim, and hostile `BASH_ENV` cases. This source-only repair
+does not establish staging admission or deployment; no Compose deployment or
+seed was run.
+
 ## 2026-11-04 stale admin-list follow-up
 
 An active-list response captured before a deletion could arrive after the
