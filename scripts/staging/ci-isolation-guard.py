@@ -253,7 +253,42 @@ class GuardError(RuntimeError):
 
 
 def _strip_yaml_comments(source: str) -> str:
-    return "\n".join(line.split("#", 1)[0] for line in source.splitlines())
+    """Remove YAML comments without truncating hashes inside scalar values."""
+    uncommented: list[str] = []
+    for line in source.splitlines():
+        quote: str | None = None
+        token_start = True
+        index = 0
+        while index < len(line):
+            character = line[index]
+            if quote == "'":
+                if character == "'":
+                    if index + 1 < len(line) and line[index + 1] == "'":
+                        index += 2
+                        continue
+                    quote = None
+            elif quote == '"':
+                if character == "\\":
+                    index += 2
+                    continue
+                if character == '"':
+                    quote = None
+            else:
+                if character == "#" and (index == 0 or line[index - 1].isspace()):
+                    line = line[:index]
+                    break
+                if character in "'\"" and token_start:
+                    quote = character
+                    token_start = False
+                    index += 1
+                    continue
+                if character in ":,[]{}" or (character == "-" and token_start):
+                    token_start = True
+                elif not character.isspace():
+                    token_start = False
+            index += 1
+        uncommented.append(line)
+    return "\n".join(uncommented)
 
 
 def _source_mapping_entries(

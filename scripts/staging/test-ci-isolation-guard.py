@@ -275,6 +275,56 @@ class CIIsolationGuardTests(unittest.TestCase):
             compose_model=model,
         )
 
+    def test_source_comments_preserve_hashes_in_plain_and_quoted_scalars(self):
+        self.assertEqual(
+            guard._strip_yaml_comments(
+                'source: ./nginx/nginx.conf#alt # trailing comment\n'
+                'target: "/etc/nginx/nginx.conf#alt" # trailing comment\n'
+                '  - "value # inside quotes" # trailing comment\n'
+            ),
+            'source: ./nginx/nginx.conf#alt \n'
+            'target: "/etc/nginx/nginx.conf#alt" \n'
+            '  - "value # inside quotes" ',
+        )
+        source = self.compose_source.replace(
+            "          create_host_path: false\n",
+            "          create_host_path: false # explicit safe value\n",
+            1,
+        )
+        guard._source_contract(source, SOURCE_SHA)
+
+    def test_rejects_hash_suffixes_in_bind_sources_and_targets(self):
+        for old, new in (
+            (
+                "        source: ./nginx/nginx.conf\n",
+                "        source: ./nginx/nginx.conf#/suffix\n",
+            ),
+            (
+                "        target: /etc/nginx/nginx.conf\n",
+                "        target: /etc/nginx/nginx.conf#alt\n",
+            ),
+        ):
+            with self.subTest(replacement=new.strip()):
+                source = self.compose_source.replace(old, new, 1)
+                self.assertNotEqual(source, self.compose_source)
+                self.assert_rejected(source=source, model=compose_model())
+
+    def test_rejects_hash_suffixes_inside_quoted_bind_scalars(self):
+        for old, new in (
+            (
+                "        source: ./nginx/nginx.conf\n",
+                '        source: "./nginx/nginx.conf#alt"\n',
+            ),
+            (
+                "        target: /etc/nginx/nginx.conf\n",
+                '        target: "/etc/nginx/nginx.conf#alt"\n',
+            ),
+        ):
+            with self.subTest(replacement=new.strip()):
+                source = self.compose_source.replace(old, new, 1)
+                self.assertNotEqual(source, self.compose_source)
+                self.assert_rejected(source=source, model=compose_model())
+
     def test_rejects_mutable_or_substituted_compose_images(self):
         for service, expected in guard.EXPECTED_SOURCE_IMAGES.items():
             tag_only = expected.split("@", 1)[0]
