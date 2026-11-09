@@ -1,5 +1,5 @@
 #!/usr/bin/env -S -i HOME=/home/hiroyuki PATH=/usr/bin:/bin /bin/bash --noprofile --norc
-# Read-only i5 admission check. Never sources the env file or changes Docker state.
+# Read-only i5 admission check. Never sources the env file or changes Docker daemon state.
 set -euo pipefail
 umask 077
 
@@ -35,6 +35,7 @@ if builtin alias docker >/dev/null 2>&1; then
   fail 'Ambient Docker alias is forbidden; invoke preflight from a clean Bash environment'
 fi
 root="$(builtin cd -- "$(/usr/bin/dirname -- "${BASH_SOURCE[0]}")/../.." && builtin pwd -P)"
+source_tree_guard="$root/scripts/staging/source-tree-guard.py"
 [[ $# -eq 1 ]] || fail 'Supply exact absolute path of the staging-only env file'
 file="$1"
 [[ "$file" = /* && -f "$file" && ! -L "$file" ]] || fail 'Staging env must be an existing regular absolute-path file (not symlink)'
@@ -66,6 +67,10 @@ actual_revision="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONA
   "$git_cli" -c core.fsmonitor=false -c core.untrackedCache=false -C "$root" rev-parse --verify HEAD 2>/dev/null)" || \
   fail 'Cannot resolve checked-out Git HEAD'
 [[ "$actual_revision" == "$rev" ]] || fail 'Checked-out Git HEAD differs from staging revision'
+[[ -f "$source_tree_guard" && ! -L "$source_tree_guard" ]] || fail 'Exact-source verifier is missing or unsafe'
+command -v python3 >/dev/null || fail 'Python 3 is required for the exact-source verifier'
+python3 -I -B "$source_tree_guard" --repo-root "$root" --source-sha "$rev" || \
+  fail 'Exact Git source verification rejected staging build inputs'
 tree_status="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONAL_LOCKS=0 \
   "$git_cli" -c core.fsmonitor=false -c core.untrackedCache=false -c status.showUntrackedFiles=all \
   -C "$root" status --porcelain=v1 --untracked-files=all --ignore-submodules=none 2>/dev/null)" || \
@@ -97,21 +102,87 @@ docker_mode_octal=$((8#$docker_mode))
 (( (docker_mode_octal & 07022) == 0 )) || fail 'Trusted Docker CLI must not be group/world-writable or have special permission bits'
 unset docker_owner docker_mode docker_mode_octal
 
+trusted_system_uid=0
+check_trusted_docker_directory() {
+  local path="$1" owner mode mode_octal
+  [[ -d "$path" && ! -L "$path" ]] || fail 'Docker CLI plugin search directory is missing or unsafe'
+  owner="$(/usr/bin/stat -c %u -- "$path" 2>/dev/null)" || fail 'Cannot verify Docker CLI plugin directory ownership'
+  mode="$(/usr/bin/stat -c %a -- "$path" 2>/dev/null)" || fail 'Cannot verify Docker CLI plugin directory permissions'
+  [[ "$owner" == "$trusted_system_uid" && "$mode" =~ ^[0-7]{3,4}$ ]] || \
+    fail 'Docker CLI plugin search directories must be root-owned with valid permissions'
+  mode_octal=$((8#$mode))
+  (( (mode_octal & 07022) == 0 )) || fail 'Docker CLI plugin search directories must not be writable by group/world or have special permission bits'
+}
+check_trusted_docker_plugin() {
+  local path="$1" owner mode
+  [[ -f "$path" && -x "$path" && ! -L "$path" ]] || fail 'Trusted Docker CLI plugin missing or unsafe'
+  owner="$(/usr/bin/stat -c %u -- "$path" 2>/dev/null)" || fail 'Cannot verify Docker CLI plugin ownership'
+  mode="$(/usr/bin/stat -c %a -- "$path" 2>/dev/null)" || fail 'Cannot verify Docker CLI plugin permissions'
+  [[ "$owner" == "$trusted_system_uid" && "$mode" == 755 ]] || \
+    fail 'Docker Compose and Buildx plugins must be root-owned regular 0755 executables'
+}
+
+# Docker resolves CLI plugins before validating Compose inputs. Only the package-owned
+# system directory is accepted; check every existing search directory and reject duplicate
+# plugin names so user/system path precedence cannot substitute another executable.
+for trusted_dir in /usr /usr/bin /usr/libexec /usr/libexec/docker /usr/libexec/docker/cli-plugins \
+  /usr/local /usr/local/lib /usr/local/lib/docker /usr/local/lib/docker/cli-plugins \
+  /usr/local/libexec /usr/local/libexec/docker /usr/local/libexec/docker/cli-plugins \
+  /usr/lib /usr/lib/docker /usr/lib/docker/cli-plugins; do
+  if [[ -e "$trusted_dir" || -L "$trusted_dir" ]]; then
+    check_trusted_docker_directory "$trusted_dir"
+  fi
+done
+readonly docker_plugin_dir='/usr/libexec/docker/cli-plugins'
+check_trusted_docker_plugin "$docker_plugin_dir/docker-compose"
+check_trusted_docker_plugin "$docker_plugin_dir/docker-buildx"
+for plugin_search_dir in /usr/local/lib/docker/cli-plugins /usr/local/libexec/docker/cli-plugins \
+  /usr/lib/docker/cli-plugins /usr/libexec/docker/cli-plugins; do
+  for plugin_name in docker-compose docker-buildx; do
+    plugin_candidate="$plugin_search_dir/$plugin_name"
+    if [[ "$plugin_search_dir/$plugin_name" != "$docker_plugin_dir/$plugin_name" && \
+        ( -e "$plugin_candidate" || -L "$plugin_candidate" ) ]]; then
+      fail 'Unapproved duplicate Docker Compose or Buildx plugin is present'
+    fi
+  done
+done
+
+# An empty private config removes user plugin directories, cliPluginsExtraDirs, context
+# selection, and Buildx builder overrides. The only context used below is created here for
+# this exact local rootless socket. No user config or environment endpoint is inherited.
+[[ -d /tmp && ! -L /tmp ]] || fail 'System temporary directory must be a real directory'
+tmp_owner="$(/usr/bin/stat -c %u -- /tmp 2>/dev/null)" || fail 'Cannot verify system temporary directory ownership'
+tmp_mode="$(/usr/bin/stat -c %a -- /tmp 2>/dev/null)" || fail 'Cannot verify system temporary directory permissions'
+[[ "$tmp_owner" == 0 && "$tmp_mode" == 1777 ]] || fail 'System temporary directory must be root-owned mode 1777'
+unset tmp_owner tmp_mode
+preflight_tmpdir="$(/usr/bin/mktemp -d /tmp/belib-staging-preflight.XXXXXX)" || \
+  fail 'Could not create a private Docker validation directory'
+/usr/bin/chmod 700 -- "$preflight_tmpdir" || fail 'Could not protect the Docker validation directory'
+[[ -d "$preflight_tmpdir" && ! -L "$preflight_tmpdir" && \
+   "$(/usr/bin/stat -c %u -- "$preflight_tmpdir")" == "$(/usr/bin/id -u)" && \
+   "$(/usr/bin/stat -c %a -- "$preflight_tmpdir")" == 700 ]] || \
+  fail 'Docker validation directory must be private and owned by the current user'
+docker_config="$preflight_tmpdir/docker-config"
+/usr/bin/mkdir -m 700 -- "$docker_config" || fail 'Could not isolate Docker client configuration'
+trap '/usr/bin/rm -rf -- "$preflight_tmpdir"' EXIT
+export DOCKER_CONFIG="$docker_config"
+
 # CLI access does not prove rootless: docker-group access to a rootful daemon is forbidden.
-# Ambient Docker overrides are forbidden above; verify the active context directly.
 rootless_socket="unix:///run/user/$(/usr/bin/id -u)/docker.sock"
-docker_context="$("$docker_cli" context show 2>/dev/null)" || fail 'Cannot resolve current Docker context'
-[[ -n "$docker_context" ]] || fail 'Cannot resolve current Docker context'
-docker_endpoint="$("$docker_cli" context inspect "$docker_context" --format '{{ (index .Endpoints "docker").Host }}' 2>/dev/null)" || fail 'Cannot resolve Docker context'
+docker_context='belib-i5-preflight-rootless'
+"$docker_cli" context create "$docker_context" --docker "host=$rootless_socket" >/dev/null 2>&1 || \
+  fail 'Cannot create the isolated rootless Docker context'
+docker_endpoint="$("$docker_cli" context inspect "$docker_context" --format '{{ (index .Endpoints "docker").Host }}' 2>/dev/null)" || \
+  fail 'Cannot resolve the isolated Docker context'
 [[ "$docker_endpoint" == "$rootless_socket" ]] || fail 'Docker endpoint is not this i5 user rootless socket; rootful/remote daemon forbidden'
-docker_identity="$("$docker_cli" info --format '{{.Name}}|{{json .SecurityOptions}}')" || fail 'Current nonroot user has no Docker access'
+docker_identity="$("$docker_cli" --context "$docker_context" info --format '{{.Name}}|{{json .SecurityOptions}}')" || fail 'Current nonroot user has no Docker access'
 [[ "$docker_identity" == "ubuntu-worker|"* ]] || fail 'Docker daemon is not on the expected i5 host'
 [[ "$docker_identity" == *'"name=rootless"'* ]] || fail 'Docker daemon does not report rootless security option'
-"$docker_cli" compose version >/dev/null || fail 'Docker Compose plugin unavailable'
+"$docker_cli" --context "$docker_context" compose version >/dev/null || fail 'Docker Compose plugin unavailable'
 
 # Inspect only; do not bootstrap, create, or switch builders. The docker driver uses
 # the Docker daemon's BuildKit, and its endpoint must resolve to the same rootless socket.
-if ! buildx_info="$("$docker_cli" buildx inspect 2>/dev/null)"; then
+if ! buildx_info="$("$docker_cli" --context "$docker_context" buildx inspect 2>/dev/null)"; then
   fail 'Cannot inspect the selected Buildx builder'
 fi
 if ! printf '%s\n' "$buildx_info" | awk '
@@ -151,17 +222,15 @@ fi
 # Compose config resolves the staging source and env file without contacting the daemon,
 # creating resources, or launching a build. Keep its resolved model and diagnostics private:
 # the model contains the synthetic staging credentials from the host-only env file.
-command -v python3 >/dev/null || fail 'Python 3 is required for the staging isolation guard'
-compose_tmpdir="$(mktemp -d)" || fail 'Could not create a private Compose validation directory'
-trap 'rm -rf -- "$compose_tmpdir"' EXIT
+compose_tmpdir="$preflight_tmpdir"
 compose_json="$compose_tmpdir/compose.json"
 compose_diagnostics="$compose_tmpdir/compose.stderr"
-if ! "$docker_cli" compose -p belib-isolated-i5 --env-file "$file" \
+if ! "$docker_cli" --context "$docker_context" compose -p belib-isolated-i5 --env-file "$file" \
   -f "$root/compose.staging.yaml" --profile migration config --format json \
   >"$compose_json" 2>"$compose_diagnostics"; then
   fail 'Staging Compose configuration invalid'
 fi
-python3 -B "$root/scripts/staging/ci-isolation-guard.py" \
+python3 -I -B "$root/scripts/staging/ci-isolation-guard.py" \
   --source-sha "$rev" \
   --compose-source "$root/compose.staging.yaml" \
   --compose-json "$compose_json" \

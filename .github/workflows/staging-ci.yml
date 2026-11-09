@@ -163,6 +163,9 @@ jobs:
         env:
           STAGING_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          python3 -I -B scripts/staging/source-tree-guard.py \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --source-sha "$STAGING_SOURCE_SHA"
           python3 -B scripts/staging/test-ci-isolation-guard.py
           mkdir -p "$RUNNER_TEMP/compose-home" "$RUNNER_TEMP/compose-docker-config"
           : > "$RUNNER_TEMP/staging-empty.env"

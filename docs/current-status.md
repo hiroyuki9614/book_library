@@ -41,6 +41,23 @@ Git-function, PATH-shim, and hostile `BASH_ENV` cases. This source-only repair
 does not establish staging admission or deployment; no Compose deployment or
 seed was run.
 
+Dated correction (2026-11-09, i5 same-claim P2 repair): independent review of
+exact candidate `88872ac5a2c0d02a9b2ac3330c3d81b23ed5bf92` found that ordinary
+Git status did not detect `assume-unchanged` / `skip-worktree` index flags or
+Git-ignored files that could still enter a frontend Docker context, and that
+Docker plugin/config lookup was not pinned before Compose and Buildx commands.
+The candidate now verifies the exact Git commit, complete index, tracked file
+bytes/modes, symlinks, and effective backend/frontend context contents against
+the committed `.dockerignore` rules; unsupported ignore syntax fails closed.
+Both the preflight and seed wrapper validate the root-owned Docker CLI plugin
+installation before Docker calls and use a private empty Docker config pinned
+to the local rootless endpoint. The seed repeats the source/context check
+before opening credentials. Adversarial offline tests cover both index flags,
+ignored frontend injection, fake user/config plugins, and ambient Docker config
+override. This is code/test work only: no live Docker build/up, migration,
+seed, deployment, or secret read was performed. The repair is not deployed and
+does not clear the existing staging admission gates.
+
 ## 2026-11-04 stale admin-list follow-up
 
 An active-list response captured before a deletion could arrive after the

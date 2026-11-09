@@ -8,6 +8,7 @@ fail() { printf 'BLOCKED: %s\n' "$*" >&2; exit 1; }
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source_preflight="$script_dir/preflight.sh"
+source_tree_guard="$script_dir/source-tree-guard.py"
 source_guard="$script_dir/ci-isolation-guard.py"
 source_backend_dockerfile="$script_dir/Dockerfile.backend.staging"
 source_frontend_dockerfile="$script_dir/Dockerfile.frontend.staging"
@@ -17,7 +18,7 @@ source_role_init="$script_dir/10-belib-staging-roles.sh"
 source_nginx_default="$script_dir/nginx-default.conf"
 source_nginx_conf="$(cd -- "$script_dir/../.." && pwd -P)/nginx/nginx.conf"
 [[ -f "$source_preflight" ]] || fail 'Cannot find staging preflight script'
-[[ -f "$source_guard" && -f "$source_backend_dockerfile" && -f "$source_frontend_dockerfile" && -f "$source_staging_ci" && -f "$source_compose" && -f "$source_role_init" ]] || fail 'Cannot find staging guard inputs'
+[[ -f "$source_tree_guard" && -f "$source_guard" && -f "$source_backend_dockerfile" && -f "$source_frontend_dockerfile" && -f "$source_staging_ci" && -f "$source_compose" && -f "$source_role_init" ]] || fail 'Cannot find staging guard inputs'
 
 test_root="$(mktemp -d "/tmp/belib-staging-preflight-test.XXXXXX")"
 trap 'rm -rf -- "$test_root"' EXIT
@@ -42,6 +43,7 @@ if source.count(needle) != 1:
 path.write_text(source.replace(needle, f"readonly docker_cli='{sys.argv[2]}'", 1), encoding="utf-8")
 PY
 cp -- "$source_guard" "$repo_root/scripts/staging/ci-isolation-guard.py"
+cp -- "$source_tree_guard" "$repo_root/scripts/staging/source-tree-guard.py"
 cp -- "$source_backend_dockerfile" "$repo_root/scripts/staging/Dockerfile.backend.staging"
 cp -- "$source_frontend_dockerfile" "$repo_root/scripts/staging/Dockerfile.frontend.staging"
 cp -- "$source_staging_ci" "$repo_root/.github/workflows/staging-ci.yml"
@@ -49,9 +51,17 @@ cp -- "$source_role_init" "$repo_root/scripts/staging/10-belib-staging-roles.sh"
 cp -- "$source_nginx_default" "$repo_root/scripts/staging/nginx-default.conf"
 cp -- "$source_compose" "$repo_root/compose.staging.yaml"
 cp -- "$source_nginx_conf" "$repo_root/nginx/nginx.conf"
+cp -- "$script_dir/../../backend/.dockerignore" "$repo_root/backend/.dockerignore"
+cp -- "$script_dir/../../frontend/.dockerignore" "$repo_root/frontend/.dockerignore"
+mkdir -p "$repo_root/frontend/public"
+printf 'synthetic tracked frontend source\n' > "$repo_root/frontend/public/tracked.js"
+printf 'synthetic backend source\n' > "$repo_root/backend/source.ts"
+cat > "$repo_root/.gitignore" <<'EOF'
+/frontend/public/preflight-git-ignored-injection.js
+EOF
 
 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" init -q
-git -C "$repo_root" add .github/workflows/staging-ci.yml compose.staging.yaml nginx/nginx.conf scripts/staging
+git -C "$repo_root" add .gitignore .github/workflows/staging-ci.yml compose.staging.yaml nginx/nginx.conf scripts/staging backend frontend
 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" \
   -c user.name='BeLib staging test' \
   -c user.email='belib-staging-test@example.invalid' \
@@ -138,13 +148,33 @@ chmod 700 "$integration_bin/df" "$integration_bin/ss"
 cat > "$integration_bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+config_home="${DOCKER_CONFIG:-${HOME:-/nonexistent}/.docker}"
+if [[ -n "${STUB_DOCKER_CONFIG_LOG:-}" ]]; then
+  printf '%s\n' "${DOCKER_CONFIG:-<unset>}" >> "$STUB_DOCKER_CONFIG_LOG"
+fi
+plugin_name=''
+case " $* " in
+  *" compose "*) plugin_name='docker-compose' ;;
+  *" buildx "*) plugin_name='docker-buildx' ;;
+esac
+if [[ -n "$plugin_name" ]]; then
+  plugin_path="$config_home/cli-plugins/$plugin_name"
+  if [[ ! -x "$plugin_path" && -f "$config_home/config.json" ]]; then
+    extra_dir="$(sed -n 's/.*"cliPluginsExtraDirs"[[:space:]]*:[[:space:]]*\["\([^"]*\)".*/\1/p' "$config_home/config.json" | head -n 1)"
+    [[ -z "$extra_dir" ]] || plugin_path="$extra_dir/$plugin_name"
+  fi
+  if [[ -x "$plugin_path" ]]; then
+    exec "$plugin_path" "$@"
+  fi
+fi
 printf '%s\n' "$*" >> "$STUB_DOCKER_LOG"
 case "$*" in
-  'context show') printf 'default\n' ;;
-  'context inspect '*) printf 'unix:///run/user/%s/docker.sock\n' "$(id -u)" ;;
-  'info --format '*) printf 'ubuntu-worker|["name=rootless"]\n' ;;
-  'compose version') printf 'Docker Compose version fixture\n' ;;
-  'buildx inspect') cat -- "$STUB_BUILDX_INFO" ;;
+  *'context create belib-i5-preflight-rootless --docker '*) ;;
+  *'context inspect belib-i5-preflight-rootless --format '*) printf 'unix:///run/user/%s/docker.sock\n' "$(id -u)" ;;
+  *'context inspect default --format '*) printf 'unix:///run/user/%s/docker.sock\n' "$(id -u)" ;;
+  *'info --format '*) printf 'ubuntu-worker|["name=rootless"]\n' ;;
+  *'compose version') printf 'Docker Compose version fixture\n' ;;
+  *'buildx inspect') cat -- "$STUB_BUILDX_INFO" ;;
   *' config --format json') cat -- "$STUB_COMPOSE_JSON" ;;
   *' up '*|*' build '*) printf 'Unexpected deployment command in preflight test\n' >&2; exit 90 ;;
   *) printf 'Unexpected Docker command in preflight test\n' >&2; exit 91 ;;
@@ -156,13 +186,22 @@ chmod 700 "$integration_bin/docker"
 # CLI and an untrusted path. The actual repository script stays pinned to /usr/bin/docker.
 fixture_preflight_synthetic="$repo_root/scripts/staging/preflight-synthetic.sh"
 fixture_preflight_untrusted="$repo_root/scripts/staging/preflight-untrusted.sh"
+fixture_preflight_writable_plugin="$repo_root/scripts/staging/preflight-writable-plugin.sh"
 cp -- "$source_preflight" "$fixture_preflight_synthetic"
 cp -- "$source_preflight" "$fixture_preflight_untrusted"
-python3 -B - "$fixture_preflight_synthetic" "$fixture_preflight_untrusted" "$integration_bin/docker" "$(id -u)" <<'PY'
+cp -- "$source_preflight" "$fixture_preflight_writable_plugin"
+plugin_fixture_dir="$test_root/writable-cli-plugins"
+mkdir -p "$plugin_fixture_dir"
+for plugin_name in docker-compose docker-buildx; do
+  printf '#!/usr/bin/env bash\nexit 95\n' > "$plugin_fixture_dir/$plugin_name"
+  chmod 775 "$plugin_fixture_dir/$plugin_name"
+done
+python3 -B - "$fixture_preflight_synthetic" "$fixture_preflight_untrusted" \
+  "$fixture_preflight_writable_plugin" "$integration_bin/docker" "$(id -u)" "$plugin_fixture_dir" <<'PY'
 import sys
 from pathlib import Path
 
-synthetic_path, untrusted_path, docker_cli, owner = sys.argv[1:]
+synthetic_path, untrusted_path, writable_plugin_path, docker_cli, owner, plugin_dir = sys.argv[1:]
 needle = "readonly docker_cli='/usr/bin/docker'"
 owner_check = '[[ "$docker_owner" == 0 && "$docker_mode" =~ ^[0-7]{3,4}$ ]]'
 for fixture, expected_owner in ((synthetic_path, owner), (untrusted_path, "0")):
@@ -175,8 +214,26 @@ for fixture, expected_owner in ((synthetic_path, owner), (untrusted_path, "0")):
     if source.count(owner_check) != 1:
         raise SystemExit(f"Expected one Docker ownership check in {path.name}")
     path.write_text(source.replace(owner_check, replacement, 1), encoding="utf-8")
+
+path = Path(writable_plugin_path)
+source = path.read_text(encoding="utf-8")
+if source.count(needle) != 1 or source.count(owner_check) != 1:
+    raise SystemExit("Expected one pinned Docker CLI path and ownership check in writable plugin fixture")
+source = source.replace(needle, f"readonly docker_cli='{docker_cli}'", 1)
+source = source.replace(owner_check, f'[[ "$docker_owner" == {owner} && "$docker_mode" =~ ^[0-7]{{3,4}}$ ]]', 1)
+if source.count("trusted_system_uid=0") != 1:
+    raise SystemExit("Expected one trusted system UID in writable plugin fixture")
+source = source.replace("trusted_system_uid=0", f"trusted_system_uid={owner}", 1)
+plugin_dir_declaration = "readonly docker_plugin_dir='/usr/libexec/docker/cli-plugins'"
+if source.count(plugin_dir_declaration) != 1:
+    raise SystemExit("Expected one trusted plugin directory in writable plugin fixture")
+search_dirs_start = source.index("for trusted_dir in /usr ")
+plugin_dir_start = source.index(plugin_dir_declaration, search_dirs_start)
+source = source[:search_dirs_start] + source[plugin_dir_start:]
+path.write_text(source.replace(plugin_dir_declaration, f"readonly docker_plugin_dir='{plugin_dir}'", 1), encoding="utf-8")
 PY
-git -C "$repo_root" add scripts/staging/preflight-synthetic.sh scripts/staging/preflight-untrusted.sh
+git -C "$repo_root" add scripts/staging/preflight-synthetic.sh scripts/staging/preflight-untrusted.sh \
+  scripts/staging/preflight-writable-plugin.sh
 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" \
   -c user.name='BeLib staging test' \
   -c user.email='belib-staging-test@example.invalid' \
@@ -184,6 +241,60 @@ GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" \
   -c commit.gpgSign=false \
   commit -qm 'Add offline Docker executable trust fixtures'
 revision="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" rev-parse HEAD)"
+
+assume_repo="$test_root/assume-unchanged-repo"
+cp -a -- "$repo_root" "$assume_repo"
+printf '\nmodified while assume-unchanged\n' >> "$assume_repo/frontend/public/tracked.js"
+git -C "$assume_repo" update-index --assume-unchanged -- frontend/public/tracked.js
+[[ -z "$(git -C "$assume_repo" status --porcelain=v1 --untracked-files=all)" ]] || \
+  fail 'Assume-unchanged fixture did not reproduce a falsely clean Git status'
+set +e
+assume_output="$(python3 -I -B "$assume_repo/scripts/staging/source-tree-guard.py" \
+  --repo-root "$assume_repo" --source-sha "$revision" 2>&1)"
+assume_status=$?
+set -e
+[[ "$assume_status" -eq 1 && "$assume_output" == *'BLOCKED: Git index contains assume-unchanged or skip-worktree flags'* ]] || \
+  fail 'Exact-source verification accepted an assume-unchanged tracked source'
+printf 'PASS: assume-unchanged tracked source rejected although Git status is clean\n'
+
+skip_repo="$test_root/skip-worktree-repo"
+cp -a -- "$repo_root" "$skip_repo"
+printf '\nmodified while skip-worktree\n' >> "$skip_repo/frontend/public/tracked.js"
+git -C "$skip_repo" update-index --skip-worktree -- frontend/public/tracked.js
+set +e
+skip_output="$(python3 -I -B "$skip_repo/scripts/staging/source-tree-guard.py" \
+  --repo-root "$skip_repo" --source-sha "$revision" 2>&1)"
+skip_status=$?
+set -e
+[[ "$skip_status" -eq 1 && "$skip_output" == *'BLOCKED: Git index contains assume-unchanged or skip-worktree flags'* ]] || \
+  fail 'Exact-source verification accepted a skip-worktree tracked source'
+printf 'PASS: skip-worktree tracked source rejected before Docker validation\n'
+
+injection_repo="$test_root/ignored-context-injection-repo"
+cp -a -- "$repo_root" "$injection_repo"
+printf 'synthetic injected build input\n' > "$injection_repo/frontend/public/preflight-git-ignored-injection.js"
+[[ -z "$(git -C "$injection_repo" status --porcelain=v1 --untracked-files=all)" ]] || \
+  fail 'Git-ignored context injection unexpectedly appears in status'
+set +e
+injection_output="$(python3 -I -B "$injection_repo/scripts/staging/source-tree-guard.py" \
+  --repo-root "$injection_repo" --source-sha "$revision" 2>&1)"
+injection_status=$?
+set -e
+[[ "$injection_status" -eq 1 && "$injection_output" == *'BLOCKED: An ignored-by-Git path would enter a Docker build context'* ]] || \
+  fail 'Exact-source verification accepted a Git-ignored frontend/public build input'
+printf 'PASS: Git-ignored frontend/public injection rejected as an effective Docker input\n'
+
+symlink_repo="$test_root/symlink-context-repo"
+cp -a -- "$repo_root" "$symlink_repo"
+ln -s -- /etc/passwd "$symlink_repo/frontend/public/preflight-symlink-injection"
+set +e
+symlink_output="$(python3 -I -B "$symlink_repo/scripts/staging/source-tree-guard.py" \
+  --repo-root "$symlink_repo" --source-sha "$revision" 2>&1)"
+symlink_status=$?
+set -e
+[[ "$symlink_status" -eq 1 && "$symlink_output" == *'BLOCKED: A Docker build context contains an unsupported filesystem entry'* ]] || \
+  fail 'Exact-source verification accepted a symlink in a Docker build context'
+printf 'PASS: symlink source injection rejected from the Docker build context\n'
 
 valid_buildx_info="$test_root/buildx-local.txt"
 printf 'Name: default\nDriver: docker\n\nNodes:\nName: default\nEndpoint: default\nStatus: running\n' > "$valid_buildx_info"
@@ -222,6 +333,78 @@ write_fixture "$valid_env" "$synthetic_secret_a" "$synthetic_secret_b" "$synthet
 valid_model="$test_root/compose-valid.json"
 make_compose_model "$valid_model" valid
 docker_log="$test_root/docker-calls.log"
+
+plugin_home="$test_root/plugin-home"
+plugin_extra_dir="$plugin_home/.docker/attacker-plugins"
+plugin_marker="$test_root/user-plugin-ran"
+mkdir -p "$plugin_home/.docker/cli-plugins" "$plugin_extra_dir"
+cat > "$plugin_home/.docker/config.json" <<EOF
+{"cliPluginsExtraDirs":["$plugin_extra_dir"]}
+EOF
+for plugin_name in docker-compose docker-buildx; do
+  cat > "$plugin_home/.docker/cli-plugins/$plugin_name" <<EOF
+#!/usr/bin/env bash
+printf 'home plugin ran\\n' >> '$plugin_marker'
+exit 93
+EOF
+  cat > "$plugin_extra_dir/$plugin_name" <<EOF
+#!/usr/bin/env bash
+printf 'config extra-dir plugin ran\\n' >> '$plugin_marker'
+exit 94
+EOF
+  chmod 700 "$plugin_home/.docker/cli-plugins/$plugin_name" "$plugin_extra_dir/$plugin_name"
+done
+
+# A writable CLI plugin is rejected before the Docker stub can see the staging env path.
+writable_plugin_log="$test_root/writable-plugin-docker-calls.log"
+set +e
+writable_plugin_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  STUB_DOCKER_LOG="$writable_plugin_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
+  /bin/bash --noprofile --norc "$fixture_preflight_writable_plugin" "$valid_env" 2>&1)"
+writable_plugin_status=$?
+set -e
+[[ "$writable_plugin_status" -eq 1 && "$writable_plugin_output" == *'BLOCKED: Docker Compose and Buildx plugins must be root-owned regular 0755 executables'* ]] || \
+  fail 'Preflight accepted a writable Docker CLI plugin fixture'
+[[ ! -s "$writable_plugin_log" ]] || fail 'Docker CLI ran before writable plugin rejection'
+printf 'PASS: writable Docker CLI plugin rejected before any Docker invocation\n'
+
+# User-home plugins and cliPluginsExtraDirs must be ignored under a fresh private config.
+plugin_attack_log="$test_root/plugin-attack-docker-calls.log"
+plugin_config_log="$test_root/plugin-attack-config-paths.log"
+set +e
+plugin_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" HOME="$plugin_home" \
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  STUB_DOCKER_LOG="$plugin_attack_log" STUB_DOCKER_CONFIG_LOG="$plugin_config_log" \
+  STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
+  /bin/bash --noprofile --norc "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
+plugin_status=$?
+set -e
+[[ "$plugin_status" -eq 0 && "$plugin_output" == *'PREFLIGHT_PASS'* ]] || \
+  fail 'Preflight did not complete with a fake user-home Docker plugin present'
+[[ ! -e "$plugin_marker" ]] || fail 'User-home or cliPluginsExtraDirs plugin ran during preflight'
+[[ -s "$plugin_config_log" ]] || fail 'Docker calls did not receive an isolated config directory'
+if grep -F "$plugin_home/.docker" "$plugin_config_log" >/dev/null || grep -Fx '<unset>' "$plugin_config_log" >/dev/null; then
+  fail 'Docker calls inherited the user home config or an unset Docker config path'
+fi
+for synthetic_secret in "$synthetic_secret_a" "$synthetic_secret_b" "$synthetic_secret_c" "$synthetic_secret_d"; do
+  [[ "$plugin_output" != *"$synthetic_secret"* ]] || fail 'User-plugin rejection test exposed a synthetic credential'
+done
+printf 'PASS: user-home fake plugins and cliPluginsExtraDirs are bypassed by the private Docker config\n'
+
+# An explicit config/plugin path override is rejected before any Docker CLI invocation.
+override_log="$test_root/docker-config-override-calls.log"
+set +e
+override_output="$(/usr/bin/env -i PATH="$integration_bin:/usr/bin:/bin" HOME="$plugin_home" \
+  DOCKER_CONFIG="$plugin_home/.docker" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  STUB_DOCKER_LOG="$override_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
+  /bin/bash --noprofile --norc "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
+override_status=$?
+set -e
+[[ "$override_status" -eq 1 && "$override_output" == *'BLOCKED: Ambient staging, Docker, Buildx, BuildKit, Compose, database, or SSH-agent overrides are forbidden'* ]] || \
+  fail 'User-provided DOCKER_CONFIG plugin path was not rejected'
+[[ ! -s "$override_log" && ! -e "$plugin_marker" ]] || \
+  fail 'Docker or a config-path plugin ran before DOCKER_CONFIG override rejection'
+printf 'PASS: explicit DOCKER_CONFIG plugin-path takeover rejected before Docker\n'
 
 # Use a dirty synthetic checkout to prove Git shims cannot fabricate a clean status.
 git_attack_repo="$test_root/git-attack-repo"
@@ -387,7 +570,7 @@ set +e
 startup_git_output="$(BASH_ENV="$startup_git_override" "$git_attack_preflight" "$git_attack_env" 2>&1)"
 startup_git_status=$?
 set -e
-[[ "$startup_git_status" -eq 1 && "$startup_git_output" == *'BLOCKED: Dirty source tree: fixed staging SHA cannot describe local changes'* ]] || \
+[[ "$startup_git_status" -eq 1 && "$startup_git_output" == *'BLOCKED: Exact Git source verification rejected staging build inputs'* ]] || \
   fail 'Sanitized executable did not use trusted Git after hostile BASH_ENV input'
 [[ ! -e "$startup_marker" ]] || fail 'BASH_ENV startup code ran before preflight despite the clean shebang boundary'
 printf 'PASS: BASH_ENV startup code is cleared before Bash starts\n'

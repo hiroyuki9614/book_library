@@ -824,6 +824,8 @@ class CIIsolationGuardTests(unittest.TestCase):
         self.assertRegex(workflow, r"(?m)^\s*pull_request:\s*$")
         self.assertNotIn("pull_request_target", workflow)
         self.assertIn("contents: read", workflow)
+        self.assertIn("scripts/staging/source-tree-guard.py", workflow)
+        self.assertIn('--source-sha "$STAGING_SOURCE_SHA"', workflow)
         self.assertEqual(
             re.findall(r"(?m)^\s*image:\s*(\S+)\s*$", workflow),
             [guard.CI_POSTGRES_IMAGE],

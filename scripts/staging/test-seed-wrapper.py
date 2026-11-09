@@ -164,6 +164,10 @@ class SeedWrapperDockerGuardTests(unittest.TestCase):
         for variable in (
             "DOCKER_HOST",
             "DOCKER_CONTEXT",
+            "DOCKER_CONFIG",
+            "BUILDX_BUILDER",
+            "BUILDX_CONFIG",
+            "BUILDKIT_HOST",
             "COMPOSE_FILE",
             "COMPOSE_PROJECT_NAME",
             "BELIB_STAGE_PORT",
@@ -181,6 +185,9 @@ class SeedWrapperDockerGuardTests(unittest.TestCase):
             "PRODUCTION_DATABASE_URL",
             "PROD_API_URL",
             "VITE_PUBLIC_DEMO_API_URL",
+            "SSH_AUTH_SOCK",
+            "SSH_AGENT_PID",
+            "GIT_SSH_COMMAND",
         ):
             with self.subTest(variable=variable):
                 with self.assertRaises(seed_wrapper.SeedWrapperError):
@@ -227,7 +234,9 @@ class SeedWrapperDockerGuardTests(unittest.TestCase):
 
     def test_daemon_identity_probe_is_explicit_timed_and_nonsecret(self) -> None:
         endpoint = Path(f"/run/user/{os.getuid()}/docker.sock")
-        environment = seed_wrapper.docker_environment(Path("/home/hiroyuki"))
+        config = self.root / "docker-config"
+        config.mkdir(mode=0o700)
+        environment = seed_wrapper.docker_environment(Path("/home/hiroyuki"), config)
         observed = {}
 
         def runner(command, **kwargs):
@@ -255,12 +264,17 @@ class SeedWrapperDockerGuardTests(unittest.TestCase):
         self.assertEqual(observed["kwargs"]["timeout"], seed_wrapper.DOCKER_INFO_TIMEOUT_SECONDS)
         self.assertEqual(observed["kwargs"]["stdin"], subprocess.DEVNULL)
         self.assertEqual(observed["kwargs"]["stderr"], subprocess.DEVNULL)
-        self.assertEqual(set(environment), {"PATH", "HOME", "USER", "LOGNAME"})
-        self.assertFalse(any(name.startswith(("DOCKER_", "COMPOSE_", "BELIB_STAGE_")) for name in environment))
+        self.assertEqual(set(environment), {"PATH", "HOME", "USER", "LOGNAME", "DOCKER_CONFIG"})
+        self.assertEqual(environment["DOCKER_CONFIG"], str(config))
+        self.assertFalse(any(name.startswith(("COMPOSE_", "BELIB_STAGE_")) for name in environment))
+        self.assertNotIn("DOCKER_HOST", environment)
+        self.assertNotIn("DOCKER_CONTEXT", environment)
 
     def test_daemon_identity_probe_fails_closed_for_rootful_mismatch_or_timeout(self) -> None:
         endpoint = Path(f"/run/user/{os.getuid()}/docker.sock")
-        environment = seed_wrapper.docker_environment(Path("/home/hiroyuki"))
+        config = self.root / "docker-config"
+        config.mkdir(mode=0o700)
+        environment = seed_wrapper.docker_environment(Path("/home/hiroyuki"), config)
         for output in (
             'ubuntu-worker|["name=seccomp,profile=builtin"]\n',
             'remote-host|["name=rootless"]\n',
@@ -285,6 +299,91 @@ class SeedWrapperDockerGuardTests(unittest.TestCase):
 
         with self.assertRaisesRegex(seed_wrapper.SeedWrapperError, "bounded identity check"):
             seed_wrapper.verify_rootless_docker("/usr/bin/docker", endpoint, environment, runner=spawn_error)
+
+    def test_user_home_plugin_and_config_plugin_takeovers_are_not_selected(self) -> None:
+        home_plugin_dir = self.root / ".docker" / "cli-plugins"
+        home_plugin_dir.mkdir(parents=True)
+        (home_plugin_dir / "docker-compose").write_text("fake user plugin", encoding="ascii")
+        config = self.root / "isolated-docker-config"
+        config.mkdir(mode=0o700)
+
+        environment = seed_wrapper.docker_environment(self.root, config)
+        self.assertEqual(environment["DOCKER_CONFIG"], str(config))
+        self.assertNotEqual(Path(environment["DOCKER_CONFIG"]), self.root / ".docker")
+        seed_wrapper.verify_private_docker_config(config, os.getuid())
+
+        config_plugins = config / "cli-plugins"
+        config_plugins.mkdir()
+        (config_plugins / "docker-compose").write_text("fake config plugin", encoding="ascii")
+        with self.assertRaisesRegex(seed_wrapper.SeedWrapperError, "must be empty"):
+            seed_wrapper.verify_private_docker_config(config, os.getuid())
+
+    def test_trusted_plugins_are_root_owned_and_duplicate_paths_are_rejected(self) -> None:
+        system = self.root / "system"
+        usr = system / "usr"
+        bin_dir = usr / "bin"
+        exec_dir = usr / "libexec" / "docker"
+        plugin_dir = exec_dir / "cli-plugins"
+        alternate_dir = usr / "lib" / "docker" / "cli-plugins"
+        plugin_dir.mkdir(parents=True)
+        alternate_dir.mkdir(parents=True)
+        docker_cli = bin_dir / "docker"
+        docker_cli.parent.mkdir(parents=True)
+        docker_cli.write_text("system docker", encoding="ascii")
+        for plugin_name in ("docker-compose", "docker-buildx"):
+            plugin = plugin_dir / plugin_name
+            plugin.write_text("system plugin", encoding="ascii")
+            plugin.chmod(0o755)
+
+        real_lstat = os.lstat
+
+        def root_owned_lstat(path):
+            metadata = real_lstat(path)
+            mode = metadata.st_mode
+            if stat.S_ISDIR(mode):
+                mode = stat.S_IFDIR | 0o755
+            elif stat.S_ISREG(mode):
+                mode = stat.S_IFREG | 0o755
+            return SimpleNamespace(st_mode=mode, st_uid=0)
+
+        parents = (
+            usr,
+            bin_dir,
+            usr / "local",
+            usr / "local" / "lib",
+            usr / "local" / "lib" / "docker",
+            usr / "local" / "lib" / "docker" / "cli-plugins",
+            usr / "local" / "libexec",
+            usr / "local" / "libexec" / "docker",
+            usr / "local" / "libexec" / "docker" / "cli-plugins",
+            usr / "lib",
+            usr / "lib" / "docker",
+            alternate_dir,
+            usr / "libexec",
+            exec_dir,
+            plugin_dir,
+        )
+        search_dirs = (usr / "local" / "lib" / "docker" / "cli-plugins",
+                       usr / "local" / "libexec" / "docker" / "cli-plugins",
+                       alternate_dir,
+                       plugin_dir)
+        with (
+            patch.object(seed_wrapper, "DOCKER_CLI", str(docker_cli)),
+            patch.object(seed_wrapper, "DOCKER_PLUGIN_DIR", plugin_dir),
+            patch.object(seed_wrapper, "DOCKER_PLUGIN_PARENTS", parents),
+            patch.object(seed_wrapper, "DOCKER_PLUGIN_SEARCH_DIRS", search_dirs),
+        ):
+            seed_wrapper.verify_trusted_docker_plugins(lstat=root_owned_lstat)
+
+            duplicate = alternate_dir / "docker-compose"
+            duplicate.write_text("shadow plugin", encoding="ascii")
+            with self.assertRaisesRegex(seed_wrapper.SeedWrapperError, "alternate Docker CLI plugin"):
+                seed_wrapper.verify_trusted_docker_plugins(lstat=root_owned_lstat)
+
+            duplicate.unlink()
+            fake_lstat = lambda path: SimpleNamespace(st_mode=stat.S_IFREG | 0o777, st_uid=0) if path == plugin_dir / "docker-buildx" else root_owned_lstat(path)
+            with self.assertRaisesRegex(seed_wrapper.SeedWrapperError, "0755"):
+                seed_wrapper.verify_trusted_docker_plugins(lstat=fake_lstat)
 
     def test_main_does_not_open_credentials_if_docker_guard_fails(self) -> None:
         account = SimpleNamespace(pw_uid=os.getuid(), pw_dir=str(self.root))
@@ -524,9 +623,71 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
             )
         self.assertIsNone(process.returncode)
 
+    def test_exact_source_context_uses_isolated_python_and_fails_closed(self) -> None:
+        observed = {}
+
+        def runner(command, **kwargs):
+            observed["command"] = command
+            observed["kwargs"] = kwargs
+            return subprocess.CompletedProcess(command, 0)
+
+        seed_wrapper.verify_exact_source_context(self.root, TEST_SOURCE_SHA, runner=runner)
+        self.assertEqual(observed["command"][1:3], ["-I", "-B"])
+        self.assertEqual(observed["command"][-2:], ["--source-sha", TEST_SOURCE_SHA])
+        self.assertEqual(observed["kwargs"]["cwd"], self.root)
+        self.assertEqual(observed["kwargs"]["stdin"], subprocess.DEVNULL)
+        self.assertEqual(observed["kwargs"]["stdout"], subprocess.DEVNULL)
+        self.assertEqual(observed["kwargs"]["stderr"], subprocess.DEVNULL)
+        self.assertEqual(observed["kwargs"]["timeout"], seed_wrapper.SOURCE_CHECK_TIMEOUT_SECONDS)
+        self.assertNotIn("PYTHONPATH", observed["kwargs"]["env"])
+        self.assertNotIn("GIT_DIR", observed["kwargs"]["env"])
+
+        with self.assertRaisesRegex(seed_wrapper.SeedWrapperError, "build inputs"):
+            seed_wrapper.verify_exact_source_context(
+                self.root,
+                TEST_SOURCE_SHA,
+                runner=lambda command, **kwargs: subprocess.CompletedProcess(command, 1),
+            )
+
+    def test_git_admission_uses_only_root_owned_system_git(self) -> None:
+        git_path = self.root / "git"
+        git_path.write_text("trusted system Git fixture", encoding="ascii")
+        git_path.chmod(0o755)
+        self.assertEqual(seed_wrapper.git_command(self.root, "status")[0], "/usr/bin/git")
+
+        def root_owned_lstat(path):
+            if str(path) == str(git_path):
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0)
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+
+        with patch.object(seed_wrapper, "GIT_CLI", str(git_path)):
+            seed_wrapper.verify_trusted_git_cli(lstat=root_owned_lstat)
+
+            def writable_lstat(path):
+                if str(path) == str(git_path):
+                    return SimpleNamespace(st_mode=stat.S_IFREG | 0o775, st_uid=0)
+                return root_owned_lstat(path)
+
+            with self.assertRaisesRegex(seed_wrapper.SeedWrapperError, "non-writable executable"):
+                seed_wrapper.verify_trusted_git_cli(lstat=writable_lstat)
+
     def test_rejects_dirty_worktree_after_reading_only_one_status_byte(self) -> None:
         process, popen, selector_factory = self.status_probe(b"M" * 100_000)
-        with self.assertRaisesRegex(seed_wrapper.SeedWrapperError, "worktree must be clean"):
+        with patch.object(seed_wrapper, "verify_exact_source_context"):
+            with self.assertRaisesRegex(seed_wrapper.SeedWrapperError, "worktree must be clean"):
+                seed_wrapper.verify_reviewed_source(
+                    self.root,
+                    TEST_SOURCE_SHA,
+                    git_runner=self.git_runner(),
+                    popen=popen,
+                    selector_factory=selector_factory,
+                )
+        self.assertEqual(process.reads, [1])
+        self.assertTrue(process.killed)
+
+    def test_accepts_matching_sha_and_clean_worktree(self) -> None:
+        process, popen, selector_factory = self.status_probe()
+        with patch.object(seed_wrapper, "verify_exact_source_context"):
             seed_wrapper.verify_reviewed_source(
                 self.root,
                 TEST_SOURCE_SHA,
@@ -534,18 +695,6 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
                 popen=popen,
                 selector_factory=selector_factory,
             )
-        self.assertEqual(process.reads, [1])
-        self.assertTrue(process.killed)
-
-    def test_accepts_matching_sha_and_clean_worktree(self) -> None:
-        process, popen, selector_factory = self.status_probe()
-        seed_wrapper.verify_reviewed_source(
-            self.root,
-            TEST_SOURCE_SHA,
-            git_runner=self.git_runner(),
-            popen=popen,
-            selector_factory=selector_factory,
-        )
         self.assertEqual(process.returncode, 0)
         self.assertEqual(process.reads, [1])
 
@@ -622,25 +771,39 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
     def test_main_opens_credentials_only_after_valid_admission(self) -> None:
         account = SimpleNamespace(pw_uid=os.getuid(), pw_dir=str(self.root))
         endpoint = Path(f"/run/user/{os.getuid()}/docker.sock")
-        environment = seed_wrapper.docker_environment(self.root)
         original_open_credentials = seed_wrapper.open_private_regular_file
+
+        def docker_runtime(uid, home, environment, docker_config):
+            return "/usr/bin/docker", endpoint, seed_wrapper.docker_environment(home, docker_config)
+
         with (
             patch.object(seed_wrapper.pwd, "getpwnam", return_value=account),
             patch.object(seed_wrapper.socket, "gethostname", return_value="ubuntu-worker"),
             patch.object(seed_wrapper, "read_source_sha", return_value=TEST_SOURCE_SHA),
+            patch.object(seed_wrapper, "verify_exact_source_context"),
             patch.object(seed_wrapper, "assert_clean_source_worktree"),
-            patch.object(seed_wrapper, "validate_docker_runtime", return_value=("/usr/bin/docker", endpoint, environment)),
+            patch.object(seed_wrapper, "validate_docker_runtime", side_effect=docker_runtime) as docker_guard,
+            patch.object(seed_wrapper, "verify_trusted_docker_plugins"),
             patch.object(seed_wrapper, "open_private_regular_file", wraps=original_open_credentials) as open_credentials,
             patch.object(seed_wrapper.os, "dup2") as duplicate_stdin,
-            patch.object(seed_wrapper.os, "execve") as exec_command,
+            patch.object(
+                seed_wrapper.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as run_command,
             patch.dict(os.environ, {}, clear=True),
         ):
             result = seed_wrapper.main()
 
-        self.assertEqual(result, 1)
+        self.assertEqual(result, 0)
         open_credentials.assert_called_once_with(self.credentials, os.getuid())
         duplicate_stdin.assert_called_once()
-        command = exec_command.call_args.args[1]
+        command = run_command.call_args.args[0]
+        self.assertEqual(command[0], "/usr/bin/docker")
+        self.assertEqual(
+            run_command.call_args.kwargs["env"]["DOCKER_CONFIG"],
+            str(docker_guard.call_args.args[3]),
+        )
         env_file_argument = command[command.index("--env-file") + 1]
         self.assertRegex(env_file_argument, rf"^/proc/{os.getpid()}/fd/[0-9]+$")
 

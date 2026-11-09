@@ -8,22 +8,48 @@ import json
 import os
 import pwd
 import selectors
-import shutil
 import socket
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Mapping
 
 
 EXPECTED_HOSTNAME = "ubuntu-worker"
 COMPOSE_PROJECT = "belib-isolated-i5"
+GIT_CLI = "/usr/bin/git"
 DOCKER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 DOCKER_INFO_TIMEOUT_SECONDS = 10
 DOCKER_INFO_MAX_OUTPUT_BYTES = 4096
 SOURCE_CHECK_TIMEOUT_SECONDS = 5
 ENV_FILE_MAX_BYTES = 1024
+DOCKER_CLI = "/usr/bin/docker"
+DOCKER_PLUGIN_DIR = Path("/usr/libexec/docker/cli-plugins")
+DOCKER_PLUGIN_SEARCH_DIRS = (
+    Path("/usr/local/lib/docker/cli-plugins"),
+    Path("/usr/local/libexec/docker/cli-plugins"),
+    Path("/usr/lib/docker/cli-plugins"),
+    DOCKER_PLUGIN_DIR,
+)
+DOCKER_PLUGIN_PARENTS = (
+    Path("/usr"),
+    Path("/usr/bin"),
+    Path("/usr/local"),
+    Path("/usr/local/lib"),
+    Path("/usr/local/lib/docker"),
+    Path("/usr/local/lib/docker/cli-plugins"),
+    Path("/usr/local/libexec"),
+    Path("/usr/local/libexec/docker"),
+    Path("/usr/local/libexec/docker/cli-plugins"),
+    Path("/usr/lib"),
+    Path("/usr/lib/docker"),
+    Path("/usr/lib/docker/cli-plugins"),
+    Path("/usr/libexec"),
+    Path("/usr/libexec/docker"),
+    DOCKER_PLUGIN_DIR,
+)
 STAGING_ENV_KEYS = frozenset(
     {
         "BELIB_STAGE_DB_BOOTSTRAP_PASSWORD",
@@ -271,12 +297,37 @@ def git_environment() -> dict[str, str]:
     }
 
 
+def verify_trusted_git_cli(*, lstat=None) -> None:
+    """Pin Git admission to the root-owned system binary and its protected parents."""
+    inspect = os.lstat if lstat is None else lstat
+    for directory in (Path("/usr"), Path("/usr/bin")):
+        try:
+            metadata = inspect(directory)
+        except OSError as error:
+            raise SeedWrapperError("Trusted Git directories are unavailable") from error
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != 0
+            or stat.S_IMODE(metadata.st_mode) & 0o7022
+        ):
+            raise SeedWrapperError("Trusted Git directories must be root-owned and non-writable")
+
+    try:
+        metadata = inspect(GIT_CLI)
+    except OSError as error:
+        raise SeedWrapperError("Trusted /usr/bin/git is unavailable") from error
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or stat.S_IMODE(metadata.st_mode) & 0o7022
+        or not stat.S_IMODE(metadata.st_mode) & 0o111
+    ):
+        raise SeedWrapperError("Trusted /usr/bin/git must be a root-owned non-writable executable")
+
+
 def git_command(repo_root: Path, *arguments: str) -> list[str]:
-    git_cli = shutil.which("git", path=DOCKER_PATH)
-    if git_cli is None or not os.path.isabs(git_cli):
-        raise SeedWrapperError("Git is unavailable on the fixed system path")
     return [
-        git_cli,
+        GIT_CLI,
         "-c",
         "core.fsmonitor=false",
         "-c",
@@ -291,6 +342,7 @@ def git_command(repo_root: Path, *arguments: str) -> list[str]:
 
 def read_source_sha(repo_root: Path, *, runner=None) -> str:
     """Ask Git for the commit currently checked out in the source directory."""
+    verify_trusted_git_cli()
     run = subprocess.run if runner is None else runner
     try:
         result = run(
@@ -316,8 +368,48 @@ def read_source_sha(repo_root: Path, *, runner=None) -> str:
     return source_sha
 
 
+def verify_exact_source_context(repo_root: Path, source_sha: str, *, runner=None) -> None:
+    """Reject source bytes or effective Docker inputs outside the reviewed Git tree."""
+    run = subprocess.run if runner is None else runner
+    guard = Path(__file__).with_name("source-tree-guard.py")
+    environment = {
+        "HOME": "/nonexistent",
+        "PATH": "/usr/bin:/bin",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "LC_ALL": "C",
+    }
+    try:
+        result = run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                str(guard),
+                "--repo-root",
+                str(repo_root),
+                "--source-sha",
+                source_sha,
+            ],
+            cwd=repo_root,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=SOURCE_CHECK_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SeedWrapperError("Could not verify exact staging build inputs") from error
+    if result.returncode != 0:
+        raise SeedWrapperError("Staging source or Docker build inputs differ from the reviewed Git tree")
+
+
 def assert_clean_source_worktree(repo_root: Path, *, popen=None, selector_factory=None) -> None:
     """Reject tracked and untracked changes while reading at most one status byte."""
+    verify_trusted_git_cli()
     spawn = subprocess.Popen if popen is None else popen
     make_selector = selectors.DefaultSelector if selector_factory is None else selector_factory
     process = None
@@ -382,6 +474,7 @@ def verify_reviewed_source(
     source_sha = read_source_sha(repo_root, runner=git_runner)
     if source_sha != reviewed_sha:
         raise SeedWrapperError("Checked-out Git HEAD differs from the staging env revision")
+    verify_exact_source_context(repo_root, reviewed_sha)
     assert_clean_source_worktree(repo_root, popen=popen, selector_factory=selector_factory)
 
 
@@ -429,6 +522,8 @@ def reject_ambient_overrides(environment: Mapping[str, str]) -> None:
     forbidden_prefixes = (
         "DOCKER_",
         "COMPOSE_",
+        "BUILDX_",
+        "BUILDKIT_",
         "BELIB_STAGE_",
         "POSTGRES_",
         "R2_",
@@ -437,6 +532,9 @@ def reject_ambient_overrides(environment: Mapping[str, str]) -> None:
         "PROD_",
         "PRODUCTION_",
         "VITE_PUBLIC_DEMO_",
+        "SSH_AUTH_SOCK",
+        "SSH_AGENT_PID",
+        "GIT_SSH_COMMAND",
     )
     forbidden_names = {"DATABASE_URL", "DIRECT_URL", "BETTER_AUTH_SECRET"}
     if any(name.upper().startswith(forbidden_prefixes) or name.upper() in forbidden_names for name in environment):
@@ -484,21 +582,122 @@ def validate_rootless_socket(path: Path, expected_uid: int) -> None:
             os.close(directory_fd)
 
 
-def docker_environment(home: Path) -> dict[str, str]:
+def _trusted_system_directory(path: Path, *, lstat=None) -> bool:
+    inspect = os.lstat if lstat is None else lstat
+    try:
+        metadata = inspect(path)
+    except OSError as error:
+        if error.errno == 2:
+            return False
+        raise SeedWrapperError("Could not verify Docker CLI plugin search directories") from error
+    mode = metadata.st_mode
+    if (
+        not stat.S_ISDIR(mode)
+        or metadata.st_uid != 0
+        or stat.S_IMODE(mode) & 0o7022
+    ):
+        raise SeedWrapperError("Docker CLI plugin search directories must be root-owned and non-writable")
+    return True
+
+
+def verify_trusted_docker_plugins(*, lstat=None) -> None:
+    """Require the package-owned CLI and plugins before invoking Docker Compose."""
+    inspect = os.lstat if lstat is None else lstat
+    for directory in DOCKER_PLUGIN_PARENTS:
+        _trusted_system_directory(directory, lstat=inspect)
+
+    try:
+        docker_metadata = inspect(DOCKER_CLI)
+    except OSError as error:
+        raise SeedWrapperError("Trusted /usr/bin/docker is unavailable") from error
+    if (
+        not stat.S_ISREG(docker_metadata.st_mode)
+        or docker_metadata.st_uid != 0
+        or stat.S_IMODE(docker_metadata.st_mode) & 0o7022
+        or not stat.S_IMODE(docker_metadata.st_mode) & 0o111
+    ):
+        raise SeedWrapperError("Trusted /usr/bin/docker must be a root-owned non-writable executable")
+
+    for plugin_name in ("docker-compose", "docker-buildx"):
+        trusted_plugin = DOCKER_PLUGIN_DIR / plugin_name
+        try:
+            metadata = inspect(trusted_plugin)
+        except OSError as error:
+            raise SeedWrapperError("Trusted Docker Compose and Buildx plugins are required") from error
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o755
+        ):
+            raise SeedWrapperError("Docker Compose and Buildx plugins must be root-owned regular 0755 executables")
+
+        for search_directory in DOCKER_PLUGIN_SEARCH_DIRS:
+            if search_directory == DOCKER_PLUGIN_DIR:
+                continue
+            candidate = search_directory / plugin_name
+            try:
+                inspect(candidate)
+            except OSError as error:
+                if error.errno == 2:
+                    continue
+                raise SeedWrapperError("Could not verify alternate Docker plugin paths") from error
+            raise SeedWrapperError("An unapproved alternate Docker CLI plugin is present")
+
+
+def verify_private_docker_config(path: Path, expected_uid: int) -> None:
+    """Require an empty, private Docker config directory before every CLI invocation."""
+    try:
+        metadata = os.lstat(path)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != expected_uid
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise SeedWrapperError("The isolated Docker config directory must be empty and mode 0700")
+        with os.scandir(path) as entries:
+            if next(entries, None) is not None:
+                raise SeedWrapperError("The isolated Docker config directory must be empty and mode 0700")
+    except SeedWrapperError:
+        raise
+    except OSError as error:
+        raise SeedWrapperError("The isolated Docker config directory is unavailable") from error
+
+
+def create_private_docker_config(expected_uid: int) -> tempfile.TemporaryDirectory[str]:
+    """Create an empty config under the trusted system /tmp, independent of caller settings."""
+    tmp_metadata = os.lstat("/tmp")
+    if (
+        not stat.S_ISDIR(tmp_metadata.st_mode)
+        or tmp_metadata.st_uid != 0
+        or stat.S_IMODE(tmp_metadata.st_mode) != 0o1777
+    ):
+        raise SeedWrapperError("The system temporary directory must be root-owned mode 1777")
+    temporary = None
+    try:
+        temporary = tempfile.TemporaryDirectory(prefix="belib-staging-docker.", dir="/tmp")
+        verify_private_docker_config(Path(temporary.name), expected_uid)
+        return temporary
+    except (OSError, SeedWrapperError) as error:
+        if temporary is not None:
+            temporary.cleanup()
+        if isinstance(error, SeedWrapperError):
+            raise
+        raise SeedWrapperError("Could not create a private Docker config directory") from error
+
+
+def docker_environment(home: Path, docker_config: Path) -> dict[str, str]:
     """Return the small, fixed environment passed to Docker CLI processes."""
     return {
         "PATH": DOCKER_PATH,
         "HOME": str(home),
         "USER": "hiroyuki",
         "LOGNAME": "hiroyuki",
+        "DOCKER_CONFIG": str(docker_config),
     }
 
 
 def resolve_docker_cli() -> str:
-    docker_cli = shutil.which("docker", path=DOCKER_PATH)
-    if docker_cli is None or not os.path.isabs(docker_cli):
-        raise SeedWrapperError("Docker CLI is unavailable on the fixed system path")
-    return docker_cli
+    return DOCKER_CLI
 
 
 def verify_rootless_docker(
@@ -553,11 +752,14 @@ def validate_docker_runtime(
     uid: int,
     home: Path,
     environment: Mapping[str, str],
+    docker_config: Path,
 ) -> tuple[str, Path, dict[str, str]]:
     reject_ambient_overrides(environment)
+    verify_private_docker_config(docker_config, uid)
+    verify_trusted_docker_plugins()
     endpoint = expected_docker_socket(uid)
     validate_rootless_socket(endpoint, uid)
-    docker_env = docker_environment(home)
+    docker_env = docker_environment(home, docker_config)
     docker_cli = resolve_docker_cli()
     verify_rootless_docker(docker_cli, endpoint, docker_env)
     return docker_cli, endpoint, docker_env
@@ -565,6 +767,8 @@ def validate_docker_runtime(
 
 def main() -> int:
     env_snapshot_fd = -1
+    credential_fd = -1
+    docker_config_temporary = None
     try:
         account = pwd.getpwnam("hiroyuki")
         if account.pw_uid == 0 or os.getuid() != account.pw_uid or os.geteuid() != account.pw_uid:
@@ -577,7 +781,16 @@ def main() -> int:
         env_file = home / ".config" / "belib-staging" / "i5.env"
         repo_root = Path(__file__).resolve(strict=True).parents[2]
         env_snapshot_fd, _stage_values = validate_staging_admission(repo_root, env_file, account.pw_uid)
-        docker_cli, endpoint, docker_env = validate_docker_runtime(account.pw_uid, home, os.environ)
+        docker_config_temporary = create_private_docker_config(account.pw_uid)
+        docker_config = Path(docker_config_temporary.name)
+        docker_cli, endpoint, docker_env = validate_docker_runtime(
+            account.pw_uid,
+            home,
+            os.environ,
+            docker_config,
+        )
+        if docker_env.get("DOCKER_CONFIG") != str(docker_config):
+            raise SeedWrapperError("Docker CLI config is not the isolated private directory")
 
         # Seed credentials are opened only after source, env-file, and Docker guards pass.
         credential_fd = open_private_regular_file(credentials_path, account.pw_uid)
@@ -585,21 +798,30 @@ def main() -> int:
         os.dup2(credential_fd, 0, inheritable=True)
         if credential_fd != 0:
             os.close(credential_fd)
+            credential_fd = -1
 
         os.chdir(repo_root)
         os.set_inheritable(env_snapshot_fd, True)
         snapshot_path = Path(f"/proc/{os.getpid()}/fd/{env_snapshot_fd}")
         command = build_compose_command(repo_root, snapshot_path, endpoint)
-        os.execve(docker_cli, command, docker_env)
+        command[0] = docker_cli
+        verify_private_docker_config(docker_config, account.pw_uid)
+        verify_trusted_docker_plugins()
+        result = subprocess.run(command, env=docker_env, check=False)
+        return result.returncode
     except SeedWrapperError as error:
         print(f"BLOCKED: {error}", file=sys.stderr)
         return 1
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         print("BLOCKED: Could not start the named staging Compose seed command", file=sys.stderr)
         return 1
     finally:
+        if credential_fd >= 0:
+            os.close(credential_fd)
         if env_snapshot_fd >= 0:
             os.close(env_snapshot_fd)
+        if docker_config_temporary is not None:
+            docker_config_temporary.cleanup()
 
     return 1
 
