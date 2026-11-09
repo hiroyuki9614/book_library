@@ -4,7 +4,8 @@ name: belib-isolated-i5
 
 services:
   db:
-    image: postgres:16.14-bookworm
+    image: postgres:16.14-bookworm@sha256:714b08dd70c05160db032e4321033ac4e5b6328935b2d03ed419c3a898aa8219
+    platform: linux/amd64
     environment:
       POSTGRES_USER: belib_staging_bootstrap
       POSTGRES_DB: belib_staging
@@ -37,8 +38,10 @@ services:
 
   migrate:
     profiles: ["migration"]
+    platform: linux/amd64
     build:
       context: ./backend
+      dockerfile: ../scripts/staging/Dockerfile.backend.staging
       target: migration
     user: node
     command: ["npx", "prisma", "migrate", "deploy"]
@@ -51,8 +54,10 @@ services:
     networks: [isolated]
 
   backend:
+    platform: linux/amd64
     build:
       context: ./backend
+      dockerfile: ../scripts/staging/Dockerfile.backend.staging
       target: runtime
       args:
         VCS_REF: ${BELIB_STAGE_VCS_REF:?Set full reviewed staging SHA}
@@ -79,8 +84,10 @@ services:
     networks: [isolated]
 
   frontend:
+    platform: linux/amd64
     build:
       context: ./frontend
+      dockerfile: ../scripts/staging/Dockerfile.frontend.staging
       target: runtime
       args:
         VCS_REF: ${BELIB_STAGE_VCS_REF:?Set full reviewed staging SHA}
@@ -94,7 +101,8 @@ services:
     networks: [isolated]
 
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:1.27-alpine@sha256:62223d644fa234c3a1cc785ee14242ec47a77364226f1c811d2f669f96dc2ac8
+    platform: linux/amd64
     ports:
       - "127.0.0.1:${BELIB_STAGE_PORT:?Set free i5 loopback port}:8080"
     volumes:

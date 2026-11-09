@@ -16,13 +16,59 @@ from typing import Any
 COMPOSE_PROJECT = "belib-isolated-i5"
 EXPECTED_CI_PORT = 49199
 EXPECTED_SERVICES = {"db", "migrate", "backend", "frontend", "nginx"}
+EXPECTED_PLATFORM = "linux/amd64"
+POSTGRES_IMAGE = (
+    "postgres:16.14-bookworm@sha256:"
+    "714b08dd70c05160db032e4321033ac4e5b6328935b2d03ed419c3a898aa8219"
+)
+NGINX_IMAGE = (
+    "nginx:1.27-alpine@sha256:"
+    "62223d644fa234c3a1cc785ee14242ec47a77364226f1c811d2f669f96dc2ac8"
+)
+CI_POSTGRES_IMAGE = POSTGRES_IMAGE
+NODE_BUILD_IMAGE = (
+    "node:22-bookworm@sha256:"
+    "539d4d5b9c0df96bb9d1229264d358dc816e8592cb8867828a580b527e7ad0fa"
+)
+NODE_RUNTIME_IMAGE = (
+    "node:22-bookworm-slim@sha256:"
+    "aaa4b5baf1ecff3b283486bb1f90405cdda225a3e6f79660d2c559fa510a7292"
+)
+NGINX_UNPRIVILEGED_IMAGE = (
+    "nginxinc/nginx-unprivileged:1.27-alpine@sha256:"
+    "28d91bdce70ad09025ea901458fdd149259d8e05982ade79d4ef2c0d9470eb48"
+)
+EXPECTED_SOURCE_IMAGES = {"db": POSTGRES_IMAGE, "nginx": NGINX_IMAGE}
+EXPECTED_DOCKERFILE_REFERENCES = {
+    "migrate": "../scripts/staging/Dockerfile.backend.staging",
+    "backend": "../scripts/staging/Dockerfile.backend.staging",
+    "frontend": "../scripts/staging/Dockerfile.frontend.staging",
+}
+EXPECTED_DOCKERFILE_PATHS = {
+    "migrate": "scripts/staging/Dockerfile.backend.staging",
+    "backend": "scripts/staging/Dockerfile.backend.staging",
+    "frontend": "scripts/staging/Dockerfile.frontend.staging",
+}
+EXPECTED_DOCKERFILE_FROM_LINES = {
+    "scripts/staging/Dockerfile.backend.staging": [
+        f"FROM {NODE_BUILD_IMAGE} AS build",
+        "FROM build AS migration",
+        f"FROM {NODE_RUNTIME_IMAGE} AS runtime",
+    ],
+    "scripts/staging/Dockerfile.frontend.staging": [
+        f"FROM {NODE_BUILD_IMAGE} AS build",
+        f"FROM {NGINX_UNPRIVILEGED_IMAGE} AS runtime",
+    ],
+}
 EXPECTED_SOURCE_BUILDS = {
     "migrate": {
         "context": "./backend",
+        "dockerfile": EXPECTED_DOCKERFILE_REFERENCES["migrate"],
         "target": "migration",
     },
     "backend": {
         "context": "./backend",
+        "dockerfile": EXPECTED_DOCKERFILE_REFERENCES["backend"],
         "target": "runtime",
         "args": {
             "VCS_REF": "${BELIB_STAGE_VCS_REF:?Set full reviewed staging SHA}",
@@ -30,6 +76,7 @@ EXPECTED_SOURCE_BUILDS = {
     },
     "frontend": {
         "context": "./frontend",
+        "dockerfile": EXPECTED_DOCKERFILE_REFERENCES["frontend"],
         "target": "runtime",
         "args": {
             "VCS_REF": "${BELIB_STAGE_VCS_REF:?Set full reviewed staging SHA}",
@@ -47,17 +94,17 @@ EXPECTED_BUILD_MODEL_KEYS = {
 }
 EXPECTED_SOURCE_ROOT_KEYS = {"name", "services", "networks", "volumes"}
 EXPECTED_SOURCE_SERVICE_KEYS = {
-    "db": {"image", "environment", "volumes", "healthcheck", "restart", "networks"},
+    "db": {"image", "platform", "environment", "volumes", "healthcheck", "restart", "networks"},
     "migrate": {
-        "profiles", "build", "user", "command", "environment", "depends_on",
+        "profiles", "platform", "build", "user", "command", "environment", "depends_on",
         "restart", "networks",
     },
     "backend": {
-        "build", "user", "environment", "volumes", "expose", "depends_on",
+        "platform", "build", "user", "environment", "volumes", "expose", "depends_on",
         "restart", "networks",
     },
-    "frontend": {"build", "expose", "restart", "networks"},
-    "nginx": {"image", "ports", "volumes", "depends_on", "restart", "networks"},
+    "frontend": {"platform", "build", "expose", "restart", "networks"},
+    "nginx": {"image", "platform", "ports", "volumes", "depends_on", "restart", "networks"},
 }
 EXPECTED_SOURCE_ENV_KEYS = {
     "db": {
@@ -154,23 +201,23 @@ EXPECTED_SOURCE_MOUNTS = {
 }
 EXPECTED_SERVICE_MODEL_KEYS = {
     "db": {
-        "command", "entrypoint", "environment", "healthcheck", "image",
+        "command", "entrypoint", "environment", "healthcheck", "image", "platform",
         "networks", "restart", "volumes",
     },
     "migrate": {
         "build", "command", "depends_on", "entrypoint", "environment",
-        "networks", "profiles", "restart", "user",
+        "networks", "platform", "profiles", "restart", "user",
     },
     "backend": {
         "build", "command", "depends_on", "entrypoint", "environment",
-        "expose", "networks", "restart", "user", "volumes",
+        "expose", "networks", "platform", "restart", "user", "volumes",
     },
     "frontend": {
-        "build", "command", "entrypoint", "expose", "networks", "restart",
+        "build", "command", "entrypoint", "expose", "networks", "platform", "restart",
     },
     "nginx": {
         "command", "depends_on", "entrypoint", "image", "networks", "ports",
-        "restart", "volumes",
+        "platform", "restart", "volumes",
     },
 }
 EXPECTED_COMMANDS = {
@@ -257,6 +304,13 @@ def _source_shape_contract(source: str) -> None:
         if property_keys != EXPECTED_SOURCE_SERVICE_KEYS[name]:
             raise GuardError(f"{name} service keys are outside the allowlist")
         property_by_key = {key: (index, value) for index, key, value in properties}
+        if property_by_key["platform"][1] != EXPECTED_PLATFORM:
+            raise GuardError(f"{name} must target the reviewed {EXPECTED_PLATFORM} platform")
+        if (
+            name in EXPECTED_SOURCE_IMAGES
+            and property_by_key["image"][1] != EXPECTED_SOURCE_IMAGES[name]
+        ):
+            raise GuardError(f"{name} image reference must match its reviewed immutable digest")
 
         if property_by_key["networks"][1] != "[isolated]":
             raise GuardError(f"{name} must use only the isolated network")
@@ -644,6 +698,65 @@ def _checked_repo_path(value: Any, compose_root: Path) -> Path | None:
     return current
 
 
+def _validate_staging_dockerfiles(services: dict[str, Any], compose_root: Path) -> None:
+    for name, relative_reference in EXPECTED_DOCKERFILE_REFERENCES.items():
+        service = services.get(name)
+        build = service.get("build") if isinstance(service, dict) else None
+        if not isinstance(build, dict):
+            raise GuardError(f"{name} must use its dedicated staging Dockerfile")
+        if build.get("dockerfile") != relative_reference:
+            raise GuardError(f"{name} Dockerfile path must use the staging-only recipe")
+
+        context_path = _checked_repo_path(build.get("context"), compose_root)
+        expected_path = _checked_repo_path(
+            EXPECTED_DOCKERFILE_PATHS[name], compose_root
+        )
+        if context_path is None or expected_path is None:
+            raise GuardError(f"{name} staging Dockerfile must stay inside the checkout")
+        try:
+            resolved_reference = (context_path / relative_reference).resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            raise GuardError(f"{name} staging Dockerfile path cannot be resolved") from None
+        if resolved_reference != expected_path:
+            raise GuardError(f"{name} Dockerfile path resolves outside its staging allowlist")
+        try:
+            file_stat = expected_path.lstat()
+            dockerfile_source = expected_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            raise GuardError(f"{name} staging Dockerfile is unavailable") from None
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise GuardError(f"{name} staging Dockerfile must be a regular file")
+        from_lines = [
+            line.strip()
+            for line in dockerfile_source.splitlines()
+            if re.match(r"(?i)^\s*FROM(?:\s|$)", line)
+        ]
+        if from_lines != EXPECTED_DOCKERFILE_FROM_LINES[EXPECTED_DOCKERFILE_PATHS[name]]:
+            raise GuardError(f"{name} staging Dockerfile has an unreviewed base image or stage")
+
+
+def _validate_staging_ci_image(compose_root: Path) -> None:
+    workflow_path = _checked_repo_path(
+        ".github/workflows/staging-ci.yml", compose_root
+    )
+    if workflow_path is None:
+        raise GuardError("Staging CI workflow path is missing or unsafe")
+    try:
+        file_stat = workflow_path.lstat()
+        workflow_source = workflow_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        raise GuardError("Staging CI workflow is unavailable") from None
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise GuardError("Staging CI workflow must be a regular file")
+    image_values = [
+        match.group(1)
+        for line in _strip_yaml_comments(workflow_source).splitlines()
+        if (match := re.fullmatch(r"\s*image\s*:\s*(\S+)\s*", line))
+    ]
+    if image_values != [CI_POSTGRES_IMAGE]:
+        raise GuardError("Staging CI container images must use the reviewed immutable digest")
+
+
 def _repo_path_matches(value: Any, expected: str, compose_root: Path) -> bool:
     actual_path = _checked_repo_path(value, compose_root)
     expected_path = _checked_repo_path(expected, compose_root)
@@ -704,10 +817,13 @@ def _validate_model(
     for name, service in services.items():
         if not isinstance(service, dict) or set(service) != EXPECTED_SERVICE_MODEL_KEYS[name]:
             raise GuardError(f"{name} service settings are outside the allowlist")
+        if service.get("platform") != EXPECTED_PLATFORM:
+            raise GuardError(f"{name} must target the reviewed {EXPECTED_PLATFORM} platform")
         if service.get("command") != EXPECTED_COMMANDS[name] or service.get("entrypoint") is not None:
             raise GuardError(f"{name} command and entrypoint must remain allowlisted")
         if name == "migrate" and service.get("profiles") != ["migration"]:
             raise GuardError("Migration service must use only the migration profile")
+    _validate_staging_dockerfiles(services, compose_root)
     networks = model.get("networks")
     if (
         not isinstance(networks, dict)
@@ -771,7 +887,7 @@ def _validate_model(
     db = services["db"]
     db_env = _env(db, "db")
     if (
-        db.get("image") != "postgres:16.14-bookworm"
+        db.get("image") != POSTGRES_IMAGE
         or "build" in db
         or db.get("command") is not None
         or db.get("entrypoint") is not None
@@ -840,7 +956,7 @@ def _validate_model(
         or not _context_matches(
             migrate_build.get("context"), "backend", compose_root
         )
-        or migrate_build.get("dockerfile") != "Dockerfile"
+        or migrate_build.get("dockerfile") != EXPECTED_DOCKERFILE_REFERENCES["migrate"]
         or migrate_build.get("target") != "migration"
         or _mounts(migrate, "migrate")
     ):
@@ -875,7 +991,7 @@ def _validate_model(
         backend.get("user") != "node"
         or "image" in backend
         or not _context_matches(backend_build.get("context"), "backend", compose_root)
-        or backend_build.get("dockerfile") != "Dockerfile"
+        or backend_build.get("dockerfile") != EXPECTED_DOCKERFILE_REFERENCES["backend"]
         or backend_build.get("target") != "runtime"
         or backend_build.get("args") != {"VCS_REF": source_sha}
     ):
@@ -907,7 +1023,7 @@ def _validate_model(
         or not _context_matches(
             frontend_build.get("context"), "frontend", compose_root
         )
-        or frontend_build.get("dockerfile") != "Dockerfile"
+        or frontend_build.get("dockerfile") != EXPECTED_DOCKERFILE_REFERENCES["frontend"]
         or frontend_build.get("target") != "runtime"
         or frontend_build.get("args") != expected_frontend_args
         or frontend.get("expose") != ["8080"]
@@ -917,7 +1033,7 @@ def _validate_model(
 
     nginx = services["nginx"]
     if (
-        nginx.get("image") != "nginx:1.27-alpine"
+        nginx.get("image") != NGINX_IMAGE
         or "build" in nginx
         or nginx.get("environment") not in (None, {})
     ):
@@ -974,6 +1090,7 @@ def validate(
         raise GuardError("Staging CI port is outside the safe loopback range")
     root = Path.cwd() if compose_root is None else compose_root
     _source_contract(compose_source, source_sha)
+    _validate_staging_ci_image(root)
     _validate_model(compose_model, source_sha, expected_port, root)
 
 

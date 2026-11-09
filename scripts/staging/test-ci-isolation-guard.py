@@ -33,7 +33,8 @@ def compose_model(root: Path = ROOT) -> dict:
         "name": guard.COMPOSE_PROJECT,
         "services": {
             "db": {
-                "image": "postgres:16.14-bookworm",
+                "image": guard.POSTGRES_IMAGE,
+                "platform": guard.EXPECTED_PLATFORM,
                 "command": None,
                 "entrypoint": None,
                 "environment": {
@@ -70,7 +71,7 @@ def compose_model(root: Path = ROOT) -> dict:
             "migrate": {
                 "build": {
                     "context": "./backend",
-                    "dockerfile": "Dockerfile",
+                    "dockerfile": guard.EXPECTED_DOCKERFILE_REFERENCES["migrate"],
                     "target": "migration",
                 },
                 "command": ["npx", "prisma", "migrate", "deploy"],
@@ -78,6 +79,7 @@ def compose_model(root: Path = ROOT) -> dict:
                 "entrypoint": None,
                 "environment": {"DATABASE_URL": MIGRATE_DATABASE_URL},
                 "user": "node",
+                "platform": guard.EXPECTED_PLATFORM,
                 "networks": {"isolated": None},
                 "profiles": ["migration"],
                 "restart": "no",
@@ -85,11 +87,12 @@ def compose_model(root: Path = ROOT) -> dict:
             "backend": {
                 "build": {
                     "context": "./backend",
-                    "dockerfile": "Dockerfile",
+                    "dockerfile": guard.EXPECTED_DOCKERFILE_REFERENCES["backend"],
                     "target": "runtime",
                     "args": {"VCS_REF": SOURCE_SHA},
                 },
                 "command": None,
+                "platform": guard.EXPECTED_PLATFORM,
                 "depends_on": {"db": {"condition": "service_healthy", "required": True}},
                 "entrypoint": None,
                 "user": "node",
@@ -119,7 +122,7 @@ def compose_model(root: Path = ROOT) -> dict:
             "frontend": {
                 "build": {
                     "context": "./frontend",
-                    "dockerfile": "Dockerfile",
+                    "dockerfile": guard.EXPECTED_DOCKERFILE_REFERENCES["frontend"],
                     "target": "runtime",
                     "args": {
                         "VCS_REF": SOURCE_SHA,
@@ -131,13 +134,15 @@ def compose_model(root: Path = ROOT) -> dict:
                     },
                 },
                 "command": None,
+                "platform": guard.EXPECTED_PLATFORM,
                 "entrypoint": None,
                 "networks": {"isolated": None},
                 "expose": ["8080"],
                 "restart": "unless-stopped",
             },
             "nginx": {
-                "image": "nginx:1.27-alpine",
+                "image": guard.NGINX_IMAGE,
+                "platform": guard.EXPECTED_PLATFORM,
                 "command": None,
                 "depends_on": {
                     "backend": {"condition": "service_started", "required": True},
@@ -226,7 +231,9 @@ class CIIsolationGuardTests(unittest.TestCase):
         return self.compose_source.replace(marker, marker + f"    {entry}\n", 1)
 
     def populate_compose_root(self, root: Path) -> None:
-        for directory in ("backend", "frontend", "nginx", "scripts/staging"):
+        for directory in (
+            "backend", "frontend", "nginx", "scripts/staging", ".github/workflows"
+        ):
             (root / directory).mkdir(parents=True, exist_ok=True)
         for relative in (
             "nginx/nginx.conf",
@@ -235,6 +242,13 @@ class CIIsolationGuardTests(unittest.TestCase):
         ):
             (root / relative).write_text("fixture\n", encoding="utf-8")
         (root / "scripts/staging/10-belib-staging-roles.sh").chmod(0o644)
+        for relative in guard.EXPECTED_DOCKERFILE_FROM_LINES:
+            (root / relative).write_text(
+                (ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        (root / ".github/workflows/staging-ci.yml").write_text(
+            f"image: {guard.CI_POSTGRES_IMAGE}\n", encoding="utf-8"
+        )
 
     def test_accepts_the_isolated_compose_model_for_exact_pr_head(self):
         guard.validate(
@@ -243,6 +257,117 @@ class CIIsolationGuardTests(unittest.TestCase):
             compose_source=self.compose_source,
             compose_model=compose_model(),
         )
+
+    def test_rejects_mutable_or_substituted_compose_images(self):
+        for service, expected in guard.EXPECTED_SOURCE_IMAGES.items():
+            tag_only = expected.split("@", 1)[0]
+            substitutions = (
+                tag_only,
+                f"{tag_only}@sha256:{'0' * 64}",
+                f"attacker.invalid/replacement:latest@sha256:{'0' * 64}",
+            )
+            for replacement in substitutions:
+                with self.subTest(service=service, replacement=replacement):
+                    source = self.compose_source.replace(
+                        f"image: {expected}", f"image: {replacement}", 1
+                    )
+                    self.assert_rejected(source=source)
+                    model = compose_model()
+                    model["services"][service]["image"] = replacement
+                    self.assert_rejected(model=model)
+
+    def test_rejects_mutable_or_substituted_staging_base_images(self):
+        dockerfile_paths = tuple(guard.EXPECTED_DOCKERFILE_FROM_LINES)
+        for relative in dockerfile_paths:
+            for line in guard.EXPECTED_DOCKERFILE_FROM_LINES[relative]:
+                parts = line.split()
+                if len(parts) < 3 or parts[1] == "build":
+                    continue
+                pinned = parts[1]
+                tag_only = pinned.split("@", 1)[0]
+                for replacement in (
+                    tag_only,
+                    f"{tag_only}@sha256:{'0' * 64}",
+                    f"attacker.invalid/replacement:latest@sha256:{'0' * 64}",
+                ):
+                    with self.subTest(path=relative, replacement=replacement), tempfile.TemporaryDirectory() as temp:
+                        repo = Path(temp) / "checkout"
+                        repo.mkdir()
+                        self.populate_compose_root(repo)
+                        dockerfile = repo / relative
+                        source = dockerfile.read_text(encoding="utf-8")
+                        dockerfile.write_text(
+                            source.replace(line, line.replace(pinned, replacement), 1),
+                            encoding="utf-8",
+                        )
+                        with self.assertRaises(guard.GuardError):
+                            guard.validate(
+                                source_sha=SOURCE_SHA,
+                                checkout_sha=SOURCE_SHA,
+                                compose_source=self.compose_source,
+                                compose_model=compose_model(repo),
+                                compose_root=repo,
+                            )
+
+    def test_staging_dockerfiles_preserve_shared_multistage_recipes(self):
+        mirrors = {
+            "backend/Dockerfile": (
+                "scripts/staging/Dockerfile.backend.staging",
+                (
+                    ("FROM node:22-bookworm AS build", f"FROM {guard.NODE_BUILD_IMAGE} AS build"),
+                    (
+                        "FROM node:22-bookworm-slim AS runtime",
+                        f"FROM {guard.NODE_RUNTIME_IMAGE} AS runtime",
+                    ),
+                ),
+            ),
+            "frontend/Dockerfile": (
+                "scripts/staging/Dockerfile.frontend.staging",
+                (
+                    ("FROM node:22-bookworm AS build", f"FROM {guard.NODE_BUILD_IMAGE} AS build"),
+                    (
+                        "FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime",
+                        f"FROM {guard.NGINX_UNPRIVILEGED_IMAGE} AS runtime",
+                    ),
+                ),
+            ),
+        }
+        for shared_path, (staging_path, substitutions) in mirrors.items():
+            with self.subTest(shared_path=shared_path):
+                expected = (ROOT / shared_path).read_text(encoding="utf-8")
+                for source_line, pinned_line in substitutions:
+                    self.assertEqual(expected.count(source_line), 1)
+                    expected = expected.replace(source_line, pinned_line, 1)
+                actual = (ROOT / staging_path).read_text(encoding="utf-8")
+                self.assertEqual(actual, expected)
+
+    def test_rejects_shared_or_suspicious_dockerfile_paths(self):
+        for replacement in ("Dockerfile", "../../outside/Dockerfile"):
+            with self.subTest(replacement=replacement):
+                model = compose_model()
+                model["services"]["backend"]["build"]["dockerfile"] = replacement
+                self.assert_rejected(model=model)
+
+                source = self.compose_source.replace(
+                    guard.EXPECTED_DOCKERFILE_REFERENCES["backend"], replacement, 1
+                )
+                self.assert_rejected(source=source)
+
+    def test_rejects_mutable_staging_ci_postgres_image(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp) / "checkout"
+            repo.mkdir()
+            self.populate_compose_root(repo)
+            workflow = repo / ".github/workflows/staging-ci.yml"
+            workflow.write_text("image: postgres:16\n", encoding="utf-8")
+            with self.assertRaises(guard.GuardError):
+                guard.validate(
+                    source_sha=SOURCE_SHA,
+                    checkout_sha=SOURCE_SHA,
+                    compose_source=self.compose_source,
+                    compose_model=compose_model(repo),
+                    compose_root=repo,
+                )
 
     def test_database_comment_marker_uses_shared_object_lookup(self):
         role_script = (ROOT / "scripts/staging/10-belib-staging-roles.sh").read_text(encoding="utf-8")
@@ -444,8 +569,8 @@ class CIIsolationGuardTests(unittest.TestCase):
         self.assert_rejected(model=model)
 
         source = self.compose_source.replace(
-            "    image: postgres:16.14-bookworm\n",
-            "    image: postgres:16.14-bookworm\n"
+            f"    image: {guard.POSTGRES_IMAGE}\n",
+            f"    image: {guard.POSTGRES_IMAGE}\n"
             "    build:\n"
             "      context: ./backend\n"
             "      target: runtime\n",
@@ -699,6 +824,10 @@ class CIIsolationGuardTests(unittest.TestCase):
         self.assertRegex(workflow, r"(?m)^\s*pull_request:\s*$")
         self.assertNotIn("pull_request_target", workflow)
         self.assertIn("contents: read", workflow)
+        self.assertEqual(
+            re.findall(r"(?m)^\s*image:\s*(\S+)\s*$", workflow),
+            [guard.CI_POSTGRES_IMAGE],
+        )
         checkouts = re.findall(
             r"(?m)^\s*ref:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\}\}\s*$",
             workflow,

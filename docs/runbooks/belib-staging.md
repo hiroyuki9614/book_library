@@ -16,6 +16,18 @@ Read-only checks below cannot clear this gate. The launch, migration, seed, and 
 
 `.github/workflows/staging-ci.yml` is candidate-source CI: it runs PR-controlled code with read-only repository access. A green run proves only that its jobs completed; it cannot establish trusted CD provenance or authorize staging. It creates no admission artifact and does not start deployment.
 
+The staging Compose images and build bases use amd64 child manifest digests fetched and independently rehashed from Docker Hub's registry v2 on 2026-11-09; each referenced image config reports `linux/amd64`. `platform: linux/amd64` is fixed on each Compose service. PostgreSQL in the CI reader job uses the same amd64 manifest as staging Compose. The backend and frontend build contexts select the dedicated recipes at `../scripts/staging/Dockerfile.backend.staging` and `../scripts/staging/Dockerfile.frontend.staging`, resolved relative to `./backend` and `./frontend`; these keep the current multi-stage targets and runtime behavior while pinning every external `FROM` image. The reviewed immutable references are:
+
+| Use | Immutable reference |
+| --- | --- |
+| PostgreSQL (staging and CI) | `postgres:16.14-bookworm@sha256:714b08dd70c05160db032e4321033ac4e5b6328935b2d03ed419c3a898aa8219` |
+| Staging Nginx | `nginx:1.27-alpine@sha256:62223d644fa234c3a1cc785ee14242ec47a77364226f1c811d2f669f96dc2ac8` |
+| Node build stage | `node:22-bookworm@sha256:539d4d5b9c0df96bb9d1229264d358dc816e8592cb8867828a580b527e7ad0fa` |
+| Node runtime stage | `node:22-bookworm-slim@sha256:aaa4b5baf1ecff3b283486bb1f90405cdda225a3e6f79660d2c559fa510a7292` |
+| Frontend Nginx runtime stage | `nginxinc/nginx-unprivileged:1.27-alpine@sha256:28d91bdce70ad09025ea901458fdd149259d8e05982ade79d4ef2c0d9470eb48` |
+
+The guard checks these exact references, the staging-only Dockerfile paths and `FROM` lines, and the CI PostgreSQL image. Offline Compose configuration and guard checks do not build images or establish deployment evidence.
+
 `.github/workflows/staging-cd.yml` is a protected evidence handoff. It must run from the exact immutable workflow revision on authoritative `main`; dispatch from an unmerged branch is unavailable in GitHub and fails its job context checks. Before writing candidate evidence, its helper pins one `main` commit and requires both the candidate `staging-ci.yml` and `release-ci.yml` blob IDs to match the definitions at that same commit. Missing or changed definitions fail closed. It then verifies the current same-repository PR head SHA, terminal successful staging CI and release CI runs, the selected run attempt, each required job's conclusion and head SHA, independent review, and explicit owner request. The required release jobs are `Backend tests, build, Prisma, and migrations`, `Frontend tests, lint, and build`, `Reader Playwright E2E`, and `Production images, Compose config, and isolated smoke`.
 
 The uploaded JSON is **candidate check evidence**, not a trusted deployment receipt. Its status remains pending until the existing staging supervisor independently verifies the GitHub workflow run and immutable provenance, including the actual workflow ref/revision, exact PR source SHA, run attempt, job conclusions/head SHAs, and the workflow definitions from `main`. The GitHub workflow has no deployment command, staging secret, SSH key, or self-hosted runner. Only the existing owner staging supervisor may act after its separate provenance and staging-admission checks pass. A successful workflow exit never means deployment started or completed.

@@ -91,7 +91,7 @@ jobs:
     timeout-minutes: 60
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16.14-bookworm@sha256:714b08dd70c05160db032e4321033ac4e5b6328935b2d03ed419c3a898aa8219
         env:
           POSTGRES_USER: ci
           POSTGRES_PASSWORD: ci-only-password

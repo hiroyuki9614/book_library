@@ -9,12 +9,15 @@ fail() { printf 'BLOCKED: %s\n' "$*" >&2; exit 1; }
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source_preflight="$script_dir/preflight.sh"
 source_guard="$script_dir/ci-isolation-guard.py"
+source_backend_dockerfile="$script_dir/Dockerfile.backend.staging"
+source_frontend_dockerfile="$script_dir/Dockerfile.frontend.staging"
+source_staging_ci="$(cd -- "$script_dir/../../.github/workflows" && pwd -P)/staging-ci.yml"
 source_compose="$(cd -- "$script_dir/../.." && pwd -P)/compose.staging.yaml"
 source_role_init="$script_dir/10-belib-staging-roles.sh"
 source_nginx_default="$script_dir/nginx-default.conf"
 source_nginx_conf="$(cd -- "$script_dir/../.." && pwd -P)/nginx/nginx.conf"
 [[ -f "$source_preflight" ]] || fail 'Cannot find staging preflight script'
-[[ -f "$source_guard" && -f "$source_compose" && -f "$source_role_init" ]] || fail 'Cannot find staging guard inputs'
+[[ -f "$source_guard" && -f "$source_backend_dockerfile" && -f "$source_frontend_dockerfile" && -f "$source_staging_ci" && -f "$source_compose" && -f "$source_role_init" ]] || fail 'Cannot find staging guard inputs'
 
 test_root="$(mktemp -d "/tmp/belib-staging-preflight-test.XXXXXX")"
 trap 'rm -rf -- "$test_root"' EXIT
@@ -22,16 +25,20 @@ repo_root="$test_root/repo"
 fixture_preflight="$repo_root/scripts/staging/preflight.sh"
 test_bin="$test_root/bin"
 mkdir -p "$(dirname -- "$fixture_preflight")" "$test_bin" "$repo_root/nginx" \
+  "$repo_root/.github/workflows" \
   "$repo_root/backend" "$repo_root/frontend"
 cp -- "$source_preflight" "$fixture_preflight"
 cp -- "$source_guard" "$repo_root/scripts/staging/ci-isolation-guard.py"
+cp -- "$source_backend_dockerfile" "$repo_root/scripts/staging/Dockerfile.backend.staging"
+cp -- "$source_frontend_dockerfile" "$repo_root/scripts/staging/Dockerfile.frontend.staging"
+cp -- "$source_staging_ci" "$repo_root/.github/workflows/staging-ci.yml"
 cp -- "$source_role_init" "$repo_root/scripts/staging/10-belib-staging-roles.sh"
 cp -- "$source_nginx_default" "$repo_root/scripts/staging/nginx-default.conf"
 cp -- "$source_compose" "$repo_root/compose.staging.yaml"
 cp -- "$source_nginx_conf" "$repo_root/nginx/nginx.conf"
 
 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" init -q
-git -C "$repo_root" add compose.staging.yaml nginx/nginx.conf scripts/staging
+git -C "$repo_root" add .github/workflows/staging-ci.yml compose.staging.yaml nginx/nginx.conf scripts/staging
 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" \
   -c user.name='BeLib staging test' \
   -c user.email='belib-staging-test@example.invalid' \
