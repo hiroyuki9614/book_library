@@ -28,6 +28,18 @@ mkdir -p "$(dirname -- "$fixture_preflight")" "$test_bin" "$repo_root/nginx" \
   "$repo_root/.github/workflows" \
   "$repo_root/backend" "$repo_root/frontend"
 cp -- "$source_preflight" "$fixture_preflight"
+missing_docker_cli="$test_root/trusted-docker-unavailable"
+python3 -B - "$fixture_preflight" "$missing_docker_cli" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+needle = "readonly docker_cli='/usr/bin/docker'"
+if source.count(needle) != 1:
+    raise SystemExit("Expected one pinned Docker CLI path in the preflight fixture")
+path.write_text(source.replace(needle, f"readonly docker_cli='{sys.argv[2]}'", 1), encoding="utf-8")
+PY
 cp -- "$source_guard" "$repo_root/scripts/staging/ci-isolation-guard.py"
 cp -- "$source_backend_dockerfile" "$repo_root/scripts/staging/Dockerfile.backend.staging"
 cp -- "$source_frontend_dockerfile" "$repo_root/scripts/staging/Dockerfile.frontend.staging"
@@ -48,7 +60,7 @@ GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" \
 revision="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" rev-parse HEAD)"
 base_revision="$revision"
 
-# A constrained PATH makes the preflight's Docker CLI check fail without invoking Docker.
+# The missing pinned executable makes this fixture fail before any Docker invocation.
 for utility in bash dirname git grep hostname id sed sh stat; do
   utility_path="$(command -v "$utility")"
   [[ -x "$utility_path" ]] || fail "Required test utility unavailable: $utility"
@@ -86,10 +98,10 @@ distinct_output="$(/usr/bin/env -i PATH="$test_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CO
   bash "$fixture_preflight" "$distinct_env" 2>&1)"
 distinct_status=$?
 set -e
-[[ "$distinct_status" -eq 1 && "$distinct_output" == *'BLOCKED: Docker CLI missing; do not install with sudo'* ]] || \
-  fail 'Distinct synthetic secrets did not reach the expected Docker CLI-missing guard'
-printf 'PASS: distinct synthetic secrets reached Docker CLI-missing guard (exit=%s)\n' "$distinct_status"
-printf 'NOTE: Docker CLI absence is only the expected offline stopping point, not preflight acceptance.\n'
+[[ "$distinct_status" -eq 1 && "$distinct_output" == *'BLOCKED: Trusted Docker CLI missing or unsafe; do not use a PATH fallback'* ]] || \
+  fail 'Distinct synthetic secrets did not reach the expected trusted Docker CLI guard'
+printf 'PASS: distinct synthetic secrets reached trusted Docker CLI guard (exit=%s)\n' "$distinct_status"
+printf 'NOTE: the unavailable trusted executable is only the expected offline stopping point, not preflight acceptance.\n'
 
 legacy_env="$test_root/legacy.env"
 printf 'BELIB_STAGE_DB_PASSWORD=%s\nBELIB_STAGE_AUTH_SECRET=%s\nBELIB_STAGE_VCS_REF=%s\nBELIB_STAGE_PORT=49199\n' \
@@ -139,6 +151,39 @@ esac
 SH
 chmod 700 "$integration_bin/docker"
 
+# These disposable fixture variants let the integration checks exercise a safe synthetic
+# CLI and an untrusted path. The actual repository script stays pinned to /usr/bin/docker.
+fixture_preflight_synthetic="$repo_root/scripts/staging/preflight-synthetic.sh"
+fixture_preflight_untrusted="$repo_root/scripts/staging/preflight-untrusted.sh"
+cp -- "$source_preflight" "$fixture_preflight_synthetic"
+cp -- "$source_preflight" "$fixture_preflight_untrusted"
+python3 -B - "$fixture_preflight_synthetic" "$fixture_preflight_untrusted" "$integration_bin/docker" "$(id -u)" <<'PY'
+import sys
+from pathlib import Path
+
+synthetic_path, untrusted_path, docker_cli, owner = sys.argv[1:]
+needle = "readonly docker_cli='/usr/bin/docker'"
+owner_check = '[[ "$docker_owner" == 0 && "$docker_mode" =~ ^[0-7]{3,4}$ ]]'
+for fixture, expected_owner in ((synthetic_path, owner), (untrusted_path, "0")):
+    path = Path(fixture)
+    source = path.read_text(encoding="utf-8")
+    if source.count(needle) != 1:
+        raise SystemExit(f"Expected one pinned Docker CLI path in {path.name}")
+    source = source.replace(needle, f"readonly docker_cli='{docker_cli}'", 1)
+    replacement = f'[[ "$docker_owner" == {expected_owner} && "$docker_mode" =~ ^[0-7]{{3,4}}$ ]]'
+    if source.count(owner_check) != 1:
+        raise SystemExit(f"Expected one Docker ownership check in {path.name}")
+    path.write_text(source.replace(owner_check, replacement, 1), encoding="utf-8")
+PY
+git -C "$repo_root" add scripts/staging/preflight-synthetic.sh scripts/staging/preflight-untrusted.sh
+GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" \
+  -c user.name='BeLib staging test' \
+  -c user.email='belib-staging-test@example.invalid' \
+  -c core.hooksPath=/dev/null \
+  -c commit.gpgSign=false \
+  commit -qm 'Add offline Docker executable trust fixtures'
+revision="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_root" rev-parse HEAD)"
+
 valid_buildx_info="$test_root/buildx-local.txt"
 printf 'Name: default\nDriver: docker\n\nNodes:\nName: default\nEndpoint: default\nStatus: running\n' > "$valid_buildx_info"
 
@@ -176,10 +221,99 @@ write_fixture "$valid_env" "$synthetic_secret_a" "$synthetic_secret_b" "$synthet
 valid_model="$test_root/compose-valid.json"
 make_compose_model "$valid_model" valid
 docker_log="$test_root/docker-calls.log"
+
+grep -F "readonly docker_cli='/usr/bin/docker'" "$source_preflight" >/dev/null || \
+  fail 'Host preflight is not pinned to the trusted absolute Docker executable'
+[[ -x "$integration_bin/docker" ]] || fail 'Expected fake PATH Docker binary is unavailable'
+
+# A PATH-only fake Docker binary cannot satisfy the pinned executable check.
+runtime_path_log="$test_root/path-docker-calls.log"
+set +e
+runtime_path_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  STUB_DOCKER_LOG="$runtime_path_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
+  bash "$fixture_preflight" "$valid_env" 2>&1)"
+runtime_path_status=$?
+set -e
+[[ "$runtime_path_status" -eq 1 && "$runtime_path_output" == *'BLOCKED: Trusted Docker CLI missing or unsafe; do not use a PATH fallback'* ]] || \
+  fail 'PATH fake Docker binary satisfied an unavailable pinned executable'
+[[ ! -s "$runtime_path_log" ]] || fail 'PATH fake Docker binary was invoked by the trust-boundary check'
+printf 'PASS: PATH Docker stub cannot satisfy the pinned runtime binary check\n'
+
+# A user-owned executable cannot become a trusted Docker CLI just by using an absolute path.
+untrusted_path_log="$test_root/untrusted-docker-calls.log"
+set +e
+untrusted_path_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  STUB_DOCKER_LOG="$untrusted_path_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
+  bash "$fixture_preflight_untrusted" "$valid_env" 2>&1)"
+untrusted_path_status=$?
+set -e
+[[ "$untrusted_path_status" -eq 1 && "$untrusted_path_output" == *'BLOCKED: Trusted Docker CLI must be root-owned with a valid permission mode'* ]] || \
+  fail 'Preflight accepted a user-owned absolute Docker executable'
+[[ ! -s "$untrusted_path_log" ]] || fail 'User-owned Docker executable was invoked before trust rejection'
+printf 'PASS: user-owned absolute Docker executable rejected before invocation\n'
+
+# An exported Bash function that fabricates an allowed rootless host must be rejected.
+function_docker_log="$test_root/function-docker-calls.log"
+set +e
+function_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  FUNCTION_DOCKER_LOG="$function_docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
+  bash -c '
+docker() {
+  printf "%s\\n" "$*" >> "$FUNCTION_DOCKER_LOG"
+  case "$*" in
+    "context show") printf "default\\n" ;;
+    "context inspect "*) printf "unix:///run/user/%s/docker.sock\\n" "$(id -u)" ;;
+    "info --format "*) printf "ubuntu-worker|[\\\"name=rootless\\\"]\\n" ;;
+    "compose version") printf "Docker Compose version fixture\\n" ;;
+    "buildx inspect") cat -- "$STUB_BUILDX_INFO" ;;
+    *" config --format json") cat -- "$STUB_COMPOSE_JSON" ;;
+    *) return 91 ;;
+  esac
+}
+export -f docker
+exec bash "$1" "$2"
+' _ "$fixture_preflight" "$valid_env" 2>&1)"
+function_status=$?
+set -e
+[[ "$function_status" -eq 1 && "$function_output" == *'BLOCKED: Ambient Docker shell function is forbidden'* ]] || \
+  fail 'Exported Docker function that fakes rootless host output was not rejected'
+[[ ! -s "$function_docker_log" ]] || fail 'Exported Docker function ran before preflight rejected it'
+printf 'PASS: exported Docker function faking allowed rootless output rejected before Docker\n'
+
+# BASH_ENV is sourced by Bash before a script starts, so never run preflight with it set.
+startup_override="$test_root/bash-env-override"
+: > "$startup_override"
+for startup_name in BASH_ENV ENV; do
+  set +e
+  startup_output="$(/usr/bin/env -i PATH="$integration_bin" "$startup_name=$startup_override" \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null bash "$fixture_preflight" "$valid_env" 2>&1)"
+  startup_status=$?
+  set -e
+  [[ "$startup_status" -eq 1 && "$startup_output" == *'BLOCKED: Bash startup overrides are forbidden'* ]] || \
+    fail "$startup_name startup override was not rejected"
+  printf 'PASS: %s startup override rejected before preflight checks\n' "$startup_name"
+done
+
+# A Bash startup file can leave an alias behind even when it unsets BASH_ENV.
+alias_override="$test_root/bash-env-alias-override"
+cat > "$alias_override" <<'SH'
+shopt -s expand_aliases
+alias docker='printf "spoofed Docker output\\n"'
+unset BASH_ENV
+SH
+set +e
+alias_output="$(/usr/bin/env -i PATH="$integration_bin" BASH_ENV="$alias_override" \
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null bash "$fixture_preflight" "$valid_env" 2>&1)"
+alias_status=$?
+set -e
+[[ "$alias_status" -eq 1 && "$alias_output" == *'BLOCKED: Ambient Docker alias is forbidden'* ]] || \
+  fail 'Docker alias from a Bash startup file was not rejected'
+printf 'PASS: Docker alias from Bash startup file rejected before Docker\n'
+
 set +e
 valid_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-  bash "$fixture_preflight" "$valid_env" 2>&1)"
+  bash "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
 valid_status=$?
 set -e
 [[ "$valid_status" -eq 0 && "$valid_output" == *'STAGING_COMPOSE_GUARD_PASS '* && "$valid_output" == *'PREFLIGHT_PASS '* ]] || \
@@ -196,7 +330,7 @@ for override in 'BUILDX_BUILDER=remote' 'BUILDKIT_HOST=tcp://builder.invalid:123
   set +e
   override_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
     "$override" STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-    bash "$fixture_preflight" "$valid_env" 2>&1)"
+    bash "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
   override_status=$?
   set -e
   [[ "$override_status" -eq 1 && "$override_output" == *'BLOCKED: Ambient staging, Docker, Buildx, BuildKit, Compose, database, or SSH-agent overrides are forbidden'* ]] || \
@@ -214,7 +348,7 @@ printf 'Name: remote\nDriver: remote\n\nNodes:\nName: remote0\nEndpoint: tcp://b
 set +e
 remote_builder_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$remote_buildx_info" \
-  bash "$fixture_preflight" "$valid_env" 2>&1)"
+  bash "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
 remote_builder_status=$?
 set -e
 [[ "$remote_builder_status" -eq 1 && "$remote_builder_output" == *'BLOCKED: Selected Buildx builder must use the local docker driver'* ]] || \
@@ -230,7 +364,7 @@ printf 'Name: default\nDriver: docker\n\nNodes:\nName: default\nEndpoint: unix:/
 set +e
 wrong_socket_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$wrong_socket_buildx_info" \
-  bash "$fixture_preflight" "$valid_env" 2>&1)"
+  bash "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
 wrong_socket_status=$?
 set -e
 [[ "$wrong_socket_status" -eq 1 && "$wrong_socket_output" == *'BLOCKED: Selected Buildx builder is not bound to this i5 rootless Docker socket'* ]] || \
@@ -243,7 +377,7 @@ make_compose_model "$unsafe_model" unsafe-model
 set +e
 model_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$unsafe_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-  bash "$fixture_preflight" "$valid_env" 2>&1)"
+  bash "$fixture_preflight_synthetic" "$valid_env" 2>&1)"
 model_status=$?
 set -e
 [[ "$model_status" -eq 1 && "$model_output" == *'BLOCKED: Staging Compose isolation guard rejected configuration'* ]] || \
@@ -284,7 +418,7 @@ make_compose_model "$source_model" valid
 set +e
 source_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$source_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-  bash "$fixture_preflight" "$source_attack_env" 2>&1)"
+  bash "$fixture_preflight_synthetic" "$source_attack_env" 2>&1)"
 source_status=$?
 set -e
 [[ "$source_status" -eq 1 && "$source_output" == *'BLOCKED: Staging Compose isolation guard rejected configuration'* ]] || \
@@ -330,7 +464,7 @@ make_compose_model "$source_env_model" valid
 set +e
 source_env_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$source_env_model" STUB_BUILDX_INFO="$valid_buildx_info" \
-  bash "$fixture_preflight" "$source_env_attack" 2>&1)"
+  bash "$fixture_preflight_synthetic" "$source_env_attack" 2>&1)"
 source_env_status=$?
 set -e
 [[ "$source_env_status" -eq 1 && "$source_env_output" == *'BLOCKED: Staging Compose isolation guard rejected configuration'* ]] || \

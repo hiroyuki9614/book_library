@@ -4,6 +4,15 @@ set -euo pipefail
 umask 077
 
 fail() { printf 'BLOCKED: %s\n' "$*" >&2; exit 1; }
+if [[ -v BASH_ENV || -v ENV ]]; then
+  fail 'Bash startup overrides are forbidden; invoke preflight from a clean Bash environment'
+fi
+if declare -F docker >/dev/null; then
+  fail 'Ambient Docker shell function is forbidden; invoke preflight from a clean Bash environment'
+fi
+if alias docker >/dev/null 2>&1; then
+  fail 'Ambient Docker alias is forbidden; invoke preflight from a clean Bash environment'
+fi
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 [[ $# -eq 1 ]] || fail 'Supply exact absolute path of the staging-only env file'
 file="$1"
@@ -46,22 +55,34 @@ auth_secret="$(sed -n 's/^BELIB_STAGE_AUTH_SECRET=//p' "$file")"
 unset bootstrap_password app_password migrate_password auth_secret
 grep -Eq '^BELIB_STAGE_AUTH_SECRET=[a-f0-9]{64}$' "$file" || fail 'Auth secret must be local 64-character hex'
 
-command -v docker >/dev/null || fail 'Docker CLI missing; do not install with sudo'
+# Never resolve Docker through PATH: it could select a wrapper or an attacker-controlled
+# stub. The system package path must be a root-owned executable without unsafe permissions.
+readonly docker_cli='/usr/bin/docker'
+[[ "$docker_cli" == /* && -f "$docker_cli" && -x "$docker_cli" && ! -L "$docker_cli" ]] || \
+  fail 'Trusted Docker CLI missing or unsafe; do not use a PATH fallback'
+docker_owner="$(/usr/bin/stat -c %u -- "$docker_cli" 2>/dev/null)" || fail 'Cannot verify trusted Docker CLI ownership'
+docker_mode="$(/usr/bin/stat -c %a -- "$docker_cli" 2>/dev/null)" || fail 'Cannot verify trusted Docker CLI permissions'
+[[ "$docker_owner" == 0 && "$docker_mode" =~ ^[0-7]{3,4}$ ]] || \
+  fail 'Trusted Docker CLI must be root-owned with a valid permission mode'
+docker_mode_octal=$((8#$docker_mode))
+(( (docker_mode_octal & 07022) == 0 )) || fail 'Trusted Docker CLI must not be group/world-writable or have special permission bits'
+unset docker_owner docker_mode docker_mode_octal
+
 # CLI access does not prove rootless: docker-group access to a rootful daemon is forbidden.
 # Ambient Docker overrides are forbidden above; verify the active context directly.
 rootless_socket="unix:///run/user/$(id -u)/docker.sock"
-docker_context="$(docker context show 2>/dev/null)" || fail 'Cannot resolve current Docker context'
+docker_context="$("$docker_cli" context show 2>/dev/null)" || fail 'Cannot resolve current Docker context'
 [[ -n "$docker_context" ]] || fail 'Cannot resolve current Docker context'
-docker_endpoint="$(docker context inspect "$docker_context" --format '{{ (index .Endpoints "docker").Host }}' 2>/dev/null)" || fail 'Cannot resolve Docker context'
+docker_endpoint="$("$docker_cli" context inspect "$docker_context" --format '{{ (index .Endpoints "docker").Host }}' 2>/dev/null)" || fail 'Cannot resolve Docker context'
 [[ "$docker_endpoint" == "$rootless_socket" ]] || fail 'Docker endpoint is not this i5 user rootless socket; rootful/remote daemon forbidden'
-docker_identity="$(docker info --format '{{.Name}}|{{json .SecurityOptions}}')" || fail 'Current nonroot user has no Docker access'
+docker_identity="$("$docker_cli" info --format '{{.Name}}|{{json .SecurityOptions}}')" || fail 'Current nonroot user has no Docker access'
 [[ "$docker_identity" == "ubuntu-worker|"* ]] || fail 'Docker daemon is not on the expected i5 host'
 [[ "$docker_identity" == *'"name=rootless"'* ]] || fail 'Docker daemon does not report rootless security option'
-docker compose version >/dev/null || fail 'Docker Compose plugin unavailable'
+"$docker_cli" compose version >/dev/null || fail 'Docker Compose plugin unavailable'
 
 # Inspect only; do not bootstrap, create, or switch builders. The docker driver uses
 # the Docker daemon's BuildKit, and its endpoint must resolve to the same rootless socket.
-if ! buildx_info="$(docker buildx inspect 2>/dev/null)"; then
+if ! buildx_info="$("$docker_cli" buildx inspect 2>/dev/null)"; then
   fail 'Cannot inspect the selected Buildx builder'
 fi
 if ! printf '%s\n' "$buildx_info" | awk '
@@ -83,7 +104,7 @@ fi
 buildx_endpoint="$(printf '%s\n' "$buildx_info" | awk '$1 == "Endpoint:" { print $2 }')"
 if [[ "$buildx_endpoint" != "$rootless_socket" ]]; then
   [[ "$buildx_endpoint" != *"://"* ]] || fail 'Selected Buildx builder is not bound to this i5 rootless Docker socket'
-  buildx_endpoint="$(docker context inspect "$buildx_endpoint" --format '{{ (index .Endpoints "docker").Host }}' 2>/dev/null)" || \
+  buildx_endpoint="$("$docker_cli" context inspect "$buildx_endpoint" --format '{{ (index .Endpoints "docker").Host }}' 2>/dev/null)" || \
     fail 'Cannot resolve the selected Buildx builder endpoint'
 fi
 [[ "$buildx_endpoint" == "$rootless_socket" ]] || fail 'Selected Buildx builder is not bound to this i5 rootless Docker socket'
@@ -106,7 +127,7 @@ compose_tmpdir="$(mktemp -d)" || fail 'Could not create a private Compose valida
 trap 'rm -rf -- "$compose_tmpdir"' EXIT
 compose_json="$compose_tmpdir/compose.json"
 compose_diagnostics="$compose_tmpdir/compose.stderr"
-if ! docker compose -p belib-isolated-i5 --env-file "$file" \
+if ! "$docker_cli" compose -p belib-isolated-i5 --env-file "$file" \
   -f "$root/compose.staging.yaml" --profile migration config --format json \
   >"$compose_json" 2>"$compose_diagnostics"; then
   fail 'Staging Compose configuration invalid'
