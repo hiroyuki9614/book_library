@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import hashlib
 import importlib.util
 import json
 import os
@@ -36,7 +35,6 @@ SAFE_PATH = "/usr/bin:/bin"
 CONTEXT_NAME = "belib-i5-staging-rootless"
 LOCK_PATH = Path("/tmp/belib-staging-cd-belib-isolated-i5.lock")
 SOURCE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
-RECEIPT_ID_PATTERN = re.compile(r"belib-staging-[0-9a-f]{64}\Z")
 
 OPERATION_ARGS: dict[str, tuple[str, ...]] = {
     "start-db": ("up", "-d", "db"),
@@ -103,72 +101,13 @@ def reject_caller_environment(environment: Mapping[str, str]) -> None:
 
 
 def validate_handoff_receipt(receipt: object, source_sha: str) -> str:
+    """Reject local claims until an independent supervisor verifier is configured."""
     if not SOURCE_SHA_PATTERN.fullmatch(source_sha):
         raise LaunchBlocked("Source revision must be a full lowercase Git SHA")
-    if (
-        not isinstance(receipt, dict)
-        or receipt.get("schema") != "belib-staging-handoff/v1"
-        or receipt.get("status") != "approved-by-existing-staging-supervisor"
-    ):
-        raise LaunchBlocked("A verified existing staging supervisor handoff is required")
-
-    source = receipt.get("source")
-    evidence = receipt.get("evidence")
-    target = receipt.get("target")
-    lock = receipt.get("lock")
-    supervisor = receipt.get("supervisor_verification")
-    deployment = receipt.get("deployment")
-    if not all(isinstance(value, dict) for value in (source, evidence, target, lock, supervisor, deployment)):
-        raise LaunchBlocked("The staging supervisor handoff is incomplete")
-
-    if (
-        source.get("repository") != REPOSITORY
-        or source.get("pull_request") != PULL_REQUEST
-        or source.get("sha") != source_sha
-        or target.get("host") != EXPECTED_HOST
-        or target.get("principal") != EXPECTED_USER
-        or target.get("compose_project") != COMPOSE_PROJECT
-        or target.get("transport") != "existing staging supervisor"
-        or lock.get("github_concurrency_group") != LOCK_GROUP
-    ):
-        raise LaunchBlocked("The staging handoff does not match PR #103, this host, project, and exact SHA")
-
-    receipt_id = receipt.get("receipt_id")
-    ci = evidence.get("staging_ci")
-    release_ci = evidence.get("release_ci")
-    review = evidence.get("independent_review")
-    if not all(isinstance(value, dict) for value in (ci, release_ci, review)):
-        raise LaunchBlocked("The staging handoff receipt identity is incomplete")
-    run_id = ci.get("run_id")
-    run_attempt = ci.get("run_attempt")
-    if type(run_id) is not int or run_id <= 0 or type(run_attempt) is not int or run_attempt <= 0:
-        raise LaunchBlocked("The staging handoff receipt identity is invalid")
-    expected_id = "belib-staging-" + hashlib.sha256(
-        f"{REPOSITORY}:{PULL_REQUEST}:{source_sha}:{run_id}:{run_attempt}".encode("utf-8")
-    ).hexdigest()
-    if (
-        not isinstance(receipt_id, str)
-        or not RECEIPT_ID_PATTERN.fullmatch(receipt_id)
-        or receipt_id != expected_id
-        or lock.get("receipt_id") != receipt_id
-        or ci.get("source_sha") != source_sha
-        or ci.get("run_head_sha") != source_sha
-        or release_ci.get("source_sha") != source_sha
-        or release_ci.get("run_head_sha") != source_sha
-        or review.get("commit_sha") != source_sha
-    ):
-        raise LaunchBlocked("The exact-HEAD staging receipt and lock do not match")
-
-    if (
-        supervisor.get("required") is not True
-        or supervisor.get("status") != "approved"
-        or supervisor.get("deployment_authorized") is not True
-        or supervisor.get("verified_source_sha") != source_sha
-        or supervisor.get("verified_receipt_id") != receipt_id
-        or deployment.get("authorized") is not True
-    ):
-        raise LaunchBlocked("The existing staging supervisor has not authorized this exact receipt and SHA")
-    return receipt_id
+    _ = receipt
+    raise LaunchBlocked(
+        "No trusted independent staging supervisor verifier is configured; local receipt claims cannot authorize staging"
+    )
 
 
 def build_compose_command(
@@ -431,6 +370,16 @@ def validate_compose_contract(
         raise LaunchBlocked("Staging image digest, Compose project, or build context was rejected") from error
 
 
+def load_source_tree_guard(repo_root: Path):
+    guard_path = repo_root / "scripts/staging/source-tree-guard.py"
+    spec = importlib.util.spec_from_file_location("belib_staging_source_tree_guard", guard_path)
+    if spec is None or spec.loader is None:
+        raise LaunchBlocked("The SHA-derived staging build snapshot helper is unavailable")
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    return guard
+
+
 def _checked_repo_branch(seed, repo_root: Path) -> None:
     result = _run(
         seed.git_command(repo_root, "branch", "--show-current"),
@@ -450,42 +399,6 @@ def _run_preflight(repo_root: Path, env_file: Path) -> None:
         raise LaunchBlocked("Read-only i5 preflight did not admit this exact staging source")
 
 
-def _read_receipt(seed, path: Path, uid: int) -> dict:
-    try:
-        fd = seed._open_regular_file_without_symlinks(
-            path,
-            uid,
-            allowed_modes=frozenset({0o600}),
-            maximum_size=65536,
-            description="staging supervisor handoff receipt",
-            mode_error="The staging supervisor handoff receipt must have mode 0600",
-        )
-    except seed.SeedWrapperError as error:
-        raise LaunchBlocked(str(error)) from error
-    try:
-        before = os.fstat(fd)
-        data = bytearray()
-        while len(data) <= 65536:
-            chunk = os.read(fd, 65537 - len(data))
-            if not chunk:
-                break
-            data.extend(chunk)
-        after = os.fstat(fd)
-        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
-            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
-        ) or len(data) != after.st_size or len(data) > 65536:
-            raise LaunchBlocked("The staging supervisor handoff receipt changed while being checked")
-        try:
-            receipt = json.loads(data)
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise LaunchBlocked("The staging supervisor handoff receipt is invalid") from error
-        if not isinstance(receipt, dict):
-            raise LaunchBlocked("The staging supervisor handoff receipt is invalid")
-        return receipt
-    finally:
-        os.close(fd)
-
-
 def main(argv: list[str] | None = None) -> int:
     try:
         verify_python_runtime()
@@ -493,7 +406,6 @@ def main(argv: list[str] | None = None) -> int:
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("--source-sha", required=True)
         parser.add_argument("--env-file", type=Path, required=True)
-        parser.add_argument("--receipt", type=Path, required=True)
         parser.add_argument("operation", choices=(*OPERATION_ARGS, "seed"))
         args = parser.parse_args(argv)
 
@@ -510,13 +422,11 @@ def main(argv: list[str] | None = None) -> int:
             raise LaunchBlocked("Use only the existing i5 staging checkout")
         if args.env_file != EXPECTED_HOME / ".config/belib-staging/i5.env":
             raise LaunchBlocked("Use only the outside-repository i5 staging env file")
-        if args.receipt != EXPECTED_HOME / ".config/belib-staging/approved-handoff.json":
-            raise LaunchBlocked("Use only the existing supervisor-approved handoff receipt")
+
+        validate_handoff_receipt(None, args.source_sha)
 
         seed = load_seed_module()
         _checked_repo_branch(seed, repo_root)
-        receipt = _read_receipt(seed, args.receipt, EXPECTED_UID)
-        receipt_id = validate_handoff_receipt(receipt, args.source_sha)
 
         with project_lock():
             env_snapshot_fd = -1
@@ -530,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
                 except seed.SeedWrapperError as error:
                     raise LaunchBlocked(str(error)) from error
                 if values["BELIB_STAGE_VCS_REF"] != args.source_sha:
-                    raise LaunchBlocked("Staging env revision differs from the approved handoff SHA")
+                    raise LaunchBlocked("Staging env revision differs from the selected source SHA")
 
                 try:
                     docker_config_temporary = seed.create_private_docker_config(EXPECTED_UID)
@@ -540,51 +450,49 @@ def main(argv: list[str] | None = None) -> int:
                 docker_environment, endpoint = _trusted_rootless_context(
                     seed, EXPECTED_UID, EXPECTED_HOME, docker_config
                 )
-                try:
-                    seed.verify_exact_source_context(repo_root, args.source_sha)
-                    seed.assert_clean_source_worktree(repo_root)
-                except seed.SeedWrapperError as error:
-                    raise LaunchBlocked(str(error)) from error
-
                 os.set_inheritable(env_snapshot_fd, True)
-                _validate_compose_model(
-                    repo_root,
-                    env_snapshot_fd,
-                    values,
-                    docker_environment,
-                    args.source_sha,
-                )
-                _checked_repo_branch(seed, repo_root)
-                if validate_handoff_receipt(
-                    _read_receipt(seed, args.receipt, EXPECTED_UID), args.source_sha
-                ) != receipt_id:
-                    raise LaunchBlocked("The verified staging receipt changed before the operation")
                 try:
                     seed.verify_exact_source_context(repo_root, args.source_sha)
                     seed.assert_clean_source_worktree(repo_root)
                 except seed.SeedWrapperError as error:
                     raise LaunchBlocked(str(error)) from error
 
-                if args.operation == "seed":
-                    return seed.main(invoked_by_launcher=True)
+                source_guard = load_source_tree_guard(repo_root)
+                with source_guard.sha_derived_build_snapshot(repo_root, args.source_sha) as build_root:
+                    _validate_compose_model(
+                        build_root,
+                        env_snapshot_fd,
+                        values,
+                        docker_environment,
+                        args.source_sha,
+                    )
+                    _checked_repo_branch(seed, repo_root)
+                    try:
+                        seed.verify_exact_source_context(repo_root, args.source_sha)
+                        seed.assert_clean_source_worktree(repo_root)
+                    except seed.SeedWrapperError as error:
+                        raise LaunchBlocked(str(error)) from error
 
-                env_path = Path(f"/proc/{os.getpid()}/fd/{env_snapshot_fd}")
-                command = build_compose_command(
-                    args.operation,
-                    repo_root=repo_root,
-                    env_file=env_path,
-                )
-                result = subprocess.run(
-                    command,
-                    cwd=repo_root,
-                    env=docker_environment,
-                    stdin=subprocess.DEVNULL,
-                    check=False,
-                    pass_fds=(env_snapshot_fd,),
-                )
-                if result.returncode != 0:
-                    print("BLOCKED: Guarded staging Compose operation failed", file=sys.stderr)
-                return result.returncode
+                    if args.operation == "seed":
+                        return seed.main(invoked_by_launcher=True)
+
+                    env_path = Path(f"/proc/{os.getpid()}/fd/{env_snapshot_fd}")
+                    command = build_compose_command(
+                        args.operation,
+                        repo_root=build_root,
+                        env_file=env_path,
+                    )
+                    result = subprocess.run(
+                        command,
+                        cwd=build_root,
+                        env=docker_environment,
+                        stdin=subprocess.DEVNULL,
+                        check=False,
+                        pass_fds=(env_snapshot_fd,),
+                    )
+                    if result.returncode != 0:
+                        print("BLOCKED: Guarded staging Compose operation failed", file=sys.stderr)
+                    return result.returncode
             finally:
                 if env_snapshot_fd >= 0:
                     os.close(env_snapshot_fd)

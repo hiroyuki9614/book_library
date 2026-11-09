@@ -5,9 +5,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
+import os
+import pwd
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -114,48 +119,45 @@ class LaunchEnvironmentTests(unittest.TestCase):
 
 
 class LaunchReceiptTests(unittest.TestCase):
-    def test_exact_supervisor_receipt_is_required(self) -> None:
-        receipt = approved_receipt()
-        self.assertEqual(launch.validate_handoff_receipt(receipt, SOURCE_SHA), receipt["receipt_id"])
+    def test_fully_forged_local_receipt_cannot_authorize_staging(self) -> None:
+        with self.assertRaisesRegex(launch.LaunchBlocked, "No trusted independent staging supervisor verifier"):
+            launch.validate_handoff_receipt(approved_receipt(), SOURCE_SHA)
 
-    def test_pending_or_stale_receipt_is_rejected(self) -> None:
-        receipt = approved_receipt()
-        receipt["supervisor_verification"]["status"] = "pending-independent-provenance-verification"
-        with self.assertRaisesRegex(launch.LaunchBlocked, "not authorized"):
-            launch.validate_handoff_receipt(receipt, SOURCE_SHA)
+    def test_missing_receipt_and_claimed_approval_both_fail_closed(self) -> None:
+        for receipt in (None, {"status": "approved", "supervisor": True}):
+            with self.subTest(receipt=receipt), self.assertRaisesRegex(
+                launch.LaunchBlocked, "local receipt claims cannot authorize staging"
+            ):
+                launch.validate_handoff_receipt(receipt, SOURCE_SHA)
 
-        with self.assertRaisesRegex(launch.LaunchBlocked, "exact SHA"):
-            launch.validate_handoff_receipt(approved_receipt(), "b" * 40)
+    def test_malformed_source_sha_is_rejected_before_authority_check(self) -> None:
+        with self.assertRaisesRegex(launch.LaunchBlocked, "full lowercase Git SHA"):
+            launch.validate_handoff_receipt(approved_receipt(), "B" * 40)
 
-    def test_wrong_project_and_receipt_lock_are_rejected(self) -> None:
-        receipt = approved_receipt()
-        receipt["target"]["compose_project"] = "production"
-        with self.assertRaisesRegex(launch.LaunchBlocked, "does not match PR #103"):
-            launch.validate_handoff_receipt(receipt, SOURCE_SHA)
+    def test_launcher_stops_before_lock_when_independent_authority_is_unavailable(self) -> None:
+        account = pwd.getpwuid(os.getuid())
+        error_output = io.StringIO()
+        arguments = [
+            "--source-sha", SOURCE_SHA,
+            "--env-file", str(Path(account.pw_dir) / ".config/belib-staging/i5.env"),
+            "start-app",
+        ]
+        with (
+            patch.object(launch, "verify_python_runtime"),
+            patch.object(launch, "reject_caller_environment"),
+            patch.object(launch, "EXPECTED_USER", account.pw_name),
+            patch.object(launch, "EXPECTED_UID", account.pw_uid),
+            patch.object(launch, "EXPECTED_HOME", Path(account.pw_dir)),
+            patch.object(launch, "EXPECTED_HOST", "test-host"),
+            patch.object(launch.socket, "gethostname", return_value="test-host"),
+            patch.object(launch, "EXPECTED_REPO_ROOT", ROOT),
+            patch.object(launch, "project_lock", side_effect=AssertionError("lock reached")),
+            redirect_stderr(error_output),
+        ):
+            result = launch.main(arguments)
 
-        receipt = approved_receipt()
-        receipt["lock"]["receipt_id"] = "belib-staging-" + "0" * 64
-        with self.assertRaisesRegex(launch.LaunchBlocked, "receipt and lock"):
-            launch.validate_handoff_receipt(receipt, SOURCE_SHA)
-
-    def test_wrong_host_or_principal_is_rejected(self) -> None:
-        for field, value in (("host", "production-worker"), ("principal", "root")):
-            with self.subTest(field=field):
-                receipt = approved_receipt()
-                receipt["target"][field] = value
-                with self.assertRaisesRegex(launch.LaunchBlocked, "does not match PR #103"):
-                    launch.validate_handoff_receipt(receipt, SOURCE_SHA)
-
-    def test_wrong_review_or_ci_sha_is_rejected(self) -> None:
-        receipt = approved_receipt()
-        receipt["evidence"]["independent_review"]["commit_sha"] = "c" * 40
-        with self.assertRaisesRegex(launch.LaunchBlocked, "receipt and lock"):
-            launch.validate_handoff_receipt(receipt, SOURCE_SHA)
-
-        receipt = approved_receipt()
-        receipt["evidence"]["staging_ci"]["run_head_sha"] = "c" * 40
-        with self.assertRaisesRegex(launch.LaunchBlocked, "receipt and lock"):
-            launch.validate_handoff_receipt(receipt, SOURCE_SHA)
+        self.assertEqual(result, 1)
+        self.assertIn("No trusted independent staging supervisor verifier", error_output.getvalue())
 
 
 class LaunchOperationTests(unittest.TestCase):
@@ -180,6 +182,14 @@ class LaunchOperationTests(unittest.TestCase):
             launch.build_compose_command(
                 "migrate", repo_root=Path("/tmp"), env_file=Path("/tmp/env"), docker_context="default"
             )
+
+    def test_compose_build_project_directory_can_be_pinned_to_snapshot(self) -> None:
+        snapshot = Path("/tmp/belib-staging-source-example")
+        command = launch.build_compose_command(
+            "start-app", repo_root=snapshot, env_file=Path("/proc/123/fd/7")
+        )
+        self.assertEqual(command[command.index("--project-directory") + 1], str(snapshot))
+        self.assertEqual(command[command.index("-f") + 1], str(snapshot / "compose.staging.yaml"))
 
     def test_changed_build_context_and_image_digest_are_rejected(self) -> None:
         model = ci_tests.compose_model(ROOT)

@@ -86,6 +86,28 @@ i5 host, preserve the current artifacts/cache, and rerun read-only admission.
 The local repair has not been independently re-reviewed, pushed, or checked by
 GitHub CI; it does not approve or deploy staging.
 
+Dated correction (2026-11-09, same-claim bounded P1/P2 response for draft PR
+#103): no trusted independent supervisor verifier is configured. The launcher
+now rejects every local receipt claim before lock acquisition, preflight,
+staging env-file access, or Docker setup; same-principal hashes or credentials
+are not treated as independent approval. A new offline test submits a complete
+self-asserted approval and confirms the launcher stops before the project lock.
+The source guard now materializes the selected commit's Git blobs into a
+private temporary snapshot containing only tracked effective backend
+and frontend contexts plus required staging Compose files. Compose validation
+and build operations use that snapshot path. Tests mutate tracked checkout
+content after snapshot admission and add ignored Playwright output and tracked
+`dist` output; the snapshot remains SHA-derived and excludes those artifacts.
+The rootless Docker socket is still accessible to the same `hiroyuki` principal,
+who can bypass the launcher and lock with direct Docker API access or alter a
+same-UID snapshot. The runbook records a single-owner,
+one-operation-at-a-time boundary and the residual risk; no daemon or permission
+change was made. Local source admission remains blocked
+by preserved Playwright/test artifacts and Python cache. No Docker build/up,
+migration, seed, DB operation, secret read, or deployment was performed. The
+changes have not been independently re-reviewed, pushed, or checked by GitHub
+CI; they do not approve or deploy staging.
+
 ## 2026-11-04 stale admin-list follow-up
 
 An active-list response captured before a deletion could arrive after the

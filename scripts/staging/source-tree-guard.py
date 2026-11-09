@@ -11,7 +11,10 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 
 GIT = "/usr/bin/git"
@@ -20,6 +23,14 @@ DOCKERIGNORE_FILES = (b"backend/.dockerignore", b"frontend/.dockerignore")
 DOCKERFILE_INPUTS = (
     b"scripts/staging/Dockerfile.backend.staging",
     b"scripts/staging/Dockerfile.frontend.staging",
+)
+SNAPSHOT_SUPPORT_FILES = (
+    b"compose.staging.yaml",
+    b"nginx/nginx.conf",
+    b"scripts/staging/10-belib-staging-roles.sh",
+    b"scripts/staging/ci-isolation-guard.py",
+    b"scripts/staging/nginx-default.conf",
+    *DOCKERFILE_INPUTS,
 )
 
 
@@ -340,6 +351,94 @@ def verify_source(root: Path, revision: str) -> tuple[int, int]:
             raise SourceTreeBlocked("Docker ignore rules are missing or too large")
         context_file_count += verify_context(root, prefix, tree_paths, dockerignore_patterns(dockerignore_content[ignore_file]))
     return len(tree), context_file_count
+
+
+def _snapshot_entries(
+    root: Path,
+    tree: dict[bytes, tuple[bytes, bytes]],
+) -> dict[bytes, tuple[bytes, bytes]]:
+    selected: dict[bytes, tuple[bytes, bytes]] = {}
+    for path in SNAPSHOT_SUPPORT_FILES:
+        entry = tree.get(path)
+        if entry is None:
+            raise SourceTreeBlocked("A required staging Compose source file is missing from the selected commit")
+        selected[path] = entry
+
+    for prefix, ignore_file in zip(CONTEXTS, DOCKERIGNORE_FILES, strict=True):
+        ignore_entry = tree.get(ignore_file)
+        if ignore_entry is None or ignore_entry[0] not in (b"100644", b"100755"):
+            raise SourceTreeBlocked("A Docker ignore file is missing from the selected commit")
+        ignore_contents = git(root, "cat-file", "blob", ignore_entry[1].decode("ascii"))
+        patterns = dockerignore_patterns(ignore_contents)
+        for path, entry in tree.items():
+            if path.startswith(prefix + b"/") and not ignored(path[len(prefix) + 1 :], patterns):
+                selected[path] = entry
+
+    for path, (mode, _) in selected.items():
+        if mode not in (b"100644", b"100755"):
+            raise SourceTreeBlocked("A staging snapshot input is not a regular Git file")
+        if path.startswith(b"/") or any(part in (b"", b".", b"..") for part in path.split(b"/")):
+            raise SourceTreeBlocked("A staging snapshot input has an unsafe Git path")
+    return selected
+
+
+@contextmanager
+def sha_derived_build_snapshot(root: Path, revision: str) -> Iterator[Path]:
+    """Materialize only committed, effective staging inputs into a private source tree."""
+    verify_source(root, revision)
+    tree = parse_tree(root, revision)
+    object_format = git(root, "rev-parse", "--show-object-format").decode("ascii", "strict").strip()
+    if object_format not in ("sha1", "sha256"):
+        raise SourceTreeBlocked("Git object format is unsupported")
+    entries = _snapshot_entries(root, tree)
+
+    temporary = tempfile.TemporaryDirectory(prefix="belib-staging-source-", dir="/tmp")
+    snapshot = Path(temporary.name)
+    snapshot_bytes = os.fsencode(snapshot)
+    try:
+        for relative, (mode, oid) in sorted(entries.items()):
+            parent = snapshot_bytes
+            for component in relative.split(b"/")[:-1]:
+                parent = os.path.join(parent, component)
+                if not os.path.exists(parent):
+                    os.mkdir(parent, 0o755)
+                    os.chmod(parent, 0o755)
+
+            content = git(root, "cat-file", "blob", oid.decode("ascii"))
+            if hash_blob(content, object_format).decode("ascii") != oid.decode("ascii"):
+                raise SourceTreeBlocked("A staging snapshot blob differs from its selected Git object")
+            full_path = os.path.join(snapshot_bytes, relative)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(full_path, flags, 0o600)
+            except OSError as exc:
+                raise SourceTreeBlocked("A staging snapshot file could not be created safely") from exc
+            try:
+                remaining = memoryview(content)
+                while remaining:
+                    written = os.write(fd, remaining)
+                    if written <= 0:
+                        raise SourceTreeBlocked("A staging snapshot file could not be written completely")
+                    remaining = remaining[written:]
+            finally:
+                os.close(fd)
+            os.chmod(full_path, 0o755 if mode == b"100755" else 0o644)
+
+        snapshot_bytes_by_path = os.fsencode(snapshot)
+        for relative, (expected_mode, expected_oid) in entries.items():
+            path = os.path.join(snapshot_bytes_by_path, relative)
+            actual_oid, actual_mode, _ = hash_regular_file(path, object_format)
+            if actual_oid != expected_oid or bool(actual_mode & 0o111) != (expected_mode == b"100755"):
+                raise SourceTreeBlocked("A staging snapshot differs from its selected Git tree")
+
+        for prefix, ignore_file in zip(CONTEXTS, DOCKERIGNORE_FILES, strict=True):
+            content = (snapshot / os.fsdecode(ignore_file)).read_bytes()
+            patterns = dockerignore_patterns(content)
+            verify_context(snapshot, prefix, set(entries), patterns)
+
+        yield snapshot
+    finally:
+        temporary.cleanup()
 
 
 def main() -> int:
