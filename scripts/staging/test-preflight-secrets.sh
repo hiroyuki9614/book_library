@@ -131,12 +131,16 @@ case "$*" in
   'context inspect '*) printf 'unix:///run/user/%s/docker.sock\n' "$(id -u)" ;;
   'info --format '*) printf 'ubuntu-worker|["name=rootless"]\n' ;;
   'compose version') printf 'Docker Compose version fixture\n' ;;
+  'buildx inspect') cat -- "$STUB_BUILDX_INFO" ;;
   *' config --format json') cat -- "$STUB_COMPOSE_JSON" ;;
   *' up '*|*' build '*) printf 'Unexpected deployment command in preflight test\n' >&2; exit 90 ;;
   *) printf 'Unexpected Docker command in preflight test\n' >&2; exit 91 ;;
 esac
 SH
 chmod 700 "$integration_bin/docker"
+
+valid_buildx_info="$test_root/buildx-local.txt"
+printf 'Name: default\nDriver: docker\n\nNodes:\nName: default\nEndpoint: default\nStatus: running\n' > "$valid_buildx_info"
 
 make_compose_model() {
   local destination="$1" mode="$2"
@@ -174,7 +178,7 @@ make_compose_model "$valid_model" valid
 docker_log="$test_root/docker-calls.log"
 set +e
 valid_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-  STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" \
+  STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
   bash "$fixture_preflight" "$valid_env" 2>&1)"
 valid_status=$?
 set -e
@@ -183,13 +187,62 @@ set -e
 for synthetic_secret in "$synthetic_secret_a" "$synthetic_secret_b" "$synthetic_secret_c" "$synthetic_secret_d"; do
   [[ "$valid_output" != *"$synthetic_secret"* ]] || fail 'Preflight output exposed a synthetic credential'
 done
+grep -F 'buildx inspect' "$docker_log" >/dev/null || fail 'Preflight did not inspect the selected Buildx builder'
 printf 'PASS: preflight passes only after offline resolved-model guard (exit=%s)\n' "$valid_status"
+
+# Buildx and BuildKit environment overrides can select remote build infrastructure.
+for override in 'BUILDX_BUILDER=remote' 'BUILDKIT_HOST=tcp://builder.invalid:1234'; do
+  calls_before="$(wc -l < "$docker_log")"
+  set +e
+  override_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+    "$override" STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$valid_buildx_info" \
+    bash "$fixture_preflight" "$valid_env" 2>&1)"
+  override_status=$?
+  set -e
+  [[ "$override_status" -eq 1 && "$override_output" == *'BLOCKED: Ambient staging, Docker, Buildx, BuildKit, Compose, database, or SSH-agent overrides are forbidden'* ]] || \
+    fail 'Ambient Buildx or BuildKit override was not rejected'
+  [[ "$(wc -l < "$docker_log")" -eq "$calls_before" ]] || fail 'Ambient Buildx or BuildKit override reached Docker'
+  for synthetic_secret in "$synthetic_secret_a" "$synthetic_secret_b" "$synthetic_secret_c" "$synthetic_secret_d"; do
+    [[ "$override_output" != *"$synthetic_secret"* ]] || fail 'Buildx/BuildKit override rejection exposed a synthetic credential'
+  done
+  printf 'PASS: ambient Buildx/BuildKit override rejected before Docker\n'
+done
+
+# The selected builder can be remote even when the active Docker context is local.
+remote_buildx_info="$test_root/buildx-remote.txt"
+printf 'Name: remote\nDriver: remote\n\nNodes:\nName: remote0\nEndpoint: tcp://builder.invalid:1234\nStatus: running\n' > "$remote_buildx_info"
+set +e
+remote_builder_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$remote_buildx_info" \
+  bash "$fixture_preflight" "$valid_env" 2>&1)"
+remote_builder_status=$?
+set -e
+[[ "$remote_builder_status" -eq 1 && "$remote_builder_output" == *'BLOCKED: Selected Buildx builder must use the local docker driver'* ]] || \
+  fail 'Preflight accepted a preselected remote Buildx builder'
+for synthetic_secret in "$synthetic_secret_a" "$synthetic_secret_b" "$synthetic_secret_c" "$synthetic_secret_d"; do
+  [[ "$remote_builder_output" != *"$synthetic_secret"* ]] || fail 'Remote-builder rejection exposed a synthetic credential'
+done
+[[ "$remote_builder_output" != *'builder.invalid'* ]] || fail 'Remote-builder rejection exposed endpoint details'
+printf 'PASS: preselected remote Buildx builder rejected without exposing credentials (exit=%s)\n' "$remote_builder_status"
+
+wrong_socket_buildx_info="$test_root/buildx-wrong-socket.txt"
+printf 'Name: default\nDriver: docker\n\nNodes:\nName: default\nEndpoint: unix:///run/user/1001/docker.sock\nStatus: running\n' > "$wrong_socket_buildx_info"
+set +e
+wrong_socket_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$valid_model" STUB_BUILDX_INFO="$wrong_socket_buildx_info" \
+  bash "$fixture_preflight" "$valid_env" 2>&1)"
+wrong_socket_status=$?
+set -e
+[[ "$wrong_socket_status" -eq 1 && "$wrong_socket_output" == *'BLOCKED: Selected Buildx builder is not bound to this i5 rootless Docker socket'* ]] || \
+  fail 'Preflight accepted a local-driver builder bound to another socket'
+[[ "$wrong_socket_output" != *'1001'* ]] || fail 'Wrong-socket rejection exposed endpoint details'
+printf 'PASS: local Buildx driver bound to a different user socket rejected (exit=%s)\n' "$wrong_socket_status"
 
 unsafe_model="$test_root/compose-unsafe.json"
 make_compose_model "$unsafe_model" unsafe-model
 set +e
 model_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-  STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$unsafe_model" \
+  STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$unsafe_model" STUB_BUILDX_INFO="$valid_buildx_info" \
   bash "$fixture_preflight" "$valid_env" 2>&1)"
 model_status=$?
 set -e
@@ -230,7 +283,7 @@ source_model="$test_root/compose-source-attack.json"
 make_compose_model "$source_model" valid
 set +e
 source_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-  STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$source_model" \
+  STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$source_model" STUB_BUILDX_INFO="$valid_buildx_info" \
   bash "$fixture_preflight" "$source_attack_env" 2>&1)"
 source_status=$?
 set -e
@@ -276,7 +329,7 @@ source_env_model="$test_root/compose-source-env-attack.json"
 make_compose_model "$source_env_model" valid
 set +e
 source_env_output="$(/usr/bin/env -i PATH="$integration_bin" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-  STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$source_env_model" \
+  STUB_DOCKER_LOG="$docker_log" STUB_COMPOSE_JSON="$source_env_model" STUB_BUILDX_INFO="$valid_buildx_info" \
   bash "$fixture_preflight" "$source_env_attack" 2>&1)"
 source_env_status=$?
 set -e

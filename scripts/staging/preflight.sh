@@ -13,10 +13,11 @@ file="$1"
 [[ "$(stat -c %u -- "$file")" == "$(id -u)" ]] || fail 'Env file must be owned by current principal'
 mode="$(stat -c %a -- "$file")"
 [[ "$mode" == 600 || "$mode" == 400 ]] || fail 'Env file must have mode 0600 or 0400'
-# Compose gives ambient variables precedence over --env-file; reject all ambient staging,
-# Compose, Docker, database, and SSH-agent credential inputs before reading the host-only file.
-if compgen -e | grep -Eq '^(BELIB_STAGE_|COMPOSE_|DOCKER_|DATABASE_URL$|DIRECT_URL$|POSTGRES_|BETTER_AUTH_SECRET$|R2_|AWS_|S3_|PROD_|PRODUCTION_|VITE_PUBLIC_DEMO_|BELIB_FRONTEND_|SSH_AUTH_SOCK$|SSH_AGENT_PID$|GIT_SSH_COMMAND$)'; then
-  fail 'Ambient staging, Docker, Compose, database, or SSH-agent overrides are forbidden; use the staging env file only'
+# Compose gives ambient variables precedence over --env-file. Docker, Buildx, and BuildKit
+# variables can redirect daemon/build traffic, so reject those along with other ambient
+# staging, Compose, database, and SSH-agent credential inputs before reading the host-only file.
+if compgen -e | grep -Eq '^(BELIB_STAGE_|COMPOSE_|DOCKER_|BUILDX_|BUILDKIT_|DATABASE_URL$|DIRECT_URL$|POSTGRES_|BETTER_AUTH_SECRET$|R2_|AWS_|S3_|PROD_|PRODUCTION_|VITE_PUBLIC_DEMO_|BELIB_FRONTEND_|SSH_AUTH_SOCK$|SSH_AGENT_PID$|GIT_SSH_COMMAND$)'; then
+  fail 'Ambient staging, Docker, Buildx, BuildKit, Compose, database, or SSH-agent overrides are forbidden; use the staging env file only'
 fi
 
 allowed_keys='BELIB_STAGE_DB_BOOTSTRAP_PASSWORD|BELIB_STAGE_DB_APP_PASSWORD|BELIB_STAGE_DB_MIGRATE_PASSWORD|BELIB_STAGE_AUTH_SECRET|BELIB_STAGE_VCS_REF|BELIB_STAGE_PORT'
@@ -47,20 +48,46 @@ grep -Eq '^BELIB_STAGE_AUTH_SECRET=[a-f0-9]{64}$' "$file" || fail 'Auth secret m
 
 command -v docker >/dev/null || fail 'Docker CLI missing; do not install with sudo'
 # CLI access does not prove rootless: docker-group access to a rootful daemon is forbidden.
-# Resolve the effective endpoint, including DOCKER_CONTEXT/DOCKER_HOST overrides.
+# Ambient Docker overrides are forbidden above; verify the active context directly.
 rootless_socket="unix:///run/user/$(id -u)/docker.sock"
-if [[ -n "${DOCKER_CONTEXT:-}" ]]; then
-  docker_endpoint="$(docker context inspect "$DOCKER_CONTEXT" --format '{{ (index .Endpoints "docker").Host }}')" || fail 'Cannot resolve Docker context'
-elif [[ -n "${DOCKER_HOST:-}" ]]; then
-  docker_endpoint="$DOCKER_HOST"
-else
-  docker_endpoint="$(docker context inspect "$(docker context show)" --format '{{ (index .Endpoints "docker").Host }}')" || fail 'Cannot resolve current Docker context'
-fi
+docker_context="$(docker context show 2>/dev/null)" || fail 'Cannot resolve current Docker context'
+[[ -n "$docker_context" ]] || fail 'Cannot resolve current Docker context'
+docker_endpoint="$(docker context inspect "$docker_context" --format '{{ (index .Endpoints "docker").Host }}' 2>/dev/null)" || fail 'Cannot resolve Docker context'
 [[ "$docker_endpoint" == "$rootless_socket" ]] || fail 'Docker endpoint is not this i5 user rootless socket; rootful/remote daemon forbidden'
 docker_identity="$(docker info --format '{{.Name}}|{{json .SecurityOptions}}')" || fail 'Current nonroot user has no Docker access'
 [[ "$docker_identity" == "ubuntu-worker|"* ]] || fail 'Docker daemon is not on the expected i5 host'
 [[ "$docker_identity" == *'"name=rootless"'* ]] || fail 'Docker daemon does not report rootless security option'
 docker compose version >/dev/null || fail 'Docker Compose plugin unavailable'
+
+# Inspect only; do not bootstrap, create, or switch builders. The docker driver uses
+# the Docker daemon's BuildKit, and its endpoint must resolve to the same rootless socket.
+if ! buildx_info="$(docker buildx inspect 2>/dev/null)"; then
+  fail 'Cannot inspect the selected Buildx builder'
+fi
+if ! printf '%s\n' "$buildx_info" | awk '
+  $1 == "Driver:" {
+    driver_count++
+    driver = $2
+    if (NF != 2) invalid = 1
+  }
+  $1 == "Endpoint:" {
+    endpoint_count++
+    if (NF != 2) invalid = 1
+  }
+  END {
+    exit !(driver_count == 1 && endpoint_count == 1 && !invalid && driver == "docker")
+  }
+'; then
+  fail 'Selected Buildx builder must use the local docker driver'
+fi
+buildx_endpoint="$(printf '%s\n' "$buildx_info" | awk '$1 == "Endpoint:" { print $2 }')"
+if [[ "$buildx_endpoint" != "$rootless_socket" ]]; then
+  [[ "$buildx_endpoint" != *"://"* ]] || fail 'Selected Buildx builder is not bound to this i5 rootless Docker socket'
+  buildx_endpoint="$(docker context inspect "$buildx_endpoint" --format '{{ (index .Endpoints "docker").Host }}' 2>/dev/null)" || \
+    fail 'Cannot resolve the selected Buildx builder endpoint'
+fi
+[[ "$buildx_endpoint" == "$rootless_socket" ]] || fail 'Selected Buildx builder is not bound to this i5 rootless Docker socket'
+unset buildx_info buildx_endpoint
 
 free_kib="$(df -Pk "$root" | awk 'END {print $4}')"
 [[ "$free_kib" =~ ^[0-9]+$ && "$free_kib" -ge 8388608 ]] || fail 'Require >=8 GiB free on target i5 filesystem'

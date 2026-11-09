@@ -20,8 +20,12 @@ refuses unexpected top-level book data, creates `/home/node/books` as `node`
 with mode `0700`, and probes nonroot file creation/removal before connecting
 to the staging database. Offline Compose, wrapper, initializer, and Vitest
 checks cover the source contract. Neither role initialization nor book-volume
-ownership has been observed on i5. The rootless Docker CLI/socket remains
-unavailable, so staging startup and seed remain blocked.
+ownership has been observed on i5.
+
+Dated correction (2026-11-09 12:15 JST): the rootless Docker context/socket,
+daemon rootless security option, and Docker Compose v5.7.0 were verified on
+i5. No staging containers or volumes were present, and no staging HTTP/TLS
+service was available. Deployment and seed remain blocked pending admission.
 
 ## 2026-11-04 stale admin-list follow-up
 
