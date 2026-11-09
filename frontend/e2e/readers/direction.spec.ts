@@ -89,9 +89,7 @@ for (const config of cases) {
 				await page.getByRole('button', { name: 'Chapter 1', exact: true }).click();
 				await idle(page);
 				const columns = mode === '常に見開き' || (mode === '自動' && config.width >= 800) ? 2 : 1;
-				const record = async (action: string, expected: number[]) => {
-					const observation = await observe(page);
-					observations.push({ action, mode, observation });
+				const assertObservation = (observation: Awaited<ReturnType<typeof observe>>, expected: number[]) => {
 					expect(observation.visible.map(p => p.number), JSON.stringify(observation)).toEqual(expected);
 					expect(observation.cfi).toMatch(/^epubcfi\(/);
 					for (const layout of observation.layout) {
@@ -109,6 +107,11 @@ for (const config of cases) {
 						if (config.direction === 'ltr') expect(earlier.x).toBeLessThan(later.x);
 						else expect(earlier.x).toBeGreaterThan(later.x);
 					}
+				};
+				const record = async (action: string, expected: number[]) => {
+					const observation = await observe(page);
+					observations.push({ action, mode, observation });
+					assertObservation(observation, expected);
 					if (action === 'start' && columns === 2) await page.screenshot({ path: testInfo.outputPath(`spread-${mode}.png`) });
 					return observation;
 				};
@@ -162,8 +165,20 @@ for (const config of cases) {
 				await page.evaluate(() => localStorage.clear());
 				await page.reload();
 				await idle(page);
-				observations.push({ action: 'reloaded before mode change', mode, observation: await observe(page) });
+				const restoredBeforeModeChange = await observe(page);
+				const initialMode = await page.getByRole('combobox').innerText();
+				const initialColumns = initialMode === '常に見開き' || (initialMode === '自動' && config.width >= 800) ? 2 : 1;
+				const savedFirstPage = before.visible[0].number;
+				const initialFirstPage = initialColumns === 2 ? savedFirstPage - ((savedFirstPage - 1) % 2) : savedFirstPage;
+				const expectedInitialPages = Array.from({ length: initialColumns }, (_, i) => initialFirstPage + i);
+				observations.push({ action: 'reloaded before mode change', mode, observation: restoredBeforeModeChange });
+				assertObservation(restoredBeforeModeChange, expectedInitialPages);
+				expect(restoredBeforeModeChange.cfi, 'saved CFI must be restored before changing spread mode').toBe(before.cfi);
 				await page.waitForTimeout(850);
+				const restoredAfterSettle = await observe(page);
+				observations.push({ action: 'reloaded after settle before mode change', mode, observation: restoredAfterSettle });
+				assertObservation(restoredAfterSettle, expectedInitialPages);
+				expect(restoredAfterSettle.cfi, 'saved CFI must remain restored after settling before changing spread mode').toBe(before.cfi);
 				expect(api.writes.length, 'opening must not overwrite the saved CFI').toBe(writes);
 				// Restore defaults to the viewport mode; reselect the mode through UI.
 				await page.getByRole('combobox').click();
