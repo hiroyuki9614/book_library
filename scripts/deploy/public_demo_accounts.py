@@ -47,10 +47,27 @@ def empty_build_args() -> dict[str, str]:
     )}
 
 
-def _public_user_build_fingerprint(user: dict[str, str]) -> str:
-    """Fingerprint only the intentionally public pair compiled into the frontend."""
+def public_user_build_args(email: str, password: str) -> dict[str, str]:
+    """Return frontend args and a fingerprint for only the public general-user pair."""
+    if type(email) is not str or type(password) is not str:
+        raise PublicDemoError('Public demo credentials have an invalid shape')
+    if not email and not password:
+        fingerprint = ''
+    elif not email or not password:
+        raise PublicDemoError('Public demo credentials are incomplete')
+    else:
+        fingerprint = _public_user_build_fingerprint(email, password)
+    return {
+        'VITE_PUBLIC_DEMO_EMAIL': email,
+        'VITE_PUBLIC_DEMO_PASSWORD': password,
+        'PUBLIC_DEMO_USER_BUILD_SHA256': fingerprint,
+    }
+
+
+def _public_user_build_fingerprint(email: str, password: str) -> str:
+    """Fingerprint only the intentionally public general-user pair."""
     public_inputs = json.dumps(
-        {'email': user['email'], 'password': user['password']},
+        {'email': email, 'password': password},
         ensure_ascii=False,
         separators=(',', ':'),
         sort_keys=True,
@@ -96,11 +113,7 @@ def load_accounts(config: dict) -> tuple[dict[str, str], dict | None]:
             raise ValueError()
     except (ValueError, KeyError, TypeError):
         raise PublicDemoError('Public demo file has an invalid schema') from None
-    return {
-        'VITE_PUBLIC_DEMO_EMAIL': data['user']['email'],
-        'VITE_PUBLIC_DEMO_PASSWORD': data['user']['password'],
-        'PUBLIC_DEMO_USER_BUILD_SHA256': _public_user_build_fingerprint(data['user']),
-    }, data
+    return public_user_build_args(data['user']['email'], data['user']['password']), data
 
 
 _VERIFY_JS = r'''

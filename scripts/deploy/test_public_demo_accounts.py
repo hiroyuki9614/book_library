@@ -12,6 +12,7 @@ from public_demo_accounts import (
     drop_legacy_admin_build_args,
     empty_build_args,
     load_accounts,
+    public_user_build_args,
     verify_accounts,
 )
 
@@ -53,6 +54,7 @@ class PublicDemoAccountTests(unittest.TestCase):
         self.assertEqual(args['VITE_PUBLIC_DEMO_PASSWORD'], 'synthetic-user-pass')
         original = args['PUBLIC_DEMO_USER_BUILD_SHA256']
         self.assertRegex(original, r'^[0-9a-f]{64}$')
+        self.assertEqual(args, public_user_build_args('user@example.test', 'synthetic-user-pass'))
         self.data['admin']['password'] = 'different-synthetic-pass'
         self.data['admin']['email'] = 'changed-admin@example.test'
         self.save()
@@ -60,6 +62,11 @@ class PublicDemoAccountTests(unittest.TestCase):
         self.data['user']['password'] = 'changed-public-user-pass'
         self.save()
         self.assertNotEqual(load_accounts(self.config)[0]['PUBLIC_DEMO_USER_BUILD_SHA256'], original)
+
+    def test_public_user_build_args_are_blank_only_for_no_public_pair(self):
+        self.assertEqual(public_user_build_args('', ''), empty_build_args())
+        with self.assertRaises(PublicDemoError):
+            public_user_build_args('user@example.test', '')
 
     def test_drops_only_exact_legacy_admin_build_keys_and_rejects_other_names(self):
         args = {

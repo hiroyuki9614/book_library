@@ -32,6 +32,7 @@ from public_demo_accounts import (
     drop_legacy_admin_build_args,
     empty_build_args,
     load_accounts,
+    public_user_build_args,
     verify_accounts,
 )
 from release_gate import GateError, GitHubAPI, TransientGitHubAPIError, validate_release
@@ -911,13 +912,24 @@ def deploy_frontend(
             dual_args, dual_accounts = load_accounts(config)
         except (PublicDemoError, OSError):
             raise DeployError('Public demo configuration is unavailable or invalid') from None
-        config = {**config, '_public_demo_build_args': dual_args}
     if public_demo_source is None:
         public_demo_source = _load_public_demo_source(config)
     public_demo_candidate = public_demo_source.candidate
     public_demo_credentials = (
         public_demo_candidate.pair if public_demo_candidate is not None else ("", "")
     )
+    if dual_args is not None:
+        public_demo_credentials = (
+            dual_args['VITE_PUBLIC_DEMO_EMAIL'],
+            dual_args['VITE_PUBLIC_DEMO_PASSWORD'],
+        )
+    try:
+        public_demo_build_args = public_user_build_args(*public_demo_credentials)
+    except PublicDemoError:
+        raise DeployError('The public demo configuration is invalid') from None
+    if dual_args is not None and public_demo_build_args != dual_args:
+        raise DeployError('The public demo configuration is invalid')
+    config = {**config, '_public_demo_build_args': public_demo_build_args}
     _validate_public_demo_api_base_url(config)
     public_demo_identity = (
         _validate_public_demo_candidate(public_demo_candidate)
