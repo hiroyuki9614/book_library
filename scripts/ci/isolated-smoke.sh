@@ -253,6 +253,56 @@ wait_db_healthy() {
   return 1
 }
 
+wait_runtime_healthcheck() {
+  local service="$1" expected_id="$2" expected_image="$3" attempt record health_test
+  local current_id current_image status
+  [[ "$recovery_rehearsal" == "github-hosted-v1" && "$RUNNER_ENVIRONMENT" == "github-hosted" \
+    && "$GITHUB_ACTIONS" == true ]] || {
+    echo "Refusing runtime healthcheck outside guarded GitHub-hosted rehearsal" >&2
+    return 1
+  }
+  case "$service" in
+    frontend|nginx) ;;
+    *) echo "Refusing runtime healthcheck outside fixed frontend/nginx services" >&2; return 1 ;;
+  esac
+  for attempt in {1..60}; do
+    if ! record="$(docker inspect --format '{{json .Config.Healthcheck.Test}}|{{.Id}}|{{.Image}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$expected_id" 2>/dev/null)"; then
+      sleep 2
+      continue
+    fi
+    IFS='|' read -r health_test current_id current_image status <<<"$record"
+    if [[ "$current_id" != "$expected_id" || "$current_image" != "$expected_image" ]]; then
+      echo "Synthetic $service container identity changed during healthcheck verification" >&2
+      return 1
+    fi
+    if ! python3 -c '
+import json
+import sys
+
+expected = ["CMD", "busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+try:
+    actual = json.loads(sys.argv[1])
+except (IndexError, json.JSONDecodeError):
+    raise SystemExit(1)
+raise SystemExit(0 if actual == expected else 1)
+' "$health_test"; then
+      echo "Synthetic $service container does not have the expected loopback healthcheck" >&2
+      return 1
+    fi
+    if [[ "$status" == missing ]]; then
+      echo "Synthetic $service container has no Docker health status" >&2
+      return 1
+    fi
+    if [[ "$status" == healthy ]]; then
+      echo "Synthetic $service runtime healthcheck became healthy"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "Synthetic $service runtime healthcheck did not become healthy within 120 seconds" >&2
+  return 1
+}
+
 synthetic_restore_drill() {
   local marker="$1" restore_db backup_file restore_error_file restore_error_category restored_marker
   local -a restore_pipeline_status=()
@@ -761,6 +811,8 @@ baseline_frontend="${runtime_records[frontend]}"
 baseline_nginx="${runtime_records[nginx]}"
 baseline_postgres_volume="${volume_records[postgres-data]}"
 baseline_books_volume="${volume_records[book-files]}"
+wait_runtime_healthcheck frontend "$baseline_frontend_id" "$baseline_frontend_image"
+wait_runtime_healthcheck nginx "${runtime_ids[nginx]}" "${runtime_images[nginx]}"
 marker="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 docker compose --project-name "$project" --file "$compose_file" exec -T db \
   psql -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
@@ -796,6 +848,8 @@ done
 for service in "${services[@]}"; do
   wait_service_running "$service" "${runtime_ids[$service]}" "${runtime_images[$service]}"
 done
+wait_runtime_healthcheck frontend "${runtime_ids[frontend]}" "${runtime_images[frontend]}"
+wait_runtime_healthcheck nginx "${runtime_ids[nginx]}" "${runtime_images[nginx]}"
 wait_db_healthy "${runtime_ids[db]}"
 wait_for_http_recovery
 db_continuity="$(docker compose --project-name "$project" --file "$compose_file" exec -T db \

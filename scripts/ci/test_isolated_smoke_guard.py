@@ -83,6 +83,98 @@ esac
     def raw_logged_docker_calls(self):
         return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
 
+    def test_runtime_healthcheck_validates_compose_container_probe_identity_and_health(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        function = re.search(
+            r"(?ms)^wait_runtime_healthcheck\(\) \{\n.*?^\}", source
+        )
+        self.assertIsNotNone(function)
+        expected_test = [
+            "CMD", "busybox", "wget", "-q", "-O", "/dev/null",
+            "http://127.0.0.1:8080/",
+        ]
+        expected_id = "a" * 64
+        expected_image = "sha256:" + "b" * 64
+        probe_json = json.dumps(expected_test, separators=(",", ":"))
+
+        def run_function(*records):
+            count_file = self.root / "runtime-inspect-count"
+            count_file.unlink(missing_ok=True)
+            record_cases = "\n".join(
+                f'    {index}) printf \'%s\\n\' "$FAKE_RECORD_{index}" ;;'
+                for index in range(1, len(records) + 1)
+            )
+            record_cases += f'\n    *) printf \'%s\\n\' "$FAKE_RECORD_{len(records)}" ;;'
+            harness = "\n".join((
+                "set -euo pipefail",
+                'recovery_rehearsal="github-hosted-v1"',
+                'RUNNER_ENVIRONMENT="github-hosted"',
+                'GITHUB_ACTIONS="true"',
+                'docker() {',
+                '  [[ "$1" == inspect ]] || return 90',
+                '  inspect_count=0',
+                '  [[ ! -f "$FAKE_COUNT_FILE" ]] || read -r inspect_count < "$FAKE_COUNT_FILE"',
+                '  inspect_count=$((inspect_count + 1))',
+                '  printf \'%s\\n\' "$inspect_count" > "$FAKE_COUNT_FILE"',
+                '  case "$inspect_count" in',
+                record_cases,
+                '  esac',
+                '}',
+                'sleep() { :; }',
+                function.group(0),
+                f'wait_runtime_healthcheck frontend "{expected_id}" "{expected_image}"',
+            ))
+            return subprocess.run(
+                ["bash", "-c", harness], cwd=ROOT,
+                env={
+                    **os.environ,
+                    "FAKE_COUNT_FILE": str(count_file),
+                    **{
+                        f"FAKE_RECORD_{index}": record
+                        for index, record in enumerate(records, start=1)
+                    },
+                }, check=False, capture_output=True, text=True, timeout=10,
+            )
+
+        def record(test=probe_json, container_id=expected_id, image=expected_image, status="healthy"):
+            return f"{test}|{container_id}|{image}|{status}"
+
+        result = run_function(record())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("frontend runtime healthcheck became healthy", result.stdout)
+
+        # Compose sets .Config.Healthcheck on the container. The first inspection
+        # may still be starting after boot or daemon recovery; the next can pass.
+        result = run_function(record(status="starting"), record())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("became healthy", result.stdout)
+
+        for bad_record, diagnostic in (
+            (record(test="null"), "does not have the expected loopback healthcheck"),
+            (record(status="missing"), "has no Docker health status"),
+            (record(container_id="c" * 64), "container identity changed"),
+            (record(image="sha256:" + "c" * 64), "container identity changed"),
+            (record(status="unhealthy"), "did not become healthy within 120 seconds"),
+        ):
+            with self.subTest(record=bad_record):
+                result = run_function(bad_record)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(diagnostic, result.stderr)
+                self.assertNotIn(expected_image, result.stdout + result.stderr)
+
+    def test_runtime_healthchecks_run_at_boot_and_after_daemon_restart(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        initial_checks = source.index('wait_runtime_healthcheck frontend "$baseline_frontend_id"')
+        initial_nginx = source.index('wait_runtime_healthcheck nginx "${runtime_ids[nginx]}"', initial_checks)
+        marker_insert = source.index("INSERT INTO ci_recovery_probe VALUES")
+        daemon_restart = source.index("sudo systemctl restart docker")
+        restarted_frontend = source.index('wait_runtime_healthcheck frontend "${runtime_ids[frontend]}"', daemon_restart)
+        restarted_nginx = source.index('wait_runtime_healthcheck nginx "${runtime_ids[nginx]}"', restarted_frontend)
+        self.assertLess(initial_checks, initial_nginx)
+        self.assertLess(initial_nginx, marker_insert)
+        self.assertLess(daemon_restart, restarted_frontend)
+        self.assertLess(restarted_frontend, restarted_nginx)
+
     def test_synthetic_restore_is_private_isolated_and_fail_closed(self):
         source = SCRIPT.read_text(encoding="utf-8")
         function = re.search(
