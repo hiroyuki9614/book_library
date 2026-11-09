@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /usr/bin/python3 -I -B
 """Run the candidate staging seed with its private credential file on stdin."""
 
 from __future__ import annotations
@@ -58,6 +58,16 @@ STAGING_ENV_KEYS = frozenset(
         "BELIB_STAGE_AUTH_SECRET",
         "BELIB_STAGE_VCS_REF",
         "BELIB_STAGE_PORT",
+    }
+)
+PYTHON_STARTUP_OVERRIDES = frozenset(
+    {
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONUSERBASE",
+        "PYTHONSTARTUP",
+        "PYTHONINSPECT",
+        "PYTHONWARNINGS",
     }
 )
 
@@ -536,10 +546,10 @@ def reject_ambient_overrides(environment: Mapping[str, str]) -> None:
         "SSH_AGENT_PID",
         "GIT_SSH_COMMAND",
     )
-    forbidden_names = {"DATABASE_URL", "DIRECT_URL", "BETTER_AUTH_SECRET"}
+    forbidden_names = {"DATABASE_URL", "DIRECT_URL", "BETTER_AUTH_SECRET", *PYTHON_STARTUP_OVERRIDES}
     if any(name.upper().startswith(forbidden_prefixes) or name.upper() in forbidden_names for name in environment):
         raise SeedWrapperError(
-            "Remove inherited staging, database, Docker, Compose, production, and secret overrides before running the staging seed"
+            "Remove inherited Python startup, staging, database, Docker, Compose, production, and secret overrides before running the staging seed"
         )
 
 
@@ -765,11 +775,20 @@ def validate_docker_runtime(
     return docker_cli, endpoint, docker_env
 
 
-def main() -> int:
+def main(*, invoked_by_launcher: bool = False) -> int:
     env_snapshot_fd = -1
     credential_fd = -1
     docker_config_temporary = None
     try:
+        if (
+            sys.executable != "/usr/bin/python3"
+            or not sys.flags.isolated
+            or not sys.flags.dont_write_bytecode
+        ):
+            raise SeedWrapperError("Use trusted /usr/bin/python3 -I -B for the staging seed wrapper")
+        reject_ambient_overrides(os.environ)
+        if not invoked_by_launcher:
+            raise SeedWrapperError("Invoke the staging seed only through scripts/staging/launch-guard.py")
         account = pwd.getpwnam("hiroyuki")
         if account.pw_uid == 0 or os.getuid() != account.pw_uid or os.geteuid() != account.pw_uid:
             raise SeedWrapperError("Run the staging seed wrapper as host user hiroyuki")

@@ -151,6 +151,61 @@ class SeedWrapperCredentialGuardTests(unittest.TestCase):
         self.assertNotIn("--volume", command)
         self.assertNotIn("-v", command)
 
+    def test_direct_seed_invocation_is_rejected(self) -> None:
+        stderr = StringIO()
+        with (
+            patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": "/home/hiroyuki"}, clear=True),
+            redirect_stderr(stderr),
+        ):
+            result = seed_wrapper.main()
+
+        self.assertEqual(result, 1)
+        self.assertIn("only through scripts/staging/launch-guard.py", stderr.getvalue())
+
+    def test_pythonpath_startup_injection_is_rejected(self) -> None:
+        stderr = StringIO()
+        with (
+            patch.dict(
+                os.environ,
+                {"PATH": "/usr/bin:/bin", "HOME": "/home/hiroyuki", "PYTHONPATH": "/tmp/attacker"},
+                clear=True,
+            ),
+            redirect_stderr(stderr),
+        ):
+            result = seed_wrapper.main()
+
+        self.assertEqual(result, 1)
+        self.assertIn("Python startup", stderr.getvalue())
+
+    def test_direct_executable_ignores_sitecustomize_then_rejects_pythonpath(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="belib-seed-sitecustomize-test-") as directory:
+            root = Path(directory)
+            marker = root / "sitecustomize-ran"
+            (root / "sitecustomize.py").write_text(
+                "import os\nfrom pathlib import Path\nPath(os.environ['SEED_STARTUP_MARKER']).write_text('ran')\n",
+                encoding="ascii",
+            )
+            environment = {
+                "PATH": "/usr/bin:/bin",
+                "HOME": "/home/hiroyuki",
+                "PYTHONPATH": str(root),
+                "SEED_STARTUP_MARKER": str(marker),
+            }
+            result = subprocess.run(
+                [str(MODULE_PATH)],
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            marker_was_created = marker.exists()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Python startup", result.stderr)
+        self.assertFalse(marker_was_created, "PYTHONPATH sitecustomize ran before the seed guard")
+
 
 class SeedWrapperDockerGuardTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -398,7 +453,7 @@ class SeedWrapperDockerGuardTests(unittest.TestCase):
             patch.dict(os.environ, {}, clear=True),
             redirect_stderr(stderr),
         ):
-            result = seed_wrapper.main()
+            result = seed_wrapper.main(invoked_by_launcher=True)
 
         self.assertEqual(result, 1)
         open_credentials.assert_not_called()
@@ -761,7 +816,7 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
                     fstat_patch,
                     redirect_stderr(stdout),
                 ):
-                    result = seed_wrapper.main()
+                    result = seed_wrapper.main(invoked_by_launcher=True)
 
                 self.assertEqual(result, 1)
                 open_credentials.assert_not_called()
@@ -793,7 +848,7 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
             ) as run_command,
             patch.dict(os.environ, {}, clear=True),
         ):
-            result = seed_wrapper.main()
+            result = seed_wrapper.main(invoked_by_launcher=True)
 
         self.assertEqual(result, 0)
         open_credentials.assert_called_once_with(self.credentials, os.getuid())

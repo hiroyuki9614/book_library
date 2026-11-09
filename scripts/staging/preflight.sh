@@ -11,6 +11,7 @@ if [[ -v BASH_ENV || -v ENV ]]; then
   fail 'Bash startup overrides are forbidden; invoke preflight from a clean Bash environment'
 fi
 readonly git_cli='/usr/bin/git'
+readonly python_cli='/usr/bin/python3'
 if declare -F git >/dev/null; then
   fail 'Ambient Git shell function is forbidden; invoke the preflight executable directly'
 fi
@@ -28,6 +29,22 @@ git_mode="$(/usr/bin/stat -c %a -- "$git_cli" 2>/dev/null)" || fail 'Cannot veri
 git_mode_octal=$((8#$git_mode))
 (( (git_mode_octal & 07022) == 0 )) || fail 'Trusted Git executable must not be group/world-writable or have special permission bits'
 unset git_owner git_mode git_mode_octal git_path
+python_parent_owner="$(/usr/bin/stat -c %u -- /usr/bin 2>/dev/null)" || fail 'Cannot verify trusted Python directory ownership'
+python_parent_mode="$(/usr/bin/stat -c %a -- /usr/bin 2>/dev/null)" || fail 'Cannot verify trusted Python directory permissions'
+[[ "$python_parent_owner" == 0 && "$python_parent_mode" =~ ^[0-7]{3,4}$ ]] || \
+  fail 'Trusted Python directory must be root-owned with a valid permission mode'
+python_parent_mode_octal=$((8#$python_parent_mode))
+(( (python_parent_mode_octal & 07022) == 0 )) || fail 'Trusted Python directory must not be group/world-writable or have special permission bits'
+python_real="$(/usr/bin/readlink -f -- "$python_cli" 2>/dev/null)" || fail 'Cannot resolve trusted /usr/bin/python3'
+[[ "$python_real" == /usr/bin/python3.* && -f "$python_real" && -x "$python_real" && ! -L "$python_real" ]] || \
+  fail 'Trusted Python must resolve to a regular /usr/bin/python3.x executable'
+python_owner="$(/usr/bin/stat -c %u -- "$python_real" 2>/dev/null)" || fail 'Cannot verify trusted Python ownership'
+python_mode="$(/usr/bin/stat -c %a -- "$python_real" 2>/dev/null)" || fail 'Cannot verify trusted Python permissions'
+[[ "$python_owner" == 0 && "$python_mode" =~ ^[0-7]{3,4}$ ]] || \
+  fail 'Trusted Python must be root-owned with a valid permission mode'
+python_mode_octal=$((8#$python_mode))
+(( (python_mode_octal & 07022) == 0 )) || fail 'Trusted Python must not be group/world-writable or have special permission bits'
+unset python_parent_owner python_parent_mode python_parent_mode_octal python_real python_owner python_mode python_mode_octal
 if declare -F docker >/dev/null; then
   fail 'Ambient Docker shell function is forbidden; invoke preflight from a clean Bash environment'
 fi
@@ -68,8 +85,7 @@ actual_revision="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONA
   fail 'Cannot resolve checked-out Git HEAD'
 [[ "$actual_revision" == "$rev" ]] || fail 'Checked-out Git HEAD differs from staging revision'
 [[ -f "$source_tree_guard" && ! -L "$source_tree_guard" ]] || fail 'Exact-source verifier is missing or unsafe'
-command -v python3 >/dev/null || fail 'Python 3 is required for the exact-source verifier'
-python3 -I -B "$source_tree_guard" --repo-root "$root" --source-sha "$rev" || \
+"$python_cli" -I -B "$source_tree_guard" --repo-root "$root" --source-sha "$rev" || \
   fail 'Exact Git source verification rejected staging build inputs'
 tree_status="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONAL_LOCKS=0 \
   "$git_cli" -c core.fsmonitor=false -c core.untrackedCache=false -c status.showUntrackedFiles=all \
@@ -230,7 +246,7 @@ if ! "$docker_cli" --context "$docker_context" compose -p belib-isolated-i5 --en
   >"$compose_json" 2>"$compose_diagnostics"; then
   fail 'Staging Compose configuration invalid'
 fi
-python3 -I -B "$root/scripts/staging/ci-isolation-guard.py" \
+"$python_cli" -I -B "$root/scripts/staging/ci-isolation-guard.py" \
   --source-sha "$rev" \
   --compose-source "$root/compose.staging.yaml" \
   --compose-json "$compose_json" \

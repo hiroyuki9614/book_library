@@ -58,6 +58,34 @@ override. This is code/test work only: no live Docker build/up, migration,
 seed, deployment, or secret read was performed. The repair is not deployed and
 does not clear the existing staging admission gates.
 
+Dated correction (2026-11-09, same-claim P1/P2 review response): the independent
+review of local candidate `25e81b8ca70289f994b3c61092399d39b2770725` blocked
+unguarded runbook Compose commands, ordinary Python seed startup, and missing
+coverage for the Compose-selected staging Dockerfiles/full file modes. The
+staging runbook now routes migration/build/up/seed through an allowlisted
+`launch-guard.py` bound to PR #103, exact source SHA, the existing supervisor
+receipt and lock group, the validated rootless Docker context, trusted CLI and
+plugins, and the Compose/image/build-context guard. Direct seed invocation now
+fails; it runs only under `/usr/bin/python3 -I -B` through the launch guard.
+Preflight uses the absolute isolated Python interpreter. The source-tree guard
+checks external Dockerfile symlinks, full safe file modes, context directory
+permissions, tracked/index identity, and ignored build-context content.
+Adversarial offline coverage includes incorrect context/endpoint, caller
+overrides, unapproved or stale receipts, project/build-context/image changes,
+Python startup injection, Docker plugin substitution, external Dockerfile
+symlinks, unsafe modes, index flags, and ignored inputs. No Compose build/up,
+migration, seed, DB operation, secret read, or deployment was performed.
+
+Source admission remains **BLOCKED**: ignored Playwright output under
+`frontend/test-results/` would enter the frontend build context, and the
+untracked Python cache also keeps Git status dirty. Both remain outside the
+committed diff. No archive or generated checkout workaround was adopted because
+it could bypass the existing admission gate. The one-time next step is to
+obtain separate authorization for a clean exact-SHA source tree on the existing
+i5 host, preserve the current artifacts/cache, and rerun read-only admission.
+The local repair has not been independently re-reviewed, pushed, or checked by
+GitHub CI; it does not approve or deploy staging.
+
 ## 2026-11-04 stale admin-list follow-up
 
 An active-list response captured before a deletion could arrive after the

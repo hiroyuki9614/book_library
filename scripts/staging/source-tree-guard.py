@@ -17,6 +17,10 @@ from pathlib import Path
 GIT = "/usr/bin/git"
 CONTEXTS = (b"backend", b"frontend")
 DOCKERIGNORE_FILES = (b"backend/.dockerignore", b"frontend/.dockerignore")
+DOCKERFILE_INPUTS = (
+    b"scripts/staging/Dockerfile.backend.staging",
+    b"scripts/staging/Dockerfile.frontend.staging",
+)
 
 
 class SourceTreeBlocked(Exception):
@@ -176,7 +180,11 @@ def verify_worktree(root: Path, tree: dict[bytes, tuple[bytes, bytes]], object_f
             continue
 
         if mode == b"120000":
-            if relative.startswith((b"backend/", b"frontend/")) or relative in DOCKERIGNORE_FILES:
+            if (
+                relative.startswith((b"backend/", b"frontend/"))
+                or relative in DOCKERIGNORE_FILES
+                or relative in DOCKERFILE_INPUTS
+            ):
                 raise SourceTreeBlocked("A Docker build input contains a symlink")
             if not stat.S_ISLNK(info.st_mode):
                 raise SourceTreeBlocked("A tracked symlink differs from the selected source commit")
@@ -192,7 +200,14 @@ def verify_worktree(root: Path, tree: dict[bytes, tuple[bytes, bytes]], object_f
             raise SourceTreeBlocked("Git tree contains an unsupported file mode")
         collect_limit = 64 * 1024 if relative in DOCKERIGNORE_FILES else 0
         actual_oid, actual_mode, collected = hash_regular_file(full_path, object_format, collect_limit)
-        if actual_oid != oid or bool(actual_mode & 0o111) != (mode == b"100755"):
+        is_build_input = relative.startswith((b"backend/", b"frontend/")) or relative in DOCKERFILE_INPUTS
+        actual_permissions = stat.S_IMODE(actual_mode)
+        mode_mismatch = (
+            actual_permissions not in ((0o700, 0o755) if mode == b"100755" else (0o600, 0o644))
+            if is_build_input
+            else bool(actual_mode & 0o111) != (mode == b"100755")
+        )
+        if actual_oid != oid or mode_mismatch:
             raise SourceTreeBlocked("Tracked source bytes or mode differ from the selected source commit")
         if relative in DOCKERIGNORE_FILES:
             if collected is None:
@@ -239,6 +254,8 @@ def verify_context(root: Path, prefix: bytes, tree_paths: set[bytes], patterns: 
         raise SourceTreeBlocked("A Docker build context is missing") from exc
     if not stat.S_ISDIR(info.st_mode):
         raise SourceTreeBlocked("A Docker build context is not a real directory")
+    if stat.S_IMODE(info.st_mode) & 0o7022:
+        raise SourceTreeBlocked("A Docker build context directory has unsafe permissions")
 
     expected_directories: set[bytes] = {prefix}
     for path in tree_paths:
@@ -266,6 +283,8 @@ def verify_context(root: Path, prefix: bytes, tree_paths: set[bytes], patterns: 
                 raise SourceTreeBlocked("A Docker build input contains a symlink")
             if not stat.S_ISDIR(entry.st_mode):
                 raise SourceTreeBlocked("A Docker build context contains an unsupported filesystem entry")
+            if stat.S_IMODE(entry.st_mode) & 0o7022:
+                raise SourceTreeBlocked("A Docker build context directory has unsafe permissions")
             if relative not in expected_directories:
                 raise SourceTreeBlocked("An ignored-by-Git path would enter a Docker build context")
             retained_directories.append(name)
