@@ -10,6 +10,128 @@ nginx_site="$repo_root/scripts/staging/nginx-default.conf"
 [[ -f "$compose_file" ]] || fail 'Cannot find compose.staging.yaml'
 [[ -f "$nginx_site" ]] || fail 'Cannot find staging-only nginx site configuration'
 
+assert_safe_staging_bind_mounts() {
+  local candidate="$1"
+  awk \
+    -v s1='./scripts/staging/10-belib-staging-roles.sh' \
+    -v t1='/docker-entrypoint-initdb.d/10-belib-staging-roles.sh' \
+    -v s2='./nginx/nginx.conf' \
+    -v t2='/etc/nginx/nginx.conf' \
+    -v s3='./scripts/staging/nginx-default.conf' \
+    -v t3='/etc/nginx/conf.d/default.conf' '
+      function trim(value) {
+        sub(/^[[:space:]]+/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        return value
+      }
+      function expected_index(source) {
+        if (source == s1) return 1
+        if (source == s2) return 2
+        if (source == s3) return 3
+        return 0
+      }
+      function finish_mount() {
+        mount_index = expected_index(mount_source)
+        if (mount_index == 0) return
+        mount_count[mount_index]++
+        expected_target = (mount_index == 1 ? t1 : mount_index == 2 ? t2 : t3)
+        if (mount_kind != "bind" || mount_target != expected_target ||
+            !read_only_seen || read_only_value != "true" ||
+            !create_host_path_seen || create_host_path_value != "false") {
+          invalid = 1
+        }
+      }
+      /^      - / {
+        finish_mount()
+        in_mount = 1
+        mount_kind = ""
+        mount_source = ""
+        mount_target = ""
+        read_only_seen = 0
+        read_only_value = ""
+        bind_started = 0
+        create_host_path_seen = 0
+        create_host_path_value = ""
+        if ($0 ~ /^      - type:[[:space:]]*/) {
+          mount_kind = $0
+          sub(/^      - type:[[:space:]]*/, "", mount_kind)
+          mount_kind = trim(mount_kind)
+        }
+        next
+      }
+      in_mount && /^        source:[[:space:]]*/ {
+        mount_source = $0
+        sub(/^        source:[[:space:]]*/, "", mount_source)
+        mount_source = trim(mount_source)
+        next
+      }
+      in_mount && /^        target:[[:space:]]*/ {
+        mount_target = $0
+        sub(/^        target:[[:space:]]*/, "", mount_target)
+        mount_target = trim(mount_target)
+        next
+      }
+      in_mount && /^        read_only:[[:space:]]*/ {
+        read_only_seen = 1
+        read_only_value = $0
+        sub(/^        read_only:[[:space:]]*/, "", read_only_value)
+        read_only_value = trim(read_only_value)
+        next
+      }
+      in_mount && /^        bind:[[:space:]]*$/ {
+        bind_started = 1
+        next
+      }
+      in_mount && bind_started && /^          create_host_path:[[:space:]]*/ {
+        create_host_path_seen = 1
+        create_host_path_value = $0
+        sub(/^          create_host_path:[[:space:]]*/, "", create_host_path_value)
+        create_host_path_value = trim(create_host_path_value)
+        next
+      }
+      END {
+        finish_mount()
+        if (invalid || mount_count[1] != 1 || mount_count[2] != 1 || mount_count[3] != 1) {
+          exit 1
+        }
+      }
+    ' "$candidate"
+}
+
+mutate_bind_mount_fixture() {
+  local source_file="$1"
+  local output_file="$2"
+  local mount_source="$3"
+  local property="$4"
+  local mutation="$5"
+  awk \
+    -v target_source="$mount_source" \
+    -v target_property="$property" \
+    -v mutation="$mutation" '
+      /^      - / { current_source = ""; target_mount = 0 }
+      /^        source:[[:space:]]*/ {
+        current_source = $0
+        sub(/^        source:[[:space:]]*/, "", current_source)
+        sub(/[[:space:]]+$/, "", current_source)
+        target_mount = current_source == target_source
+        print
+        next
+      }
+      target_mount && target_property == "read_only" && /^        read_only:[[:space:]]*true[[:space:]]*$/ {
+        changed++
+        if (mutation != "removed") print "        read_only: false"
+        next
+      }
+      target_mount && target_property == "create_host_path" && /^          create_host_path:[[:space:]]*false[[:space:]]*$/ {
+        changed++
+        if (mutation == "true") print "          create_host_path: true"
+        next
+      }
+      { print }
+      END { if (changed != 1) exit 1 }
+    ' "$source_file" > "$output_file"
+}
+
 if ! awk '
   /^networks:[[:space:]]*$/ { in_networks = 1; next }
   in_networks && /^[^[:space:]#]/ { in_networks = 0; in_isolated = 0 }
@@ -58,6 +180,42 @@ grep -Fq '        source: ./scripts/staging/nginx-default.conf' "$compose_file" 
   fail 'The staging service must use its staging-only nginx site config'
 grep -Fq '        target: /etc/nginx/conf.d/default.conf' "$compose_file" || \
   fail 'The staging nginx site config must retain its target path'
+if ! assert_safe_staging_bind_mounts "$compose_file"; then
+  fail 'Every fixed PostgreSQL/nginx bind mount must be read-only and set bind.create_host_path: false'
+fi
+
+# Exercise the assertion against temporary fixture copies so each unsafe
+# setting is rejected without changing the real Compose file.
+fixture_dir="$(mktemp -d)"
+trap 'rm -rf -- "$fixture_dir"' EXIT
+negative_case_count=0
+mount_index=0
+for mount_source in \
+  './scripts/staging/10-belib-staging-roles.sh' \
+  './nginx/nginx.conf' \
+  './scripts/staging/nginx-default.conf'; do
+  mount_index=$((mount_index + 1))
+  for property in read_only create_host_path; do
+    for mutation in removed false true; do
+      if [[ "$property/$mutation" == 'read_only/true' || \
+            "$property/$mutation" == 'create_host_path/false' ]]; then
+        continue
+      fi
+      fixture="$fixture_dir/mount-${mount_index}-${property}-${mutation}.yaml"
+      mutated_fixture="$fixture_dir/mutated-mount-${mount_index}-${property}-${mutation}.yaml"
+      cp -- "$compose_file" "$fixture"
+      if ! mutate_bind_mount_fixture "$fixture" "$mutated_fixture" "$mount_source" "$property" "$mutation"; then
+        fail "Could not create the $property=$mutation fixture for $mount_source"
+      fi
+      mv -- "$mutated_fixture" "$fixture"
+      if assert_safe_staging_bind_mounts "$fixture"; then
+        fail "The shell regression accepted $property=$mutation for $mount_source"
+      fi
+      negative_case_count=$((negative_case_count + 1))
+    done
+  done
+done
+[[ "$negative_case_count" -eq 12 ]] || fail 'The bind mount negative fixture matrix is incomplete'
 [[ "$(grep -Fc 'proxy_set_header Host stg-bl.hiroyuki9614.com;' "$nginx_site")" -eq 3 ]] || \
   fail 'Every staging upstream route must receive the canonical Host header'
 [[ "$(grep -Fc 'proxy_set_header X-Forwarded-Host stg-bl.hiroyuki9614.com;' "$nginx_site")" -eq 3 ]] || \
@@ -123,4 +281,4 @@ if grep -Eq 'belib-isolated-i5|staging-postgres-data|staging-book-files|belib_st
   fail 'Production Compose must not reference the isolated staging project or data'
 fi
 
-printf 'PASS: staging roles are separated, shared database markers are readable, origins and proxy headers are pinned, production Compose stays separate, and the node-owned book volume contract remains intact\n'
+printf 'PASS: 3 staging bind mounts are read-only with host-path creation disabled; 12 unsafe mount fixtures fail closed; roles, database markers, origins, proxy headers, production separation, and node-owned book volume remain intact\n'
