@@ -165,7 +165,7 @@ class LaunchReceiptTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("no verifier configured", error_output.getvalue())
         fake_approval.request_and_wait.assert_called_once_with(
-            SOURCE_SHA, "deploy", "e" * 64, uid=launch.EXPECTED_UID, output=unittest.mock.ANY
+            SOURCE_SHA, "deploy", "e" * 64, uid=account.pw_uid, output=unittest.mock.ANY
         )
 
 
