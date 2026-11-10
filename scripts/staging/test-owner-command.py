@@ -25,7 +25,7 @@ class OwnerCommandTests(unittest.TestCase):
         self.helper = self.home / ".local/state/belib-staging/snapshots" / self.source_sha / "scripts/staging/owner-serve-cas.py"
         self.helper.parent.mkdir(parents=True)
         self.helper.write_bytes(b"# pinned helper bytes\n")
-        self.helper.chmod(0o444)
+        self.helper.chmod(0o644)
         self.plan_path = self.home / ".local/state/belib-staging/tls-work-context/owner-plan.json"
         self.plan_path.parent.mkdir(parents=True)
         self.plan = {"schema": "belib-tls-owner-plan/v1", "source_sha": self.source_sha,

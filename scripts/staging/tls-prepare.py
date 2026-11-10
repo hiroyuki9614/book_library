@@ -23,7 +23,8 @@ from typing import Any, Callable
 
 HERE = Path(__file__).resolve().parent
 STATE = Path("/home/hiroyuki/.local/state/belib-staging")
-PLAN_PATH = STATE / "tls-owner-plan.json"
+PLAN_PATH = STATE / "tls-work-context/owner-plan.json"
+APP_SOURCE = Path("/home/hiroyuki/workspaces/belib-i5-admission-8125626")
 ENV_PATH = Path("/home/hiroyuki/.config/belib-staging/i5.env")
 APP812 = "81256268276d7ead95029849037f69ec6beec202"
 APP_IMAGES = {
@@ -502,6 +503,29 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
+def verify_tls_runtime_contract(source_root: Path, source_sha: str) -> str:
+    """Keep the live app812 DB contract while admitting only a new nginx overlay."""
+    expected_db_image = GUARD.verify_resume_snapshot_compatibility(
+        source_root, APP812, "6963103fd6bec332b4057457d07b890fe5c11e73")
+    source_guard = GUARD.load_source_tree_guard(source_root)
+    for path in ("compose.staging.yaml", "scripts/staging/10-belib-staging-roles.sh",
+                 "nginx/nginx.conf", "scripts/staging/nginx-default.conf"):
+        previous = source_guard.git(source_root, "rev-parse", f"{APP812}:{path}").strip()
+        current = source_guard.git(source_root, "rev-parse", f"{source_sha}:{path}").strip()
+        if not previous or previous != current:
+            raise PrepareError("TLS-only continuation cannot change the live base Compose or DB contract")
+    return expected_db_image
+
+
+def open_live_app_env(seed):
+    """Verify the unchanged private env against the clean live application source."""
+    fd, values = seed.validate_staging_admission(APP_SOURCE, ENV_PATH, 1000)
+    if values.get("BELIB_STAGE_VCS_REF") != APP812:
+        os.close(fd)
+        raise PrepareError("TLS continuation must retain the live application environment")
+    return fd, values
+
+
 def collect_plan_inputs(source: Path, source_sha: str) -> dict:
     """Collect the precomputable plan state without changing Docker or Serve."""
     guard = GUARD
@@ -510,18 +534,17 @@ def collect_plan_inputs(source: Path, source_sha: str) -> dict:
     seed = guard.load_seed_module()
     source_guard = guard.load_source_tree_guard(admitted)
     try:
-        with source_guard.sha_derived_build_snapshot(admitted, source_sha) as build_root:
+        with source_guard.sha_derived_build_snapshot(admitted, source_sha) as build_root, \
+                source_guard.sha_derived_build_snapshot(APP_SOURCE, APP812) as rollback_root:
             seed.validate_build_snapshot(build_root, admitted, source_sha)
-            expected_db_image = guard.verify_resume_snapshot_compatibility(
-                admitted, source_sha, "6963103fd6bec332b4057457d07b890fe5c11e73")
+            expected_db_image = verify_tls_runtime_contract(admitted, source_sha)
             docker_env, endpoint, docker_prefix = _read_only_rootless(seed, guard)
-            env_fd, env_values = seed.validate_staging_admission(admitted, ENV_PATH, 1000)
+            env_fd, env_values = open_live_app_env(seed)
             try:
                 base_model = _compose_model(build_root, env_fd, docker_env, docker_prefix, tls=False)
                 tls_model = _compose_model(build_root, env_fd, docker_env, docker_prefix, tls=True)
                 TLS.validate_tls_compose_overlay(base_model, tls_model, build_root, int(env_values["BELIB_STAGE_PORT"]))
-                manifest = guard.build_retained_manifest("6963103fd6bec332b4057457d07b890fe5c11e73",
-                    docker_env, docker_prefix=docker_prefix, expected_db_image=expected_db_image)
+                manifest = retained_live_manifest(guard, docker_env, docker_prefix, expected_db_image)
                 validate_app812(manifest, docker_env, docker_prefix)
                 serve = TLS.TailscaleServeClient()
                 serve_raw, etag = serve.get()
@@ -590,19 +613,18 @@ def prepare_live(plan_raw: bytes, plan_sha: str, evidence_sha256: str) -> dict:
     if len(evidence_sha256) != 64 or any(c not in "0123456789abcdef" for c in evidence_sha256):
         raise PrepareError("External evidence digest is malformed")
     guard = GUARD
-    seed = guard.load_seed_module()
     source_root = guard._admission_source_root(guard.EXPECTED_REPO_ROOT, plan["source_sha"])
     guard.ADMITTED_SOURCE_ROOT = source_root
+    seed = guard.load_seed_module()
     source_guard = guard.load_source_tree_guard(source_root)
     with guard.project_lock():
         try:
             with source_guard.sha_derived_build_snapshot(source_root, plan["source_sha"]) as build_root, \
-                    source_guard.sha_derived_build_snapshot(source_root, TLS.PRIOR_APPLICATION_SHA) as rollback_root:
+                    source_guard.sha_derived_build_snapshot(APP_SOURCE, APP812) as rollback_root:
                 seed.validate_build_snapshot(build_root, source_root, plan["source_sha"])
-                expected_db_image = guard.verify_resume_snapshot_compatibility(source_root, plan["source_sha"],
-                    "6963103fd6bec332b4057457d07b890fe5c11e73")
+                expected_db_image = verify_tls_runtime_contract(source_root, plan["source_sha"])
                 docker_env, endpoint, docker_prefix = _read_only_rootless(seed, guard)
-                env_fd, values = seed.validate_staging_admission(source_root, ENV_PATH, 1000)
+                env_fd, values = open_live_app_env(seed)
                 try:
                     base = _compose_model(build_root, env_fd, docker_env, docker_prefix, tls=False)
                     combined = _compose_model(build_root, env_fd, docker_env, docker_prefix, tls=True)

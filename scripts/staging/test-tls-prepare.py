@@ -396,6 +396,38 @@ class TlsPrepareTests(unittest.TestCase):
         read.assert_called_once_with(cli.PLAN_PATH)
         prepare_live.assert_called_once_with(raw, plan_sha, "d" * 64)
 
+    def test_plan_path_matches_owner_packager(self):
+        package = cli._module("owner_package_contract", Path(__file__).with_name("owner-command.py"))
+        self.assertEqual(cli.PLAN_PATH, package.PLAN_PATH)
+
+    def test_runtime_contract_keeps_old_schema_and_rejects_changed_base(self):
+        seen = []
+        def git(_root, _op, spec):
+            seen.append(spec)
+            return b"base"
+        sg = types.SimpleNamespace(git=git)
+        guard = types.SimpleNamespace(
+            verify_resume_snapshot_compatibility=lambda _root, live, prior:
+                ("db-image" if live == cli.APP812 and prior.startswith("6963103") else self.fail("wrong DB source")),
+            load_source_tree_guard=lambda _root: sg)
+        with patch.object(cli, "GUARD", guard):
+            self.assertEqual(cli.verify_tls_runtime_contract(Path("/source"), "a" * 40), "db-image")
+            self.assertFalse(any("prisma" in x for x in seen))
+            sg.git = lambda _root, _op, spec: b"new" if spec.startswith("a" * 40) else b"old"
+            with self.assertRaises(cli.PrepareError):
+                cli.verify_tls_runtime_contract(Path("/source"), "a" * 40)
+
+    def test_prepare_admits_before_actual_guard_seed_loading(self):
+        raw = cli.create_plan("a" * 40, retained(), serve(), tls.EXPECTED_SERVE_ETAG,
+                              tls.EXPECTED_CERT_SHA256, "c" * 64)
+        with patch.object(cli, "GUARD", guard_real), \
+             patch.object(guard_real, "ADMITTED_SOURCE_ROOT", None), \
+             patch.object(guard_real, "_admission_source_root", return_value=Path("/fixed-admission")), \
+             patch.object(guard_real.importlib.util, "spec_from_file_location", side_effect=RuntimeError("admitted module boundary")):
+            with self.assertRaisesRegex(RuntimeError, "admitted module boundary"):
+                cli.prepare_live(raw, cli.digest(raw), "d" * 64)
+            self.assertEqual(guard_real.ADMITTED_SOURCE_ROOT, Path("/fixed-admission"))
+
     def test_shipped_cli_prepare_runs_live_orchestration_through_mocked_boundaries(self):
         expected_db = "postgres:16@sha256:" + "a" * 64
         baseline = retained_full(expected_db)
@@ -416,9 +448,10 @@ class TlsPrepareTests(unittest.TestCase):
                 class SeedWrapperError(Exception): pass
                 def validate_build_snapshot(self, *_args): pass
                 def validate_staging_admission(self, *_args):
-                    return os.open(os.devnull, os.O_RDONLY), {"BELIB_STAGE_PORT": "8083"}
+                    return os.open(os.devnull, os.O_RDONLY), {"BELIB_STAGE_PORT": "8083", "BELIB_STAGE_VCS_REF": cli.APP812}
             seed = Seed()
             class SourceGuard:
+                def git(self, *_args): return b"same-base-blob"
                 @contextlib.contextmanager
                 def sha_derived_build_snapshot(self, _source, revision):
                     yield build_root if revision == "a" * 40 else rollback_root

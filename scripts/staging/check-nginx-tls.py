@@ -35,7 +35,9 @@ def main():
             "-addext", "subjectAltName=DNS:stg-bl.hiroyuki9614.com",
             "-keyout", str(key), "-out", str(cert),
         ], check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        key.chmod(0o600)
+        # Only this disposable CI key is readable by the capability-restricted container.
+        # The enclosing temporary directory remains private; real i5 keys stay 0600.
+        key.chmod(0o444)
         command = [
             "docker", "run", "--rm", "--name", name, "--pull", "never",
             "--platform", "linux/amd64", "--network", "none", "--read-only",
