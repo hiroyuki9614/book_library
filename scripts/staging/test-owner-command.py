@@ -9,6 +9,7 @@ import shlex
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("owner_command", Path(__file__).with_name("owner-command.py"))
@@ -38,7 +39,16 @@ class OwnerCommandTests(unittest.TestCase):
         self.plan_path.chmod(0o600)
         self.helper_sha = hashlib.sha256(self.helper.read_bytes()).hexdigest()
         self.plan_sha = hashlib.sha256(self.plan_path.read_bytes()).hexdigest()
-        self.patches = [patch.object(packager, "HOME", self.home), patch.object(packager, "PLAN_PATH", self.plan_path)]
+        real_fstat = os.fstat
+        def fixture_fstat(fd):
+            info = real_fstat(fd)
+            fields = {name: getattr(info, name) for name in
+                      ("st_mode", "st_nlink", "st_size", "st_dev", "st_ino", "st_mtime_ns")}
+            return SimpleNamespace(**fields, st_uid=1000)
+        self.fixture_fstat = fixture_fstat
+        self.patches = [patch.object(packager, "HOME", self.home),
+                        patch.object(packager, "PLAN_PATH", self.plan_path),
+                        patch.object(packager.os, "fstat", side_effect=fixture_fstat)]
         for item in self.patches:
             item.start()
             self.addCleanup(item.stop)
@@ -94,6 +104,15 @@ class OwnerCommandTests(unittest.TestCase):
         self.plan_path.chmod(0o600)
         with self.assertRaises(packager.PackageError):
             packager.make_loader_command(self.source_sha, self.helper_sha, hashlib.sha256(raw).hexdigest())
+
+    def test_wrong_owner_is_rejected_independently_of_runner_uid(self):
+        def foreign_owner(fd):
+            info = self.fixture_fstat(fd)
+            info.st_uid = 1001
+            return info
+        with patch.object(packager.os, "fstat", side_effect=foreign_owner):
+            with self.assertRaises(packager.PackageError):
+                self.command()
 
     def test_paths_and_hashes_are_narrowly_validated(self):
         with self.assertRaises(packager.PackageError):
