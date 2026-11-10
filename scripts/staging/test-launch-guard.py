@@ -141,6 +141,7 @@ class LaunchReceiptTests(unittest.TestCase):
         error_output = io.StringIO()
         arguments = [
             "--source-sha", SOURCE_SHA,
+            "--evidence-sha256", "e" * 64,
             "--env-file", str(Path(account.pw_dir) / ".config/belib-staging/i5.env"),
             "deploy",
         ]
@@ -163,27 +164,78 @@ class LaunchReceiptTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertIn("no verifier configured", error_output.getvalue())
-        fake_approval.request_and_wait.assert_called_once()
+        fake_approval.request_and_wait.assert_called_once_with(
+            SOURCE_SHA, "deploy", "e" * 64, uid=launch.EXPECTED_UID, output=unittest.mock.ANY
+        )
 
 
 class LaunchOperationTests(unittest.TestCase):
-    def test_detached_admission_requires_exact_sha_and_shared_git_store(self) -> None:
+    def setUp(self):
+        launch.ADMITTED_SOURCE_ROOT = None
+
+    def test_detached_admission_rejects_stale_dirty_sibling_branch_and_modified_bytes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="belib-admission-test-") as directory:
             base = Path(directory)
             source_sha = "a" * 40
             candidate = base / ("admission-" + source_sha[:7])
-            candidate.mkdir()
-            seed = SimpleNamespace(
-                SeedWrapperError=RuntimeError,
-                read_source_sha=Mock(return_value=source_sha),
-                git_command=lambda root, *args: [str(root), *args],
-                git_environment=lambda: {},
-            )
-            # symbolic-ref is queried as three trailing arguments; detached means it exits nonzero.
-            def run(command, **kwargs):
-                return SimpleNamespace(returncode=1 if command[-3:] == ["symbolic-ref", "-q", "HEAD"] else 0, stdout="/shared/git\n")
-            with patch.object(launch, "ADMISSION_WORKTREE_PREFIX", base / "admission-"), patch.object(launch, "_run", side_effect=run):
-                self.assertEqual(launch._admission_source_root(seed, base / "checkout", source_sha), candidate)
+            (candidate / "scripts/staging").mkdir(parents=True)
+            launcher_path = candidate / "scripts/staging/launch-guard.py"
+            launcher_path.write_text("reviewed launcher")
+            launcher_path.chmod(0o644)
+            checkout = base / "claimed-checkout"
+            checkout.mkdir()
+
+            def git_results(*, head=source_sha, branch=launch.EXPECTED_BRANCH, dirty="", common="/shared/git\n", modified=False):
+                def run(root, *args):
+                    if args[:2] == ("branch", "--show-current"):
+                        return SimpleNamespace(returncode=0, stdout=branch + "\n")
+                    if args[:3] == ("rev-parse", "--verify", "HEAD"):
+                        return SimpleNamespace(returncode=0, stdout=head + "\n")
+                    if args[:1] == ("rev-parse",):
+                        return SimpleNamespace(returncode=0, stdout=common if root == candidate else "/shared/git\n")
+                    if args[:1] == ("symbolic-ref",):
+                        return SimpleNamespace(returncode=1, stdout="")
+                    if args[:1] == ("ls-tree",):
+                        data = b"reviewed launcher"
+                        oid = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+                        return SimpleNamespace(returncode=0, stdout=f"100644 blob {oid}\tscripts/staging/launch-guard.py\0")
+                    if args[:1] == ("status",):
+                        return SimpleNamespace(returncode=0, stdout=dirty)
+                    if "diff" in args:
+                        return SimpleNamespace(returncode=1 if modified else 0, stdout="")
+                    raise AssertionError(args)
+                return run
+
+            with (
+                patch.object(launch, "ADMISSION_WORKTREE_PREFIX", base / "admission-"),
+                patch.object(launch, "__file__", str(launcher_path)),
+                patch.object(launch, "EXPECTED_UID", os.getuid()),
+            ):
+                for overrides, message in (
+                    ({"head": "b" * 40}, "selected SHA"),
+                    ({"dirty": "?? unsafe.py\\n"}, "must be clean"),
+                    ({"common": "/other/git\\n"}, "claimed repository"),
+                    ({"branch": "codex/wrong"}, "Original checkout branch"),
+                    ({"modified": True}, "must be clean"),
+                ):
+                    with self.subTest(overrides=overrides), patch.object(launch, "_trusted_git", side_effect=git_results(**overrides)):
+                        with self.assertRaisesRegex(launch.LaunchBlocked, message):
+                            launch._admission_source_root(checkout, source_sha)
+
+                with patch.object(launch, "_trusted_git", side_effect=git_results()):
+                    self.assertEqual(launch._admission_source_root(checkout, source_sha), candidate)
+                    launcher_path.write_text("tampered helper hidden by cached Git stat")
+                    with self.assertRaisesRegex(launch.LaunchBlocked, "bytes differ"):
+                        launch._admission_source_root(checkout, source_sha)
+
+    def test_helper_imports_are_bound_to_admitted_source_root(self) -> None:
+        with self.assertRaisesRegex(launch.LaunchBlocked, "has not been admitted"):
+            launch.load_seed_module()
+        with patch.object(launch, "ADMITTED_SOURCE_ROOT", ROOT), patch.object(launch.importlib.util, "spec_from_file_location") as loader:
+            loader.return_value = None
+            with self.assertRaisesRegex(launch.LaunchBlocked, "unavailable"):
+                launch.load_seed_module()
+            self.assertEqual(loader.call_args.args[1], ROOT / "scripts/staging/seed.py")
 
     def test_commands_are_fixed_to_staging_project_context_and_compose_file(self) -> None:
         root = Path("/home/hiroyuki/workspaces/belib-i5-isolated-staging-20261107")
@@ -241,6 +293,7 @@ class LaunchOperationTests(unittest.TestCase):
         stderr = io.StringIO()
         arguments = [
             "--source-sha", source_sha,
+            "--evidence-sha256", "e" * 64,
             "--env-file", str(Path(account.pw_dir) / ".config/belib-staging/i5.env"),
             "deploy",
         ]
@@ -256,8 +309,7 @@ class LaunchOperationTests(unittest.TestCase):
             patch.object(launch, "_admission_source_root", return_value=ROOT),
             patch.object(launch, "load_approval_module", return_value=SimpleNamespace(ApprovalError=RuntimeError, request_and_wait=Mock())),
             patch.object(launch, "load_seed_module", return_value=fake_seed),
-            patch.object(launch, "_checked_repo_branch"),
-            patch.object(launch, "project_lock", return_value=nullcontext()),
+                        patch.object(launch, "project_lock", return_value=nullcontext()),
             patch.object(launch, "load_source_tree_guard", return_value=fake_source_guard),
             patch.object(launch, "_run_preflight") as preflight,
             patch.object(launch, "_trusted_rootless_context") as docker_context,
@@ -277,7 +329,7 @@ class LaunchOperationTests(unittest.TestCase):
         commands = []
         def runner(command, **kwargs):
             commands.append(command)
-            output = '{"Health":"healthy"}' if "ps" in command else ""
+            output = '{"Health":"healthy"}' if "ps" in command and "--all" not in command else ("200" if command[0] == "/usr/bin/curl" else "")
             return SimpleNamespace(returncode=0, stdout=output)
         seed = SimpleNamespace(main=Mock(return_value=0))
         launch.run_deploy_transaction(
@@ -288,8 +340,10 @@ class LaunchOperationTests(unittest.TestCase):
             sleep=lambda _: None, monotonic=lambda: 0, report=lambda *a, **k: None,
         )
         serialized = " ".join(" ".join(command) for command in commands)
+        self.assertLess(serialized.index("ps --all"), serialized.index("up -d db"))
         self.assertLess(serialized.index("up -d db"), serialized.index("--profile migration run"))
-        self.assertLess(serialized.index("--profile migration run"), serialized.index("up -d --build backend"))
+        self.assertIn("--build --rm -T migrate", serialized)
+        self.assertLess(serialized.index("--profile migration run --build --rm -T migrate"), serialized.index("up -d --build backend"))
         self.assertIn("127.0.0.1:18080/health", serialized)
         self.assertEqual(seed.main.call_count, 1)
         seed.main.assert_called_once_with(
@@ -303,7 +357,7 @@ class LaunchOperationTests(unittest.TestCase):
         commands = []
         def runner(command, **kwargs):
             commands.append(command)
-            output = '{"Health":"healthy"}' if "ps" in command else ""
+            output = '{"Health":"healthy"}' if "ps" in command and "--all" not in command else ""
             return SimpleNamespace(returncode=1 if "migration" in command else 0, stdout=output)
         seed = SimpleNamespace(main=Mock(return_value=0))
         with self.assertRaisesRegex(launch.LaunchBlocked, "phase failed: migration"):
@@ -317,12 +371,12 @@ class LaunchOperationTests(unittest.TestCase):
         self.assertEqual(seed.main.call_count, 0)
         flattened = [" ".join(command) for command in commands]
         self.assertTrue(any("stop nginx frontend backend db" in command for command in flattened))
-        self.assertFalse(any("down" in command or "volume" in command or "production" in command for command in flattened))
+        self.assertFalse(any("down" in command or "volume rm" in command or "production" in command for command in flattened))
 
     def test_failed_rollback_is_never_reported_as_pass(self) -> None:
         reports = []
         def runner(command, **kwargs):
-            output = '{"Health":"healthy"}' if "ps" in command else ""
+            output = '{"Health":"healthy"}' if "ps" in command and "--all" not in command else ""
             if "migration" in command:
                 return SimpleNamespace(returncode=1, stdout=output)
             if "stop" in command:
@@ -337,8 +391,71 @@ class LaunchOperationTests(unittest.TestCase):
                 runner=runner, sleep=lambda _: None, monotonic=lambda: 0,
                 report=lambda message, **kwargs: reports.append(message),
             )
-        self.assertIn("STAGING_ROLLBACK_FAILED manual-review-required", reports)
+        self.assertTrue(any(r.startswith("STAGING_ROLLBACK_FAILED manual-review-required") for r in reports))
         self.assertNotIn("STAGING_ROLLBACK_PASS stopped-project-services-volumes-preserved", reports)
+
+    def test_existing_project_resources_are_rejected_before_any_docker_mutation(self) -> None:
+        commands = []
+        reports = []
+        def runner(command, **kwargs):
+            commands.append(command)
+            output = '{"Name":"belib-isolated-i5-db-1"}' if "--all" in command else ""
+            return SimpleNamespace(returncode=0, stdout=output)
+        with self.assertRaisesRegex(launch.LaunchBlocked, "already exist"):
+            launch.run_deploy_transaction(
+                compose=["/usr/bin/docker", "--context", launch.CONTEXT_NAME, "compose", "-p", launch.COMPOSE_PROJECT],
+                env_file=Path("/tmp/env"), build_root=Path("/tmp/source"), environment={}, env_fd=9,
+                seed=SimpleNamespace(main=Mock(return_value=0)), source_sha=SOURCE_SHA, port="18080",
+                stage_values={"BELIB_STAGE_VCS_REF": SOURCE_SHA}, docker_endpoint=Path("/run/user/1000/docker.sock"),
+                runner=runner, sleep=lambda _: None, monotonic=lambda: 0,
+                report=lambda message, **kwargs: reports.append(message),
+            )
+        self.assertFalse(any(" up " in " " + " ".join(command) + " " for command in commands))
+        self.assertFalse(any(" stop " in " " + " ".join(command) + " " for command in commands))
+        self.assertNotIn("STAGING_ROLLBACK_PASS stopped-project-services-volumes-preserved", reports)
+
+    def test_oneoff_remaining_or_failed_inventory_prevents_rollback_pass(self) -> None:
+        for inspect_code, remaining in ((0, "oneoff-id"), (1, ""), (0, "")):
+            reports = []
+            def runner(command, **kwargs):
+                if command[3:4] == ["ps"]:
+                    return SimpleNamespace(returncode=inspect_code, stdout=remaining)
+                if "migration" in command:
+                    return SimpleNamespace(returncode=1, stdout="")
+                output = '{"Health":"healthy"}' if "ps" in command and "--all" not in command else ""
+                return SimpleNamespace(returncode=0, stdout=output)
+            with self.assertRaises(launch.LaunchBlocked):
+                launch.run_deploy_transaction(
+                    compose=["/usr/bin/docker", "--context", launch.CONTEXT_NAME, "compose", "-p", launch.COMPOSE_PROJECT],
+                    env_file=Path("/tmp/env"), build_root=Path("/tmp/source"), environment={}, env_fd=9,
+                    seed=SimpleNamespace(main=Mock(return_value=0)), source_sha=SOURCE_SHA, port="18080",
+                    stage_values={}, docker_endpoint=Path("/run/user/1000/docker.sock"),
+                    runner=runner, sleep=lambda _: None, monotonic=lambda: 0,
+                    report=lambda message, **kwargs: reports.append(message),
+                )
+            passed = any(message.startswith("STAGING_ROLLBACK_PASS ") for message in reports)
+            self.assertEqual(passed, inspect_code == 0 and not remaining)
+
+    def test_redirect_is_not_accepted_as_http_health(self) -> None:
+        reports = []
+        ticks = iter((0, 0, 0, 0, 121))
+        def runner(command, **kwargs):
+            if command[0] == "/usr/bin/curl":
+                self.assertEqual(command[1], "-q")
+                self.assertEqual(kwargs["stdout"], launch.subprocess.PIPE)
+                return SimpleNamespace(returncode=0, stdout="302")
+            output = '{"Health":"healthy"}' if "ps" in command and "--all" not in command and "compose" in command else ""
+            return SimpleNamespace(returncode=0, stdout=output)
+        with self.assertRaisesRegex(launch.LaunchBlocked, "http-health"):
+            launch.run_deploy_transaction(
+                compose=["/usr/bin/docker", "--context", launch.CONTEXT_NAME, "compose", "-p", launch.COMPOSE_PROJECT],
+                env_file=Path("/tmp/env"), build_root=Path("/tmp/source"), environment={}, env_fd=9,
+                seed=SimpleNamespace(main=Mock(return_value=0)), source_sha=SOURCE_SHA, port="18080",
+                stage_values={}, docker_endpoint=Path("/run/user/1000/docker.sock"),
+                runner=runner, sleep=lambda _: None, monotonic=lambda: next(ticks),
+                report=lambda message, **kwargs: reports.append(message),
+            )
+        self.assertFalse(any(message.startswith("STAGING_TRANSACTION_PASS") for message in reports))
 
     def test_changed_build_context_and_image_digest_are_rejected(self) -> None:
         model = ci_tests.compose_model(ROOT)

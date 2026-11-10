@@ -1036,7 +1036,11 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         open_credentials.assert_called_once_with(self.credentials, os.getuid())
-        duplicate_stdin.assert_called_once()
+        self.assertIs(type(run_command.call_args.kwargs["stdin"]), int)
+        with self.assertRaises(OSError):
+            os.fstat(run_command.call_args.kwargs["stdin"])
+        self.assertEqual(run_command.call_args.kwargs["timeout"], 900)
+        duplicate_stdin.assert_not_called()
         command = run_command.call_args.args[0]
         self.assertEqual(command[0], "/usr/bin/docker")
         self.assertEqual(
@@ -1045,6 +1049,59 @@ class SeedWrapperAdmissionTests(unittest.TestCase):
         )
         env_file_argument = command[command.index("--env-file") + 1]
         self.assertRegex(env_file_argument, rf"^/proc/{os.getpid()}/fd/[0-9]+$")
+
+    def test_borrowed_launcher_env_descriptor_survives_seed_success_and_timeout(self) -> None:
+        endpoint = Path(f"/run/user/{os.getuid()}/docker.sock")
+        snapshot = make_verified_snapshot(self)
+        docker_env = {"PATH": "/usr/bin:/bin", "HOME": str(self.root), "DOCKER_CONFIG": "/tmp/private"}
+
+        for timeout_case in (False, True):
+            env_fd = seed_wrapper.create_sealed_env_snapshot(staging_env_contents())
+            captured = {}
+            credential_fds = []
+            duplicate_env_fds = []
+
+            def compose_runner(command, **kwargs):
+                captured.update(kwargs)
+                duplicate_env_fds.extend(kwargs["pass_fds"])
+                if timeout_case:
+                    raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                return subprocess.CompletedProcess(command, 0)
+
+            original_open = seed_wrapper.open_private_regular_file
+            def open_credential(path, uid):
+                fd = original_open(path, uid)
+                credential_fds.append(fd)
+                return fd
+
+            try:
+                with (
+                    patch.object(seed_wrapper.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=os.getuid(), pw_dir=str(self.root))),
+                    patch.object(seed_wrapper.socket, "gethostname", return_value="ubuntu-worker"),
+                    patch.object(seed_wrapper, "open_private_regular_file", side_effect=open_credential),
+                    patch.object(seed_wrapper.subprocess, "run", side_effect=compose_runner),
+                    patch.dict(os.environ, {}, clear=True),
+                    redirect_stderr(StringIO()),
+                ):
+                    result = seed_wrapper.main(
+                        invoked_by_launcher=True, build_root=snapshot, source_sha=TEST_SOURCE_SHA,
+                        admitted_env_fd=env_fd,
+                        stage_values={"BELIB_STAGE_VCS_REF": TEST_SOURCE_SHA},
+                        docker_cli="/usr/bin/docker", docker_endpoint=endpoint,
+                        docker_environment=docker_env,
+                    )
+                self.assertEqual(result, 1 if timeout_case else 0)
+                os.fstat(env_fd)  # The wrapper borrowed this descriptor and must leave it open.
+                self.assertEqual(captured["stdin"], credential_fds[0])
+                self.assertEqual(captured["timeout"], 900)
+                self.assertIn("pass_fds", captured)
+                self.assertNotIn(captured["stdin"], captured["pass_fds"])
+                with self.assertRaises(OSError):
+                    os.fstat(credential_fds[0])
+                with self.assertRaises(OSError):
+                    os.fstat(duplicate_env_fds[0])
+            finally:
+                os.close(env_fd)
 
 
 if __name__ == "__main__":

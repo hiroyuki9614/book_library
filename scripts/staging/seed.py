@@ -919,7 +919,10 @@ def main(
         else:
             if stage_values is None or docker_cli is None or docker_endpoint is None or docker_environment is None:
                 raise SeedWrapperError("The launcher admission handoff is incomplete")
-            env_snapshot_fd = admitted_env_fd
+            try:
+                env_snapshot_fd = os.dup(admitted_env_fd)
+            except OSError as error:
+                raise SeedWrapperError("The launcher environment handoff descriptor is unavailable") from error
             endpoint = docker_endpoint
             docker_env = dict(docker_environment)
         if stage_values["BELIB_STAGE_VCS_REF"] != source_sha:
@@ -930,11 +933,6 @@ def main(
         # Seed credentials are opened only after source, env-file, and Docker guards pass.
         credential_fd = open_private_regular_file(credentials_path, account.pw_uid)
 
-        os.dup2(credential_fd, 0, inheritable=True)
-        if credential_fd != 0:
-            os.close(credential_fd)
-            credential_fd = -1
-
         os.set_inheritable(env_snapshot_fd, True)
         snapshot_path = Path(f"/proc/{os.getpid()}/fd/{env_snapshot_fd}")
         command = build_compose_command(build_root, snapshot_path, endpoint)
@@ -942,7 +940,10 @@ def main(
         if admitted_env_fd is None:
             verify_private_docker_config(docker_config, account.pw_uid)
             verify_trusted_docker_plugins()
-        result = subprocess.run(command, cwd=build_root, env=docker_env, check=False)
+        result = subprocess.run(
+            command, cwd=build_root, env=docker_env, check=False,
+            stdin=credential_fd, timeout=900, pass_fds=(env_snapshot_fd,),
+        )
         return result.returncode
     except SeedWrapperError as error:
         print(f"BLOCKED: {error}", file=sys.stderr)

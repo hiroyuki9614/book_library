@@ -37,7 +37,7 @@ class ApprovalTests(unittest.TestCase):
     def envelope(self, **changes):
         now = int(time.time())
         nonce = "c" * 64
-        payload = approval.expected_payload("a" * 40, "deploy", nonce, now)
+        payload = approval.expected_payload("a" * 40, "deploy", nonce, now, "d" * 64)
         payload.update(changes)
         raw = approval.canonical_json(payload)
         message = self.root / "message"
@@ -47,8 +47,7 @@ class ApprovalTests(unittest.TestCase):
         return {"payload": approval.b64(raw), "signature": approval.b64(signature.read_bytes())}
 
     def test_valid_external_signature_accepts_exact_tuple(self):
-        with patch.object(approval, "_verify_trusted_openssl"):
-            self.assertEqual(approval.verify_envelope(self.envelope(), "a" * 40, "deploy", "c" * 64), "c" * 64)
+        self.assertEqual(approval.verify_envelope(self.envelope(), "a" * 40, "deploy", "c" * 64, "d" * 64), "c" * 64)
 
     def test_embedded_production_key_fingerprint_is_pinned(self):
         self.assertEqual(hashlib.sha256(approval.PUBLIC_KEY_PEM).hexdigest(), approval.PUBLIC_KEY_SHA256)
@@ -56,18 +55,17 @@ class ApprovalTests(unittest.TestCase):
     def test_forgery_payload_tamper_and_unexpected_fields_reject(self):
         env = self.envelope()
         env["signature"] = approval.b64(b"x" * 64)
-        with patch.object(approval, "_verify_trusted_openssl"):
-            with self.assertRaisesRegex(approval.ApprovalError, "signature is invalid"):
-                approval.verify_envelope(env, "a" * 40, "deploy", "c" * 64)
+        with self.assertRaisesRegex(approval.ApprovalError, "signature is invalid"):
+            approval.verify_envelope(env, "a" * 40, "deploy", "c" * 64, "d" * 64)
         env = self.envelope()
         payload = json.loads(approval.unb64(env["payload"]))
         payload["host"] = "production"
         env["payload"] = approval.b64(approval.canonical_json(payload))
         with self.assertRaises(approval.ApprovalError):
-            approval.verify_envelope(env, "a" * 40, "deploy", "c" * 64)
+            approval.verify_envelope(env, "a" * 40, "deploy", "c" * 64, "d" * 64)
         payload["unexpected"] = True
         with self.assertRaises(approval.ApprovalError):
-                approval.validate_payload(payload, "a" * 40, "deploy", "c" * 64, int(time.time()))
+                approval.validate_payload(payload, "a" * 40, "deploy", "c" * 64, "d" * 64, int(time.time()))
 
     def test_wrong_nonce_sha_operation_and_expiry_reject(self):
         cases = [
@@ -77,7 +75,7 @@ class ApprovalTests(unittest.TestCase):
         ]
         for changes in cases:
             with self.subTest(changes=changes), self.assertRaises(approval.ApprovalError):
-                approval.verify_envelope(self.envelope(**changes), "a" * 40, "deploy", "c" * 64)
+                approval.verify_envelope(self.envelope(**changes), "a" * 40, "deploy", "c" * 64, "d" * 64)
 
     def test_wrong_host_principal_uid_project_and_pr_reject(self):
         for changes in (
@@ -85,7 +83,12 @@ class ApprovalTests(unittest.TestCase):
             {"project": "production"}, {"pull_request": 104},
         ):
             with self.subTest(changes=changes), self.assertRaises(approval.ApprovalError):
-                approval.verify_envelope(self.envelope(**changes), "a" * 40, "deploy", "c" * 64)
+                approval.verify_envelope(self.envelope(**changes), "a" * 40, "deploy", "c" * 64, "d" * 64)
+
+    def test_wrong_external_evidence_digest_and_branch_reject(self):
+        for changes in ({"evidence_sha256": "e" * 64}, {"branch": "codex/wrong"}):
+            with self.subTest(changes=changes), self.assertRaises(approval.ApprovalError):
+                approval.verify_envelope(self.envelope(**changes), "a" * 40, "deploy", "c" * 64, "d" * 64)
 
     def test_challenge_timeout_and_unsafe_response_fail_closed(self):
         state_root = self.root / "state"
@@ -99,7 +102,7 @@ class ApprovalTests(unittest.TestCase):
             return real_lstat(path)
         with patch.object(approval.os, "getuid", return_value=test_uid), patch.object(approval.os, "lstat", side_effect=safe_lstat):
             with self.assertRaisesRegex(approval.ApprovalError, "Timed out"):
-                approval.request_and_wait("a" * 40, "deploy", uid=test_uid, output=io.StringIO(), timeout=0)
+                approval.request_and_wait("a" * 40, "deploy", "d" * 64, uid=test_uid, output=io.StringIO(), timeout=0)
 
         outside = self.root / "outside"
         outside.write_text("not a receipt")
@@ -111,7 +114,7 @@ class ApprovalTests(unittest.TestCase):
                 pass
         with patch.object(approval.os, "getuid", return_value=test_uid), patch.object(approval.os, "lstat", side_effect=safe_lstat):
             with self.assertRaisesRegex(approval.ApprovalError, "unsafe"):
-                approval.request_and_wait("a" * 40, "deploy", uid=test_uid, output=SymlinkResponse(), timeout=1)
+                approval.request_and_wait("a" * 40, "deploy", "d" * 64, uid=test_uid, output=SymlinkResponse(), timeout=1)
 
     def test_duplicate_json_keys_reject(self):
         with self.assertRaises(approval.ApprovalError):

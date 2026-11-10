@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import fcntl
 import json
@@ -37,10 +38,12 @@ CONTEXT_NAME = "belib-i5-staging-rootless"
 LOCK_PATH = Path("/tmp/belib-staging-cd-belib-isolated-i5.lock")
 ADMISSION_WORKTREE_PREFIX = Path("/home/hiroyuki/workspaces/belib-i5-admission-")
 SOURCE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
+EVIDENCE_SHA_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+ADMITTED_SOURCE_ROOT: Path | None = None
 
 OPERATION_ARGS: dict[str, tuple[str, ...]] = {
     "start-db": ("up", "-d", "db"),
-    "migrate": ("--profile", "migration", "run", "--rm", "migrate"),
+    "migrate": ("--profile", "migration", "run", "--build", "--rm", "-T", "migrate"),
     "start-app": ("up", "-d", "--build", "backend", "frontend", "nginx"),
     "status": ("ps",),
 }
@@ -51,7 +54,9 @@ class LaunchBlocked(Exception):
 
 
 def load_approval_module():
-    path = Path(__file__).with_name("approval.py")
+    if ADMITTED_SOURCE_ROOT is None:
+        raise LaunchBlocked("Exact detached staging source has not been admitted")
+    path = ADMITTED_SOURCE_ROOT / "scripts/staging/approval.py"
     spec = importlib.util.spec_from_file_location("belib_staging_approval", path)
     if spec is None or spec.loader is None:
         raise LaunchBlocked("The signed staging approval verifier is unavailable")
@@ -61,7 +66,9 @@ def load_approval_module():
 
 
 def load_seed_module():
-    path = Path(__file__).with_name("seed.py")
+    if ADMITTED_SOURCE_ROOT is None:
+        raise LaunchBlocked("Exact detached staging source has not been admitted")
+    path = ADMITTED_SOURCE_ROOT / "scripts/staging/seed.py"
     spec = importlib.util.spec_from_file_location("belib_staging_seed", path)
     if spec is None or spec.loader is None:
         raise LaunchBlocked("The guarded staging seed wrapper is unavailable")
@@ -105,11 +112,13 @@ def reject_caller_environment(environment: Mapping[str, str]) -> None:
     }
     if any(name in environment for name in python_overrides | shell_and_git_overrides):
         raise LaunchBlocked("Caller Python, shell, or Git startup overrides are forbidden")
-    seed = load_seed_module()
-    try:
-        seed.reject_ambient_overrides(environment)
-    except seed.SeedWrapperError as error:
-        raise LaunchBlocked(str(error)) from error
+    forbidden_prefixes = (
+        "DOCKER_", "COMPOSE_", "BUILDX_", "BUILDKIT_", "BELIB_STAGE_", "POSTGRES_",
+        "R2_", "AWS_", "S3_", "PROD_", "PRODUCTION_", "VITE_PUBLIC_DEMO_",
+    )
+    forbidden_names = {"DATABASE_URL", "DIRECT_URL", "BETTER_AUTH_SECRET", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "GIT_SSH_COMMAND"}
+    if any(name.upper().startswith(forbidden_prefixes) or name.upper() in forbidden_names for name in environment):
+        raise LaunchBlocked("Remove inherited staging, database, Docker, production, and secret overrides")
 
 
 def validate_handoff_receipt(receipt: object, source_sha: str) -> str:
@@ -134,6 +143,7 @@ def run_deploy_transaction(
     port: str,
     stage_values: Mapping[str, str],
     docker_endpoint: Path,
+    evidence_sha256: str = "0" * 64,
     runner=subprocess.run,
     sleep=time.sleep,
     monotonic=time.monotonic,
@@ -147,16 +157,19 @@ def run_deploy_transaction(
     completed: list[str] = []
     db_start_attempted = False
 
+    def receipt(message: str) -> None:
+        report(f"{message} evidence_sha256={evidence_sha256}", file=sys.stderr)
+
     def phase(name: str, command: list[str], timeout: int = 900) -> None:
-        report(f"STAGING_PHASE_START {name}", file=sys.stderr)
+        receipt(f"STAGING_PHASE_START {name}")
         result = runner(command, cwd=build_root, env=dict(environment), stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
                         pass_fds=(env_fd,), timeout=timeout)
         if result.returncode != 0:
-            report(f"STAGING_PHASE_FAIL {name}", file=sys.stderr)
+            receipt(f"STAGING_PHASE_FAIL {name}")
             raise LaunchBlocked(f"Staging phase failed: {name}")
         completed.append(name)
-        report(f"STAGING_PHASE_PASS {name}", file=sys.stderr)
+        receipt(f"STAGING_PHASE_PASS {name}")
 
     def wait_db() -> None:
         deadline = monotonic() + 180
@@ -175,57 +188,77 @@ def run_deploy_transaction(
                     for row in rows
                 ):
                     completed.append("db-healthy")
-                    report("STAGING_PHASE_PASS db-healthy", file=sys.stderr)
+                    receipt("STAGING_PHASE_PASS db-healthy")
                     return
             except (json.JSONDecodeError, AttributeError):
                 pass
             sleep(2)
-        report("STAGING_PHASE_FAIL db-health", file=sys.stderr)
+        receipt("STAGING_PHASE_FAIL db-health")
         raise LaunchBlocked("Staging phase timed out: db-health")
 
     try:
+        inventory = runner([*compose, "ps", "--all", "--format", "json"], cwd=build_root,
+                           env=dict(environment), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, text=True, check=False, pass_fds=(env_fd,), timeout=20)
+        volumes = runner([DOCKER_CLI, "--context", CONTEXT_NAME, "volume", "ls", "--filter",
+                          f"label=com.docker.compose.project={COMPOSE_PROJECT}", "--format", "{{.Name}}"],
+                         cwd=build_root, env=dict(environment), stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False, timeout=20)
+        if inventory.returncode != 0 or volumes.returncode != 0:
+            raise LaunchBlocked("Could not safely inventory the staging project before first Docker mutation")
+        if (inventory.stdout or "").strip() or (volumes.stdout or "").strip():
+            raise LaunchBlocked("Staging project containers or volumes already exist; separate resume review is required")
+        receipt("STAGING_RESOURCE_INVENTORY_EMPTY")
         db_start_attempted = True
         phase("db-start", [*compose, "up", "-d", "db"], 300)
         wait_db()
-        phase("migration", [*compose, "--profile", "migration", "run", "--rm", "migrate"])
-        report("STAGING_PHASE_START synthetic-seed", file=sys.stderr)
+        phase("migration", [*compose, *OPERATION_ARGS["migrate"]])
+        receipt("STAGING_PHASE_START synthetic-seed")
         if seed.main(
             invoked_by_launcher=True, build_root=build_root, source_sha=source_sha,
             admitted_env_fd=env_fd, stage_values=stage_values, docker_cli=DOCKER_CLI,
             docker_endpoint=docker_endpoint, docker_environment=environment,
         ) != 0:
-            report("STAGING_PHASE_FAIL synthetic-seed", file=sys.stderr)
+            receipt("STAGING_PHASE_FAIL synthetic-seed")
             raise LaunchBlocked("Staging phase failed: synthetic-seed")
         completed.append("synthetic-seed")
-        report("STAGING_PHASE_PASS synthetic-seed", file=sys.stderr)
+        receipt("STAGING_PHASE_PASS synthetic-seed")
         phase("app-start", [*compose, "up", "-d", "--build", "backend", "frontend", "nginx"], 1800)
         deadline = monotonic() + 120
         health_url = f"http://127.0.0.1:{port}/health"
         while monotonic() < deadline:
-            result = runner(["/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "5", health_url],
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            check=False, timeout=7, env={"PATH": SAFE_PATH, "HOME": str(EXPECTED_HOME)})
-            if result.returncode == 0:
+            result = runner(["/usr/bin/curl", "-q", "--noproxy", "*", "--fail", "--silent", "--show-error",
+                             "--max-time", "5", "--output", "/dev/null", "--write-out", "%{http_code}", health_url],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                            check=False, timeout=7, env={"PATH": SAFE_PATH, "HOME": str(EXPECTED_HOME), "NO_PROXY": "*", "no_proxy": "*"})
+            if result.returncode == 0 and getattr(result, "stdout", "") == "200":
                 completed.append("http-health")
-                report("STAGING_PHASE_PASS http-health", file=sys.stderr)
-                report("STAGING_TRANSACTION_PASS", file=sys.stderr)
+                receipt("STAGING_PHASE_PASS http-health")
+                receipt("STAGING_TRANSACTION_PASS")
                 return 0
             sleep(2)
-        report("STAGING_PHASE_FAIL http-health", file=sys.stderr)
+        receipt("STAGING_PHASE_FAIL http-health")
         raise LaunchBlocked("Staging phase timed out: http-health")
     except (Exception, KeyboardInterrupt) as error:
-        report("STAGING_TRANSACTION_FAILED phases=" + ",".join(completed), file=sys.stderr)
+        receipt("STAGING_TRANSACTION_FAILED phases=" + ",".join(completed))
         if db_start_attempted:
             try:
                 rollback = runner([*compose, "stop", "nginx", "frontend", "backend", "db"], cwd=build_root,
                                   env=dict(environment), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL, check=False, pass_fds=(env_fd,), timeout=120)
-                if rollback.returncode == 0:
-                    report("STAGING_ROLLBACK_PASS stopped-project-services-volumes-preserved", file=sys.stderr)
+                remaining = runner(
+                    [DOCKER_CLI, "--context", CONTEXT_NAME, "ps", "--filter",
+                     f"label=com.docker.compose.project={COMPOSE_PROJECT}", "--format", "{{.ID}}"],
+                    cwd=build_root, env=dict(environment), stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                    check=False, timeout=20,
+                )
+                if rollback.returncode == 0 and remaining.returncode == 0 and not remaining.stdout.strip():
+                    receipt("STAGING_ROLLBACK_PASS stopped-project-services-volumes-preserved")
                 else:
-                    report("STAGING_ROLLBACK_FAILED manual-review-required", file=sys.stderr)
+                    receipt("STAGING_ROLLBACK_FAILED manual-review-required")
             except (OSError, subprocess.SubprocessError):
-                report("STAGING_ROLLBACK_FAILED manual-review-required", file=sys.stderr)
+                receipt("STAGING_ROLLBACK_FAILED manual-review-required")
         if isinstance(error, LaunchBlocked):
             raise
         if isinstance(error, KeyboardInterrupt):
@@ -503,20 +536,23 @@ def load_source_tree_guard(repo_root: Path):
     return guard
 
 
-def _checked_repo_branch(seed, repo_root: Path) -> None:
-    result = _run(
-        seed.git_command(repo_root, "branch", "--show-current"),
-        environment=seed.git_environment(),
-    )
-    if result.returncode != 0 or (result.stdout or "").strip() != EXPECTED_BRANCH:
-        raise LaunchBlocked("Checked-out staging branch differs from the existing PR #103 claim")
+def _trusted_git(repo_root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    environment = {
+        "HOME": str(EXPECTED_HOME), "PATH": SAFE_PATH, "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0",
+    }
+    return _run(["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+                 "-C", str(repo_root), *arguments], environment=environment, timeout=10)
 
 
-def _admission_source_root(seed, checkout: Path, source_sha: str) -> Path:
-    """Select only the fixed-name detached clean worktree sharing this checkout's Git store."""
+def _admission_source_root(checkout: Path, source_sha: str) -> Path:
+    """Admit the fixed detached tree and its bytes before importing any privileged helper."""
     if not SOURCE_SHA_PATTERN.fullmatch(source_sha):
         raise LaunchBlocked("Source revision must be a full lowercase Git SHA")
     candidate = ADMISSION_WORKTREE_PREFIX.parent / f"{ADMISSION_WORKTREE_PREFIX.name}{source_sha[:7]}"
+    expected_launcher = candidate / "scripts/staging/launch-guard.py"
+    if Path(__file__).resolve(strict=True) != expected_launcher:
+        raise LaunchBlocked("Invoke launch-guard.py from the exact-SHA detached admission worktree")
     try:
         metadata = os.lstat(candidate)
         resolved = candidate.resolve(strict=True)
@@ -530,26 +566,39 @@ def _admission_source_root(seed, checkout: Path, source_sha: str) -> Path:
         or candidate.parent != ADMISSION_WORKTREE_PREFIX.parent
     ):
         raise LaunchBlocked("The staging admission worktree path or ownership is unsafe")
-    try:
-        head = seed.read_source_sha(candidate)
-        candidate_common = _run(
-            seed.git_command(candidate, "rev-parse", "--path-format=absolute", "--git-common-dir"),
-            environment=seed.git_environment(), timeout=5,
-        )
-        checkout_common = _run(
-            seed.git_command(checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"),
-            environment=seed.git_environment(), timeout=5,
-        )
-        detached = _run(
-            seed.git_command(candidate, "symbolic-ref", "-q", "HEAD"),
-            environment=seed.git_environment(), timeout=5,
-        )
-        if head != source_sha or candidate_common.returncode != 0 or checkout_common.returncode != 0:
-            raise LaunchBlocked("The detached admission worktree does not match the selected SHA and Git store")
-        if candidate_common.stdout.strip() != checkout_common.stdout.strip() or detached.returncode == 0:
-            raise LaunchBlocked("The admission source must be a detached worktree of the claimed repository")
-    except seed.SeedWrapperError as error:
-        raise LaunchBlocked("The detached admission worktree failed exact-source checks") from error
+    branch = _trusted_git(checkout, "branch", "--show-current")
+    head = _trusted_git(candidate, "rev-parse", "--verify", "HEAD")
+    candidate_common = _trusted_git(candidate, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    checkout_common = _trusted_git(checkout, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    detached = _trusted_git(candidate, "symbolic-ref", "-q", "HEAD")
+    status = _trusted_git(candidate, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none")
+    worktree_diff = _trusted_git(candidate, "diff", "--no-ext-diff", "--quiet", "HEAD", "--")
+    index_diff = _trusted_git(candidate, "diff", "--cached", "--no-ext-diff", "--quiet", "HEAD", "--")
+    if branch.returncode != 0 or branch.stdout.strip() != EXPECTED_BRANCH:
+        raise LaunchBlocked("Original checkout branch differs from the existing PR #103 claim")
+    if head.returncode != 0 or head.stdout.strip() != source_sha or candidate_common.returncode != 0 or checkout_common.returncode != 0:
+        raise LaunchBlocked("The detached admission worktree does not match the selected SHA and Git store")
+    if candidate_common.stdout.strip() != checkout_common.stdout.strip() or detached.returncode == 0:
+        raise LaunchBlocked("The admission source must be a detached worktree of the claimed repository")
+    if status.returncode != 0 or status.stdout or worktree_diff.returncode != 0 or index_diff.returncode != 0:
+        raise LaunchBlocked("The exact-SHA admission worktree must be clean with verified source bytes")
+    # Git status/diff may trust index flags or cached stat data. Hash every tracked
+    # staging helper directly before importing any of them.
+    tree = _trusted_git(candidate, "ls-tree", "-r", "-z", source_sha, "--", "scripts/staging")
+    if tree.returncode != 0 or not tree.stdout:
+        raise LaunchBlocked("Could not verify detached staging helper bytes")
+    for entry in tree.stdout.rstrip("\0").split("\0"):
+        metadata, relative = entry.split("\t", 1)
+        mode, kind, oid = metadata.split()
+        path = candidate / relative
+        info = os.lstat(path)
+        if kind != "blob" or mode not in {"100644", "100755"} or not stat.S_ISREG(info.st_mode):
+            raise LaunchBlocked("Detached staging helper path or mode is unsafe")
+        data = path.read_bytes()
+        actual = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+        expected_mode = 0o755 if mode == "100755" else 0o644
+        if actual != oid or stat.S_IMODE(info.st_mode) != expected_mode:
+            raise LaunchBlocked("Detached staging helper bytes differ from selected SHA")
     return candidate
 
 
@@ -569,6 +618,7 @@ def main(argv: list[str] | None = None) -> int:
         reject_caller_environment(os.environ)
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("--source-sha", required=True)
+        parser.add_argument("--evidence-sha256", required=True)
         parser.add_argument("--env-file", type=Path, required=True)
         parser.add_argument("operation", choices=("deploy",))
         args = parser.parse_args(argv)
@@ -581,22 +631,23 @@ def main(argv: list[str] | None = None) -> int:
             or socket.gethostname() != EXPECTED_HOST
         ):
             raise LaunchBlocked("Run only as hiroyuki UID 1000 on ubuntu-worker")
-        repo_root = Path(__file__).resolve(strict=True).parents[2]
-        if repo_root != EXPECTED_REPO_ROOT:
-            raise LaunchBlocked("Use only the existing i5 staging checkout")
+        repo_root = EXPECTED_REPO_ROOT
         if args.env_file != EXPECTED_HOME / ".config/belib-staging/i5.env":
             raise LaunchBlocked("Use only the outside-repository i5 staging env file")
-
+        if not EVIDENCE_SHA_PATTERN.fullmatch(args.evidence_sha256):
+            raise LaunchBlocked("External evidence digest must be 64 lowercase hexadecimal characters")
+        source_root = _admission_source_root(repo_root, args.source_sha)
+        global ADMITTED_SOURCE_ROOT
+        ADMITTED_SOURCE_ROOT = source_root
         seed = load_seed_module()
-        _checked_repo_branch(seed, repo_root)
 
         with project_lock():
             approval = load_approval_module()
             try:
-                approval.request_and_wait(args.source_sha, "deploy", uid=EXPECTED_UID, output=sys.stdout)
+                approval.request_and_wait(args.source_sha, "deploy", args.evidence_sha256,
+                                          uid=EXPECTED_UID, output=sys.stdout)
             except approval.ApprovalError as error:
                 raise LaunchBlocked(str(error)) from error
-            source_root = _admission_source_root(seed, repo_root, args.source_sha)
             env_snapshot_fd = -1
             docker_config_temporary = None
             try:
@@ -645,6 +696,7 @@ def main(argv: list[str] | None = None) -> int:
                             environment=docker_environment, env_fd=env_snapshot_fd, seed=seed,
                             source_sha=args.source_sha, port=values["BELIB_STAGE_PORT"],
                             stage_values=values, docker_endpoint=endpoint,
+                            evidence_sha256=args.evidence_sha256,
                         )
                 except source_guard.SourceTreeBlocked as error:
                     raise LaunchBlocked("The fixed-SHA staging build snapshot could not be verified") from error
