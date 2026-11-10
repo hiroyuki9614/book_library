@@ -19,10 +19,22 @@ SPEC = importlib.util.spec_from_file_location("staging_approval", PATH)
 approval = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(approval)
 
+# Capture the production values before test fixtures replace them with a generated key.
+PINNED_PRODUCTION_PUBLIC_KEY_SHA256 = "8f49fad277be0d1c05bf0b75246a5895a8b3489ddaaeef4f43a3e8b90e25e629"
+PRODUCTION_PUBLIC_KEY_PEM_AT_IMPORT = approval.PUBLIC_KEY_PEM
+PRODUCTION_PUBLIC_KEY_SHA256_AT_IMPORT = approval.PUBLIC_KEY_SHA256
+
 
 class ApprovalTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self._approval_globals = {
+            "PUBLIC_KEY_PEM": approval.PUBLIC_KEY_PEM,
+            "PUBLIC_KEY_SHA256": approval.PUBLIC_KEY_SHA256,
+            "STATE_ROOT": approval.STATE_ROOT,
+        }
+        self.addCleanup(self._restore_approval_globals)
         self.root = Path(self.temp.name)
         self.private = self.root / "private.pem"
         self.public = self.root / "public.pem"
@@ -31,8 +43,9 @@ class ApprovalTests(unittest.TestCase):
         approval.PUBLIC_KEY_PEM = self.public.read_bytes()
         approval.PUBLIC_KEY_SHA256 = hashlib.sha256(approval.PUBLIC_KEY_PEM).hexdigest()
 
-    def tearDown(self):
-        self.temp.cleanup()
+    def _restore_approval_globals(self):
+        for name, value in self._approval_globals.items():
+            setattr(approval, name, value)
 
     def envelope(self, **changes):
         now = int(time.time())
@@ -59,19 +72,32 @@ class ApprovalTests(unittest.TestCase):
                         "-in", str(message), "-out", str(signature)], check=True)
         return {"payload": approval.b64(raw), "signature": approval.b64(signature.read_bytes())}
 
-    def test_valid_external_signature_accepts_exact_tuple(self):
-        with patch.object(approval, "_verify_trusted_openssl"):
-            self.assertEqual(approval.verify_envelope(self.envelope(), "a" * 40, "deploy", "c" * 64, "d" * 64), "c" * 64)
+    def test_valid_external_signature_uses_trusted_openssl_path(self):
+        self.assertEqual(approval.verify_envelope(
+            self.envelope(), "a" * 40, "deploy", "c" * 64, "d" * 64), "c" * 64)
 
     def test_embedded_production_key_fingerprint_is_pinned(self):
-        self.assertEqual(hashlib.sha256(approval.PUBLIC_KEY_PEM).hexdigest(), approval.PUBLIC_KEY_SHA256)
+        self.assertEqual(PRODUCTION_PUBLIC_KEY_SHA256_AT_IMPORT, PINNED_PRODUCTION_PUBLIC_KEY_SHA256)
+        self.assertEqual(hashlib.sha256(PRODUCTION_PUBLIC_KEY_PEM_AT_IMPORT).hexdigest(),
+                         PINNED_PRODUCTION_PUBLIC_KEY_SHA256)
+
+    def test_changed_embedded_key_or_fingerprint_is_rejected(self):
+        cases = (
+            ("changed-key", PRODUCTION_PUBLIC_KEY_PEM_AT_IMPORT + b"\n",
+             PINNED_PRODUCTION_PUBLIC_KEY_SHA256),
+            ("changed-fingerprint", PRODUCTION_PUBLIC_KEY_PEM_AT_IMPORT, "0" * 64),
+        )
+        for name, public_key, fingerprint in cases:
+            with self.subTest(name=name), patch.object(approval, "PUBLIC_KEY_PEM", public_key), \
+                    patch.object(approval, "PUBLIC_KEY_SHA256", fingerprint):
+                with self.assertRaisesRegex(approval.ApprovalError, "Embedded approval public key fingerprint mismatch"):
+                    approval.verify_envelope({}, "a" * 40, "deploy", "c" * 64, "d" * 64)
 
     def test_forgery_payload_tamper_and_unexpected_fields_reject(self):
         env = self.envelope()
         env["signature"] = approval.b64(b"x" * 64)
-        with patch.object(approval, "_verify_trusted_openssl"):
-            with self.assertRaisesRegex(approval.ApprovalError, "signature is invalid"):
-                approval.verify_envelope(env, "a" * 40, "deploy", "c" * 64, "d" * 64)
+        with self.assertRaisesRegex(approval.ApprovalError, "signature is invalid"):
+            approval.verify_envelope(env, "a" * 40, "deploy", "c" * 64, "d" * 64)
         env = self.envelope()
         payload = json.loads(approval.unb64(env["payload"]))
         payload["host"] = "production"
@@ -81,6 +107,12 @@ class ApprovalTests(unittest.TestCase):
         payload["unexpected"] = True
         with self.assertRaises(approval.ApprovalError):
                 approval.validate_payload(payload, "a" * 40, "deploy", "c" * 64, "d" * 64, int(time.time()))
+
+    def test_missing_signature_rejects(self):
+        env = self.envelope()
+        del env["signature"]
+        with self.assertRaisesRegex(approval.ApprovalError, "envelope fields"):
+            approval.verify_envelope(env, "a" * 40, "deploy", "c" * 64, "d" * 64)
 
     def test_wrong_nonce_sha_operation_and_expiry_reject(self):
         cases = [
