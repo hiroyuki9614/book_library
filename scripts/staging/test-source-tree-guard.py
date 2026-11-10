@@ -33,6 +33,16 @@ class SourceTreeGuardTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="belib-source-guard-test-")
         guard.SNAPSHOT_ROOT = Path(self.temporary.name) / "snapshots"
+        def validate_test_snapshot_root(path: Path, uid: int) -> None:
+            if path != guard.SNAPSHOT_ROOT:
+                raise guard.SourceTreeBlocked("Unexpected test snapshot path")
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            info = os.lstat(path)
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
+                raise guard.SourceTreeBlocked("Test snapshot root is not private")
+        self.snapshot_path_patch = patch.object(guard, "_ensure_private_snapshot_root", side_effect=validate_test_snapshot_root)
+        self.snapshot_path_patch.start()
+        self.addCleanup(self.snapshot_path_patch.stop)
         self.root = Path(self.temporary.name) / "repo"
         for directory in (
             "backend",

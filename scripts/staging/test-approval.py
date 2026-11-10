@@ -47,7 +47,8 @@ class ApprovalTests(unittest.TestCase):
         return {"payload": approval.b64(raw), "signature": approval.b64(signature.read_bytes())}
 
     def test_valid_external_signature_accepts_exact_tuple(self):
-        self.assertEqual(approval.verify_envelope(self.envelope(), "a" * 40, "deploy", "c" * 64, "d" * 64), "c" * 64)
+        with patch.object(approval, "_verify_trusted_openssl"):
+            self.assertEqual(approval.verify_envelope(self.envelope(), "a" * 40, "deploy", "c" * 64, "d" * 64), "c" * 64)
 
     def test_embedded_production_key_fingerprint_is_pinned(self):
         self.assertEqual(hashlib.sha256(approval.PUBLIC_KEY_PEM).hexdigest(), approval.PUBLIC_KEY_SHA256)
@@ -55,8 +56,9 @@ class ApprovalTests(unittest.TestCase):
     def test_forgery_payload_tamper_and_unexpected_fields_reject(self):
         env = self.envelope()
         env["signature"] = approval.b64(b"x" * 64)
-        with self.assertRaisesRegex(approval.ApprovalError, "signature is invalid"):
-            approval.verify_envelope(env, "a" * 40, "deploy", "c" * 64, "d" * 64)
+        with patch.object(approval, "_verify_trusted_openssl"):
+            with self.assertRaisesRegex(approval.ApprovalError, "signature is invalid"):
+                approval.verify_envelope(env, "a" * 40, "deploy", "c" * 64, "d" * 64)
         env = self.envelope()
         payload = json.loads(approval.unb64(env["payload"]))
         payload["host"] = "production"
@@ -89,6 +91,31 @@ class ApprovalTests(unittest.TestCase):
         for changes in ({"evidence_sha256": "e" * 64}, {"branch": "codex/wrong"}):
             with self.subTest(changes=changes), self.assertRaises(approval.ApprovalError):
                 approval.verify_envelope(self.envelope(**changes), "a" * 40, "deploy", "c" * 64, "d" * 64)
+
+    def test_resume_approval_is_a_distinct_fixed_schema_and_binds_retained_state(self):
+        now = int(time.time())
+        prior, retained = "6" * 40, "f" * 64
+        payload = approval.expected_payload("a" * 40, "resume-ingress", "c" * 64, now, "d" * 64, prior, retained)
+        approval.validate_payload(payload, "a" * 40, "resume-ingress", "c" * 64, "d" * 64,
+                                  now, prior, retained)
+        for changes, operation, wanted_prior, wanted_digest in (
+            ({"operation": "deploy"}, "resume-ingress", prior, retained),
+            ({}, "resume-ingress", "7" * 40, retained),
+            ({}, "resume-ingress", prior, "e" * 64),
+            ({"prior_source_sha": "7" * 40}, "resume-ingress", prior, retained),
+            ({"retained_state_sha256": "e" * 64}, "resume-ingress", prior, retained),
+        ):
+            changed = dict(payload)
+            changed.update(changes)
+            with self.subTest(changes=changes, operation=operation), self.assertRaises(approval.ApprovalError):
+                approval.validate_payload(changed, "a" * 40, operation, "c" * 64, "d" * 64,
+                                          now, wanted_prior, wanted_digest)
+
+    def test_deploy_token_cannot_be_requested_with_resume_fields(self):
+        with self.assertRaisesRegex(approval.ApprovalError, "cannot carry retained-state"):
+            approval.request_and_wait("a" * 40, "deploy", "d" * 64, uid=os.getuid(),
+                                      output=io.StringIO(), timeout=0,
+                                      prior_source_sha="6" * 40, retained_state_sha256="f" * 64)
 
     def test_challenge_timeout_and_unsafe_response_fail_closed(self):
         state_root = self.root / "state"

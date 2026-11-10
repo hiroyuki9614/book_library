@@ -368,8 +368,9 @@ def _source_shape_contract(source: str) -> None:
         ):
             raise GuardError(f"{name} image reference must match its reviewed immutable digest")
 
-        if property_by_key["networks"][1] != "[isolated]":
-            raise GuardError(f"{name} must use only the isolated network")
+        expected_network_source = "[isolated, ingress]" if name == "nginx" else "[isolated]"
+        if property_by_key["networks"][1] != expected_network_source:
+            raise GuardError(f"{name} network attachments are outside the allowlist")
         if name == "migrate":
             if (
                 property_by_key["profiles"][1] != '["migration"]'
@@ -447,21 +448,24 @@ def _source_shape_contract(source: str) -> None:
     network_entries = _source_mapping_entries(
         root_sections["networks"], 2, "Staging networks mapping"
     )
-    if len(network_entries) != 1 or network_entries[0][1:] != ("isolated", ""):
+    if {key: value for _, key, value in network_entries} != {"isolated": "", "ingress": ""}:
         raise GuardError("Staging network keys are outside the allowlist")
-    network_index = network_entries[0][0]
-    network_lines = root_sections["networks"][network_index + 1 :]
-    network_properties = _source_mapping_entries(
-        network_lines, 4, "Staging isolated network mapping"
-    )
-    if len(network_properties) != 1 or network_properties[0][1:] != ("internal", "true"):
-        raise GuardError("Staging isolated network settings are outside the allowlist")
-    if any(
-        line.strip(_YAML_HORIZONTAL_WHITESPACE)
-        and len(line) - len(line.lstrip(" ")) > 4
-        for line in network_lines
-    ):
-        raise GuardError("Nested network settings are forbidden")
+    for position, (network_index, network_name, _) in enumerate(network_entries):
+        network_end = _source_entry_end(network_entries, position, len(root_sections["networks"]))
+        network_lines = root_sections["networks"][network_index + 1 : network_end]
+        network_properties = _source_mapping_entries(
+            network_lines, 4, f"Staging {network_name} network mapping"
+        )
+        observed = [(key, value) for _, key, value in network_properties]
+        expected = [("internal", "true")] if network_name == "isolated" else [("driver", "bridge")]
+        if observed != expected:
+            raise GuardError(f"Staging {network_name} network settings are outside the allowlist")
+        if any(
+            line.strip(_YAML_HORIZONTAL_WHITESPACE)
+            and len(line) - len(line.lstrip(" ")) > 4
+            for line in network_lines
+        ):
+            raise GuardError("Nested network settings are forbidden")
 
     volume_entries = _source_mapping_entries(
         root_sections["volumes"], 2, "Staging volumes mapping"
@@ -962,12 +966,17 @@ def _validate_model(
     networks = model.get("networks")
     if (
         not isinstance(networks, dict)
-        or set(networks) != {"isolated"}
+        or set(networks) != {"isolated", "ingress"}
         or not isinstance(networks["isolated"], dict)
         or set(networks["isolated"]) != {"internal", "ipam", "name"}
         or networks["isolated"].get("internal") is not True
         or networks["isolated"].get("ipam") != {}
         or networks["isolated"].get("name") != f"{COMPOSE_PROJECT}_isolated"
+        or not isinstance(networks["ingress"], dict)
+        or set(networks["ingress"]) != {"driver", "ipam", "name"}
+        or networks["ingress"].get("ipam") != {}
+        or networks["ingress"].get("driver") != "bridge"
+        or networks["ingress"].get("name") != f"{COMPOSE_PROJECT}_ingress"
     ):
         raise GuardError("Staging services must use the isolated internal network")
 
@@ -1010,8 +1019,9 @@ def _validate_model(
             raise GuardError("Unsupported or unsafe Compose setting")
 
     for name, service in services.items():
-        if service.get("networks") != {"isolated": None}:
-            raise GuardError("Every service must use only the isolated network")
+        expected_networks = {"isolated": None, "ingress": None} if name == "nginx" else {"isolated": None}
+        if service.get("networks") != expected_networks:
+            raise GuardError(f"{name} network attachments are outside the allowlist")
         if service.get("network_mode") is not None:
             raise GuardError("Host or external network modes are forbidden")
         if service.get("privileged") is True or service.get("devices") or service.get("cap_add"):

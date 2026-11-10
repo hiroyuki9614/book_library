@@ -129,11 +129,13 @@ services:
       frontend:
         condition: service_started
     restart: unless-stopped
-    networks: [isolated]
+    networks: [isolated, ingress]
 
 networks:
   isolated:
     internal: true
+  ingress:
+    driver: bridge
 
 volumes:
   staging-postgres-data: {}

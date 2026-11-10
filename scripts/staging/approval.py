@@ -76,8 +76,11 @@ def unb64(value: Any) -> bytes:
     return result
 
 
-def expected_payload(source_sha: str, operation: str, nonce: str, issued_at: int, evidence_sha256: str) -> dict[str, Any]:
-    return {
+def expected_payload(
+    source_sha: str, operation: str, nonce: str, issued_at: int, evidence_sha256: str,
+    prior_source_sha: str | None = None, retained_state_sha256: str | None = None,
+) -> dict[str, Any]:
+    payload = {
         "branch": TARGET["branch"],
         "expires_at": issued_at + MAX_GRANT_SECONDS,
         "evidence_sha256": evidence_sha256,
@@ -93,10 +96,20 @@ def expected_payload(source_sha: str, operation: str, nonce: str, issued_at: int
         "source_sha": source_sha,
         "uid": TARGET["uid"],
     }
+    if operation == "resume-ingress":
+        payload["prior_source_sha"] = prior_source_sha
+        payload["retained_state_sha256"] = retained_state_sha256
+    return payload
 
 
-def validate_payload(payload: Any, source_sha: str, operation: str, nonce: str, evidence_sha256: str, now: int) -> None:
-    expected_fields = set(expected_payload(source_sha, operation, nonce, 0, evidence_sha256))
+def validate_payload(
+    payload: Any, source_sha: str, operation: str, nonce: str, evidence_sha256: str, now: int,
+    prior_source_sha: str | None = None, retained_state_sha256: str | None = None,
+) -> None:
+    if operation not in ("deploy", "resume-ingress"):
+        raise ApprovalError("Approval operation is not allowlisted")
+    expected_fields = set(expected_payload(source_sha, operation, nonce, 0, evidence_sha256,
+                                           prior_source_sha, retained_state_sha256))
     if not isinstance(payload, dict) or set(payload) != expected_fields:
         raise ApprovalError("Approval payload fields do not match the fixed schema")
     for name in ("pull_request", "uid", "issued_at", "expires_at"):
@@ -112,12 +125,23 @@ def validate_payload(payload: Any, source_sha: str, operation: str, nonce: str, 
     if (not re.fullmatch(r"[0-9a-f]{40}", source_sha) or not re.fullmatch(r"[0-9a-f]{64}", nonce)
             or not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256)):
         raise ApprovalError("Challenge identity is malformed")
+    if operation == "resume-ingress" and (
+        not re.fullmatch(r"[0-9a-f]{40}", prior_source_sha or "")
+        or not re.fullmatch(r"[0-9a-f]{64}", retained_state_sha256 or "")
+        or payload["prior_source_sha"] != prior_source_sha
+        or payload["retained_state_sha256"] != retained_state_sha256
+    ):
+        raise ApprovalError("Resume approval does not match the retained source and state")
     issued, expires = payload["issued_at"], payload["expires_at"]
     if issued > now + 5 or issued < now - MAX_GRANT_SECONDS or expires < now or expires <= issued or expires - issued > MAX_GRANT_SECONDS:
         raise ApprovalError("Approval is expired or outside the bounded grant lifetime")
 
 
-def verify_envelope(envelope: Any, source_sha: str, operation: str, nonce: str, evidence_sha256: str, *, now: int | None = None) -> str:
+def verify_envelope(
+    envelope: Any, source_sha: str, operation: str, nonce: str, evidence_sha256: str, *,
+    now: int | None = None, prior_source_sha: str | None = None,
+    retained_state_sha256: str | None = None,
+) -> str:
     if hashlib.sha256(PUBLIC_KEY_PEM).hexdigest() != PUBLIC_KEY_SHA256:
         raise ApprovalError("Embedded approval public key fingerprint mismatch")
     if not isinstance(envelope, dict) or set(envelope) != {"payload", "signature"}:
@@ -128,7 +152,8 @@ def verify_envelope(envelope: Any, source_sha: str, operation: str, nonce: str, 
     payload = strict_json(payload_raw)
     if canonical_json(payload) != payload_raw:
         raise ApprovalError("Approval payload is not canonical JSON")
-    validate_payload(payload, source_sha, operation, nonce, evidence_sha256, int(time.time()) if now is None else now)
+    validate_payload(payload, source_sha, operation, nonce, evidence_sha256,
+                     int(time.time()) if now is None else now, prior_source_sha, retained_state_sha256)
     _verify_trusted_openssl()
     with tempfile.TemporaryDirectory(prefix="belib-approval-verify-", dir="/tmp") as temporary:
         key_path = Path(temporary) / "public.pem"
@@ -194,9 +219,20 @@ def _safe_state_root(uid: int) -> None:
         raise ApprovalError("Approval state directory must be private and owned by the operator")
 
 
-def request_and_wait(source_sha: str, operation: str, evidence_sha256: str, *, uid: int, output, timeout: int = POLL_SECONDS) -> str:
-    if operation not in ("deploy",):
-        raise ApprovalError("Only the bounded deploy operation can be approved")
+def request_and_wait(
+    source_sha: str, operation: str, evidence_sha256: str, *, uid: int, output,
+    timeout: int = POLL_SECONDS, prior_source_sha: str | None = None,
+    retained_state_sha256: str | None = None,
+) -> str:
+    if operation not in ("deploy", "resume-ingress"):
+        raise ApprovalError("Approval operation is not allowlisted")
+    if operation == "deploy" and (prior_source_sha is not None or retained_state_sha256 is not None):
+        raise ApprovalError("Deploy approval cannot carry retained-state resume fields")
+    if operation == "resume-ingress" and (
+        not re.fullmatch(r"[0-9a-f]{40}", prior_source_sha or "")
+        or not re.fullmatch(r"[0-9a-f]{64}", retained_state_sha256 or "")
+    ):
+        raise ApprovalError("Resume approval requires the exact prior source and retained-state digest")
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ApprovalError("Source revision must be a full lowercase Git SHA")
     if not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256):
@@ -216,6 +252,9 @@ def request_and_wait(source_sha: str, operation: str, evidence_sha256: str, *, u
         "response_path": str(response_path),
         "created_at": int(time.time()),
     }
+    if operation == "resume-ingress":
+        challenge["prior_source_sha"] = prior_source_sha
+        challenge["retained_state_sha256"] = retained_state_sha256
     try:
         output.write(canonical_json(challenge).decode("utf-8") + "\n")
         output.flush()
@@ -245,7 +284,8 @@ def request_and_wait(source_sha: str, operation: str, evidence_sha256: str, *, u
                 raw = bytes(chunks)
             finally:
                 os.close(fd)
-            verify_envelope(strict_json(raw), source_sha, operation, nonce, evidence_sha256)
+            verify_envelope(strict_json(raw), source_sha, operation, nonce, evidence_sha256,
+                            prior_source_sha=prior_source_sha, retained_state_sha256=retained_state_sha256)
             return nonce
         raise ApprovalError("Timed out waiting for the one-time external approval")
     finally:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import pwd
 import stat
@@ -170,6 +171,206 @@ class LaunchReceiptTests(unittest.TestCase):
 
 
 class LaunchOperationTests(unittest.TestCase):
+    @staticmethod
+    def retained_manifest(*, state="exited", db_id=launch.RETAINED_DB_CONTAINER_ID, oneoff="False", ingress=False,
+                          current_source_sha=None, swapped_volumes=False):
+        prior = launch.RETAINED_PRIOR_SHA
+        snapshot = launch.SNAPSHOT_ROOT / prior
+        volumes = sorted(launch.RETAINED_VOLUMES)
+        if swapped_volumes:
+            volumes.reverse()
+        def volume_mount(name, destination):
+            return {"type": "volume", "name": name, "source": f"/var/lib/docker/volumes/{name}/_data",
+                    "destination": destination, "read_write": True}
+        def bind_mount(path, destination):
+            return {"type": "bind", "name": "", "source": str(snapshot / path),
+                    "destination": destination, "read_write": False}
+        def container(service, cid, mounts):
+            networks = [f"{launch.COMPOSE_PROJECT}_isolated"]
+            if ingress and service == "nginx":
+                networks.append(f"{launch.COMPOSE_PROJECT}_ingress")
+            return {"id": cid, "service": service, "project": launch.COMPOSE_PROJECT,
+                    "oneoff": oneoff, "state": state, "image_id": "sha256:" + "a" * 64,
+                    "image_ref": "postgres:16.14-bookworm@sha256:" + "b" * 64,
+                    "mounts": sorted(mounts, key=lambda item: (item["destination"], item["source"])),
+                    "networks": sorted(networks)}
+        containers = [
+            container("db", db_id, [
+                volume_mount(volumes[1], "/var/lib/postgresql/data"),
+                bind_mount("scripts/staging/10-belib-staging-roles.sh", "/docker-entrypoint-initdb.d/10-belib-staging-roles.sh"),
+            ]),
+            container("backend", "a" * 64, [volume_mount(volumes[0], "/home/node")]),
+            container("frontend", "b" * 64, []),
+            container("nginx", "c" * 64, [
+                {**bind_mount("nginx/nginx.conf", "/etc/nginx/nginx.conf"),
+                 "source": str(launch.SNAPSHOT_ROOT / (current_source_sha or prior) / "nginx/nginx.conf")},
+                {**bind_mount("scripts/staging/nginx-default.conf", "/etc/nginx/conf.d/default.conf"),
+                 "source": str(launch.SNAPSHOT_ROOT / (current_source_sha or prior) / "scripts/staging/nginx-default.conf")},
+            ]),
+        ]
+        volumes_data = []
+        for name in volumes:
+            label = name.removeprefix(launch.COMPOSE_PROJECT + "_")
+            volumes_data.append({
+                "name": name, "driver": "local", "scope": "local", "created_at": "2026-11-09T00:00:00Z",
+                "mountpoint": f"/var/lib/docker/volumes/{name}/_data",
+                "labels": {"com.docker.compose.project": launch.COMPOSE_PROJECT, "com.docker.compose.volume": label},
+                "options": {},
+            })
+        networks = [{
+            "id": "d" * 64, "name": f"{launch.COMPOSE_PROJECT}_isolated", "driver": "bridge", "internal": True,
+            "labels": {"com.docker.compose.project": launch.COMPOSE_PROJECT, "com.docker.compose.network": "isolated"},
+        }]
+        if ingress:
+            networks.append({
+                "id": "e" * 64, "name": f"{launch.COMPOSE_PROJECT}_ingress", "driver": "bridge", "internal": False,
+                "labels": {"com.docker.compose.project": launch.COMPOSE_PROJECT, "com.docker.compose.network": "ingress"},
+            })
+        return {"schema": "belib-staging-retained-state/v1", "project": launch.COMPOSE_PROJECT,
+                "prior_source_sha": prior, "containers": sorted(containers, key=lambda item: item["id"]),
+                "volumes": volumes_data, "networks": networks}
+
+    def test_retained_manifest_rejects_running_unexpected_wrong_dbid_and_wrong_prior_mounts(self):
+        valid = self.retained_manifest()
+        launch.validate_retained_manifest(valid, launch.RETAINED_PRIOR_SHA)
+        mutations = []
+        running = self.retained_manifest(state="running")
+        mutations.append(running)
+        mutations.append(self.retained_manifest(db_id="f" * 64))
+        mutations.append(self.retained_manifest(oneoff="true"))
+        mutations.append(self.retained_manifest(oneoff="unknown"))
+        bad_mount = self.retained_manifest()
+        next(row for row in bad_mount["containers"] if row["service"] == "nginx")["mounts"][0]["source"] = "/tmp/untrusted"
+        mutations.append(bad_mount)
+        old_nginx_snapshot = self.retained_manifest(ingress=True, current_source_sha=launch.RETAINED_PRIOR_SHA)
+        next(row for row in old_nginx_snapshot["containers"] if row["service"] == "nginx")["mounts"][0]["source"] = str(
+            launch.SNAPSHOT_ROOT / ("f" * 40) / "nginx/nginx.conf"
+        )
+        with self.assertRaises(launch.LaunchBlocked):
+            launch.validate_retained_manifest(old_nginx_snapshot, launch.RETAINED_PRIOR_SHA,
+                                              allow_running=True, allow_ingress=True,
+                                              current_source_sha="f" * 40)
+        wrong_volume = self.retained_manifest(swapped_volumes=True)
+        with self.assertRaises(launch.LaunchBlocked):
+            launch.validate_retained_manifest(wrong_volume, launch.RETAINED_PRIOR_SHA)
+        extra = self.retained_manifest()
+        extra["networks"].append({"id": "f" * 64, "name": "unexpected", "driver": "bridge", "internal": False, "labels": {}})
+        mutations.append(extra)
+        for manifest in mutations:
+            with self.subTest(manifest=manifest), self.assertRaises(launch.LaunchBlocked):
+                launch.validate_retained_manifest(manifest, launch.RETAINED_PRIOR_SHA)
+
+    def test_manifest_collector_is_read_only_and_never_inspects_environment(self):
+        expected = self.retained_manifest()
+        by_id = {item["id"]: item for item in expected["containers"]}
+        by_volume = {item["name"]: item for item in expected["volumes"]}
+        network = expected["networks"][0]
+        commands = []
+        def runner(command, **kwargs):
+            commands.append(command)
+            if command[1:3] == ["--context", launch.CONTEXT_NAME]:
+                tail = command[3:]
+            else:
+                tail = command[1:]
+            if tail[:2] == ["ps", "--all"]:
+                return SimpleNamespace(returncode=0, stdout="\n".join(by_id) + "\n")
+            if tail[:2] == ["volume", "ls"]:
+                return SimpleNamespace(returncode=0, stdout="\n".join(by_volume) + "\n")
+            if tail[:2] == ["network", "ls"]:
+                return SimpleNamespace(returncode=0, stdout=network["id"] + "\n")
+            if tail[:2] == ["volume", "inspect"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps(by_volume[tail[-1]]) + "\n")
+            if tail[:2] == ["network", "inspect"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps(network) + "\n")
+            if tail[:2] == ["inspect", "--format"]:
+                source = by_id[tail[-1]]
+                raw = {key: value for key, value in source.items() if key not in ("mounts", "networks")}
+                raw["mounts"] = [{
+                    "Type": mount["type"], "Name": mount["name"], "Source": mount["source"],
+                    "Destination": mount["destination"], "RW": mount["read_write"],
+                } for mount in source["mounts"]]
+                raw["networks"] = {name: {} for name in source["networks"]}
+                return SimpleNamespace(returncode=0, stdout=json.dumps(raw) + "\n")
+            raise AssertionError(command)
+        result = launch.build_retained_manifest(
+            launch.RETAINED_PRIOR_SHA, {"PATH": "/usr/bin:/bin", "DOCKER_CONFIG": "/nonexistent"},
+            runner=runner,
+        )
+        self.assertEqual(result, expected)
+        self.assertTrue(all("Env" not in " ".join(command) for command in commands))
+        self.assertFalse(any(any(word in command for word in ("start", "up", "run", "stop", "down", "rm")) for command in commands))
+
+    def test_resume_digest_mismatch_is_rejected_before_any_docker_command(self):
+        manifest = self.retained_manifest()
+        commands = []
+        def runner(command, **kwargs):
+            commands.append(command)
+            return SimpleNamespace(returncode=0, stdout="")
+        with self.assertRaisesRegex(launch.LaunchBlocked, "digest does not match"):
+            launch.run_resume_ingress_transaction(
+                compose=["/usr/bin/docker", "--context", launch.CONTEXT_NAME, "compose", "-p", launch.COMPOSE_PROJECT],
+                build_root=Path("/tmp/snapshot"), environment={}, port="18083",
+                prior_source_sha=launch.RETAINED_PRIOR_SHA, signed_digest="0" * 64,
+                manifest_provider=lambda *args, **kwargs: manifest, runner=runner,
+            )
+        self.assertEqual(commands, [])
+
+    def test_resume_starts_exact_db_then_only_web_services_and_checks_readback(self):
+        original = self.retained_manifest()
+        resumed = self.retained_manifest(state="running", ingress=True, current_source_sha=SOURCE_SHA)
+        commands = []
+        def provider(_prior, validate=True):
+            return original if not commands else resumed
+        def runner(command, **kwargs):
+            commands.append(command)
+            if "inspect" in command:
+                return SimpleNamespace(returncode=0, stdout="healthy")
+            if "port" in command:
+                return SimpleNamespace(returncode=0, stdout="127.0.0.1:18083\n")
+            if command[0] == "/usr/bin/curl":
+                return SimpleNamespace(returncode=0, stdout="200")
+            return SimpleNamespace(returncode=0, stdout="")
+        digest = launch.retained_manifest_sha256(original)
+        result = launch.run_resume_ingress_transaction(
+            compose=["/usr/bin/docker", "--context", launch.CONTEXT_NAME, "compose", "-p", launch.COMPOSE_PROJECT],
+            build_root=Path("/tmp/snapshot"), environment={}, port="18083",
+            prior_source_sha=launch.RETAINED_PRIOR_SHA, signed_digest=digest,
+            manifest_provider=provider, runner=runner, sleep=lambda _: None, monotonic=lambda: 0,
+            current_source_sha=SOURCE_SHA,
+            expected_db_image="postgres:16.14-bookworm@sha256:" + "b" * 64,
+            report=lambda *args, **kwargs: None,
+        )
+        self.assertEqual(result, 0)
+        self.assertIn(["/usr/bin/docker", "--context", launch.CONTEXT_NAME, "start", launch.RETAINED_DB_CONTAINER_ID], commands)
+        compose_mutations = [command for command in commands if "compose" in command and ("up" in command or "run" in command)]
+        self.assertEqual(len(compose_mutations), 1)
+        self.assertEqual(compose_mutations[0][-5:], ["--no-deps", "--build", "backend", "frontend", "nginx"])
+        self.assertFalse(any("migrate" in command or "seed" in command for command in commands))
+
+    def test_resume_failure_stops_services_without_deleting_retained_volumes(self):
+        original = self.retained_manifest()
+        commands = []
+        reports = []
+        def runner(command, **kwargs):
+            commands.append(command)
+            if command[0] == "/usr/bin/docker" and "inspect" in command:
+                return SimpleNamespace(returncode=0, stdout="healthy")
+            if "compose" in command and "up" in command:
+                return SimpleNamespace(returncode=1, stdout="")
+            return SimpleNamespace(returncode=0, stdout="")
+        digest = launch.retained_manifest_sha256(original)
+        with self.assertRaisesRegex(launch.LaunchBlocked, "web services did not start"):
+            launch.run_resume_ingress_transaction(
+                compose=["/usr/bin/docker", "--context", launch.CONTEXT_NAME, "compose", "-p", launch.COMPOSE_PROJECT],
+                build_root=Path("/tmp/snapshot"), environment={}, port="18083",
+                prior_source_sha=launch.RETAINED_PRIOR_SHA, signed_digest=digest,
+                manifest_provider=lambda *args, **kwargs: original, runner=runner,
+                report=lambda message, **kwargs: reports.append(message),
+            )
+        self.assertTrue(any("stop nginx frontend backend db" in " ".join(command) for command in commands))
+        self.assertFalse(any("down" in command or "volume rm" in command for command in commands))
+        self.assertTrue(any(message.startswith("STAGING_ROLLBACK_PASS stopped-retained-services-volumes-preserved") for message in reports))
+
     def setUp(self):
         launch.ADMITTED_SOURCE_ROOT = None
 

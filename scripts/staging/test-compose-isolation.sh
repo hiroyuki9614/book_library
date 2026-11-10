@@ -173,6 +173,37 @@ if ! awk '
   fail 'The isolated staging network must set internal: true'
 fi
 
+if ! awk '
+  /^networks:[[:space:]]*$/ { in_networks = 1; next }
+  in_networks && /^[^[:space:]#]/ { in_networks = 0; in_ingress = 0 }
+  in_networks && /^  ingress:[[:space:]]*$/ { in_ingress = 1; next }
+  in_ingress && /^  [^[:space:]#]/ { in_ingress = 0 }
+  in_ingress && /^    driver:[[:space:]]*bridge[[:space:]]*(#.*)?$/ { found = 1 }
+  END { exit !found }
+' "$compose_file"; then
+  fail 'The staging ingress network must use the reviewed bridge driver'
+fi
+
+if ! grep -Fxq '    networks: [isolated, ingress]' "$compose_file"; then
+  fail 'Only the nginx gateway may attach to isolated and ingress networks'
+fi
+if [[ "$(grep -Fc '    networks: [isolated, ingress]' "$compose_file")" -ne 1 ]]; then
+  fail 'Application and database services must not attach to the ingress network'
+fi
+awk '
+  /^services:[[:space:]]*$/ { in_services = 1; next }
+  in_services && /^networks:[[:space:]]*$/ { in_services = 0 }
+  in_services && /^  [[:alnum:]_-]+:/ {
+    service = $1
+    sub(/:$/, "", service)
+  }
+  in_services && /networks:[[:space:]]*\[/ {
+    if (service == "nginx" && $0 !~ /networks:[[:space:]]*\[isolated,[[:space:]]*ingress\]/) bad = 1
+    if (service != "nginx" && $0 ~ /ingress/) bad = 1
+  }
+  END { exit bad }
+' "$compose_file" || fail 'Only nginx may join the staging ingress network'
+
 # Compose must remain standalone and carry no production env-file or R2 settings.
 if awk '
   /^[[:space:]]*#/ { next }

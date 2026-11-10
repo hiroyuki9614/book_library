@@ -174,7 +174,7 @@ def compose_model(root: Path = ROOT) -> dict:
                         "bind": {},
                     },
                 ],
-                "networks": {"isolated": None},
+                "networks": {"isolated": None, "ingress": None},
                 "restart": "unless-stopped",
             },
         },
@@ -183,7 +183,12 @@ def compose_model(root: Path = ROOT) -> dict:
                 "internal": True,
                 "ipam": {},
                 "name": "belib-isolated-i5_isolated",
-            }
+            },
+            "ingress": {
+                "driver": "bridge",
+                "ipam": {},
+                "name": "belib-isolated-i5_ingress",
+            },
         },
         "volumes": {
             "staging-postgres-data": {"name": "belib-isolated-i5_staging-postgres-data"},
@@ -849,6 +854,47 @@ class CIIsolationGuardTests(unittest.TestCase):
         model = compose_model()
         model["services"]["nginx"]["volumes"][0]["source"] = "/production/nginx.conf"
         self.assert_rejected(model=model)
+
+    def test_network_mapping_tags_and_inline_values_are_rejected(self):
+        for value in ("!override", "{}"):
+            self.assert_rejected(source=self.compose_source.replace(
+                "  ingress:\n", f"  ingress: {value}\n", 1))
+
+    def test_only_nginx_may_attach_to_the_bridge_ingress_network(self):
+        for service in ("db", "migrate", "backend", "frontend"):
+            model = compose_model()
+            model["services"][service]["networks"]["ingress"] = None
+            with self.subTest(service=service):
+                self.assert_rejected(model=model)
+
+        source = self.compose_source.replace(
+            "    networks: [isolated]\n", "    networks: [isolated, ingress]\n", 1
+        )
+        self.assert_rejected(source=source)
+
+    def test_ingress_network_is_exact_private_bridge_without_external_or_options(self):
+        model = compose_model()
+        model["networks"]["unexpected"] = {"driver": "bridge", "name": "belib-isolated-i5_unexpected"}
+        self.assert_rejected(model=model)
+
+        for key, value in (
+            ("driver", "host"),
+            ("external", True),
+            ("ipam", {"config": [{"subnet": "172.30.0.0/16"}]}),
+            ("driver_opts", {"com.docker.network.bridge.name": "docker0"}),
+        ):
+            model = compose_model()
+            model["networks"]["ingress"][key] = value
+            with self.subTest(key=key):
+                self.assert_rejected(model=model)
+
+        for suffix in (
+            "    external: true\n",
+            "    driver_opts: {}\n",
+        ):
+            self.assert_rejected(source=self.compose_source.replace(
+                "  ingress:\n    driver: bridge\n", "  ingress:\n    driver: bridge\n" + suffix, 1
+            ))
 
     def test_rejects_hostile_named_volume_driver_options_in_raw_and_resolved_compose(self):
         for key, value in (

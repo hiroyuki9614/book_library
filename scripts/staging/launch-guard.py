@@ -40,6 +40,14 @@ ADMISSION_WORKTREE_PREFIX = Path("/home/hiroyuki/workspaces/belib-i5-admission-"
 SOURCE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 EVIDENCE_SHA_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 ADMITTED_SOURCE_ROOT: Path | None = None
+RETAINED_PRIOR_SHA = "6963103fd6bec332b4057457d07b890fe5c11e73"
+RETAINED_DB_CONTAINER_ID = "9ab9d141599e8b33f51a1e4e9bcd16d66e92b9d134889014d9d9bd618b42f73d"
+SNAPSHOT_ROOT = Path("/home/hiroyuki/.local/state/belib-staging/snapshots")
+RETAINED_SERVICES = {"db", "backend", "frontend", "nginx"}
+RETAINED_VOLUMES = {
+    "belib-isolated-i5_staging-postgres-data",
+    "belib-isolated-i5_staging-book-files",
+}
 
 OPERATION_ARGS: dict[str, tuple[str, ...]] = {
     "start-db": ("up", "-d", "db"),
@@ -75,6 +83,347 @@ def load_seed_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _docker_read(command: list[str], environment: Mapping[str, str], *, runner=subprocess.run) -> str:
+    try:
+        result = runner(command, env=dict(environment), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL, text=True, check=False, timeout=20)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise LaunchBlocked("Read-only retained-state inspection failed") from error
+    if result.returncode != 0 or len(result.stdout or "") > 2 * 1024 * 1024:
+        raise LaunchBlocked("Read-only retained-state inspection failed")
+    return result.stdout or ""
+
+
+def _lines_json(text: str) -> list[dict]:
+    try:
+        values = [json.loads(line) for line in text.splitlines() if line.strip()]
+    except json.JSONDecodeError as error:
+        raise LaunchBlocked("Retained-state inspection output is malformed") from error
+    if any(not isinstance(value, dict) for value in values):
+        raise LaunchBlocked("Retained-state inspection output is malformed")
+    return values
+
+
+def build_retained_manifest(
+    prior_source_sha: str, environment: Mapping[str, str], *, runner=subprocess.run,
+    docker_prefix: list[str] | None = None, validate: bool = True,
+    expected_db_image: str | None = None,
+) -> dict:
+    if prior_source_sha != RETAINED_PRIOR_SHA:
+        raise LaunchBlocked("Only the reviewed retained source revision can be resumed")
+    docker = docker_prefix or [DOCKER_CLI, "--context", CONTEXT_NAME]
+    project_filter = f"label=com.docker.compose.project={COMPOSE_PROJECT}"
+    ids = _docker_read([*docker, "ps", "--all", "--no-trunc", "--filter", project_filter, "--format", "{{.ID}}"],
+                       environment, runner=runner).splitlines()
+    volume_names = _docker_read([*docker, "volume", "ls", "--filter", project_filter, "--format", "{{.Name}}"],
+                                environment, runner=runner).splitlines()
+    network_ids = _docker_read([*docker, "network", "ls", "--no-trunc", "--filter", project_filter, "--format", "{{.ID}}"],
+                               environment, runner=runner).splitlines()
+    if len(ids) > 16 or len(volume_names) > 8 or len(network_ids) > 8:
+        raise LaunchBlocked("Retained staging inventory exceeds its fixed bounds")
+    container_template = (
+        '{{printf \"{\\\"id\\\":%q,\\\"service\\\":%q,\\\"project\\\":%q,\\\"oneoff\\\":%q,\\\"state\\\":%q,\\\"image_id\\\":%q,\\\"image_ref\\\":%q,\\\"mounts\\\":%s,\\\"networks\\\":%s}\" '
+        '.Id (index .Config.Labels \"com.docker.compose.service\") '
+        '(index .Config.Labels \"com.docker.compose.project\") '
+        '(index .Config.Labels \"com.docker.compose.oneoff\") .State.Status .Image .Config.Image (json .Mounts) (json .NetworkSettings.Networks)}}'
+    )
+    containers = []
+    for container_id in ids:
+        if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+            raise LaunchBlocked("Retained container ID is malformed")
+        inspected = _lines_json(_docker_read([*docker, "inspect", "--format", container_template, container_id],
+                                             environment, runner=runner))
+        if len(inspected) != 1:
+            raise LaunchBlocked("Retained container inspection is ambiguous")
+        row = inspected[0]
+        raw_mounts = row.pop("mounts", None)
+        raw_networks = row.get("networks")
+        if not isinstance(raw_networks, dict) or len(raw_networks) > 4:
+            raise LaunchBlocked("Retained container networks are malformed")
+        row["networks"] = sorted(raw_networks)
+        if not isinstance(raw_mounts, list) or len(raw_mounts) > 16:
+            raise LaunchBlocked("Retained container mounts are malformed")
+        mounts = []
+        for mount in raw_mounts:
+            if not isinstance(mount, dict):
+                raise LaunchBlocked("Retained container mount is malformed")
+            mounts.append({
+                "type": mount.get("Type"), "name": mount.get("Name") or "",
+                "source": mount.get("Source") or "", "destination": mount.get("Destination") or "",
+                "read_write": mount.get("RW"),
+            })
+        row["mounts"] = sorted(mounts, key=lambda mount: (mount["destination"], mount["source"]))
+        containers.append(row)
+    volume_template = (
+        '{{printf \"{\\\"name\\\":%q,\\\"driver\\\":%q,\\\"scope\\\":%q,\\\"created_at\\\":%q,\\\"mountpoint\\\":%q,\\\"labels\\\":%s,\\\"options\\\":%s}\" '
+        '.Name .Driver .Scope .CreatedAt .Mountpoint (json .Labels) (json .Options)}}'
+    )
+    volumes = []
+    for name in volume_names:
+        if name not in RETAINED_VOLUMES:
+            raise LaunchBlocked("Unexpected retained staging volume")
+        rows = _lines_json(_docker_read([*docker, "volume", "inspect", "--format", volume_template, name],
+                                        environment, runner=runner))
+        if len(rows) != 1:
+            raise LaunchBlocked("Retained volume inspection is ambiguous")
+        volumes.extend(rows)
+    network_template = (
+        '{{printf \"{\\\"id\\\":%q,\\\"name\\\":%q,\\\"driver\\\":%q,\\\"internal\\\":%t,\\\"labels\\\":%s}\" '
+        '.Id .Name .Driver .Internal (json .Labels)}}'
+    )
+    networks = []
+    for network_id in network_ids:
+        if not re.fullmatch(r"[0-9a-f]{64}", network_id):
+            raise LaunchBlocked("Retained network ID is malformed")
+        rows = _lines_json(_docker_read([*docker, "network", "inspect", "--format", network_template, network_id],
+                                        environment, runner=runner))
+        if len(rows) != 1:
+            raise LaunchBlocked("Retained network inspection is ambiguous")
+        networks.extend(rows)
+    manifest = {
+        "schema": "belib-staging-retained-state/v1",
+        "project": COMPOSE_PROJECT,
+        "prior_source_sha": prior_source_sha,
+        "containers": sorted(containers, key=lambda item: item.get("id", "")),
+        "volumes": sorted(volumes, key=lambda item: item.get("name", "")),
+        "networks": sorted(networks, key=lambda item: item.get("id", "")),
+    }
+    if validate:
+        validate_retained_manifest(manifest, prior_source_sha, expected_db_image=expected_db_image)
+    return manifest
+
+
+def retained_manifest_sha256(manifest: dict) -> str:
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def validate_retained_manifest(
+    manifest: dict, prior_source_sha: str, *, allow_running: bool = False,
+    allow_ingress: bool = False, expected_db_image: str | None = None,
+    current_source_sha: str | None = None,
+) -> None:
+    if not isinstance(manifest, dict) or manifest.get("schema") != "belib-staging-retained-state/v1" or manifest.get("project") != COMPOSE_PROJECT or manifest.get("prior_source_sha") != prior_source_sha:
+        raise LaunchBlocked("Retained-state manifest identity is invalid")
+    containers = manifest.get("containers")
+    if not isinstance(containers, list) or len(containers) != 4:
+        raise LaunchBlocked("Retained project must contain exactly four service containers")
+    by_service = {item.get("service"): item for item in containers if isinstance(item, dict)}
+    if set(by_service) != RETAINED_SERVICES or len(by_service) != 4:
+        raise LaunchBlocked("Retained project services are outside the resume allowlist")
+    current_source_sha = current_source_sha or prior_source_sha
+    for service, item in by_service.items():
+        expected_state = "running" if allow_running else "exited"
+        if item.get("project") != COMPOSE_PROJECT or str(item.get("oneoff", "")).lower() != "false" or item.get("state") != expected_state:
+            raise LaunchBlocked("Retained containers have an unexpected state or oneoff label")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", item.get("image_id", "")):
+            raise LaunchBlocked("Retained container image identity is malformed")
+        if not isinstance(item.get("image_ref"), str) or not item["image_ref"]:
+            raise LaunchBlocked("Retained container image reference is missing")
+        if service == "db" and expected_db_image is not None and item["image_ref"] != expected_db_image:
+            raise LaunchBlocked("Retained database image reference differs from the verified source")
+        if service == "db" and item.get("id") != RETAINED_DB_CONTAINER_ID:
+            raise LaunchBlocked("Retained database container ID differs from the reviewed rollback")
+        expected_mounts = {
+            "db": {"/var/lib/postgresql/data", "/docker-entrypoint-initdb.d/10-belib-staging-roles.sh"},
+            "backend": {"/home/node"},
+            "frontend": set(),
+            "nginx": {"/etc/nginx/nginx.conf", "/etc/nginx/conf.d/default.conf"},
+        }[service]
+        mounts = item.get("mounts")
+        if not isinstance(mounts, list) or {mount.get("destination") for mount in mounts if isinstance(mount, dict)} != expected_mounts:
+            raise LaunchBlocked("Retained container mounts differ from the reviewed staging layout")
+        expected_networks = [f"{COMPOSE_PROJECT}_isolated", f"{COMPOSE_PROJECT}_ingress"] if allow_ingress and service == "nginx" else [f"{COMPOSE_PROJECT}_isolated"]
+        if item.get("networks") != sorted(expected_networks):
+            raise LaunchBlocked("Retained container network attachments are outside the resume allowlist")
+        expected_volume_by_target = {
+            ("/var/lib/postgresql/data", "db"): "belib-isolated-i5_staging-postgres-data",
+            ("/home/node", "backend"): "belib-isolated-i5_staging-book-files",
+        }
+        expected_bind_by_target = {
+            ("/docker-entrypoint-initdb.d/10-belib-staging-roles.sh", "db"):
+                SNAPSHOT_ROOT / prior_source_sha / "scripts/staging/10-belib-staging-roles.sh",
+            ("/etc/nginx/nginx.conf", "nginx"):
+                SNAPSHOT_ROOT / (current_source_sha if allow_ingress else prior_source_sha) / "nginx/nginx.conf",
+            ("/etc/nginx/conf.d/default.conf", "nginx"):
+                SNAPSHOT_ROOT / (current_source_sha if allow_ingress else prior_source_sha) / "scripts/staging/nginx-default.conf",
+        }
+        for mount in mounts:
+            if mount["type"] == "bind":
+                expected_path = expected_bind_by_target.get((mount["destination"], service))
+                if expected_path is None or mount["source"] != str(expected_path) or mount["read_write"] is not False:
+                    raise LaunchBlocked("Retained bind mount does not point to the prior verified source snapshot")
+            elif mount["type"] == "volume":
+                expected_volume = expected_volume_by_target.get((mount["destination"], service))
+                if expected_volume is None or mount["name"] != expected_volume or mount["read_write"] is not True:
+                    raise LaunchBlocked("Retained named volume mount is outside the staging allowlist")
+            else:
+                raise LaunchBlocked("Retained container mount type is unsupported")
+    volumes = manifest.get("volumes")
+    if not isinstance(volumes, list) or {item.get("name") for item in volumes if isinstance(item, dict)} != RETAINED_VOLUMES or len(volumes) != 2:
+        raise LaunchBlocked("Retained project must contain exactly its two named volumes")
+    for volume in volumes:
+        expected_label = volume["name"].removeprefix(COMPOSE_PROJECT + "_")
+        labels = volume.get("labels")
+        if (volume.get("driver") != "local" or volume.get("scope") != "local" or not volume.get("created_at")
+                or not Path(volume.get("mountpoint", "")).is_absolute() or volume.get("options") not in (None, {})
+                or not isinstance(labels, dict) or labels.get("com.docker.compose.project") != COMPOSE_PROJECT
+                or labels.get("com.docker.compose.volume") != expected_label):
+            raise LaunchBlocked("Retained volume driver, labels, or mountpoint are outside the allowlist")
+    networks = manifest.get("networks")
+    expected_network_count = 2 if allow_ingress else 1
+    if not isinstance(networks, list) or len(networks) != expected_network_count:
+        raise LaunchBlocked("Retained project must contain only its original isolated network")
+    by_network = {item.get("name"): item for item in networks if isinstance(item, dict)}
+    if set(by_network) != ({f"{COMPOSE_PROJECT}_isolated", f"{COMPOSE_PROJECT}_ingress"} if allow_ingress else {f"{COMPOSE_PROJECT}_isolated"}):
+        raise LaunchBlocked("Retained project network set is outside the resume allowlist")
+    network = by_network[f"{COMPOSE_PROJECT}_isolated"]
+    labels = network.get("labels")
+    if (network.get("name") != f"{COMPOSE_PROJECT}_isolated" or network.get("driver") != "bridge"
+            or network.get("internal") is not True or not re.fullmatch(r"[0-9a-f]{64}", network.get("id", ""))
+            or not isinstance(labels, dict) or labels.get("com.docker.compose.project") != COMPOSE_PROJECT
+            or labels.get("com.docker.compose.network") != "isolated"):
+        raise LaunchBlocked("Retained internal network identity or labels are outside the allowlist")
+    if allow_ingress:
+        ingress = by_network[f"{COMPOSE_PROJECT}_ingress"]
+        ingress_labels = ingress.get("labels")
+        if (ingress.get("driver") != "bridge" or ingress.get("internal") is not False
+                or not re.fullmatch(r"[0-9a-f]{64}", ingress.get("id", ""))
+                or not isinstance(ingress_labels, dict)
+                or ingress_labels.get("com.docker.compose.project") != COMPOSE_PROJECT
+                or ingress_labels.get("com.docker.compose.network") != "ingress"):
+            raise LaunchBlocked("Resumed ingress bridge identity or labels are outside the allowlist")
+
+
+def run_resume_ingress_transaction(
+    *, compose: list[str], build_root: Path, environment: Mapping[str, str], port: str,
+    prior_source_sha: str, signed_digest: str, manifest_provider, current_source_sha: str | None = None,
+    expected_db_image: str | None = None, env_fd: int | None = None, runner=subprocess.run,
+    sleep=time.sleep, monotonic=time.monotonic, report=print,
+) -> int:
+    """Restart the retained DB and build only the three web services; never migrates or seeds."""
+    if not re.fullmatch(r"(?:[1-9][0-9]{3,4})", port) or not 1024 <= int(port) <= 65535:
+        raise LaunchBlocked("Resume loopback port is invalid")
+    original = manifest_provider(prior_source_sha)
+    validate_retained_manifest(original, prior_source_sha, expected_db_image=expected_db_image)
+    if retained_manifest_sha256(original) != signed_digest:
+        raise LaunchBlocked("Signed retained-state digest does not match the current resource manifest")
+    db_id = next(item["id"] for item in original["containers"] if item["service"] == "db")
+    attempted = False
+    def receipt(message: str) -> None:
+        report(f"{message} retained_state_sha256={signed_digest}", file=sys.stderr)
+    try:
+        attempted = True
+        result = runner([DOCKER_CLI, "--context", CONTEXT_NAME, "start", db_id], env=dict(environment),
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        check=False, timeout=60)
+        if result.returncode != 0:
+            raise LaunchBlocked("Retained database container did not start")
+        deadline = monotonic() + 180
+        while monotonic() < deadline:
+            health = _docker_read([DOCKER_CLI, "--context", CONTEXT_NAME, "inspect", "--format",
+                                   "{{.State.Health.Status}}", db_id], environment, runner=runner).strip()
+            if health == "healthy":
+                break
+            sleep(2)
+        else:
+            raise LaunchBlocked("Retained database health timed out")
+        web_services = [*compose, "up", "-d", "--no-deps", "--build", "backend", "frontend", "nginx"]
+        result = runner(web_services, cwd=build_root, env=dict(environment), stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=1800,
+                        pass_fds=() if env_fd is None else (env_fd,))
+        if result.returncode != 0:
+            raise LaunchBlocked("Staging ingress web services did not start")
+        current = manifest_provider(prior_source_sha, validate=False)
+        validate_retained_manifest(current, prior_source_sha, allow_running=True, allow_ingress=True,
+                                   expected_db_image=expected_db_image, current_source_sha=current_source_sha)
+        if (next(item["id"] for item in current["containers"] if item["service"] == "db") != db_id
+                or current["volumes"] != original["volumes"]
+                or next(item for item in current["containers"] if item["service"] == "db")
+                   != next(item for item in original["containers"] if item["service"] == "db") | {"state": "running"}
+                or next(item for item in current["networks"] if item["name"] == f"{COMPOSE_PROJECT}_isolated")
+                   != original["networks"][0]):
+            raise LaunchBlocked("Resume changed the retained database, volumes, or isolated network")
+        if _docker_read([DOCKER_CLI, "--context", CONTEXT_NAME, "inspect", "--format",
+                         "{{.State.Health.Status}}", db_id], environment, runner=runner).strip() != "healthy":
+            raise LaunchBlocked("Retained database health was lost during ingress resume")
+        nginx_id = next(item["id"] for item in current["containers"] if item["service"] == "nginx")
+        published = _docker_read([DOCKER_CLI, "--context", CONTEXT_NAME, "port", nginx_id, "8080/tcp"],
+                                 environment, runner=runner).splitlines()
+        if published != [f"127.0.0.1:{port}"]:
+            raise LaunchBlocked("Resumed nginx does not have the exact loopback port binding")
+        health_url = f"http://127.0.0.1:{port}/health"
+        deadline = monotonic() + 120
+        while monotonic() < deadline:
+            response = runner(["/usr/bin/curl", "-q", "--noproxy", "*", "--fail", "--silent",
+                               "--show-error", "--max-time", "5", "--output", "/dev/null",
+                               "--write-out", "%{http_code}", health_url],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              text=True, check=False, timeout=7,
+                              env={"PATH": SAFE_PATH, "HOME": str(EXPECTED_HOME), "NO_PROXY": "*", "no_proxy": "*"})
+            if response.returncode == 0 and response.stdout == "200":
+                receipt("STAGING_RESUME_INGRESS_PASS")
+                return 0
+            sleep(2)
+        raise LaunchBlocked("Resumed staging HTTP health timed out")
+    except (Exception, KeyboardInterrupt) as error:
+        receipt("STAGING_RESUME_INGRESS_FAILED")
+        if attempted:
+            try:
+                stopped = runner([*compose, "stop", "nginx", "frontend", "backend", "db"],
+                                 cwd=build_root, env=dict(environment), stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=120,
+                                 pass_fds=() if env_fd is None else (env_fd,))
+                after = manifest_provider(prior_source_sha, validate=False)
+                running = _docker_read([DOCKER_CLI, "--context", CONTEXT_NAME, "ps", "--filter",
+                                        f"label=com.docker.compose.project={COMPOSE_PROJECT}", "--format", "{{.ID}}"],
+                                       environment, runner=runner)
+                if stopped.returncode == 0 and not running.strip() and after.get("volumes") == original["volumes"]:
+                    receipt("STAGING_ROLLBACK_PASS stopped-retained-services-volumes-preserved")
+                else:
+                    receipt("STAGING_ROLLBACK_FAILED manual-review-required")
+            except Exception:
+                receipt("STAGING_ROLLBACK_FAILED manual-review-required")
+        if isinstance(error, LaunchBlocked):
+            raise
+        if isinstance(error, KeyboardInterrupt):
+            raise LaunchBlocked("Staging ingress resume was interrupted") from error
+        raise LaunchBlocked("Staging ingress resume failed") from error
+
+
+def verify_resume_snapshot_compatibility(source_root: Path, new_source_sha: str, prior_source_sha: str) -> str:
+    guard = load_source_tree_guard(source_root)
+    try:
+        object_format = guard.git(source_root, "rev-parse", "--show-object-format").decode("ascii").strip()
+        manifests = {}
+        for revision in (prior_source_sha, new_source_sha):
+            tree = guard.parse_tree(source_root, revision)
+            entries = guard._snapshot_entries(source_root, tree)
+            snapshot = SNAPSHOT_ROOT / revision
+            guard._verify_persistent_snapshot(snapshot, revision, entries, object_format)
+            manifest = json.loads((snapshot / ".belib-staging-manifest.json").read_text(encoding="utf-8"))
+            manifests[revision] = {item["path"]: item["blob"] for item in manifest["files"]}
+        old, new = manifests[prior_source_sha], manifests[new_source_sha]
+        hook = "scripts/staging/10-belib-staging-roles.sh"
+        old_prisma = {path: oid for path, oid in old.items() if path.startswith("backend/prisma/")}
+        new_prisma = {path: oid for path, oid in new.items() if path.startswith("backend/prisma/")}
+        if hook not in old or hook not in new or old[hook] != new[hook] or not old_prisma or old_prisma != new_prisma:
+            raise LaunchBlocked("Retained bootstrap hook or Prisma migration tree changed")
+        def db_image(revision: str) -> str:
+            raw = guard.git(source_root, "show", f"{revision}:compose.staging.yaml").decode("utf-8")
+            match = re.search(r"(?ms)^  db:\n(?:(?!^  \w).)*?^    image: ([^\n]+)$", raw)
+            if not match:
+                raise LaunchBlocked("Database image identity could not be read from the verified source tree")
+            return match.group(1)
+        old_db_image, new_db_image = db_image(prior_source_sha), db_image(new_source_sha)
+        if old_db_image != new_db_image:
+            raise LaunchBlocked("The retained database image differs from the reviewed current source")
+        return new_db_image
+    except (OSError, ValueError, UnicodeError, guard.SourceTreeBlocked) as error:
+        if isinstance(error, LaunchBlocked):
+            raise
+        raise LaunchBlocked("Retained and current source snapshots could not be verified") from error
 
 
 def verify_python_runtime() -> None:
@@ -618,9 +967,11 @@ def main(argv: list[str] | None = None) -> int:
         reject_caller_environment(os.environ)
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("--source-sha", required=True)
-        parser.add_argument("--evidence-sha256", required=True)
+        parser.add_argument("--evidence-sha256")
+        parser.add_argument("--prior-source-sha")
+        parser.add_argument("--retained-state-sha256")
         parser.add_argument("--env-file", type=Path, required=True)
-        parser.add_argument("operation", choices=("deploy",))
+        parser.add_argument("operation", choices=("deploy", "resume-ingress", "manifest-ingress"))
         args = parser.parse_args(argv)
 
         account = pwd.getpwuid(os.getuid())
@@ -634,14 +985,110 @@ def main(argv: list[str] | None = None) -> int:
         repo_root = EXPECTED_REPO_ROOT
         if args.env_file != EXPECTED_HOME / ".config/belib-staging/i5.env":
             raise LaunchBlocked("Use only the outside-repository i5 staging env file")
-        if not EVIDENCE_SHA_PATTERN.fullmatch(args.evidence_sha256):
+        if args.operation != "manifest-ingress" and not EVIDENCE_SHA_PATTERN.fullmatch(args.evidence_sha256 or ""):
             raise LaunchBlocked("External evidence digest must be 64 lowercase hexadecimal characters")
+        if args.operation in ("resume-ingress", "manifest-ingress") and args.prior_source_sha != RETAINED_PRIOR_SHA:
+            raise LaunchBlocked("Only the reviewed retained source revision can be resumed")
+        if args.operation == "resume-ingress" and not re.fullmatch(r"[0-9a-f]{64}", args.retained_state_sha256 or ""):
+            raise LaunchBlocked("Resume requires the signed retained-state manifest digest")
         source_root = _admission_source_root(repo_root, args.source_sha)
         global ADMITTED_SOURCE_ROOT
         ADMITTED_SOURCE_ROOT = source_root
         seed = load_seed_module()
 
         with project_lock():
+            if args.operation == "manifest-ingress":
+                try:
+                    source_guard = load_source_tree_guard(source_root)
+                    with source_guard.sha_derived_build_snapshot(source_root, args.source_sha):
+                        expected_db_image = verify_resume_snapshot_compatibility(
+                            source_root, args.source_sha, args.prior_source_sha
+                        )
+                    seed.verify_trusted_docker_plugins()
+                    endpoint = seed.expected_docker_socket(EXPECTED_UID)
+                    seed.validate_rootless_socket(endpoint, EXPECTED_UID)
+                    inspect_env = {"HOME": "/nonexistent", "PATH": SAFE_PATH, "DOCKER_CONFIG": "/nonexistent"}
+                    prefix = [DOCKER_CLI, "--host", f"unix://{endpoint}"]
+                    manifest = build_retained_manifest(args.prior_source_sha, inspect_env, docker_prefix=prefix,
+                                                       expected_db_image=expected_db_image)
+                    response = {"manifest": manifest, "retained_state_sha256": retained_manifest_sha256(manifest)}
+                    print(json.dumps(response, sort_keys=True, separators=(",", ":")))
+                    return 0
+                except (LaunchBlocked, seed.SeedWrapperError) as error:
+                    raise LaunchBlocked(str(error)) from error
+            if args.operation == "resume-ingress":
+                try:
+                    source_guard = load_source_tree_guard(source_root)
+                    with source_guard.sha_derived_build_snapshot(source_root, args.source_sha) as build_root:
+                        expected_db_image = verify_resume_snapshot_compatibility(
+                            source_root, args.source_sha, args.prior_source_sha
+                        )
+                        seed.verify_trusted_docker_plugins()
+                        endpoint = seed.expected_docker_socket(EXPECTED_UID)
+                        seed.validate_rootless_socket(endpoint, EXPECTED_UID)
+                        inspect_env = {"HOME": "/nonexistent", "PATH": SAFE_PATH, "DOCKER_CONFIG": "/nonexistent"}
+                        inspect_prefix = [DOCKER_CLI, "--host", f"unix://{endpoint}"]
+                        before = build_retained_manifest(args.prior_source_sha, inspect_env, docker_prefix=inspect_prefix,
+                                                         expected_db_image=expected_db_image)
+                        if retained_manifest_sha256(before) != args.retained_state_sha256:
+                            raise LaunchBlocked("Signed retained-state digest does not match the stopped project")
+                        approval = load_approval_module()
+                        try:
+                            approval.request_and_wait(
+                                args.source_sha, "resume-ingress", args.evidence_sha256,
+                                uid=EXPECTED_UID, output=sys.stdout,
+                                prior_source_sha=args.prior_source_sha,
+                                retained_state_sha256=args.retained_state_sha256,
+                            )
+                        except approval.ApprovalError as error:
+                            raise LaunchBlocked(str(error)) from error
+                        after_approval = build_retained_manifest(args.prior_source_sha, inspect_env,
+                                                                 docker_prefix=inspect_prefix,
+                                                                 expected_db_image=expected_db_image)
+                        if retained_manifest_sha256(after_approval) != args.retained_state_sha256:
+                            raise LaunchBlocked("Retained staging resources changed while awaiting resume approval")
+                        _run_preflight(source_root, args.env_file)
+                        env_fd, values = seed.validate_staging_admission(source_root, args.env_file, EXPECTED_UID)
+                        try:
+                            if values["BELIB_STAGE_VCS_REF"] != args.source_sha:
+                                raise LaunchBlocked("Staging env revision differs from the selected source SHA")
+                            docker_config_temp = seed.create_private_docker_config(EXPECTED_UID)
+                            try:
+                                docker_environment, actual_endpoint = _trusted_rootless_context(
+                                    seed, EXPECTED_UID, EXPECTED_HOME, Path(docker_config_temp.name)
+                                )
+                                if actual_endpoint != endpoint:
+                                    raise LaunchBlocked("Rootless Docker endpoint changed during resume admission")
+                                os.set_inheritable(env_fd, True)
+                                _validate_compose_model(build_root, env_fd, values, docker_environment, args.source_sha)
+                                env_path = Path(f"/proc/{os.getpid()}/fd/{env_fd}")
+                                compose = [
+                                    DOCKER_CLI, "--context", CONTEXT_NAME, "compose", "-p", COMPOSE_PROJECT,
+                                    "--project-directory", str(build_root), "--env-file", str(env_path),
+                                    "-f", str(build_root / "compose.staging.yaml"),
+                                ]
+                                provider = lambda revision, validate=True: build_retained_manifest(
+                                    revision, docker_environment, validate=validate,
+                                    expected_db_image=expected_db_image,
+                                )
+                                current = provider(args.prior_source_sha)
+                                if retained_manifest_sha256(current) != args.retained_state_sha256:
+                                    raise LaunchBlocked("Retained resources changed before resume mutation")
+                                return run_resume_ingress_transaction(
+                                    compose=compose, build_root=build_root, environment=docker_environment,
+                                    port=values["BELIB_STAGE_PORT"], prior_source_sha=args.prior_source_sha,
+                                    signed_digest=args.retained_state_sha256, manifest_provider=provider,
+                                    current_source_sha=args.source_sha, expected_db_image=expected_db_image,
+                                    env_fd=env_fd,
+                                )
+                            finally:
+                                docker_config_temp.cleanup()
+                        finally:
+                            os.close(env_fd)
+                except (LaunchBlocked, seed.SeedWrapperError) as error:
+                    raise LaunchBlocked(str(error)) from error
+                except Exception as error:
+                    raise LaunchBlocked("Retained source or resume admission failed") from error
             approval = load_approval_module()
             try:
                 approval.request_and_wait(args.source_sha, "deploy", args.evidence_sha256,
