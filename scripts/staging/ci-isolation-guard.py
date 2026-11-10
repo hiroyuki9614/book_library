@@ -246,6 +246,7 @@ SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 HEX_SECRET_PATTERN = re.compile(r"[a-f0-9]{64}\Z")
 ROLE_INIT_SOURCE = "scripts/staging/10-belib-staging-roles.sh"
 ROLE_INIT_TARGET = "/docker-entrypoint-initdb.d/10-belib-staging-roles.sh"
+_YAML_HORIZONTAL_WHITESPACE = " \t"
 
 
 class GuardError(RuntimeError):
@@ -274,7 +275,9 @@ def _strip_yaml_comments(source: str) -> str:
                 if character == '"':
                     quote = None
             else:
-                if character == "#" and (index == 0 or line[index - 1].isspace()):
+                if character == "#" and (
+                    index == 0 or line[index - 1] in _YAML_HORIZONTAL_WHITESPACE
+                ):
                     line = line[:index]
                     break
                 if character in "'\"" and token_start:
@@ -284,7 +287,7 @@ def _strip_yaml_comments(source: str) -> str:
                     continue
                 if character in ":,[]{}" or (character == "-" and token_start):
                     token_start = True
-                elif not character.isspace():
+                elif character not in _YAML_HORIZONTAL_WHITESPACE:
                     token_start = False
             index += 1
         uncommented.append(line)
@@ -297,10 +300,11 @@ def _source_mapping_entries(
     entries: list[tuple[int, str, str]] = []
     found: set[str] = set()
     pattern = re.compile(
-        " " * indentation + r"([A-Za-z_][A-Za-z0-9_-]*)\s*:(?:\s*(.*))?"
+        " " * indentation
+        + r"([A-Za-z_][A-Za-z0-9_-]*)[ \t]*:(?:[ \t]*(.*))?"
     )
     for index, line in enumerate(lines):
-        if not line.strip():
+        if not line.strip(_YAML_HORIZONTAL_WHITESPACE):
             continue
         actual_indentation = len(line) - len(line.lstrip(" "))
         if actual_indentation != indentation:
@@ -312,7 +316,9 @@ def _source_mapping_entries(
         if key in found:
             raise GuardError(f"{label} contains a duplicate key")
         found.add(key)
-        entries.append((index, key, (value or "").strip()))
+        entries.append(
+            (index, key, (value or "").strip(_YAML_HORIZONTAL_WHITESPACE))
+        )
     return entries
 
 
@@ -393,7 +399,7 @@ def _source_shape_contract(source: str) -> None:
             } != EXPECTED_SOURCE_ENV_VALUES[name]:
                 raise GuardError(f"{name} environment values are outside the allowlist")
             if any(
-                line.strip()
+                line.strip(_YAML_HORIZONTAL_WHITESPACE)
                 and len(line) - len(line.lstrip(" ")) > 6
                 for line in env_lines
             ):
@@ -430,7 +436,11 @@ def _source_shape_contract(source: str) -> None:
                 properties, property_position, len(service_lines)
             )
             volume_lines = service_lines[volumes_index + 1 : volumes_end]
-            mounts = [line.rstrip() for line in volume_lines if line.strip()]
+            mounts = [
+                line.rstrip(_YAML_HORIZONTAL_WHITESPACE)
+                for line in volume_lines
+                if line.strip(_YAML_HORIZONTAL_WHITESPACE)
+            ]
             if mounts != expected_mounts:
                 raise GuardError(f"{name} mount sources are outside the allowlist")
 
@@ -447,7 +457,8 @@ def _source_shape_contract(source: str) -> None:
     if len(network_properties) != 1 or network_properties[0][1:] != ("internal", "true"):
         raise GuardError("Staging isolated network settings are outside the allowlist")
     if any(
-        line.strip() and len(line) - len(line.lstrip(" ")) > 4
+        line.strip(_YAML_HORIZONTAL_WHITESPACE)
+        and len(line) - len(line.lstrip(" ")) > 4
         for line in network_lines
     ):
         raise GuardError("Nested network settings are forbidden")
@@ -462,7 +473,8 @@ def _source_shape_contract(source: str) -> None:
     if {key: value for _, key, value in volume_entries} != expected_volume_definitions:
         raise GuardError("Named volume options are outside the allowlist")
     if any(
-        line.strip() and len(line) - len(line.lstrip(" ")) > 2
+        line.strip(_YAML_HORIZONTAL_WHITESPACE)
+        and len(line) - len(line.lstrip(" ")) > 2
         for line in root_sections["volumes"]
     ):
         raise GuardError("Named volume driver and option settings are forbidden")
@@ -488,8 +500,8 @@ def _mapping(value: Any, label: str) -> dict[str, Any]:
 def _source_build_contract(source: str) -> None:
     """Check the original YAML build blocks before Compose can normalize them."""
     code = _strip_yaml_comments(source)
-    if re.search(r"(?m)^\s*<<\s*:", code) or re.search(
-        r"(?:^|[\s:[{,])[&*][A-Za-z0-9_-]+(?=$|[\s,}\]])", code
+    if re.search(r"(?m)^[ \t]*<<[ \t]*:", code) or re.search(
+        r"(?:^|[ \t\r\n:[{,])[&*][A-Za-z0-9_-]+(?=$|[ \t\r\n,}\]])", code
     ):
         raise GuardError("YAML aliases and merge keys are forbidden in staging Compose")
 
@@ -502,13 +514,16 @@ def _source_build_contract(source: str) -> None:
     index = 0
     while index < len(lines):
         line = lines[index]
-        stripped = line.strip()
+        leading_whitespace = line[
+            : len(line) - len(line.lstrip(_YAML_HORIZONTAL_WHITESPACE))
+        ]
+        if "\t" in leading_whitespace:
+            raise GuardError("Tabs are forbidden in staging Compose indentation")
+        stripped = line.strip(_YAML_HORIZONTAL_WHITESPACE)
         indent = len(line) - len(line.lstrip(" "))
         if not stripped:
             index += 1
             continue
-        if "\t" in line[: len(line) - len(line.lstrip())]:
-            raise GuardError("Tabs are forbidden in staging Compose indentation")
         if indent == 0:
             if stripped == "services:":
                 services_sections += 1
@@ -525,7 +540,9 @@ def _source_build_contract(source: str) -> None:
             index += 1
             continue
         if indent == 2:
-            service_match = re.fullmatch(r"  ([A-Za-z0-9][A-Za-z0-9_-]*):\s*", line)
+            service_match = re.fullmatch(
+                r"  ([A-Za-z0-9][A-Za-z0-9_-]*):[ \t]*", line
+            )
             if service_match is None:
                 raise GuardError("Staging service keys must use the checked-in YAML form")
             current_service = service_match.group(1)
@@ -537,14 +554,14 @@ def _source_build_contract(source: str) -> None:
             continue
 
         build_match = re.fullmatch(
-            r" {4}(?:build|'build'|\"build\")\s*:(.*)", line
+            r" {4}(?:build|'build'|\"build\")[ \t]*:(.*)", line
         )
         if build_match is None:
             index += 1
             continue
         if current_service not in EXPECTED_SOURCE_BUILDS:
             raise GuardError("Build is forbidden for this staging service")
-        if build_match.group(1).strip():
+        if build_match.group(1).strip(_YAML_HORIZONTAL_WHITESPACE):
             raise GuardError("Staging build must use an explicit allowlisted mapping")
 
         actual_build: dict[str, Any] = {}
@@ -553,17 +570,20 @@ def _source_build_contract(source: str) -> None:
         child_index = index + 1
         while child_index < len(lines):
             child = lines[child_index]
-            if not child.strip():
+            child_leading_whitespace = child[
+                : len(child) - len(child.lstrip(_YAML_HORIZONTAL_WHITESPACE))
+            ]
+            if "\t" in child_leading_whitespace:
+                raise GuardError("Tabs are forbidden in staging build indentation")
+            if not child.strip(_YAML_HORIZONTAL_WHITESPACE):
                 child_index += 1
                 continue
-            if "\t" in child[: len(child) - len(child.lstrip())]:
-                raise GuardError("Tabs are forbidden in staging build indentation")
             child_indent = len(child) - len(child.lstrip(" "))
             if child_indent <= 4:
                 break
             if child_indent == 6:
                 child_match = re.fullmatch(
-                    r" {6}([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)", child
+                    r" {6}([A-Za-z_][A-Za-z0-9_-]*)[ \t]*:(.*)", child
                 )
                 if child_match is None:
                     raise GuardError("Staging build keys must use the checked-in YAML form")
@@ -571,26 +591,26 @@ def _source_build_contract(source: str) -> None:
                 if key in actual_build:
                     raise GuardError("Duplicate staging build key")
                 if key == "args":
-                    if raw_value.strip():
+                    if raw_value.strip(_YAML_HORIZONTAL_WHITESPACE):
                         raise GuardError("Staging build args must use an explicit allowlisted mapping")
                     actual_build[key] = actual_args
                     in_args = True
                 else:
-                    value = raw_value.strip()
+                    value = raw_value.strip(_YAML_HORIZONTAL_WHITESPACE)
                     if not value:
                         raise GuardError("Staging build values must be explicit scalars")
                     actual_build[key] = value
                     in_args = False
             elif child_indent == 8 and in_args:
                 arg_match = re.fullmatch(
-                    r" {8}([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)", child
+                    r" {8}([A-Za-z_][A-Za-z0-9_-]*)[ \t]*:(.*)", child
                 )
                 if arg_match is None:
                     raise GuardError("Staging build args must use the checked-in YAML form")
                 arg_name, raw_value = arg_match.groups()
                 if arg_name in actual_args:
                     raise GuardError("Duplicate staging build argument")
-                value = raw_value.strip()
+                value = raw_value.strip(_YAML_HORIZONTAL_WHITESPACE)
                 if not value:
                     raise GuardError("Staging build arguments must be explicit scalars")
                 actual_args[arg_name] = value
@@ -627,11 +647,23 @@ def _walk(value: Any):
 
 
 def _source_contract(source: str, source_sha: str) -> None:
+    if not source.isascii():
+        raise GuardError("Staging Compose source must contain ASCII characters only")
+    if any(
+        (ord(character) < 0x20 and character not in "\t\r\n")
+        or ord(character) == 0x7F
+        for character in source
+    ):
+        raise GuardError("Staging Compose source contains unsupported control characters")
+
     code = _strip_yaml_comments(source)
     _source_build_contract(source)
     _source_shape_contract(source)
     for pattern, description in (
-        (r"(?im)^\s*(?:env_file|extends|include)\s*:", "external Compose input"),
+        (
+            r"(?im)^[ \t]*(?:env_file|extends|include)[ \t]*:",
+            "external Compose input",
+        ),
         (r"compose\.ya?ml", "production Compose reference"),
         (r"(?<![\w])\.env(?:\b|$)", "environment file reference"),
         (r"\bR2_[A-Z0-9_]*\b", "R2 setting"),
@@ -640,14 +672,16 @@ def _source_contract(source: str, source_sha: str) -> None:
         if re.search(pattern, code):
             raise GuardError(f"Staging Compose contains a forbidden {description}")
 
-    if re.search(r"(?m)^name:\s*belib-isolated-i5\s*$", code) is None:
+    if re.search(r"(?m)^name:[ \t]*belib-isolated-i5[ \t]*$", code) is None:
         raise GuardError("Staging Compose project name must be belib-isolated-i5")
-    if re.search(r"(?m)^name:\s*(?!belib-isolated-i5\s*$)\S+", code):
+    if re.search(r"(?m)^name:[ \t]*(?!belib-isolated-i5[ \t]*$)\S+", code):
         raise GuardError("Staging Compose project name must be belib-isolated-i5")
 
     if "BELIB_STAGE_DB_PASSWORD" in code:
         raise GuardError("The legacy single-password database identity is forbidden")
-    if "shobj_description(" not in code or re.search(r"(?<!sh)obj_description\s*\(", code):
+    if "shobj_description(" not in code or re.search(
+        r"(?<!sh)obj_description[ \t]*\(", code
+    ):
         raise GuardError("The database bootstrap marker must use shared-object description lookup")
     required_role_lines = (
         "POSTGRES_USER: belib_staging_bootstrap",
@@ -666,9 +700,9 @@ def _source_contract(source: str, source_sha: str) -> None:
 
     expected_vcs_line = "VCS_REF: ${BELIB_STAGE_VCS_REF:?Set full reviewed staging SHA}"
     vcs_lines = [
-        line.strip()
+        line.strip(_YAML_HORIZONTAL_WHITESPACE)
         for line in code.splitlines()
-        if re.search(r"(?<![A-Za-z0-9_])VCS_REF\s*:", line)
+        if re.search(r"(?<![A-Za-z0-9_])VCS_REF[ \t]*:", line)
     ]
     if vcs_lines != [expected_vcs_line, expected_vcs_line]:
         raise GuardError("Both built services must use the required staging SHA")
@@ -676,9 +710,9 @@ def _source_contract(source: str, source_sha: str) -> None:
         raise GuardError("Source revision must be a full lowercase Git SHA")
 
     db_lines = [
-        line.strip()
+        line.strip(_YAML_HORIZONTAL_WHITESPACE)
         for line in code.splitlines()
-        if re.search(r"(?<![A-Za-z0-9_])DATABASE_URL\s*:", line)
+        if re.search(r"(?<![A-Za-z0-9_])DATABASE_URL[ \t]*:", line)
     ]
     expected_db_lines = [
         f"DATABASE_URL: {MIGRATE_DATABASE_URL_SOURCE}",
@@ -688,7 +722,7 @@ def _source_contract(source: str, source_sha: str) -> None:
         raise GuardError("Database URLs must use the isolated migration and app roles")
 
     port_lines = [
-        line.strip()
+        line.strip(_YAML_HORIZONTAL_WHITESPACE)
         for line in code.splitlines()
         if "BELIB_STAGE_PORT" in line and "8080" in line
     ]
@@ -796,7 +830,11 @@ def _validate_staging_ci_image(compose_root: Path) -> None:
     image_values = [
         match.group(1)
         for line in _strip_yaml_comments(workflow_source).splitlines()
-        if (match := re.fullmatch(r"\s*image\s*:\s*(\S+)\s*", line))
+        if (
+            match := re.fullmatch(
+                r"[ \t]*image[ \t]*:[ \t]*(\S+)[ \t]*", line
+            )
+        )
     ]
     if image_values != [CI_POSTGRES_IMAGE]:
         raise GuardError("Staging CI container images must use the reviewed immutable digest")

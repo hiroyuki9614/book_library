@@ -54,7 +54,7 @@ if mount_start is None:
 mount_end = len(lines)
 for index in range(source_index + 1, len(lines)):
     line = lines[index]
-    if not line.strip() or line.lstrip().startswith("#"):
+    if not line.strip(" \t") or line.lstrip(" \t").startswith("#"):
         continue
     indentation = len(line) - len(line.lstrip(" "))
     if indentation <= 6:
@@ -82,7 +82,9 @@ if property == "source" and mutation in {"hash", "quoted-hash"}:
         else f"        source: {mount_source}#/suffix\n"
     )
     mount_lines[relative_source_index] = replacement
-elif property == "target" and mutation in {"hash", "quoted-hash"}:
+elif property == "target" and mutation in {
+    "hash", "quoted-hash", "nbsp-comment"
+}:
     target_by_source = {
         "./scripts/staging/10-belib-staging-roles.sh": (
             "/docker-entrypoint-initdb.d/10-belib-staging-roles.sh"
@@ -95,11 +97,12 @@ elif property == "target" and mutation in {"hash", "quoted-hash"}:
     target_indexes = [index for index, line in enumerate(mount_lines) if line == target_line]
     if len(target_indexes) != 1:
         raise SystemExit(1)
-    replacement = (
-        f'        target: "{target}#alt"\n'
-        if mutation == "quoted-hash"
-        else f"        target: {target}#alt\n"
-    )
+    if mutation == "quoted-hash":
+        replacement = f'        target: "{target}#alt"\n'
+    elif mutation == "nbsp-comment":
+        replacement = f"        target: {target}\u00a0#alt\n"
+    else:
+        replacement = f"        target: {target}#alt\n"
     mount_lines[target_indexes[0]] = replacement
 elif property == "read_only" and mutation in {"removed", "false"}:
     read_only_indexes = [
@@ -225,6 +228,15 @@ if ! assert_safe_staging_bind_mounts "$safe_fixture"; then
   fail 'The shell regression rejected a safe bind mapping with a trailing comment'
 fi
 safe_case_count=$((safe_case_count + 1))
+unicode_fixture="$fixture_dir/target-nbsp-comment.yaml"
+if ! mutate_bind_mount_fixture \
+  "$compose_file" "$unicode_fixture" './nginx/nginx.conf' target nbsp-comment; then
+  fail 'Could not create the Unicode whitespace bind fixture'
+fi
+if assert_safe_staging_bind_mounts "$unicode_fixture"; then
+  fail 'The shell regression accepted a non-breaking space before a bind target comment'
+fi
+unicode_negative_case_count=1
 negative_case_count=0
 mount_index=0
 for mount_source in \
@@ -386,5 +398,5 @@ if grep -Eq 'belib-isolated-i5|staging-postgres-data|staging-book-files|belib_st
   fail 'Production Compose must not reference the isolated staging project or data'
 fi
 
-printf 'PASS: 3 staging bind mounts are read-only with host-path creation disabled; %s safe fixture cases and %s unsafe/scope/structure/hash fixtures fail closed; roles, database markers, origins, proxy headers, production separation, and node-owned book volume remain intact\n' \
-  "$safe_case_count" "$((negative_case_count + scope_negative_case_count + structure_negative_case_count + hash_negative_case_count))"
+printf 'PASS: 3 staging bind mounts are read-only with host-path creation disabled; %s safe fixture cases and %s unsafe/scope/structure/hash/Unicode fixtures fail closed; roles, database markers, origins, proxy headers, production separation, and node-owned book volume remain intact\n' \
+  "$safe_case_count" "$((negative_case_count + scope_negative_case_count + structure_negative_case_count + hash_negative_case_count + unicode_negative_case_count))"

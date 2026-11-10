@@ -293,6 +293,67 @@ class CIIsolationGuardTests(unittest.TestCase):
         )
         guard._source_contract(source, SOURCE_SHA)
 
+    def test_yaml_comments_use_only_ascii_space_and_tab_as_separators(self):
+        source = (
+            "plain: ./nginx/nginx.conf#alt # trailing comment\n"
+            'quoted: "/etc/nginx/nginx.conf#alt" # trailing comment\n'
+            "tabbed: value\t# trailing comment\n"
+            "nbsp: value\u00a0#alt\n"
+            "narrow_nbsp: value\u202f#alt\n"
+        )
+        self.assertEqual(
+            guard._strip_yaml_comments(source),
+            "plain: ./nginx/nginx.conf#alt \n"
+            'quoted: "/etc/nginx/nginx.conf#alt" \n'
+            "tabbed: value\t\n"
+            "nbsp: value\u00a0#alt\n"
+            "narrow_nbsp: value\u202f#alt",
+        )
+
+    def test_rejects_non_ascii_compose_source_before_yaml_parsing(self):
+        separators = (
+            "\u00a0",  # no-break space
+            "\u202f",  # narrow no-break space
+            "\u2000",  # en quad
+            "\u2002",  # en space
+            "\u2028",  # line separator
+            "\u3000",  # ideographic space
+        )
+        original = "        target: /etc/nginx/nginx.conf\n"
+        for separator in separators:
+            with self.subTest(codepoint=f"U+{ord(separator):04X}"):
+                source = self.compose_source.replace(
+                    original,
+                    f"        target: /etc/nginx/nginx.conf{separator}#alt\n",
+                    1,
+                )
+                self.assertNotEqual(source, self.compose_source)
+                with self.assertRaisesRegex(guard.GuardError, "ASCII"):
+                    guard._source_contract(source, SOURCE_SHA)
+                self.assert_rejected(source=source, model=compose_model())
+
+    def test_accepts_yaml_tab_comment_separator_and_rejects_tab_indentation(self):
+        source = self.compose_source.replace(
+            "        target: /etc/nginx/nginx.conf\n",
+            "        target: /etc/nginx/nginx.conf\t# explicit safe value\n",
+            1,
+        )
+        guard._source_contract(source, SOURCE_SHA)
+
+        indented_tab = self.compose_source.replace(
+            "        source: ./nginx/nginx.conf\n",
+            "\t        source: ./nginx/nginx.conf\n",
+            1,
+        )
+        with self.assertRaisesRegex(guard.GuardError, "Tabs are forbidden"):
+            guard._source_contract(indented_tab, SOURCE_SHA)
+
+    def test_rejects_ascii_controls_that_are_not_yaml_whitespace(self):
+        for control in ("\v", "\f", "\x7f"):
+            with self.subTest(codepoint=f"U+{ord(control):04X}"):
+                with self.assertRaisesRegex(guard.GuardError, "control characters"):
+                    guard._source_contract(self.compose_source + control, SOURCE_SHA)
+
     def test_rejects_hash_suffixes_in_bind_sources_and_targets(self):
         for old, new in (
             (
