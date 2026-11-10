@@ -162,6 +162,7 @@ jobs:
       - name: Run staging guard unit tests
         run: |
           /usr/bin/python3 -I -B scripts/staging/test-approval.py
+          /usr/bin/python3 -I -B scripts/staging/test-retained-upgrade.py
           /usr/bin/python3 -I -B scripts/staging/test-cd-handoff.py
           /usr/bin/python3 -I -B scripts/staging/test-ci-isolation-guard.py
           /usr/bin/python3 -I -B scripts/staging/test-launch-guard.py
