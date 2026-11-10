@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 async function fileApi(page: Page, file: Buffer, kind = 'epub', initial: string | null = null) {
 	let saved = initial;
 	let readStatus = 'reading';
+	let progressPercentage: number | null = null;
 	const writes: string[] = [];
 	await page.route('**/api/v1/books/1/file', (route) =>
 		route.fulfill({ body: file, contentType: kind === 'epub' ? 'application/epub+zip' : 'application/pdf' }),
@@ -15,13 +16,25 @@ async function fileApi(page: Page, file: Buffer, kind = 'epub', initial: string 
 			await new Promise((resolve) => setTimeout(resolve, writes.length === 0 ? 120 : 5));
 			saved = String(body.currentPosition ?? body.currentPage);
 			readStatus = body.readStatus ?? 'reading';
+			if (body.progressPercentage !== undefined) progressPercentage = body.progressPercentage;
+			if (readStatus === 'completed') progressPercentage = 100;
 			writes.push(saved);
 		}
 		await route.fulfill({
-			json: { bookId: 1, currentPosition: saved, currentPage: kind === 'pdf' ? Number(saved ?? 1) : 1, readStatus },
+			json: { bookId: 1, currentPosition: saved, currentPage: kind === 'pdf' ? Number(saved ?? 1) : 1, progressPercentage, readStatus },
 		});
 	});
-	return { writes, saved: () => saved, status: () => readStatus };
+	return {
+		writes,
+		saved: () => saved,
+		status: () => readStatus,
+		progress: () => progressPercentage,
+		reset: () => {
+			saved = initial;
+			readStatus = 'reading';
+			progressPercentage = null;
+		},
+	};
 }
 
 async function visibleText(page: Page) {
@@ -118,6 +131,24 @@ async function progress(page: Page) {
 	expect(locationNumber, 'generated character location must not exceed its total').toBeLessThanOrEqual(locationTotal);
 	return { page: pageNumber, section, location: locationNumber };
 }
+async function expectReadingPositionSaved(page: Page) {
+	const message = '読書位置を保存済み';
+	const status = page.getByRole('status').filter({ hasText: message });
+	await expect(status).toHaveCount(1);
+	await expect(status).toBeVisible();
+	const compactLabel = status.locator('[aria-hidden="true"]').filter({ hasText: '保存済み' });
+	if (await compactLabel.count()) {
+		const announcement = status.locator('.sr-only').filter({ hasText: message });
+		await expect(announcement).toBeAttached();
+		await expect(announcement).toHaveClass(/sr-only/);
+		await expect(announcement).toContainText(message);
+		await expect(announcement).not.toHaveAttribute('aria-hidden', 'true');
+		await expect(compactLabel).toBeVisible();
+		await expect(compactLabel).toHaveText('✓ 保存済み');
+	} else {
+		await expect(status).toContainText(message);
+	}
+}
 async function move(page: Page, name = '次のページへ', timeout = 5000) {
 	const before = await cfi(page);
 	const beforeProgress = await progress(page);
@@ -145,10 +176,19 @@ for (const config of [
 		const api = await fileApi(page, epubFixture(config));
 		await page.goto('/e2e/readers/harness.html');
 		await ready(page);
-		for (const mode of ['常に単ページ', '常に見開き', '自動']) {
+		for (const [modeIndex, mode] of ['常に単ページ', '常に見開き', '自動'].entries()) {
+			if (modeIndex > 0) {
+				api.reset();
+				await page.evaluate(() => localStorage.clear());
+				await page.reload();
+				await ready(page);
+			}
 			await page.getByRole('combobox').click();
 			await page.getByRole('option', { name: mode, exact: true }).click();
-			await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
+			// Accumulating turns across modes exhausts the finite vertical fixture.
+			await page.getByRole('button', { name: '目次', exact: true }).click();
+			await page.getByRole('button', { name: '第一章', exact: true }).click();
+			await ready(page);
 			if (!config.vertical && mode === '常に見開き') {
 				const geometry = await page.locator('[data-publication-pane="primary"] iframe').first().evaluate((frame) => {
 					const viewer = frame.closest('[data-reader-viewport]') as HTMLElement;
@@ -163,6 +203,8 @@ for (const config of [
 				expect(geometry.columnWidth, 'native horizontal spread must render two columns').toBeLessThan(geometry.viewerWidth * 0.75);
 			}
 			const position = await progress(page);
+			expect(position).toEqual({ page: 1, section: 1, location: 1 });
+			await expect.poll(() => visibleText(page)).toContain('第1章');
 			for (let i = 0; i < 10; i++) await move(page);
 			expect((await progress(page)).location, 'character location cannot stay fixed across ten actual page turns').toBeGreaterThan(position.location);
 			for (let i = 0; i < 3; i++) await move(page, '前のページへ');
@@ -175,7 +217,7 @@ for (const config of [
 		if (config.vertical) await testInfo.attach('vertical-layout', { body: await page.screenshot(), contentType: 'image/png' });
 		if (config.vertical) await expect.poll(async () => (await progress(page)).section).toBe(4);
 		else await expect.poll(() => visibleText(page)).toContain('第4章');
-		await expect(page.getByText('読書位置を保存済み', { exact: true })).toBeVisible();
+		await expectReadingPositionSaved(page);
 		const saved = api.saved();
 		expect(saved).toBe(await cfi(page));
 		await page.evaluate(() => localStorage.clear());
@@ -203,6 +245,7 @@ test('near-start vertical RTL restores exact saved CFI and returns from hierarch
 	const savedProgress = await progress(page);
 	expect(savedProgress.location).toBeGreaterThan(1);
 	expect(api.status()).toBe('reading');
+	expect(api.progress()).toBeGreaterThan(0);
 	expect(api.saved()).toBe(savedCfi);
 
 	await page.evaluate(() => localStorage.clear());
@@ -237,12 +280,14 @@ test('Book RTL overrides opposing LTR EPUB metadata for native spread order and 
 		return {
 			stageDirection: getComputedStyle(stage).direction,
 			rootDirection: frame.contentWindow!.getComputedStyle(frame.contentDocument!.documentElement).direction,
+			textDirection: frame.contentWindow!.getComputedStyle(frame.contentDocument!.querySelector('p')!).direction,
 			columnWidth: Number.parseFloat(frame.contentWindow!.getComputedStyle(frame.contentDocument!.body).columnWidth),
 			viewerWidth: viewer.clientWidth,
 		};
 	});
 	expect(layout.stageDirection).toBe('rtl');
-	expect(layout.rootDirection).toBe('ltr');
+	expect(layout.rootDirection).toBe('rtl');
+	expect(layout.textDirection).toBe('ltr');
 	expect(layout.columnWidth).toBeLessThan(layout.viewerWidth * 0.75);
 	const first = await cfi(page);
 	const firstProgress = await progress(page);
@@ -398,9 +443,10 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 	await page.waitForTimeout(500);
 	await expectPage('10');
 	await openControls();
-	await expect(page.locator('[role="status"]:visible')).toContainText('読書位置を保存済み');
 	await closeControls();
+	await expectReadingPositionSaved(page);
 	expect(api.saved()).toBe('10');
+	await expect.poll(() => api.progress()).toBe(83);
 	await page.reload();
 	controlsOpen = false;
 	await openControls();
@@ -417,6 +463,7 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 	await closeControls();
 	await goToPage('12');
 	await expect.poll(shown).toBe(12);
+	await expect.poll(() => api.progress()).toBe(100);
 	await openControls();
 	await expect(page.getByRole('button', { name: '次のページへ', exact: true })).toBeDisabled();
 	await closeControls();
@@ -479,7 +526,7 @@ for (const width of [1100, 393, 320])
 		for (let i = 0; i < 5; i++) await next.click({ noWaitAfter: true });
 		await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false');
 		await expect.poll(() => visibleText(page)).not.toBe(text);
-		await expect(page.getByText('読書位置を保存済み', { exact: true })).toBeVisible();
+		await expectReadingPositionSaved(page);
 		expect(api.saved()).toBe(await cfi(page));
 		await page.getByRole('button', { name: '目次', exact: true }).click();
 		await page.getByRole('button', { name: '第1章', exact: true }).click();
@@ -517,7 +564,7 @@ test('save errors are visible and retry writes the current EPUB CFI', async ({ p
 			}
 			saved = route.request().postDataJSON().currentPosition;
 		}
-		await route.fulfill({ json: { bookId: 1, currentPosition: saved, currentPage: 1, readStatus: 'reading' } });
+		await route.fulfill({ json: { bookId: 1, currentPosition: saved, currentPage: 1, progressPercentage: 30, readStatus: 'reading' } });
 	});
 	await page.goto('/e2e/readers/harness.html');
 	await ready(page);
@@ -525,7 +572,7 @@ test('save errors are visible and retry writes the current EPUB CFI', async ({ p
 	await expect(page.getByRole('alert')).toContainText('保存できませんでした');
 	fail = false;
 	await page.getByRole('button', { name: '再試行', exact: true }).click();
-	await expect(page.getByText('読書位置を保存済み', { exact: true })).toBeVisible();
+	await expectReadingPositionSaved(page);
 	expect(saved).toBe(await cfi(page));
 });
 
@@ -665,9 +712,10 @@ test('mixed vertical/horizontal chapters: real two-page geometry, complete sourc
 		expect(completeSource[0]).toBe(0);
 		expect(completeSource.every((value,index)=>index===0||value===completeSource[index-1]+1), 'all source characters must appear across screens').toBe(true);
 		expect(completeSource.at(-1)).toBe(before.chapterLength*4-1);
-		await expect(page.getByText('読書位置を保存済み',{exact:true})).toBeVisible();
+		await expectReadingPositionSaved(page);
 		expect(api.writes.length).toBeGreaterThan(0);
 		expect(api.status()).toBe('completed');
+		expect(api.progress()).toBe(100);
 		expect(api.saved()).toBe(await cfi(page));
 		await page.getByRole('button',{name:'前のページへ'}).click();
 		await expect(page.getByRole('button',{name:'次のページへ'})).toBeEnabled();

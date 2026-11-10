@@ -28,7 +28,14 @@ type RuntimeBook = Omit<Book, 'locations'> & {
 const EPUB_LOCATION_BREAK_SIZE = 1600;
 const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
-function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection }) {
+function getEpubProgressPercentage(index: number, total: number, atStart: boolean, atEnd: boolean) {
+	if (atEnd) return 100;
+	if (atStart) return 0;
+	if (!Number.isSafeInteger(index) || !Number.isSafeInteger(total) || index < 0 || total <= 0 || index > total) return null;
+	return Math.round((index / total) * 100);
+}
+
+function EpubReaderSession({ bookId, bookTitle, pageTurnDirection, userId }: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection; userId?: number }) {
 	const viewerRef = useRef<HTMLDivElement | null>(null);
 	const currentCfiRef = useRef('');
 	const renditionRef = useRef<RuntimeRendition | null>(null);
@@ -57,8 +64,8 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [currentHref, setCurrentHref] = useState('');
 	const setTocVisible = (open: boolean) => { tocOpenRef.current = open; setTocOpen(open); };
-	const storageKey = `reader-location:${bookId}`;
-	const { save, status, retry } = useReadingSave(bookId);
+	const storageKey = userId === undefined ? `reader-location:${bookId}` : `reader-location:${userId}:${bookId}`;
+	const { save, status, retry, confirmInitialStatus } = useReadingSave(bookId, userId);
 
 	const enqueue = useCallback((action: (rendition: Rendition) => unknown) => {
 		const rendition = renditionRef.current;
@@ -89,9 +96,11 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 					setIsLoading(false);
 				}
 			});
-		void fetchReadingInfo(bookId)
+		const readingInfoRequest = userId === undefined ? fetchReadingInfo(bookId) : fetchReadingInfo(bookId, userId);
+		void readingInfoRequest
 			.then((info) => {
 				if (!active) return;
+				confirmInitialStatus(info);
 				// A successful server response is authoritative, including a fresh book.
 				currentCfiRef.current = info.currentPosition?.startsWith('epubcfi(') ? info.currentPosition : '';
 			})
@@ -107,7 +116,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 		return () => {
 			active = false;
 		};
-	}, [bookId, storageKey]);
+	}, [bookId, confirmInitialStatus, storageKey, userId]);
 
 	useEffect(() => {
 		const viewer = viewerRef.current;
@@ -116,6 +125,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 		let ready = false;
 		let readyToPersist = false;
 		let initialLocation = '';
+		let observedAtEnd = false;
 		let resizeFrame = 0;
 		let lastSize = { width: viewer.clientWidth, height: viewer.clientHeight };
 		const book = ePub(epubData) as unknown as RuntimeBook;
@@ -131,6 +141,10 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 		const relocated = (location: Location) => {
 			if (disposed || !location.start?.cfi) return;
 			const cfi = location.start.cfi;
+			// Delayed, unchanged layout observations are not reader movement. In
+			// particular, a restored CFI may be on the second page of a spread.
+			const positionChanged = initialLocation !== cfi || observedAtEnd !== Boolean(location.atEnd);
+			observedAtEnd = Boolean(location.atEnd);
 			const index = book.locations.locationFromCfi(cfi);
 			const last = book.locations.total;
 			const atPublicationStart = Boolean(
@@ -138,16 +152,17 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 				|| (location.start.index === 0 && location.start.displayed?.page === 1),
 			);
 			initialLocation = cfi;
-			setPercentage(location.atEnd ? 100 : atPublicationStart ? 0 : index >= 0 && last > 0 ? Math.round((index / last) * 100) : null);
+			const progressPercentage = getEpubProgressPercentage(index, last, atPublicationStart, Boolean(location.atEnd));
+			setPercentage(progressPercentage);
 			setCurrentPage(location.atEnd ? last + 1 : atPublicationStart ? 1 : index >= 0 && last > 0 ? index + 1 : 0);
 			setCurrentHref(location.start.href ?? '');
 			setTotalPage(last >= 0 ? last + 1 : 0);
 			if (location.start.displayed) setScreenPage({ ...location.start.displayed, section: location.start.index + 1 });
 			setBounds({ start: !!location.atStart, end: !!location.atEnd });
-			if (readyToPersist) {
+			if (readyToPersist && positionChanged) {
 				currentCfiRef.current = cfi;
 				localStorage.setItem(storageKey, cfi);
-				save(cfi, location.atEnd ? 'completed' : 'reading');
+				save(cfi, location.atEnd ? 'completed' : 'reading', progressPercentage);
 			}
 		};
 		const onKey = (event: KeyboardEvent) => {
@@ -321,8 +336,8 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 	const activeTocHref = navigation.find((item) => normalize(item.href) === normalize(currentHref))?.href ?? navigation.find((item) => resource(item.href) === resource(currentHref))?.href;
 	return (
 		<div className='flex h-[100dvh] flex-col bg-white text-foreground'>
-			<header className='shrink-0 border-b border-border bg-white px-1 py-1 sm:px-3 sm:py-2'>
-				<div className='flex min-w-0 flex-wrap items-center gap-1 sm:gap-2'>
+			<header className='shrink-0 border-b border-border bg-white px-1 py-1 sm:px-3 sm:py-2 xl:grid xl:grid-cols-[auto_minmax(0,1fr)_auto_auto] xl:items-center xl:gap-x-2 xl:py-[3.5px]'>
+				<div className='flex min-w-0 flex-wrap items-center gap-1 sm:gap-2 xl:contents'>
 					<Link
 						to='/'
 						className='inline-flex min-h-11 shrink-0 items-center px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
@@ -330,7 +345,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 						本棚に戻る
 					</Link>
 					{bookTitle && <span title={bookTitle} className='min-w-0 flex-1 truncate px-1 text-center text-sm font-medium'>{bookTitle}</span>}
-					<div className='ml-auto flex shrink-0 items-center gap-1 sm:gap-2'>
+					<div className='ml-auto flex shrink-0 items-center gap-1 sm:gap-2 xl:col-start-4 xl:row-start-1'>
 						{history.length > 0 && (
 							<Button aria-label='目次移動前へ戻る' variant='outline' onClick={handleBack} className='min-h-11 px-2 sm:px-3'>
 								戻る
@@ -401,18 +416,22 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 						</Sheet>
 					</div>
 				</div>
-				<ReadingSaveStatus status={status} retry={retry} />
-				{restoreError && (
-					<p role='alert' className='text-xs'>
-						保存位置を確認・復元できませんでした。現在の表示位置から再開しています。
-					</p>
-				)}
-				{operationError && (
-					<p role='alert' className='text-xs'>
-						ページまたは目次を表示できませんでした。もう一度操作してください。
-					</p>
-				)}
+				<div className='xl:col-start-3 xl:row-start-1'><ReadingSaveStatus status={status} retry={retry} /></div>
 			</header>
+			{(restoreError || operationError) && (
+				<div data-reader-alerts className='shrink-0 px-3 py-1 text-xs'>
+					{restoreError && (
+						<p role='alert'>
+							保存位置を確認・復元できませんでした。現在の表示位置から再開しています。
+						</p>
+					)}
+					{operationError && (
+						<p role='alert'>
+							ページまたは目次を表示できませんでした。もう一度操作してください。
+						</p>
+					)}
+				</div>
+			)}
 
 			<main tabIndex={0} className='relative min-h-0 w-full flex-1 overflow-hidden bg-white px-0 outline-none'>
 				{isLoading && (
@@ -444,7 +463,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 					aria-label='前のページへ'
 					className='size-11 rounded-full text-2xl'
 				>
-					{direction === 'rtl' ? '›' : '‹'}
+					<span aria-hidden='true' className='block -translate-y-px leading-none'>{direction === 'rtl' ? '›' : '‹'}</span>
 				</Button>
 				<Button
 					type='button'
@@ -455,7 +474,7 @@ function EpubReader({ bookId, bookTitle, pageTurnDirection }: { bookId: number; 
 					aria-label='次のページへ'
 					className='size-11 rounded-full text-2xl'
 				>
-					{direction === 'rtl' ? '‹' : '›'}
+					<span aria-hidden='true' className='block -translate-y-px leading-none'>{direction === 'rtl' ? '‹' : '›'}</span>
 				</Button>
 				<div className='order-3 min-w-[9rem] flex-1 basis-full text-center text-xs sm:order-none sm:min-w-0 sm:flex-none sm:basis-auto sm:text-sm' aria-live='polite'>
 					<div>章内ページ: {screenPage.page} / {screenPage.total}（第{screenPage.section}節）</div>
@@ -485,6 +504,11 @@ function SpreadSelect({ id, spread, disabled, onChange }: { id?: string; spread:
 			</SelectContent>
 		</Select>
 	);
+}
+
+function EpubReader(props: { bookId: number; bookTitle?: string; pageTurnDirection?: PageTurnDirection; userId?: number }) {
+	const readerKey = `${props.bookId}:${props.userId === undefined ? 'anonymous' : props.userId}`;
+	return <EpubReaderSession key={readerKey} {...props} />;
 }
 
 export default EpubReader;

@@ -81,6 +81,8 @@ vi.mock('./lib/prisma.js', () => ({
 			readingInfo: {
 				findUnique: vi.fn(() => null),
 				upsert: vi.fn(({ create }: { create: { currentPosition: string; readStatus: string } }) => create),
+				updateMany: vi.fn(() => ({ count: 0 })),
+				create: vi.fn(({ data }: { data: { currentPosition: string; readStatus: string } }) => data),
 			},
 		});
 		return next();
@@ -237,7 +239,17 @@ describe('MVP API contract RED tests based on docs/api.yaml', () => {
 			const response = await app.request('/api/v1/books/1/reading-info', { method: 'GET', headers: AUTH_HEADERS });
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
-			expect(body).toMatchObject({ bookId: 1, currentPage: 1, readStatus: 'unread' });
+			expect(body).toMatchObject({ bookId: 1, currentPage: 1, progressPercentage: 0, readStatus: 'unread' });
+		});
+
+		test('GET /api/v1/books/{bookId}/reading-info は不一致ヒントがあっても権限なしを403で返す', async () => {
+			const response = await app.request('/api/v1/books/2/reading-info', {
+				method: 'GET',
+				headers: { ...AUTH_HEADERS, 'X-BeLib-User-Id': '2' },
+			});
+
+			expect(response.status).toBe(403);
+			expect(await expectJsonObject(response)).toMatchObject({ code: 'FORBIDDEN' });
 		});
 
 		test('PATCH /api/v1/books/{bookId}/reading-info はcurrentPageを保存してreadingを返す', async () => {
@@ -248,24 +260,35 @@ describe('MVP API contract RED tests based on docs/api.yaml', () => {
 			});
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
-			expect(body).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, readStatus: 'reading' });
+			expect(body).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: null, readStatus: 'reading' });
+		});
+
+		test('PATCH /api/v1/books/{bookId}/reading-info は明示された不一致ヒントを409で拒否する', async () => {
+			const response = await app.request('/api/v1/books/1/reading-info', {
+				method: 'PATCH',
+				headers: { ...JSON_HEADERS, 'X-BeLib-User-Id': '2' },
+				body: JSON.stringify({ currentPage: 3 }),
+			});
+
+			expect(response.status).toBe(409);
+			expect(await expectJsonObject(response)).toMatchObject({ code: 'READING_SESSION_MISMATCH' });
 		});
 
 		test('PATCH /api/v1/books/{bookId}/reading-info はcompletedを明示保存できる', async () => {
 			const response = await app.request('/api/v1/books/1/reading-info', {
 				method: 'PATCH',
-				headers: JSON_HEADERS,
+				headers: { ...JSON_HEADERS, 'X-BeLib-User-Id': '1' },
 				body: JSON.stringify({ readStatus: 'completed', currentPage: 4 }),
 			});
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
-			expect(body).toEqual({ bookId: 1, currentPosition: '4', currentPage: 4, readStatus: 'completed' });
+			expect(body).toEqual({ bookId: 1, currentPosition: '4', currentPage: 4, progressPercentage: 100, readStatus: 'completed' });
 		});
 
 		test('PATCH /api/v1/books/{bookId}/reading-info はapi.yaml上のfinishedをDB正規値ではないため400で拒否する', async () => {
 			const response = await app.request('/api/v1/books/1/reading-info', {
 				method: 'PATCH',
-				headers: JSON_HEADERS,
+				headers: { ...JSON_HEADERS, 'X-BeLib-User-Id': '1' },
 				body: JSON.stringify({ readStatus: 'finished' }),
 			});
 			expect(response.status).toBe(400);
