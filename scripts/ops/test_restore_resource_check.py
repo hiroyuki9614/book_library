@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,8 @@ class ResourceCheckTests(unittest.TestCase):
         self.target.mkdir()
         self.meminfo = self.root / "meminfo.mock"
         self.pressure = self.root / "pressure.mock"
+        self.mountinfo = self.root / "mountinfo.mock"
+        self.mountinfo.write_text("36 25 0:32 / / rw - ext4 /dev/mock rw\n", encoding="ascii")
         self.write_sensors()
 
     def tearDown(self):
@@ -26,28 +29,133 @@ class ResourceCheckTests(unittest.TestCase):
         self.meminfo.write_text(mem, encoding="ascii")
         self.pressure.write_text(pressure, encoding="ascii")
 
+    @staticmethod
+    def fake_disk_usage(_path):
+        return type("Usage", (), {"free": 3 * 1024**3})()
+
     def test_measures_only_supplied_target_and_sensor_files(self):
         result = checker.measure(
             str(self.target), self.meminfo, self.pressure,
-            disk_usage=lambda path: type("Usage", (), {"free": 3 * 1024**3})(),
+            disk_usage=self.fake_disk_usage, mountinfo=self.mountinfo,
         )
         self.assertEqual(result["free_bytes"], 3 * 1024**3)
         self.assertEqual(result["mem_available_bytes"], 2 * 1024**3)
         self.assertEqual(result["io_full_avg10_percent"], checker.Decimal("1.00"))
 
+    def test_production_measurement_uses_pinned_directory_descriptor(self):
+        result = checker.measure(
+            str(self.target), self.meminfo, self.pressure, mountinfo=self.mountinfo,
+        )
+        self.assertGreaterEqual(result["free_bytes"], 0)
+
+    def test_free_space_uses_non_root_available_blocks_from_pinned_fd(self):
+        observed_fds = []
+
+        def fake_fstatvfs(fd):
+            self.assertTrue(os.fstat(fd).st_mode)
+            observed_fds.append(fd)
+            return type("StatVfs", (), {"f_bavail": 7, "f_bfree": 99, "f_frsize": 4096})()
+
+        with patch.object(checker.os, "fstatvfs", side_effect=fake_fstatvfs) as fstatvfs:
+            result = checker.measure(
+                str(self.target), self.meminfo, self.pressure, mountinfo=self.mountinfo,
+            )
+        self.assertEqual(fstatvfs.call_count, 1)
+        self.assertEqual(len(observed_fds), 1)
+        self.assertEqual(result["free_bytes"], 7 * 4096)
+
+    def test_relative_target_is_resolved_from_current_directory(self):
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(self.root)
+            result = checker.measure(
+                "destination", self.meminfo, self.pressure,
+                disk_usage=self.fake_disk_usage, mountinfo=self.mountinfo,
+            )
+        finally:
+            os.chdir(previous_cwd)
+        self.assertEqual(result["free_bytes"], 3 * 1024**3)
+
+    def test_mountpoint_spaces_are_decoded_for_mount_identity(self):
+        spaced_mount = self.root / "mount point"
+        spaced_mount.mkdir()
+        target = spaced_mount / "destination"
+        target.mkdir()
+        escaped = str(spaced_mount).replace(" ", r"\040")
+        self.mountinfo.write_text(
+            "36 25 0:32 / / rw - ext4 /dev/root rw\n"
+            f"42 36 0:33 / {escaped} rw - ext4 /dev/spaced rw\n",
+            encoding="ascii",
+        )
+        self.assertEqual(checker._mount_id(target, self.mountinfo), 42)
+
     def test_protected_or_missing_sensors_fail_closed(self):
         with self.assertRaises(OSError):
-            checker.measure(str(self.target), self.root / "unreadable", self.pressure)
+            checker.measure(
+                str(self.target), self.root / "unreadable", self.pressure,
+                disk_usage=self.fake_disk_usage, mountinfo=self.mountinfo,
+            )
         self.pressure.write_text("some avg10=0 avg60=0\n", encoding="ascii")
         with self.assertRaises(checker.InputError):
-            checker.measure(str(self.target), self.meminfo, self.pressure)
+            checker.measure(
+                str(self.target), self.meminfo, self.pressure,
+                disk_usage=self.fake_disk_usage, mountinfo=self.mountinfo,
+            )
 
     def test_bad_pressure_and_missing_target_fail_closed(self):
         self.write_sensors(pressure="full avg10=nan avg60=1\n")
         with self.assertRaises(checker.InputError):
-            checker.measure(str(self.target), self.meminfo, self.pressure)
+            checker.measure(
+                str(self.target), self.meminfo, self.pressure,
+                disk_usage=self.fake_disk_usage, mountinfo=self.mountinfo,
+            )
         with self.assertRaises(checker.InputError):
-            checker.measure(str(self.root / "absent"), self.meminfo, self.pressure)
+            checker.measure(
+                str(self.root / "absent"), self.meminfo, self.pressure,
+                disk_usage=self.fake_disk_usage, mountinfo=self.mountinfo,
+            )
+
+    def test_empty_target_fails_closed(self):
+        with self.assertRaises(checker.InputError):
+            checker.measure(
+                "", self.meminfo, self.pressure,
+                disk_usage=self.fake_disk_usage, mountinfo=self.mountinfo,
+            )
+
+    def test_symlink_target_and_parent_fail_closed(self):
+        linked_target = self.root / "linked-target"
+        linked_target.symlink_to(self.target, target_is_directory=True)
+        linked_parent = self.root / "linked-parent"
+        linked_parent.symlink_to(self.root, target_is_directory=True)
+        for target in (linked_target, linked_parent / "destination"):
+            with self.subTest(target=target), self.assertRaises(OSError):
+                checker.measure(
+                    str(target), self.meminfo, self.pressure,
+                    disk_usage=self.fake_disk_usage, mountinfo=self.mountinfo,
+                )
+
+    def test_mount_identity_change_fails_closed(self):
+        with patch.object(checker, "_mount_id", side_effect=(36, 37)):
+            with self.assertRaises(checker.InputError):
+                checker.measure(
+                    str(self.target), self.meminfo, self.pressure,
+                    disk_usage=self.fake_disk_usage, mountinfo=self.mountinfo,
+                )
+
+    def test_replaced_target_fails_closed(self):
+        replacement = self.root / "replacement"
+        replacement.mkdir()
+
+        def replace_target(_path):
+            self.target.rename(self.root / "old-destination")
+            replacement.rename(self.target)
+            return type("Usage", (), {"free": 3 * 1024**3})()
+
+        with self.assertRaises(checker.InputError):
+            checker.measure(
+                str(self.target), self.meminfo, self.pressure,
+                disk_usage=replace_target, mountinfo=self.mountinfo,
+            )
 
     def test_full_pressure_requires_every_field_exactly_once(self):
         malformed = (

@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
-import shutil
+import stat
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -97,17 +98,96 @@ def _read_io_full_pressure(path: Path) -> tuple[Decimal, Decimal]:
     return values["avg10"], values["avg60"]
 
 
+def _mount_id(path: Path, mountinfo: Path) -> int:
+    """Return the mount ID covering path using Linux's current mount table."""
+    absolute = Path(os.path.abspath(path))
+    matches: list[tuple[int, int]] = []
+    with mountinfo.open("r", encoding="ascii") as source:
+        for line in source:
+            fields = line.split()
+            if len(fields) < 6 or "-" not in fields:
+                raise InputError("mountinfo")
+            try:
+                mount_id = int(fields[0])
+            except ValueError as exc:
+                raise InputError("mountinfo") from exc
+            # mountinfo escapes spaces, tabs, newlines, and backslashes as octal.
+            mountpoint = re.sub(
+                r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), fields[4]
+            )
+            point = Path(mountpoint)
+            if absolute == point or point in absolute.parents:
+                matches.append((len(point.parts), mount_id))
+    if not matches:
+        raise InputError("mountinfo")
+    deepest = max(depth for depth, _mount_id in matches)
+    ids = {mount_id for depth, mount_id in matches if depth == deepest}
+    if len(ids) != 1:
+        raise InputError("mountinfo")
+    return ids.pop()
+
+
+def _open_directory_without_symlinks(path: Path) -> int:
+    """Open each component with O_NOFOLLOW, pinning the final directory."""
+    absolute = Path(os.path.abspath(path))
+    if not absolute.is_absolute():
+        raise InputError("target")
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise InputError("target")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open("/", flags)
+    try:
+        for component in absolute.parts[1:]:
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise InputError("target")
+        return descriptor
+    except FileNotFoundError as exc:
+        os.close(descriptor)
+        raise InputError("target") from exc
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def measure(
     target: str,
     meminfo: Path,
     io_pressure: Path,
-    disk_usage=shutil.disk_usage,
+    disk_usage=None,
+    mountinfo: Path = Path("/proc/self/mountinfo"),
 ) -> dict[str, int | Decimal]:
     """Read the destination filesystem and two Linux resource sensors only."""
-    target_path = Path(target)
-    if not target_path.is_dir():
+    if not target:
         raise InputError("target")
-    free_bytes = disk_usage(target_path).free
+    target_path = Path(target)
+    if not target_path.is_absolute():
+        target_path = Path(os.path.abspath(target_path))
+    first_mount_id = _mount_id(target_path, mountinfo)
+    descriptor = _open_directory_without_symlinks(target_path)
+    try:
+        first_stat = os.fstat(descriptor)
+        if disk_usage is None:
+            fs = os.fstatvfs(descriptor)
+            free_bytes = fs.f_bavail * fs.f_frsize
+        else:
+            # Injection is used by unit tests; production measures the pinned FD.
+            free_bytes = disk_usage(target_path).free
+    finally:
+        os.close(descriptor)
+    second_mount_id = _mount_id(target_path, mountinfo)
+    second_descriptor = _open_directory_without_symlinks(target_path)
+    try:
+        second_stat = os.fstat(second_descriptor)
+    finally:
+        os.close(second_descriptor)
+    if (
+        first_mount_id != second_mount_id
+        or (first_stat.st_dev, first_stat.st_ino) != (second_stat.st_dev, second_stat.st_ino)
+    ):
+        raise InputError("target_changed")
     if not isinstance(free_bytes, int) or free_bytes < 0 or free_bytes > MAX_INPUT_INTEGER:
         raise InputError("filesystem")
     mem_available_bytes = _read_mem_available(meminfo)
