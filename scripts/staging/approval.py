@@ -34,6 +34,7 @@ TARGET = {
 MAX_ENVELOPE_BYTES = 16 * 1024
 MAX_GRANT_SECONDS = 300
 POLL_SECONDS = 300
+TLS_OPERATION = "tls-ingress"
 
 
 class ApprovalError(Exception):
@@ -79,6 +80,7 @@ def unb64(value: Any) -> bytes:
 def expected_payload(
     source_sha: str, operation: str, nonce: str, issued_at: int, evidence_sha256: str,
     prior_source_sha: str | None = None, retained_state_sha256: str | None = None,
+    tls_binding: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "branch": TARGET["branch"],
@@ -99,17 +101,22 @@ def expected_payload(
     if operation == "resume-ingress":
         payload["prior_source_sha"] = prior_source_sha
         payload["retained_state_sha256"] = retained_state_sha256
+    elif operation == TLS_OPERATION:
+        if tls_binding is None:
+            raise ApprovalError("TLS approval requires a fresh retained-state binding")
+        payload.update(tls_binding)
     return payload
 
 
 def validate_payload(
     payload: Any, source_sha: str, operation: str, nonce: str, evidence_sha256: str, now: int,
     prior_source_sha: str | None = None, retained_state_sha256: str | None = None,
+    tls_binding: dict[str, str] | None = None,
 ) -> None:
-    if operation not in ("deploy", "resume-ingress"):
+    if operation not in ("deploy", "resume-ingress", TLS_OPERATION):
         raise ApprovalError("Approval operation is not allowlisted")
     expected_fields = set(expected_payload(source_sha, operation, nonce, 0, evidence_sha256,
-                                           prior_source_sha, retained_state_sha256))
+                                           prior_source_sha, retained_state_sha256, tls_binding))
     if not isinstance(payload, dict) or set(payload) != expected_fields:
         raise ApprovalError("Approval payload fields do not match the fixed schema")
     for name in ("pull_request", "uid", "issued_at", "expires_at"):
@@ -132,6 +139,19 @@ def validate_payload(
         or payload["retained_state_sha256"] != retained_state_sha256
     ):
         raise ApprovalError("Resume approval does not match the retained source and state")
+    if operation == TLS_OPERATION:
+        if tls_binding is None or set(tls_binding) != {
+            "prior_application_sha", "retained_state_sha256", "serve_config_sha256", "serve_etag",
+            "certificate_sha256", "tls_config_sha256", "tls_state_sha256",
+        }:
+            raise ApprovalError("TLS approval requires the exact custom-ingress state tuple")
+        if (not re.fullmatch(r"[0-9a-f]{40}", tls_binding["prior_application_sha"])
+                or any(not re.fullmatch(r"[0-9a-f]{64}", tls_binding[name]) for name in (
+                    "retained_state_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256", "tls_config_sha256", "tls_state_sha256"
+                ))):
+            raise ApprovalError("TLS state binding is malformed")
+        if any(payload[name] != value for name, value in tls_binding.items()):
+            raise ApprovalError("TLS approval does not match the current retained state")
     issued, expires = payload["issued_at"], payload["expires_at"]
     if issued > now + 5 or issued < now - MAX_GRANT_SECONDS or expires < now or expires <= issued or expires - issued > MAX_GRANT_SECONDS:
         raise ApprovalError("Approval is expired or outside the bounded grant lifetime")
@@ -141,6 +161,7 @@ def verify_envelope(
     envelope: Any, source_sha: str, operation: str, nonce: str, evidence_sha256: str, *,
     now: int | None = None, prior_source_sha: str | None = None,
     retained_state_sha256: str | None = None,
+    tls_binding: dict[str, str] | None = None,
 ) -> str:
     if hashlib.sha256(PUBLIC_KEY_PEM).hexdigest() != PUBLIC_KEY_SHA256:
         raise ApprovalError("Embedded approval public key fingerprint mismatch")
@@ -153,7 +174,7 @@ def verify_envelope(
     if canonical_json(payload) != payload_raw:
         raise ApprovalError("Approval payload is not canonical JSON")
     validate_payload(payload, source_sha, operation, nonce, evidence_sha256,
-                     int(time.time()) if now is None else now, prior_source_sha, retained_state_sha256)
+                     int(time.time()) if now is None else now, prior_source_sha, retained_state_sha256, tls_binding)
     _verify_trusted_openssl()
     with tempfile.TemporaryDirectory(prefix="belib-approval-verify-", dir="/tmp") as temporary:
         key_path = Path(temporary) / "public.pem"
@@ -223,8 +244,9 @@ def request_and_wait(
     source_sha: str, operation: str, evidence_sha256: str, *, uid: int, output,
     timeout: int = POLL_SECONDS, prior_source_sha: str | None = None,
     retained_state_sha256: str | None = None,
+    tls_binding: dict[str, str] | None = None,
 ) -> str:
-    if operation not in ("deploy", "resume-ingress"):
+    if operation not in ("deploy", "resume-ingress", TLS_OPERATION):
         raise ApprovalError("Approval operation is not allowlisted")
     if operation == "deploy" and (prior_source_sha is not None or retained_state_sha256 is not None):
         raise ApprovalError("Deploy approval cannot carry retained-state resume fields")
@@ -233,6 +255,15 @@ def request_and_wait(
         or not re.fullmatch(r"[0-9a-f]{64}", retained_state_sha256 or "")
     ):
         raise ApprovalError("Resume approval requires the exact prior source and retained-state digest")
+    if operation == TLS_OPERATION:
+        if prior_source_sha is not None or retained_state_sha256 is not None:
+            raise ApprovalError("TLS approval uses its distinct retained-state binding")
+        if tls_binding is None:
+            raise ApprovalError("TLS approval requires its distinct retained-state binding")
+        # Reuse the fixed-schema validator before creating a challenge.
+        payload = expected_payload(source_sha, operation, "0" * 64, 0, evidence_sha256, tls_binding=tls_binding)
+        validate_payload(payload, source_sha, operation, "0" * 64, evidence_sha256, int(time.time()),
+                         tls_binding=tls_binding)
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ApprovalError("Source revision must be a full lowercase Git SHA")
     if not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256):
@@ -255,6 +286,8 @@ def request_and_wait(
     if operation == "resume-ingress":
         challenge["prior_source_sha"] = prior_source_sha
         challenge["retained_state_sha256"] = retained_state_sha256
+    elif operation == TLS_OPERATION:
+        challenge.update(tls_binding or {})
     try:
         output.write(canonical_json(challenge).decode("utf-8") + "\n")
         output.flush()
@@ -285,7 +318,8 @@ def request_and_wait(
             finally:
                 os.close(fd)
             verify_envelope(strict_json(raw), source_sha, operation, nonce, evidence_sha256,
-                            prior_source_sha=prior_source_sha, retained_state_sha256=retained_state_sha256)
+                            prior_source_sha=prior_source_sha, retained_state_sha256=retained_state_sha256,
+                            tls_binding=tls_binding)
             return nonce
         raise ApprovalError("Timed out waiting for the one-time external approval")
     finally:

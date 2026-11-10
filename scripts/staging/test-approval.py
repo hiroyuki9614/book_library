@@ -46,6 +46,19 @@ class ApprovalTests(unittest.TestCase):
         subprocess.run(["/usr/bin/openssl", "pkeyutl", "-sign", "-inkey", str(self.private), "-rawin", "-in", str(message), "-out", str(signature)], check=True)
         return {"payload": approval.b64(raw), "signature": approval.b64(signature.read_bytes())}
 
+    def tls_envelope(self, binding, **changes):
+        now = int(time.time())
+        payload = approval.expected_payload("a" * 40, "tls-ingress", "c" * 64, now, "d" * 64,
+                                            tls_binding=binding)
+        payload.update(changes)
+        raw = approval.canonical_json(payload)
+        message = self.root / "tls-message"
+        signature = self.root / "tls-signature"
+        message.write_bytes(raw)
+        subprocess.run(["/usr/bin/openssl", "pkeyutl", "-sign", "-inkey", str(self.private), "-rawin",
+                        "-in", str(message), "-out", str(signature)], check=True)
+        return {"payload": approval.b64(raw), "signature": approval.b64(signature.read_bytes())}
+
     def test_valid_external_signature_accepts_exact_tuple(self):
         with patch.object(approval, "_verify_trusted_openssl"):
             self.assertEqual(approval.verify_envelope(self.envelope(), "a" * 40, "deploy", "c" * 64, "d" * 64), "c" * 64)
@@ -110,6 +123,34 @@ class ApprovalTests(unittest.TestCase):
             with self.subTest(changes=changes, operation=operation), self.assertRaises(approval.ApprovalError):
                 approval.validate_payload(changed, "a" * 40, operation, "c" * 64, "d" * 64,
                                           now, wanted_prior, wanted_digest)
+
+    def test_tls_grant_is_a_distinct_one_use_operation_bound_to_all_runtime_state(self):
+        binding = {
+            "prior_application_sha": "8" * 40,
+            "retained_state_sha256": "1" * 64,
+            "serve_config_sha256": "2" * 64,
+            "serve_etag": "3" * 64,
+            "certificate_sha256": "4" * 64,
+            "tls_config_sha256": "5" * 64,
+            "tls_state_sha256": "6" * 64,
+        }
+        envelope = self.tls_envelope(binding)
+        with patch.object(approval, "_verify_trusted_openssl"):
+            self.assertEqual(approval.verify_envelope(
+                envelope, "a" * 40, "tls-ingress", "c" * 64, "d" * 64, tls_binding=binding), "c" * 64)
+        for name, value in (("serve_etag", "6" * 64), ("certificate_sha256", "7" * 64),
+                            ("project", "production")):
+            with self.subTest(name=name), self.assertRaises(approval.ApprovalError):
+                self.verify_tls_tamper(binding, name, value)
+        with self.assertRaises(approval.ApprovalError):
+            approval.request_and_wait("a" * 40, "tls-ingress", "d" * 64, uid=os.getuid(),
+                                      output=io.StringIO(), timeout=0)
+
+    def verify_tls_tamper(self, binding, name, value):
+        envelope = self.tls_envelope(binding, **{name: value})
+        with patch.object(approval, "_verify_trusted_openssl"):
+            approval.verify_envelope(envelope, "a" * 40, "tls-ingress", "c" * 64, "d" * 64,
+                                     tls_binding=binding)
 
     def test_deploy_token_cannot_be_requested_with_resume_fields(self):
         with self.assertRaisesRegex(approval.ApprovalError, "cannot carry retained-state"):

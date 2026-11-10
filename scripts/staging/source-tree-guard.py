@@ -39,6 +39,13 @@ SNAPSHOT_SUPPORT_FILES = (
     b"scripts/staging/nginx-default.conf",
     *DOCKERFILE_INPUTS,
 )
+SNAPSHOT_TLS_FILES = frozenset((
+    b"scripts/staging/compose-tls.yaml",
+    b"scripts/staging/nginx-tls.conf",
+    b"scripts/staging/nginx-tls-default.conf",
+    b"scripts/staging/nginx-tls-locations.conf",
+    b"scripts/staging/tls-ingress.py",
+))
 
 
 class SourceTreeBlocked(Exception):
@@ -371,6 +378,12 @@ def _snapshot_entries(
             raise SourceTreeBlocked("A required staging Compose source file is missing from the selected commit")
         selected[path] = entry
 
+    tls_entries = SNAPSHOT_TLS_FILES.intersection(tree)
+    if tls_entries and tls_entries != SNAPSHOT_TLS_FILES:
+        raise SourceTreeBlocked("The optional staging TLS source bundle is incomplete")
+    for path in tls_entries:
+        selected[path] = tree[path]
+
     for prefix, ignore_file in zip(CONTEXTS, DOCKERIGNORE_FILES, strict=True):
         ignore_entry = tree.get(ignore_file)
         if ignore_entry is None or ignore_entry[0] not in (b"100644", b"100755"):
@@ -387,6 +400,14 @@ def _snapshot_entries(
         if path.startswith(b"/") or any(part in (b"", b".", b"..") for part in path.split(b"/")):
             raise SourceTreeBlocked("A staging snapshot input has an unsafe Git path")
     return selected
+
+
+def require_tls_bundle(tree: dict[bytes, tuple[bytes, bytes]]) -> dict[bytes, tuple[bytes, bytes]]:
+    """Require the complete optional TLS source bundle for TLS-only operations."""
+    present = SNAPSHOT_TLS_FILES.intersection(tree)
+    if present != SNAPSHOT_TLS_FILES:
+        raise SourceTreeBlocked("The selected source commit does not contain the complete TLS bundle")
+    return {path: tree[path] for path in SNAPSHOT_TLS_FILES}
 
 
 @contextmanager

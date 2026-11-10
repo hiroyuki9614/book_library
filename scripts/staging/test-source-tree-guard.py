@@ -111,6 +111,37 @@ class SourceTreeGuardTests(unittest.TestCase):
         )
         return self.git("rev-parse", "HEAD").stdout.strip()
 
+    def add_tls_bundle(self, paths=None) -> str:
+        selected = guard.SNAPSHOT_TLS_FILES if paths is None else paths
+        for index, relative in enumerate(sorted(selected)):
+            target = self.root / relative.decode("ascii")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"tls fixture {index}\n", encoding="ascii")
+        self.revision = self.commit()
+        return self.revision
+
+    def test_historical_tree_without_tls_keeps_base_snapshot_requirements(self) -> None:
+        tree = guard.parse_tree(self.root, self.revision)
+        selected = guard._snapshot_entries(self.root, tree)
+        self.assertFalse(guard.SNAPSHOT_TLS_FILES.intersection(selected))
+        with self.assertRaisesRegex(guard.SourceTreeBlocked, "complete TLS bundle"):
+            guard.require_tls_bundle(tree)
+
+    def test_partial_tls_tree_is_rejected(self) -> None:
+        one_tls_file = {sorted(guard.SNAPSHOT_TLS_FILES)[0]}
+        self.add_tls_bundle(one_tls_file)
+        tree = guard.parse_tree(self.root, self.revision)
+        with self.assertRaisesRegex(guard.SourceTreeBlocked, "bundle is incomplete"):
+            guard._snapshot_entries(self.root, tree)
+
+    def test_full_tls_tree_is_snapshotted_and_available_to_tls_operation(self) -> None:
+        self.add_tls_bundle()
+        tree = guard.parse_tree(self.root, self.revision)
+        selected = guard._snapshot_entries(self.root, tree)
+        required = guard.require_tls_bundle(tree)
+        self.assertEqual(set(required), guard.SNAPSHOT_TLS_FILES)
+        self.assertTrue(guard.SNAPSHOT_TLS_FILES.issubset(selected))
+
     def test_external_compose_dockerfile_symlink_is_rejected(self) -> None:
         dockerfile = self.root / "scripts/staging/Dockerfile.backend.staging"
         outside = Path(self.temporary.name) / "outside.dockerfile"
