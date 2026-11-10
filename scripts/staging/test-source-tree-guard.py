@@ -40,6 +40,7 @@ class SourceTreeGuardTests(unittest.TestCase):
             "frontend/dist",
             "nginx",
             "scripts/staging",
+            ".github/workflows",
         ):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
         dockerignore = "node_modules\ndist\n.git\n.env\n.env.*\nstorage\ncoverage\n*.log\n"
@@ -61,6 +62,9 @@ class SourceTreeGuardTests(unittest.TestCase):
         (self.root / "scripts/staging/Dockerfile.frontend.staging").write_text(
             "FROM nginxinc/nginx-unprivileged:1.27-alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
             encoding="ascii",
+        )
+        (self.root / ".github/workflows/staging-ci.yml").write_bytes(
+            (GUARD_PATH.parents[2] / ".github/workflows/staging-ci.yml").read_bytes()
         )
         self.revision = self.commit()
 
@@ -163,6 +167,15 @@ class SourceTreeGuardTests(unittest.TestCase):
             self.assertFalse((snapshot / "frontend/test-results/results.json").exists())
             self.assertFalse((snapshot / "frontend/dist/production.js").exists())
 
+
+    def test_snapshot_preserves_workflow_required_by_live_compose_guard(self) -> None:
+        ci_spec = importlib.util.spec_from_file_location("snapshot_ci", GUARD_PATH.with_name("ci-isolation-guard.py"))
+        ci = importlib.util.module_from_spec(ci_spec)
+        ci_spec.loader.exec_module(ci)
+        with guard.sha_derived_build_snapshot(self.root, self.revision) as snapshot:
+            workflow = snapshot / ".github/workflows/staging-ci.yml"
+            self.assertEqual(workflow.read_bytes(), (self.root / ".github/workflows/staging-ci.yml").read_bytes())
+            ci._validate_staging_ci_image(snapshot)
 
     def test_persistent_snapshot_reuse_and_corruption_rejection(self) -> None:
         snapshot_uid = Path(guard.SNAPSHOT_ROOT.parent).stat().st_uid

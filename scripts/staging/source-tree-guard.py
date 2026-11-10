@@ -31,6 +31,7 @@ SNAPSHOT_REVISION_FILE = b".belib-staging-source-sha"
 SNAPSHOT_MANIFEST_FILE = b".belib-staging-manifest.json"
 SNAPSHOT_ROOT = Path("/home/hiroyuki/.local/state/belib-staging/snapshots")
 SNAPSHOT_SUPPORT_FILES = (
+    b".github/workflows/staging-ci.yml",
     b"compose.staging.yaml",
     b"nginx/nginx.conf",
     b"scripts/staging/10-belib-staging-roles.sh",
