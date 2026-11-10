@@ -156,6 +156,29 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		}
 	});
 
+	test('a repeated spread layout observation cannot overwrite the restored second-page CFI', async () => {
+		const saved = 'epubcfi(/6/2!/4/16/1:0)';
+		const spreadStart = { start: { cfi: 'epubcfi(/6/2!/4/14/1:0)' }, atEnd: false };
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: saved, readStatus: 'reading' });
+		runtime.rendition.display.mockImplementation(async () => {
+			renditionHandler<(location: typeof spreadStart) => void>(runtime, 'relocated')?.(spreadStart);
+		});
+		await render(<EpubReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(localStorage.getItem('reader-location:7')).toBe(saved));
+		const relocated = renditionHandler<(location: typeof spreadStart) => void>(runtime, 'relocated')!;
+		relocated(spreadStart);
+		await new Promise(resolve => setTimeout(resolve, 850));
+		expect(localStorage.getItem('reader-location:7')).toBe(saved);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+		// A later actual move still saves, as does reaching the end without
+		// changing the spread's start CFI.
+		const moved = { start: { cfi: 'epubcfi(/6/4!/4/2/1:0)' }, atEnd: false };
+		relocated(moved);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, moved.start.cfi, 'reading', 0), { timeout: 1500 });
+		relocated({ ...moved, atEnd: true });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, moved.start.cfi, 'completed', 100));
+	});
+
 	test('compact header keeps save and navigation controls while the footer owns position and spread controls', async () => {
 		const { getByRole, getByTestId } = await render(<EpubReader bookId={7} bookTitle='A long EPUB title that should truncate' pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(runtime.rendition.display).toHaveBeenCalled());

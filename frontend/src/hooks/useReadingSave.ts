@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as readingInfoApi from '@/api/readingInfo';
-import type { ReadStatus } from '@/api/readingInfo';
+import type { ReadStatus, ReadingInfo } from '@/api/readingInfo';
 
 type LatestReadingSave = {
 	position: number | string;
@@ -10,12 +10,21 @@ type LatestReadingSave = {
 };
 
 export function useReadingSave(bookId: number, userId?: number) {
-	const [status, setStatus] = useState<'saved' | 'saving' | 'error'>('saved');
+	const [status, setStatus] = useState<'unknown' | 'saved' | 'saving' | 'error'>('unknown');
 	const latest = useRef<LatestReadingSave | null>(null);
 	const version = useRef(0);
 	const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 	const pending = useRef(false);
 	const previousUserId = useRef(userId);
+
+	const confirmInitialStatus = useCallback((info: ReadingInfo) => {
+		if (version.current > 0) return;
+		const hasSavedPosition = (typeof info.currentPosition === 'string' && info.currentPosition.length > 0)
+			|| info.readStatus !== 'unread'
+			|| info.currentPage > 1;
+		setStatus(hasSavedPosition ? 'saved' : 'unknown');
+	}, []);
+
 	const flush = useCallback(() => {
 		if (timer.current) clearTimeout(timer.current);
 		if (!pending.current || !latest.current) return;
@@ -34,15 +43,17 @@ export function useReadingSave(bookId: number, userId?: number) {
 			() => { if (version.current === attempt) setStatus('error'); },
 		);
 	}, [bookId, userId]);
+
 	useEffect(() => {
 		if (previousUserId.current === userId) return;
 		if (timer.current) clearTimeout(timer.current);
 		latest.current = null;
 		pending.current = false;
 		++version.current;
-		setStatus('saved');
+		setStatus('unknown');
 		previousUserId.current = userId;
 	}, [userId]);
+
 	useEffect(() => {
 		const unregister = readingInfoApi.registerReadingFlush(bookId, flush, userId);
 		const visibility = () => { if (document.hidden) flush(); };
@@ -54,6 +65,7 @@ export function useReadingSave(bookId: number, userId?: number) {
 			document.removeEventListener('visibilitychange', visibility);
 		};
 	}, [bookId, flush, userId]);
+
 	const queueSave = useCallback(
 		(position: number | string, readStatus: Exclude<ReadStatus, 'unread'> = 'reading', progressPercentage?: number | null, generation = readingInfoApi.getReadingSaveGeneration?.()) => {
 			latest.current = { position, readStatus, progressPercentage, generation };
@@ -66,9 +78,11 @@ export function useReadingSave(bookId: number, userId?: number) {
 		},
 		[flush],
 	);
+
 	const save = useCallback((position: number | string, readStatus: Exclude<ReadStatus, 'unread'> = 'reading', progressPercentage?: number | null) => {
 		queueSave(position, readStatus, progressPercentage);
 	}, [queueSave]);
+
 	const retry = useCallback(() => {
 		if (latest.current) {
 			const { position, readStatus, progressPercentage, generation } = latest.current;
@@ -76,5 +90,6 @@ export function useReadingSave(bookId: number, userId?: number) {
 			flush();
 		}
 	}, [flush, queueSave]);
-	return { save, status, retry };
+
+	return { save, status, retry, confirmInitialStatus };
 }
