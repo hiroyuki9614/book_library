@@ -39,12 +39,17 @@ SNAPSHOT_SUPPORT_FILES = (
     b"scripts/staging/nginx-default.conf",
     *DOCKERFILE_INPUTS,
 )
-SNAPSHOT_TLS_FILES = frozenset((
+LEGACY_TLS_FILES = frozenset((
     b"scripts/staging/compose-tls.yaml",
     b"scripts/staging/nginx-tls.conf",
     b"scripts/staging/nginx-tls-default.conf",
     b"scripts/staging/nginx-tls-locations.conf",
     b"scripts/staging/tls-ingress.py",
+))
+SNAPSHOT_TLS_FILES = LEGACY_TLS_FILES | frozenset((
+    b"scripts/staging/owner-serve-cas.py",
+    b"scripts/staging/owner-command.py",
+    b"scripts/staging/tls-prepare.py",
 ))
 
 
@@ -379,7 +384,7 @@ def _snapshot_entries(
         selected[path] = entry
 
     tls_entries = SNAPSHOT_TLS_FILES.intersection(tree)
-    if tls_entries and tls_entries != SNAPSHOT_TLS_FILES:
+    if tls_entries and tls_entries not in (LEGACY_TLS_FILES, SNAPSHOT_TLS_FILES):
         raise SourceTreeBlocked("The optional staging TLS source bundle is incomplete")
     for path in tls_entries:
         selected[path] = tree[path]

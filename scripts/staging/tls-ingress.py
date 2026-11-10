@@ -33,12 +33,15 @@ TLS_CONFIG_PATHS = (
     Path("scripts/staging/nginx-tls-locations.conf"),
 )
 TAILSCALE_VERSION = "1.104.5"
+TAILSCALE_BUILD = "1.104.5-t788384763-gd9218e278"
 TLS_STATE_FIELDS = {
     "schema", "source_sha", "prior_application_sha", "host", "principal", "uid", "project",
     "retained_state_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256", "tls_config_sha256",
-    "funnel_enabled", "unknown_sni",
+    "funnel_enabled", "unknown_sni", "owner_plan_sha256",
 }
 BRI_PATH = "/bri-referee-pilot-comp.png"
+EXPECTED_SERVE_ETAG = "031c8cd8bbc73f27c4b6a503142d1dd0a0bc0e0f1536a497041a4faa0cd1de5e"
+BRI_FILE = "/home/hiroyuki/tailscale-share/bri-referee-pilot-comp.png"
 
 
 class TlsIngressError(Exception):
@@ -115,6 +118,13 @@ def validate_original_serve_config(raw: bytes) -> dict[str, Any]:
     """Validate the exact legacy HTTPS 443 + BRI baseline before phase A."""
     config = validate_serve_config(raw)
     tcp, web = config["TCP"], config["Web"]
+    if set(config) != {"TCP", "Web"}:
+        raise TlsIngressError("Serve baseline contains unknown node-level scopes")
+    if set(tcp) != {"443"} or len(web) != 1:
+        raise TlsIngressError("Serve baseline must contain only TCP 443 and one legacy Web host")
+    if web != {"fedora-worker.tail63cd2d.ts.net:443":
+               {"Handlers": {BRI_PATH: {"Path": BRI_FILE}}}}:
+        raise TlsIngressError("Serve baseline must retain the exact reviewed BRI file handler")
     bri_handlers = []
     for hostname_port, server in web.items():
         if not isinstance(hostname_port, str) or not hostname_port.endswith(":443") or not isinstance(server, dict):
@@ -122,11 +132,15 @@ def validate_original_serve_config(raw: bytes) -> dict[str, Any]:
         handlers = server.get("Handlers", {})
         if isinstance(handlers, dict) and BRI_PATH in handlers:
             bri_handlers.append((hostname_port, handlers[BRI_PATH]))
-    if len(bri_handlers) != 1 or not isinstance(bri_handlers[0][1], dict):
+    if len(bri_handlers) != 1 or len(web) != 1 or not isinstance(bri_handlers[0][1], dict):
         raise TlsIngressError("Exactly one existing BRI Serve file handler must be retained")
-    if not isinstance(bri_handlers[0][1].get("Path"), str):
+    server = next(iter(web.values()))
+    handlers = server.get("Handlers") if isinstance(server, dict) else None
+    if (not isinstance(server, dict) or set(server) != {"Handlers"} or not isinstance(handlers, dict)
+            or set(handlers) != {BRI_PATH} or set(bri_handlers[0][1]) != {"Path"}
+            or not isinstance(bri_handlers[0][1].get("Path"), str)):
         raise TlsIngressError("Existing BRI Serve handler path is malformed")
-    if not isinstance(tcp.get("443"), dict) or tcp["443"].get("HTTPS") is not True:
+    if not isinstance(tcp.get("443"), dict) or set(tcp["443"]) != {"HTTPS"} or tcp["443"].get("HTTPS") is not True:
         raise TlsIngressError("Original Tailscale HTTPS listener on 443 is not present")
     return config
 
@@ -134,6 +148,7 @@ def validate_original_serve_config(raw: bytes) -> dict[str, Any]:
 def build_tls_binding(
     *, source_sha: str, prior_application_sha: str, retained_manifest: dict[str, Any],
     serve_config: bytes, serve_etag: str, certificate_sha256: str, tls_config: bytes,
+    owner_plan_sha256: str, tls_config_sha256: str | None = None,
 ) -> dict[str, str]:
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise TlsIngressError("Current source SHA must be a full lowercase Git SHA")
@@ -151,13 +166,20 @@ def build_tls_binding(
         raise TlsIngressError("Certificate fingerprint does not match the owner-issued leaf")
     if not re.fullmatch(r"[0-9a-f]{64}", serve_etag):
         raise TlsIngressError("Tailscale Serve ETag is malformed")
+    if serve_etag != EXPECTED_SERVE_ETAG:
+        raise TlsIngressError("Tailscale Serve ETag differs from the owner-reviewed baseline")
+    if not re.fullmatch(r"[0-9a-f]{64}", owner_plan_sha256):
+        raise TlsIngressError("Owner plan digest is malformed")
+    if tls_config_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", tls_config_sha256):
+        raise TlsIngressError("TLS configuration bundle digest is malformed")
     return {
         "prior_application_sha": prior_application_sha,
         "retained_state_sha256": sha256(canonical_json(retained_manifest)),
         "serve_config_sha256": sha256(serve_config),
         "serve_etag": serve_etag,
         "certificate_sha256": certificate_sha256,
-        "tls_config_sha256": sha256(tls_config),
+        "tls_config_sha256": tls_config_sha256 or sha256(tls_config),
+        "owner_plan_sha256": owner_plan_sha256,
     }
 
 
@@ -282,7 +304,7 @@ def tls_state_sha256(state: dict[str, Any]) -> str:
     if (not re.fullmatch(r"[0-9a-f]{40}", state.get("source_sha", ""))
             or state.get("prior_application_sha") != PRIOR_APPLICATION_SHA
             or any(not re.fullmatch(r"[0-9a-f]{64}", state.get(name, "")) for name in (
-                "retained_state_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256", "tls_config_sha256"
+                "retained_state_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256", "tls_config_sha256", "owner_plan_sha256"
             ))
             or state.get("certificate_sha256") != EXPECTED_CERT_SHA256):
         raise TlsIngressError("TLS state hashes do not match the fixed ingress contract")
@@ -483,6 +505,5 @@ def restore_original(client: TailscaleServeClient, original_raw: bytes, original
 
 def verify_tailscale_version(version_text: str) -> None:
     first_line = version_text.splitlines()[0] if version_text.splitlines() else ""
-    match = re.search(r"(?:^|\s)(\d+\.\d+\.\d+)(?:\s|$)", first_line)
-    if not match or match.group(1) != TAILSCALE_VERSION:
-        raise TlsIngressError("Tailscale LocalAPI client source is pinned to version 1.104.5")
+    if first_line.strip() != TAILSCALE_BUILD:
+        raise TlsIngressError("Tailscale LocalAPI client build differs from the pinned 1.104.5 build")

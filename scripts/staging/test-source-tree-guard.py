@@ -78,6 +78,23 @@ class SourceTreeGuardTests(unittest.TestCase):
         )
         self.revision = self.commit()
 
+    def test_legacy_tls_snapshot_cannot_authorize_new_prepare(self):
+        for path in guard.LEGACY_TLS_FILES:
+            (self.root / path.decode()).write_text("# legacy TLS fixture\n")
+        revision = self.commit()
+        tree = guard.parse_tree(self.root, revision)
+        selected = guard._snapshot_entries(self.root, tree)
+        self.assertTrue(guard.LEGACY_TLS_FILES.issubset(selected))
+        with self.assertRaises(guard.SourceTreeBlocked):
+            guard.require_tls_bundle(tree)
+
+    def test_partial_new_entrypoint_bundle_is_rejected(self):
+        for path in guard.LEGACY_TLS_FILES | {b"scripts/staging/tls-prepare.py"}:
+            (self.root / path.decode()).write_text("# partial TLS fixture\n")
+        revision = self.commit()
+        with self.assertRaises(guard.SourceTreeBlocked):
+            guard._snapshot_entries(self.root, guard.parse_tree(self.root, revision))
+
     def tearDown(self) -> None:
         self.temporary.cleanup()
 

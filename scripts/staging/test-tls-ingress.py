@@ -24,8 +24,6 @@ def original_config():
         "Web": {"fedora-worker.tail63cd2d.ts.net:443": {
             "Handlers": {"/bri-referee-pilot-comp.png": {"Path": "/home/hiroyuki/tailscale-share/bri-referee-pilot-comp.png"}}
         }},
-        "AllowFunnel": {},
-        "UnrelatedNodeField": {"keep": ["all", "values"]},
     }
 
 
@@ -75,7 +73,6 @@ class TlsIngressTests(unittest.TestCase):
         current = f"{tls.TAILNET_HOST}:8443"
         self.assertEqual(a["Web"][stale], original_config()["Web"][stale])
         self.assertEqual(a["Web"][current], original_config()["Web"][stale])
-        self.assertEqual(a["UnrelatedNodeField"], original_config()["UnrelatedNodeField"])
         b = json.loads(tls.plan_phase_b(tls.canonical_json(a)))
         self.assertNotIn("443", b["TCP"])
         self.assertNotIn(stale, b["Web"])
@@ -90,19 +87,55 @@ class TlsIngressTests(unittest.TestCase):
         connection = tls._UnixHTTPConnection(Path("/unused.sock"), 1)
         self.assertEqual(connection.host, "local-tailscaled.sock")
 
+    def test_localapi_client_requires_the_exact_observed_build(self):
+        tls.verify_tailscale_version(tls.TAILSCALE_BUILD + "\n")
+        with self.assertRaises(tls.TlsIngressError):
+            tls.verify_tailscale_version("1.104.5\n")
+
     def test_invalid_baseline_funnel_and_occupied_ports_reject(self):
         config = original_config()
+        config["AllowFunnel"] = {}
         config["AllowFunnel"]["443"] = True
         with self.assertRaises(tls.TlsIngressError):
             tls.validate_serve_config(json.dumps(config).encode())
         config = original_config()
         config["TCP"]["8443"] = {"HTTPS": True}
-        with self.assertRaisesRegex(tls.TlsIngressError, "already occupied"):
+        with self.assertRaisesRegex(tls.TlsIngressError, "Serve baseline"):
             tls.plan_phase_a(json.dumps(config).encode())
         config = original_config()
         config["Web"]["unrelated:443"] = {"Handlers": {"/": {"Proxy": "http://localhost"}}}
-        with self.assertRaisesRegex(tls.TlsIngressError, "single BRI"):
+        with self.assertRaisesRegex(tls.TlsIngressError, "TCP 443 and one legacy Web host"):
             tls.plan_phase_a(json.dumps(config).encode())
+
+    def test_serve_baseline_rejects_extra_scopes_handlers_and_siblings(self):
+        for mutate in (
+            lambda config: config.update({"UnrelatedNodeField": {"unsafe": True}}),
+            lambda config: config["Web"].__setitem__("other:443", {"Handlers": {"/": {"Proxy": "http://localhost"}}}),
+            lambda config: config["Web"]["fedora-worker.tail63cd2d.ts.net:443"].update({"Proxy": "http://localhost"}),
+        ):
+            config = original_config()
+            mutate(config)
+            with self.assertRaises(tls.TlsIngressError):
+                tls.validate_original_serve_config(json.dumps(config).encode())
+
+    def test_actual_two_key_serve_baseline_and_pinned_etag_are_required(self):
+        self.assertEqual(set(tls.validate_original_serve_config(original_bytes())), {"TCP", "Web"})
+        config = original_config()
+        config["AllowFunnel"] = {}
+        with self.assertRaises(tls.TlsIngressError):
+            tls.validate_original_serve_config(json.dumps(config).encode())
+        manifest = {
+            "schema": "belib-staging-retained-state/v1", "project": tls.PROJECT,
+            "prior_source_sha": "6963103fd6bec332b4057457d07b890fe5c11e73",
+            "containers": [{"service": service,
+                "id": "9ab9d141599e8b33f51a1e4e9bcd16d66e92b9d134889014d9d9bd618b42f73d" if service == "db" else service * 64}
+                for service in ("db", "backend", "frontend", "nginx")],
+            "volumes": [{"name": name} for name in ("belib-isolated-i5_staging-postgres-data", "belib-isolated-i5_staging-book-files")],
+        }
+        with self.assertRaises(tls.TlsIngressError):
+            tls.build_tls_binding(source_sha="a" * 40, prior_application_sha=tls.PRIOR_APPLICATION_SHA,
+                retained_manifest=manifest, serve_config=original_bytes(), serve_etag="b" * 64,
+                certificate_sha256=tls.EXPECTED_CERT_SHA256, tls_config=b"x", owner_plan_sha256="c" * 64)
 
     def test_fresh_tls_approval_tuple_binds_source_serve_etag_certificate_and_resources(self):
         manifest = {
@@ -117,8 +150,9 @@ class TlsIngressTests(unittest.TestCase):
         }
         binding = tls.build_tls_binding(
             source_sha="a" * 40, prior_application_sha=tls.PRIOR_APPLICATION_SHA,
-            retained_manifest=manifest, serve_config=original_bytes(), serve_etag="b" * 64,
+            retained_manifest=manifest, serve_config=original_bytes(), serve_etag=tls.EXPECTED_SERVE_ETAG,
             certificate_sha256=tls.EXPECTED_CERT_SHA256, tls_config=b"nginx and compose bytes",
+            owner_plan_sha256="c" * 64,
         )
         state = tls.make_tls_state(binding, "a" * 40)
         state_digest = tls.tls_state_sha256(state)

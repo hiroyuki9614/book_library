@@ -35,6 +35,7 @@ MAX_ENVELOPE_BYTES = 16 * 1024
 MAX_GRANT_SECONDS = 300
 POLL_SECONDS = 300
 TLS_OPERATION = "tls-ingress"
+TLS_SERVE_ETAG = "031c8cd8bbc73f27c4b6a503142d1dd0a0bc0e0f1536a497041a4faa0cd1de5e"
 
 
 class ApprovalError(Exception):
@@ -142,13 +143,13 @@ def validate_payload(
     if operation == TLS_OPERATION:
         if tls_binding is None or set(tls_binding) != {
             "prior_application_sha", "retained_state_sha256", "serve_config_sha256", "serve_etag",
-            "certificate_sha256", "tls_config_sha256", "tls_state_sha256",
+            "certificate_sha256", "tls_config_sha256", "owner_plan_sha256", "tls_state_sha256",
         }:
             raise ApprovalError("TLS approval requires the exact custom-ingress state tuple")
         if (not re.fullmatch(r"[0-9a-f]{40}", tls_binding["prior_application_sha"])
                 or any(not re.fullmatch(r"[0-9a-f]{64}", tls_binding[name]) for name in (
-                    "retained_state_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256", "tls_config_sha256", "tls_state_sha256"
-                ))):
+                    "retained_state_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256", "tls_config_sha256", "owner_plan_sha256", "tls_state_sha256"
+                )) or tls_binding["serve_etag"] != TLS_SERVE_ETAG):
             raise ApprovalError("TLS state binding is malformed")
         if any(payload[name] != value for name, value in tls_binding.items()):
             raise ApprovalError("TLS approval does not match the current retained state")

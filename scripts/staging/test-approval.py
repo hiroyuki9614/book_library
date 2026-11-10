@@ -129,9 +129,10 @@ class ApprovalTests(unittest.TestCase):
             "prior_application_sha": "8" * 40,
             "retained_state_sha256": "1" * 64,
             "serve_config_sha256": "2" * 64,
-            "serve_etag": "3" * 64,
+            "serve_etag": approval.TLS_SERVE_ETAG,
             "certificate_sha256": "4" * 64,
             "tls_config_sha256": "5" * 64,
+            "owner_plan_sha256": "7" * 64,
             "tls_state_sha256": "6" * 64,
         }
         envelope = self.tls_envelope(binding)
@@ -139,6 +140,7 @@ class ApprovalTests(unittest.TestCase):
             self.assertEqual(approval.verify_envelope(
                 envelope, "a" * 40, "tls-ingress", "c" * 64, "d" * 64, tls_binding=binding), "c" * 64)
         for name, value in (("serve_etag", "6" * 64), ("certificate_sha256", "7" * 64),
+                            ("owner_plan_sha256", "8" * 64),
                             ("project", "production")):
             with self.subTest(name=name), self.assertRaises(approval.ApprovalError):
                 self.verify_tls_tamper(binding, name, value)

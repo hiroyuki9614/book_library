@@ -167,7 +167,14 @@ jobs:
           /usr/bin/python3 -I -B scripts/staging/test-launch-guard.py
           /usr/bin/python3 -I -B scripts/staging/test-seed-wrapper.py
           /usr/bin/python3 -I -B scripts/staging/test-source-tree-guard.py
+          /usr/bin/python3 -I -B scripts/staging/test-tls-ingress.py
+          /usr/bin/python3 -I -B scripts/staging/test-owner-serve-cas.py
+          /usr/bin/python3 -I -B scripts/staging/test-owner-command.py
+          /usr/bin/python3 -I -B scripts/staging/test-tls-prepare.py
           bash scripts/staging/test-compose-isolation.sh
+
+      - name: Validate pinned nginx TLS syntax with synthetic certificate
+        run: /usr/bin/python3 -I -B scripts/staging/check-nginx-tls.py
 
       - name: Verify staging Compose isolation
         env:
