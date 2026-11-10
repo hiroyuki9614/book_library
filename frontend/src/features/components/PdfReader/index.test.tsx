@@ -49,7 +49,7 @@ vi.mock('@embedpdf/plugin-viewport/react', () => ({
 }));
 vi.mock('@embedpdf/plugin-scroll/react', () => ({
 	ScrollPluginPackage: {},
-	useScrollCapability: () => ({ provides: { onLayoutReady: (callback: (event: {documentId:string;totalPages:number}) => void) => { queueMicrotask(() => callback({documentId:'doc-1',totalPages:5})); return () => {}; }, forDocument: () => mocks.scrollProvides } }),
+	useScrollCapability: () => ({ provides: { onLayoutReady: (callback: (event: {documentId:string;totalPages:number}) => void) => { queueMicrotask(() => callback({documentId:'doc-1',totalPages:mocks.scrollState.totalPages})); return () => {}; }, forDocument: () => mocks.scrollProvides } }),
 	ScrollStrategy: { Vertical: 'vertical' },
 	useScroll: () => mocks.useScroll(),
 	Scroller: ({ renderPage }: { renderPage: (value: { width: number; height: number; pageIndex: number }) => React.ReactNode }) => (
@@ -129,6 +129,31 @@ describe('PdfReader navigation, outline, and progress', () => {
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 	});
 
+
+
+	test('レイアウト準備後に復元先の状態が遅れても古いページを保存せず、復元後の操作だけ保存する', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		await new Promise((resolve) => setTimeout(resolve, 850));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await new Promise((resolve) => setTimeout(resolve, 850));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		mocks.scrollState.currentPage = 11;
+		mocks.viewportScrollState.currentPage = 11;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92), { timeout: 1_500 });
+	});
 
 	test.each([
 		{ currentPage: 1, totalPages: 7, expected: '1 / 7 ページ 14%' },

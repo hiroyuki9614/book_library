@@ -128,9 +128,9 @@ const usePageNavigation = ({ bookId, documentId, initialPage, initialReadingInfo
 			if (event.documentId !== documentId || restoredDocument.current === documentId) return;
 			const page = Math.max(1, Math.min(initialPage, event.totalPages));
 			restoredDocument.current = documentId;
-			// The restored target is already authoritative. Do not PATCH it again;
-			// only a subsequent user-visible page change should be persisted.
-			lastPersistedPage.current = page;
+			// Do not persist the old scroll-state snapshot while restoration is
+			// pending. Wait until the scroll capability reports the target page.
+			lastPersistedPage.current = null;
 			setTargetPage(page);
 			scrollCapability.forDocument(documentId).scrollToPage({ pageNumber: page, behavior: 'auto' });
 		});
@@ -138,7 +138,13 @@ const usePageNavigation = ({ bookId, documentId, initialPage, initialReadingInfo
 
 	useEffect(() => {
 		if (targetPage === null || restoredDocument.current !== documentId || state.totalPages < 1) return;
-		if (lastPersistedPage.current === null && state.currentPage !== targetPage) return;
+		if (lastPersistedPage.current === null) {
+			// Layout-ready can precede the scroll update. Wait until the saved
+			// target is observed, without PATCHing the initial page or target.
+			if (state.currentPage !== targetPage) return;
+			lastPersistedPage.current = targetPage;
+			return;
+		}
 		if (lastPersistedPage.current === state.currentPage) return;
 		lastPersistedPage.current = state.currentPage;
 		const readStatus = state.currentPage >= state.totalPages ? 'completed' : 'reading';
