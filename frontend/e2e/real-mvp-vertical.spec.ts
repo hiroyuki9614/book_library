@@ -1,6 +1,7 @@
-import { expect, test, type Page, type Request, type Response } from '@playwright/test';
+import { expect, test, type Frame, type Page, type Request, type Response } from '@playwright/test';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { createHomeProgressResponseCapture } from '../src/e2e/homeProgressResponses';
 
 const password = process.env.E2E_MVP_PASSWORD;
 const adminEmail = process.env.E2E_ADMIN_EMAIL;
@@ -65,78 +66,77 @@ async function readReadingInfo(page: Page, bookId: number) {
 }
 
 async function assertHomeProgress(page: Page, bookId: number, title: string, expected: 'measured' | 'unmeasured' = 'measured', navigation: 'home' | 'reload' = 'home') {
-	type ListPage = {
-		total: number;
-		page: number;
-		books: Array<{ id: number; title: string; progressPercentage: number | null }>;
+	const capture = createHomeProgressResponseCapture((request) =>
+		request.isNavigationRequest() && request.frame() === page.mainFrame());
+	const onRequest = (request: Request) => capture.onRequest(request);
+	const onResponse = (response: Response) => capture.onResponse(response);
+	const onFrameNavigated = (frame: Frame) => {
+		if (frame === page.mainFrame()) capture.onMainFrameNavigated();
 	};
-	const responses = new Map<number, Response>();
-	const onResponse = (response: Response) => {
-		const url = new URL(response.url());
-		if (response.request().method() !== 'GET' || url.pathname !== '/api/v1/books') return;
-		if (url.searchParams.get('limit') !== '100' || !/^\d+$/.test(url.searchParams.get('page') ?? '')) return;
-		const requestedPage = Number(url.searchParams.get('page'));
-		responses.set(requestedPage, response);
-	};
+	page.on('request', onRequest);
 	page.on('response', onResponse);
-	if (navigation === 'reload') await page.reload();
-	else await page.goto('/');
-	await expect.poll(() => responses.has(1), { timeout: 30_000 }).toBe(true);
-	const firstUrl = new URL(responses.get(1)!.url());
-	expect(firstUrl.origin, 'Home shelf list must come from the configured local backend').toBe('http://localhost:3000');
-	expect(responses.get(1)!.status(), 'Books page 1 must return HTTP 200').toBe(200);
-	const firstBody = await responses.get(1)!.json() as ListPage;
-	expect(firstBody.page, 'Books response page must match its request').toBe(1);
-	const total = firstBody.total;
-	expect(total).toBeGreaterThan(0);
-	const expectedPages = Math.ceil(total / 100);
-	await expect.poll(() => responses.size, { timeout: 30_000 }).toBe(expectedPages);
-	page.off('response', onResponse);
-	const listPages = await Promise.all([...responses.entries()]
-		.sort(([a], [b]) => a - b)
-		.map(async ([requestedPage, response]) => {
-			const url = new URL(response.url());
-			expect(url.origin, `Books page ${requestedPage} must come from the configured local backend`).toBe('http://localhost:3000');
-			expect(response.status(), `Books page ${requestedPage} must return HTTP 200`).toBe(200);
-			if (requestedPage === 1) return firstBody;
-			const body = await response.json() as ListPage;
+	page.on('framenavigated', onFrameNavigated);
+	try {
+		if (navigation === 'reload') await page.reload();
+		else await page.goto('/');
+		await expect.poll(() => capture.pages.some(({ requestedPage }) => requestedPage === 1), { timeout: 30_000 }).toBe(true);
+		const firstPage = capture.pages.find(({ requestedPage }) => requestedPage === 1)!;
+		const firstUrl = new URL(firstPage.url);
+		expect(firstUrl.origin, 'Home shelf list must come from the configured local backend').toBe('http://localhost:3000');
+		expect(firstPage.status, 'Books page 1 must return HTTP 200').toBe(200);
+		expect(firstPage.body.page, 'Books response page must match its request').toBe(1);
+		const total = firstPage.body.total;
+		expect(total).toBeGreaterThan(0);
+		const expectedPages = Math.ceil(total / 100);
+		await expect.poll(() => new Set(capture.pages.map(({ requestedPage }) => requestedPage)).size, { timeout: 30_000 }).toBe(expectedPages);
+		const capturedPages = capture.pages;
+		expect(capturedPages).toHaveLength(expectedPages);
+		const listPages = capturedPages.map(({ requestedPage, url, status, body }) => {
+			expect(new URL(url).origin, `Books page ${requestedPage} must come from the configured local backend`).toBe('http://localhost:3000');
+			expect(status, `Books page ${requestedPage} must return HTTP 200`).toBe(200);
 			expect(body.page, 'Books response page must match its request').toBe(requestedPage);
 			return body;
-		}));
+		});
 
-	listPages.sort((a, b) => a.page - b.page);
-	expect(listPages.map((result) => result.page)).toEqual(Array.from({ length: expectedPages }, (_, index) => index + 1));
-	expect(listPages.every((result) => result.total === total)).toBe(true);
-	const books = listPages.flatMap((result) => result.books);
-	expect(books).toHaveLength(total);
-	expect(new Set(books.map((book) => book.id)).size, 'Books list must not contain duplicate IDs across API pages').toBe(total);
-	const savedBook = books.find((book) => book.id === bookId);
-	expect(savedBook, `${title} must be present in the authenticated Home list`).toBeDefined();
-	expect(savedBook!.title).toBe(title);
-	if (expected === 'unmeasured') {
-		expect(savedBook!.progressPercentage, `${title} must remain server-reported as unmeasured`).toBeNull();
-	} else {
-		expect(typeof savedBook!.progressPercentage).toBe('number');
-		expect(Number.isFinite(savedBook!.progressPercentage)).toBe(true);
-	}
-	const measured = books
-		.map((book) => book.progressPercentage)
-		.filter((progress): progress is number => typeof progress === 'number' && Number.isFinite(progress));
-	const averageLabel = measured.length === 0
-		? `未計測（計測済み0/${total}冊）`
-		: `${Math.round(measured.reduce((sum, progress) => sum + progress, 0) / measured.length)}%（計測済み${measured.length}/${total}冊）`;
+		listPages.sort((a, b) => a.page - b.page);
+		expect(listPages.map((result) => result.page)).toEqual(Array.from({ length: expectedPages }, (_, index) => index + 1));
+		expect(listPages.every((result) => result.total === total)).toBe(true);
+		const books = listPages.flatMap((result) => result.books);
+		expect(books).toHaveLength(total);
+		expect(new Set(books.map((book) => book.id)).size, 'Books list must not contain duplicate IDs across API pages').toBe(total);
+		const savedBook = books.find((book) => book.id === bookId);
+		expect(savedBook, `${title} must be present in the authenticated Home list`).toBeDefined();
+		expect(savedBook!.title).toBe(title);
+		if (expected === 'unmeasured') {
+			expect(savedBook!.progressPercentage, `${title} must remain server-reported as unmeasured`).toBeNull();
+		} else {
+			expect(typeof savedBook!.progressPercentage).toBe('number');
+			expect(Number.isFinite(savedBook!.progressPercentage)).toBe(true);
+		}
+		const measured = books
+			.map((book) => book.progressPercentage)
+			.filter((progress): progress is number => typeof progress === 'number' && Number.isFinite(progress));
+		const averageLabel = measured.length === 0
+			? `未計測（計測済み0/${total}冊）`
+			: `${Math.round(measured.reduce((sum, progress) => sum + progress, 0) / measured.length)}%（計測済み${measured.length}/${total}冊）`;
 
-	await expect(page.getByText(averageLabel, { exact: true }).first()).toBeVisible();
-	await page.getByRole('textbox', { name: '書籍を検索' }).fill(title);
-	const row = page.getByRole('link', { name: `${title}を読む` });
-	if (expected === 'unmeasured') {
-		await expect(row.getByText('未計測', { exact: true })).toBeVisible();
-		await expect(row.getByRole('progressbar')).toHaveCount(0);
-	} else {
-		const savedProgress = savedBook!.progressPercentage as number;
-		await expect(row.getByText(`${Math.round(savedProgress)}%`, { exact: true })).toBeVisible();
-		await expect(row.getByRole('progressbar', { name: `${title} の読書進捗` }))
-			.toHaveAttribute('aria-valuenow', String(Math.round(savedProgress)));
+		await expect(page.getByText(averageLabel, { exact: true }).first()).toBeVisible();
+		await page.getByRole('textbox', { name: '書籍を検索' }).fill(title);
+		const row = page.getByRole('link', { name: `${title}を読む` });
+		if (expected === 'unmeasured') {
+			await expect(row.getByText('未計測', { exact: true })).toBeVisible();
+			await expect(row.getByRole('progressbar')).toHaveCount(0);
+		} else {
+			const savedProgress = savedBook!.progressPercentage as number;
+			await expect(row.getByText(`${Math.round(savedProgress)}%`, { exact: true })).toBeVisible();
+			await expect(row.getByRole('progressbar', { name: `${title} の読書進捗` }))
+				.toHaveAttribute('aria-valuenow', String(Math.round(savedProgress)));
+		}
+	} finally {
+		page.off('request', onRequest);
+		page.off('response', onResponse);
+		page.off('framenavigated', onFrameNavigated);
+		capture.dispose();
 	}
 }
 
