@@ -1,11 +1,11 @@
 #!/usr/bin/env -S /usr/bin/python3 -I -B
-"""Gate every i5 staging Compose operation on the same reviewed source and handoff."""
+"""Gate the bounded i5 staging deployment on one signed external authorization."""
 
 from __future__ import annotations
 
 import argparse
-import fcntl
 import importlib.util
+import fcntl
 import json
 import os
 import pwd
@@ -14,6 +14,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Mapping
@@ -34,6 +35,7 @@ PYTHON_CLI = "/usr/bin/python3"
 SAFE_PATH = "/usr/bin:/bin"
 CONTEXT_NAME = "belib-i5-staging-rootless"
 LOCK_PATH = Path("/tmp/belib-staging-cd-belib-isolated-i5.lock")
+ADMISSION_WORKTREE_PREFIX = Path("/home/hiroyuki/workspaces/belib-i5-admission-")
 SOURCE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 
 OPERATION_ARGS: dict[str, tuple[str, ...]] = {
@@ -46,6 +48,16 @@ OPERATION_ARGS: dict[str, tuple[str, ...]] = {
 
 class LaunchBlocked(Exception):
     pass
+
+
+def load_approval_module():
+    path = Path(__file__).with_name("approval.py")
+    spec = importlib.util.spec_from_file_location("belib_staging_approval", path)
+    if spec is None or spec.loader is None:
+        raise LaunchBlocked("The signed staging approval verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def load_seed_module():
@@ -101,13 +113,124 @@ def reject_caller_environment(environment: Mapping[str, str]) -> None:
 
 
 def validate_handoff_receipt(receipt: object, source_sha: str) -> str:
-    """Reject local claims until an independent supervisor verifier is configured."""
+    """Legacy handoff JSON remains non-authoritative; bootstrap uses signed challenge response."""
     if not SOURCE_SHA_PATTERN.fullmatch(source_sha):
         raise LaunchBlocked("Source revision must be a full lowercase Git SHA")
     _ = receipt
     raise LaunchBlocked(
         "No trusted independent staging supervisor verifier is configured; local receipt claims cannot authorize staging"
     )
+
+
+def run_deploy_transaction(
+    *,
+    compose,
+    env_file: Path,
+    build_root: Path,
+    environment: Mapping[str, str],
+    env_fd: int,
+    seed,
+    source_sha: str,
+    port: str,
+    stage_values: Mapping[str, str],
+    docker_endpoint: Path,
+    runner=subprocess.run,
+    sleep=time.sleep,
+    monotonic=time.monotonic,
+    report=print,
+) -> int:
+    """Run ordered phases; on failure stop only this project's services, preserving volumes."""
+    if len(compose) < 6 or compose[0:5] != [DOCKER_CLI, "--context", CONTEXT_NAME, "compose", "-p"] or compose[5] != COMPOSE_PROJECT:
+        raise LaunchBlocked("Deployment transaction Compose target is not the fixed i5 staging project")
+    if not re.fullmatch(r"(?:[1-9][0-9]{3,4})", port) or not 1024 <= int(port) <= 65535:
+        raise LaunchBlocked("Deployment transaction loopback port is invalid")
+    completed: list[str] = []
+    db_start_attempted = False
+
+    def phase(name: str, command: list[str], timeout: int = 900) -> None:
+        report(f"STAGING_PHASE_START {name}", file=sys.stderr)
+        result = runner(command, cwd=build_root, env=dict(environment), stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                        pass_fds=(env_fd,), timeout=timeout)
+        if result.returncode != 0:
+            report(f"STAGING_PHASE_FAIL {name}", file=sys.stderr)
+            raise LaunchBlocked(f"Staging phase failed: {name}")
+        completed.append(name)
+        report(f"STAGING_PHASE_PASS {name}", file=sys.stderr)
+
+    def wait_db() -> None:
+        deadline = monotonic() + 180
+        while monotonic() < deadline:
+            result = runner([*compose, "ps", "db", "--format", "json"], cwd=build_root,
+                            env=dict(environment), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True, check=False, pass_fds=(env_fd,), timeout=15)
+            try:
+                rows = []
+                for line in result.stdout.splitlines():
+                    if line.strip():
+                        decoded = json.loads(line)
+                        rows.extend(decoded if isinstance(decoded, list) else [decoded])
+                if result.returncode == 0 and any(
+                    isinstance(row, dict) and row.get("Service", "db") == "db" and row.get("Health") == "healthy"
+                    for row in rows
+                ):
+                    completed.append("db-healthy")
+                    report("STAGING_PHASE_PASS db-healthy", file=sys.stderr)
+                    return
+            except (json.JSONDecodeError, AttributeError):
+                pass
+            sleep(2)
+        report("STAGING_PHASE_FAIL db-health", file=sys.stderr)
+        raise LaunchBlocked("Staging phase timed out: db-health")
+
+    try:
+        db_start_attempted = True
+        phase("db-start", [*compose, "up", "-d", "db"], 300)
+        wait_db()
+        phase("migration", [*compose, "--profile", "migration", "run", "--rm", "migrate"])
+        report("STAGING_PHASE_START synthetic-seed", file=sys.stderr)
+        if seed.main(
+            invoked_by_launcher=True, build_root=build_root, source_sha=source_sha,
+            admitted_env_fd=env_fd, stage_values=stage_values, docker_cli=DOCKER_CLI,
+            docker_endpoint=docker_endpoint, docker_environment=environment,
+        ) != 0:
+            report("STAGING_PHASE_FAIL synthetic-seed", file=sys.stderr)
+            raise LaunchBlocked("Staging phase failed: synthetic-seed")
+        completed.append("synthetic-seed")
+        report("STAGING_PHASE_PASS synthetic-seed", file=sys.stderr)
+        phase("app-start", [*compose, "up", "-d", "--build", "backend", "frontend", "nginx"], 1800)
+        deadline = monotonic() + 120
+        health_url = f"http://127.0.0.1:{port}/health"
+        while monotonic() < deadline:
+            result = runner(["/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "5", health_url],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            check=False, timeout=7, env={"PATH": SAFE_PATH, "HOME": str(EXPECTED_HOME)})
+            if result.returncode == 0:
+                completed.append("http-health")
+                report("STAGING_PHASE_PASS http-health", file=sys.stderr)
+                report("STAGING_TRANSACTION_PASS", file=sys.stderr)
+                return 0
+            sleep(2)
+        report("STAGING_PHASE_FAIL http-health", file=sys.stderr)
+        raise LaunchBlocked("Staging phase timed out: http-health")
+    except (Exception, KeyboardInterrupt) as error:
+        report("STAGING_TRANSACTION_FAILED phases=" + ",".join(completed), file=sys.stderr)
+        if db_start_attempted:
+            try:
+                rollback = runner([*compose, "stop", "nginx", "frontend", "backend", "db"], cwd=build_root,
+                                  env=dict(environment), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, check=False, pass_fds=(env_fd,), timeout=120)
+                if rollback.returncode == 0:
+                    report("STAGING_ROLLBACK_PASS stopped-project-services-volumes-preserved", file=sys.stderr)
+                else:
+                    report("STAGING_ROLLBACK_FAILED manual-review-required", file=sys.stderr)
+            except (OSError, subprocess.SubprocessError):
+                report("STAGING_ROLLBACK_FAILED manual-review-required", file=sys.stderr)
+        if isinstance(error, LaunchBlocked):
+            raise
+        if isinstance(error, KeyboardInterrupt):
+            raise LaunchBlocked("Staging transaction was interrupted") from error
+        raise LaunchBlocked("Staging transaction could not be completed") from error
 
 
 def build_compose_command(
@@ -389,6 +512,47 @@ def _checked_repo_branch(seed, repo_root: Path) -> None:
         raise LaunchBlocked("Checked-out staging branch differs from the existing PR #103 claim")
 
 
+def _admission_source_root(seed, checkout: Path, source_sha: str) -> Path:
+    """Select only the fixed-name detached clean worktree sharing this checkout's Git store."""
+    if not SOURCE_SHA_PATTERN.fullmatch(source_sha):
+        raise LaunchBlocked("Source revision must be a full lowercase Git SHA")
+    candidate = ADMISSION_WORKTREE_PREFIX.parent / f"{ADMISSION_WORKTREE_PREFIX.name}{source_sha[:7]}"
+    try:
+        metadata = os.lstat(candidate)
+        resolved = candidate.resolve(strict=True)
+    except OSError as error:
+        raise LaunchBlocked("The exact-SHA detached staging admission worktree is unavailable") from error
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != EXPECTED_UID
+        or resolved != candidate
+        or candidate.parent != ADMISSION_WORKTREE_PREFIX.parent
+    ):
+        raise LaunchBlocked("The staging admission worktree path or ownership is unsafe")
+    try:
+        head = seed.read_source_sha(candidate)
+        candidate_common = _run(
+            seed.git_command(candidate, "rev-parse", "--path-format=absolute", "--git-common-dir"),
+            environment=seed.git_environment(), timeout=5,
+        )
+        checkout_common = _run(
+            seed.git_command(checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"),
+            environment=seed.git_environment(), timeout=5,
+        )
+        detached = _run(
+            seed.git_command(candidate, "symbolic-ref", "-q", "HEAD"),
+            environment=seed.git_environment(), timeout=5,
+        )
+        if head != source_sha or candidate_common.returncode != 0 or checkout_common.returncode != 0:
+            raise LaunchBlocked("The detached admission worktree does not match the selected SHA and Git store")
+        if candidate_common.stdout.strip() != checkout_common.stdout.strip() or detached.returncode == 0:
+            raise LaunchBlocked("The admission source must be a detached worktree of the claimed repository")
+    except seed.SeedWrapperError as error:
+        raise LaunchBlocked("The detached admission worktree failed exact-source checks") from error
+    return candidate
+
+
 def _run_preflight(repo_root: Path, env_file: Path) -> None:
     result = _run(
         [str(repo_root / "scripts/staging/preflight.sh"), str(env_file)],
@@ -406,7 +570,7 @@ def main(argv: list[str] | None = None) -> int:
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("--source-sha", required=True)
         parser.add_argument("--env-file", type=Path, required=True)
-        parser.add_argument("operation", choices=(*OPERATION_ARGS, "seed"))
+        parser.add_argument("operation", choices=("deploy",))
         args = parser.parse_args(argv)
 
         account = pwd.getpwuid(os.getuid())
@@ -423,27 +587,31 @@ def main(argv: list[str] | None = None) -> int:
         if args.env_file != EXPECTED_HOME / ".config/belib-staging/i5.env":
             raise LaunchBlocked("Use only the outside-repository i5 staging env file")
 
-        validate_handoff_receipt(None, args.source_sha)
-
         seed = load_seed_module()
         _checked_repo_branch(seed, repo_root)
 
         with project_lock():
+            approval = load_approval_module()
+            try:
+                approval.request_and_wait(args.source_sha, "deploy", uid=EXPECTED_UID, output=sys.stdout)
+            except approval.ApprovalError as error:
+                raise LaunchBlocked(str(error)) from error
+            source_root = _admission_source_root(seed, repo_root, args.source_sha)
             env_snapshot_fd = -1
             docker_config_temporary = None
             try:
-                source_guard = load_source_tree_guard(repo_root)
+                source_guard = load_source_tree_guard(source_root)
                 try:
-                    with source_guard.sha_derived_build_snapshot(repo_root, args.source_sha) as build_root:
+                    with source_guard.sha_derived_build_snapshot(source_root, args.source_sha) as build_root:
                         try:
-                            seed.validate_build_snapshot(build_root, repo_root, args.source_sha)
+                            seed.validate_build_snapshot(build_root, source_root, args.source_sha)
                         except seed.SeedWrapperError as error:
                             raise LaunchBlocked(str(error)) from error
 
-                        _run_preflight(repo_root, args.env_file)
+                        _run_preflight(source_root, args.env_file)
                         try:
                             env_snapshot_fd, values = seed.validate_staging_admission(
-                                repo_root, args.env_file, EXPECTED_UID
+                                source_root, args.env_file, EXPECTED_UID
                             )
                         except seed.SeedWrapperError as error:
                             raise LaunchBlocked(str(error)) from error
@@ -459,12 +627,6 @@ def main(argv: list[str] | None = None) -> int:
                             seed, EXPECTED_UID, EXPECTED_HOME, docker_config
                         )
                         os.set_inheritable(env_snapshot_fd, True)
-                        try:
-                            seed.verify_exact_source_context(repo_root, args.source_sha)
-                            seed.assert_clean_source_worktree(repo_root)
-                        except seed.SeedWrapperError as error:
-                            raise LaunchBlocked(str(error)) from error
-
                         _validate_compose_model(
                             build_root,
                             env_snapshot_fd,
@@ -472,37 +634,18 @@ def main(argv: list[str] | None = None) -> int:
                             docker_environment,
                             args.source_sha,
                         )
-                        _checked_repo_branch(seed, repo_root)
-                        try:
-                            seed.verify_exact_source_context(repo_root, args.source_sha)
-                            seed.assert_clean_source_worktree(repo_root)
-                        except seed.SeedWrapperError as error:
-                            raise LaunchBlocked(str(error)) from error
-
-                        if args.operation == "seed":
-                            return seed.main(
-                                invoked_by_launcher=True,
-                                build_root=build_root,
-                                source_sha=args.source_sha,
-                            )
-
                         env_path = Path(f"/proc/{os.getpid()}/fd/{env_snapshot_fd}")
-                        command = build_compose_command(
-                            args.operation,
-                            repo_root=build_root,
-                            env_file=env_path,
+                        compose = [
+                            DOCKER_CLI, "--context", CONTEXT_NAME, "compose", "-p", COMPOSE_PROJECT,
+                            "--project-directory", str(build_root), "--env-file", str(env_path),
+                            "-f", str(build_root / "compose.staging.yaml"),
+                        ]
+                        return run_deploy_transaction(
+                            compose=compose, env_file=args.env_file, build_root=build_root,
+                            environment=docker_environment, env_fd=env_snapshot_fd, seed=seed,
+                            source_sha=args.source_sha, port=values["BELIB_STAGE_PORT"],
+                            stage_values=values, docker_endpoint=endpoint,
                         )
-                        result = subprocess.run(
-                            command,
-                            cwd=build_root,
-                            env=docker_environment,
-                            stdin=subprocess.DEVNULL,
-                            check=False,
-                            pass_fds=(env_snapshot_fd,),
-                        )
-                        if result.returncode != 0:
-                            print("BLOCKED: Guarded staging Compose operation failed", file=sys.stderr)
-                        return result.returncode
                 except source_guard.SourceTreeBlocked as error:
                     raise LaunchBlocked("The fixed-SHA staging build snapshot could not be verified") from error
             finally:

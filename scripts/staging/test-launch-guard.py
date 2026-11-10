@@ -8,6 +8,7 @@ import importlib.util
 import io
 import os
 import pwd
+import stat
 import tempfile
 import unittest
 from contextlib import nullcontext, redirect_stderr
@@ -135,14 +136,15 @@ class LaunchReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(launch.LaunchBlocked, "full lowercase Git SHA"):
             launch.validate_handoff_receipt(approved_receipt(), "B" * 40)
 
-    def test_launcher_stops_before_lock_when_independent_authority_is_unavailable(self) -> None:
+    def test_launcher_waits_for_external_signed_approval_under_project_lock(self) -> None:
         account = pwd.getpwuid(os.getuid())
         error_output = io.StringIO()
         arguments = [
             "--source-sha", SOURCE_SHA,
             "--env-file", str(Path(account.pw_dir) / ".config/belib-staging/i5.env"),
-            "start-app",
+            "deploy",
         ]
+        fake_approval = SimpleNamespace(ApprovalError=RuntimeError, request_and_wait=Mock(side_effect=RuntimeError("no verifier configured")))
         with (
             patch.object(launch, "verify_python_runtime"),
             patch.object(launch, "reject_caller_environment"),
@@ -152,16 +154,37 @@ class LaunchReceiptTests(unittest.TestCase):
             patch.object(launch, "EXPECTED_HOST", "test-host"),
             patch.object(launch.socket, "gethostname", return_value="test-host"),
             patch.object(launch, "EXPECTED_REPO_ROOT", ROOT),
-            patch.object(launch, "project_lock", side_effect=AssertionError("lock reached")),
+            patch.object(launch, "_admission_source_root", return_value=ROOT),
+            patch.object(launch, "project_lock", return_value=nullcontext()),
+            patch.object(launch, "load_approval_module", return_value=fake_approval),
             redirect_stderr(error_output),
         ):
             result = launch.main(arguments)
 
         self.assertEqual(result, 1)
-        self.assertIn("No trusted independent staging supervisor verifier", error_output.getvalue())
+        self.assertIn("no verifier configured", error_output.getvalue())
+        fake_approval.request_and_wait.assert_called_once()
 
 
 class LaunchOperationTests(unittest.TestCase):
+    def test_detached_admission_requires_exact_sha_and_shared_git_store(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="belib-admission-test-") as directory:
+            base = Path(directory)
+            source_sha = "a" * 40
+            candidate = base / ("admission-" + source_sha[:7])
+            candidate.mkdir()
+            seed = SimpleNamespace(
+                SeedWrapperError=RuntimeError,
+                read_source_sha=Mock(return_value=source_sha),
+                git_command=lambda root, *args: [str(root), *args],
+                git_environment=lambda: {},
+            )
+            # symbolic-ref is queried as three trailing arguments; detached means it exits nonzero.
+            def run(command, **kwargs):
+                return SimpleNamespace(returncode=1 if command[-3:] == ["symbolic-ref", "-q", "HEAD"] else 0, stdout="/shared/git\n")
+            with patch.object(launch, "ADMISSION_WORKTREE_PREFIX", base / "admission-"), patch.object(launch, "_run", side_effect=run):
+                self.assertEqual(launch._admission_source_root(seed, base / "checkout", source_sha), candidate)
+
     def test_commands_are_fixed_to_staging_project_context_and_compose_file(self) -> None:
         root = Path("/home/hiroyuki/workspaces/belib-i5-isolated-staging-20261107")
         env_file = Path("/proc/123/fd/7")
@@ -219,7 +242,7 @@ class LaunchOperationTests(unittest.TestCase):
         arguments = [
             "--source-sha", source_sha,
             "--env-file", str(Path(account.pw_dir) / ".config/belib-staging/i5.env"),
-            "seed",
+            "deploy",
         ]
         with (
             patch.object(launch, "verify_python_runtime"),
@@ -230,7 +253,8 @@ class LaunchOperationTests(unittest.TestCase):
             patch.object(launch, "EXPECTED_HOST", "test-host"),
             patch.object(launch.socket, "gethostname", return_value="test-host"),
             patch.object(launch, "EXPECTED_REPO_ROOT", ROOT),
-            patch.object(launch, "validate_handoff_receipt"),
+            patch.object(launch, "_admission_source_root", return_value=ROOT),
+            patch.object(launch, "load_approval_module", return_value=SimpleNamespace(ApprovalError=RuntimeError, request_and_wait=Mock())),
             patch.object(launch, "load_seed_module", return_value=fake_seed),
             patch.object(launch, "_checked_repo_branch"),
             patch.object(launch, "project_lock", return_value=nullcontext()),
@@ -249,81 +273,72 @@ class LaunchOperationTests(unittest.TestCase):
         docker_context.assert_not_called()
         compose_validation.assert_not_called()
 
-    def test_seed_handoff_passes_the_verified_snapshot_and_sha(self) -> None:
-        account = pwd.getpwuid(os.getuid())
-        source_sha = "a" * 40
+    def test_deploy_transaction_orders_phases_and_checks_db_and_http_health(self) -> None:
+        commands = []
+        def runner(command, **kwargs):
+            commands.append(command)
+            output = '{"Health":"healthy"}' if "ps" in command else ""
+            return SimpleNamespace(returncode=0, stdout=output)
+        seed = SimpleNamespace(main=Mock(return_value=0))
+        launch.run_deploy_transaction(
+            compose=["/usr/bin/docker", "--context", launch.CONTEXT_NAME, "compose", "-p", launch.COMPOSE_PROJECT],
+            env_file=Path("/tmp/env"), build_root=Path("/tmp/source"), environment={}, env_fd=9,
+            seed=seed, source_sha=SOURCE_SHA, port="18080", runner=runner,
+            stage_values={"BELIB_STAGE_VCS_REF": SOURCE_SHA}, docker_endpoint=Path("/run/user/1000/docker.sock"),
+            sleep=lambda _: None, monotonic=lambda: 0, report=lambda *a, **k: None,
+        )
+        serialized = " ".join(" ".join(command) for command in commands)
+        self.assertLess(serialized.index("up -d db"), serialized.index("--profile migration run"))
+        self.assertLess(serialized.index("--profile migration run"), serialized.index("up -d --build backend"))
+        self.assertIn("127.0.0.1:18080/health", serialized)
+        self.assertEqual(seed.main.call_count, 1)
+        seed.main.assert_called_once_with(
+            invoked_by_launcher=True, build_root=Path("/tmp/source"), source_sha=SOURCE_SHA,
+            admitted_env_fd=9, stage_values={"BELIB_STAGE_VCS_REF": SOURCE_SHA},
+            docker_cli=launch.DOCKER_CLI, docker_endpoint=Path("/run/user/1000/docker.sock"),
+            docker_environment={},
+        )
 
-        class SnapshotFailure(Exception):
-            pass
-
-        class YieldSnapshotContext:
-            def __init__(self, path: Path) -> None:
-                self.path = path
-
-            def __enter__(self):
-                return self.path
-
-            def __exit__(self, exc_type, exc, traceback):
-                return False
-
-        with tempfile.TemporaryDirectory(prefix="belib-staging-source-launch-test-", dir="/tmp") as directory:
-            snapshot = Path(directory)
-            fake_source_guard = type(
-                "FakeSourceGuard",
-                (),
-                {
-                    "SourceTreeBlocked": SnapshotFailure,
-                    "sha_derived_build_snapshot": lambda self, root, revision: YieldSnapshotContext(snapshot),
-                },
-            )()
-            seed_main = Mock(return_value=0)
-            seed = SimpleNamespace(
-                SeedWrapperError=RuntimeError,
-                validate_build_snapshot=Mock(),
-                validate_staging_admission=Mock(
-                    return_value=(os.open(os.devnull, os.O_RDONLY), {"BELIB_STAGE_VCS_REF": source_sha})
-                ),
-                create_private_docker_config=Mock(
-                    return_value=SimpleNamespace(name="/tmp/test-docker-config", cleanup=Mock())
-                ),
-                verify_exact_source_context=Mock(),
-                assert_clean_source_worktree=Mock(),
-                main=seed_main,
+    def test_deploy_failure_stops_later_phases_and_preserves_volumes(self) -> None:
+        commands = []
+        def runner(command, **kwargs):
+            commands.append(command)
+            output = '{"Health":"healthy"}' if "ps" in command else ""
+            return SimpleNamespace(returncode=1 if "migration" in command else 0, stdout=output)
+        seed = SimpleNamespace(main=Mock(return_value=0))
+        with self.assertRaisesRegex(launch.LaunchBlocked, "phase failed: migration"):
+            launch.run_deploy_transaction(
+                compose=["/usr/bin/docker", "--context", launch.CONTEXT_NAME, "compose", "-p", launch.COMPOSE_PROJECT],
+                env_file=Path("/tmp/env"), build_root=Path("/tmp/source"), environment={}, env_fd=9,
+                seed=seed, source_sha=SOURCE_SHA, port="18080", runner=runner,
+                stage_values={"BELIB_STAGE_VCS_REF": SOURCE_SHA}, docker_endpoint=Path("/run/user/1000/docker.sock"),
+                sleep=lambda _: None, monotonic=lambda: 0, report=lambda *a, **k: None,
             )
-            env_file = Path(account.pw_dir) / ".config/belib-staging/i5.env"
-            arguments = ["--source-sha", source_sha, "--env-file", str(env_file), "seed"]
-            with (
-                patch.object(launch, "verify_python_runtime"),
-                patch.object(launch, "reject_caller_environment"),
-                patch.object(launch, "EXPECTED_USER", account.pw_name),
-                patch.object(launch, "EXPECTED_UID", account.pw_uid),
-                patch.object(launch, "EXPECTED_HOME", Path(account.pw_dir)),
-                patch.object(launch, "EXPECTED_HOST", "test-host"),
-                patch.object(launch.socket, "gethostname", return_value="test-host"),
-                patch.object(launch, "EXPECTED_REPO_ROOT", ROOT),
-                patch.object(launch, "validate_handoff_receipt"),
-                patch.object(launch, "load_seed_module", return_value=seed),
-                patch.object(launch, "_checked_repo_branch"),
-                patch.object(launch, "project_lock", return_value=nullcontext()),
-                patch.object(launch, "load_source_tree_guard", return_value=fake_source_guard),
-                patch.object(launch, "_run_preflight"),
-                patch.object(
-                    launch,
-                    "_trusted_rootless_context",
-                    return_value=({"PATH": "/usr/bin:/bin"}, Path("/run/user/1000/docker.sock")),
-                ),
-                patch.object(launch, "_validate_compose_model"),
-                patch.dict(os.environ, {}, clear=True),
-            ):
-                result = launch.main(arguments)
+        self.assertEqual(seed.main.call_count, 0)
+        flattened = [" ".join(command) for command in commands]
+        self.assertTrue(any("stop nginx frontend backend db" in command for command in flattened))
+        self.assertFalse(any("down" in command or "volume" in command or "production" in command for command in flattened))
 
-            self.assertEqual(result, 0)
-            seed.validate_build_snapshot.assert_called_once_with(snapshot, ROOT, source_sha)
-            seed_main.assert_called_once_with(
-                invoked_by_launcher=True,
-                build_root=snapshot,
-                source_sha=source_sha,
+    def test_failed_rollback_is_never_reported_as_pass(self) -> None:
+        reports = []
+        def runner(command, **kwargs):
+            output = '{"Health":"healthy"}' if "ps" in command else ""
+            if "migration" in command:
+                return SimpleNamespace(returncode=1, stdout=output)
+            if "stop" in command:
+                return SimpleNamespace(returncode=2, stdout=output)
+            return SimpleNamespace(returncode=0, stdout=output)
+        with self.assertRaises(launch.LaunchBlocked):
+            launch.run_deploy_transaction(
+                compose=["/usr/bin/docker", "--context", launch.CONTEXT_NAME, "compose", "-p", launch.COMPOSE_PROJECT],
+                env_file=Path("/tmp/env"), build_root=Path("/tmp/source"), environment={}, env_fd=9,
+                seed=SimpleNamespace(main=Mock(return_value=0)), source_sha=SOURCE_SHA, port="18080",
+                stage_values={"BELIB_STAGE_VCS_REF": SOURCE_SHA}, docker_endpoint=Path("/run/user/1000/docker.sock"),
+                runner=runner, sleep=lambda _: None, monotonic=lambda: 0,
+                report=lambda message, **kwargs: reports.append(message),
             )
+        self.assertIn("STAGING_ROLLBACK_FAILED manual-review-required", reports)
+        self.assertNotIn("STAGING_ROLLBACK_PASS stopped-project-services-volumes-preserved", reports)
 
     def test_changed_build_context_and_image_digest_are_rejected(self) -> None:
         model = ci_tests.compose_model(ROOT)
@@ -346,10 +361,16 @@ class LaunchOperationTests(unittest.TestCase):
     def test_project_lock_blocks_a_second_writer(self) -> None:
         with tempfile.TemporaryDirectory(prefix="belib-launch-lock-test-") as directory:
             lock_path = Path(directory) / "project.lock"
-            with launch.project_lock(lock_path, expected_uid=__import__("os").getuid()):
-                with self.assertRaisesRegex(launch.LaunchBlocked, "Another staging operation"):
-                    with launch.project_lock(lock_path, expected_uid=__import__("os").getuid()):
-                        self.fail("second project lock unexpectedly succeeded")
+            real_lstat = os.lstat
+            def lstat(path):
+                if path == "/tmp":
+                    return SimpleNamespace(st_mode=stat.S_IFDIR | 0o1777, st_uid=0)
+                return real_lstat(path)
+            with patch.object(launch.os, "lstat", side_effect=lstat):
+                with launch.project_lock(lock_path, expected_uid=os.getuid()):
+                    with self.assertRaisesRegex(launch.LaunchBlocked, "Another staging operation"):
+                        with launch.project_lock(lock_path, expected_uid=os.getuid()):
+                            self.fail("second project lock unexpectedly succeeded")
 
 
 if __name__ == "__main__":

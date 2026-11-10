@@ -28,6 +28,8 @@ SOURCE_CHECK_TIMEOUT_SECONDS = 5
 ENV_FILE_MAX_BYTES = 1024
 SOURCE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 SNAPSHOT_REVISION_FILE = ".belib-staging-source-sha"
+SNAPSHOT_MANIFEST_FILE = ".belib-staging-manifest.json"
+SNAPSHOT_ROOT = Path("/home/hiroyuki/.local/state/belib-staging/snapshots")
 SNAPSHOT_REQUIRED_DIRECTORIES = ("backend", "frontend", "nginx", "scripts", "scripts/staging")
 SNAPSHOT_REQUIRED_FILES = (
     "compose.staging.yaml",
@@ -570,8 +572,8 @@ def validate_build_snapshot(
         or root_metadata.st_uid != os.getuid()
         or stat.S_IMODE(root_metadata.st_mode) != 0o700
         or resolved_root != snapshot_root
-        or resolved_root.parent != Path("/tmp")
-        or not resolved_root.name.startswith("belib-staging-source-")
+        or resolved_root.parent != SNAPSHOT_ROOT
+        or resolved_root.name != source_sha
         or resolved_root == resolved_checkout
         or resolved_checkout in resolved_root.parents
     ):
@@ -595,6 +597,10 @@ def validate_build_snapshot(
         if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
             raise SeedWrapperError("The verified staging build snapshot contains an unsafe file")
 
+    for name in (SNAPSHOT_REVISION_FILE, SNAPSHOT_MANIFEST_FILE):
+        metadata = os.lstat(resolved_root / name)
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o444:
+            raise SeedWrapperError("The staging build snapshot metadata is unsafe")
     revision_path = resolved_root / SNAPSHOT_REVISION_FILE
     revision_fd = -1
     try:
@@ -873,6 +879,11 @@ def main(
     invoked_by_launcher: bool = False,
     build_root: Path | None = None,
     source_sha: str | None = None,
+    admitted_env_fd: int | None = None,
+    stage_values: Mapping[str, str] | None = None,
+    docker_cli: str | None = None,
+    docker_endpoint: Path | None = None,
+    docker_environment: Mapping[str, str] | None = None,
 ) -> int:
     env_snapshot_fd = -1
     credential_fd = -1
@@ -898,18 +909,22 @@ def main(
         home = Path(account.pw_dir)
         credentials_path = home / ".config" / "belib-staging" / "seed-credentials"
         env_file = home / ".config" / "belib-staging" / "i5.env"
-        env_snapshot_fd, stage_values = validate_staging_admission(repo_root, env_file, account.pw_uid)
+        if admitted_env_fd is None:
+            env_snapshot_fd, stage_values = validate_staging_admission(repo_root, env_file, account.pw_uid)
+            docker_config_temporary = create_private_docker_config(account.pw_uid)
+            docker_config = Path(docker_config_temporary.name)
+            docker_cli, endpoint, docker_env = validate_docker_runtime(
+                account.pw_uid, home, os.environ, docker_config
+            )
+        else:
+            if stage_values is None or docker_cli is None or docker_endpoint is None or docker_environment is None:
+                raise SeedWrapperError("The launcher admission handoff is incomplete")
+            env_snapshot_fd = admitted_env_fd
+            endpoint = docker_endpoint
+            docker_env = dict(docker_environment)
         if stage_values["BELIB_STAGE_VCS_REF"] != source_sha:
             raise SeedWrapperError("Staging env revision differs from the verified build snapshot")
-        docker_config_temporary = create_private_docker_config(account.pw_uid)
-        docker_config = Path(docker_config_temporary.name)
-        docker_cli, endpoint, docker_env = validate_docker_runtime(
-            account.pw_uid,
-            home,
-            os.environ,
-            docker_config,
-        )
-        if docker_env.get("DOCKER_CONFIG") != str(docker_config):
+        if admitted_env_fd is None and docker_env.get("DOCKER_CONFIG") != str(docker_config):
             raise SeedWrapperError("Docker CLI config is not the isolated private directory")
 
         # Seed credentials are opened only after source, env-file, and Docker guards pass.
@@ -924,8 +939,9 @@ def main(
         snapshot_path = Path(f"/proc/{os.getpid()}/fd/{env_snapshot_fd}")
         command = build_compose_command(build_root, snapshot_path, endpoint)
         command[0] = docker_cli
-        verify_private_docker_config(docker_config, account.pw_uid)
-        verify_trusted_docker_plugins()
+        if admitted_env_fd is None:
+            verify_private_docker_config(docker_config, account.pw_uid)
+            verify_trusted_docker_plugins()
         result = subprocess.run(command, cwd=build_root, env=docker_env, check=False)
         return result.returncode
     except SeedWrapperError as error:

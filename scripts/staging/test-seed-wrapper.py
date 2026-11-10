@@ -3,6 +3,7 @@
 
 import importlib.util
 import fcntl
+import json
 import os
 import shutil
 import socket
@@ -35,8 +36,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def make_verified_snapshot(test_case: unittest.TestCase, source_sha: str = TEST_SOURCE_SHA) -> Path:
-    snapshot = Path(tempfile.mkdtemp(prefix="belib-staging-source-test-", dir="/tmp"))
-    test_case.addCleanup(shutil.rmtree, snapshot, ignore_errors=True)
+    seed_wrapper.SNAPSHOT_ROOT = Path("/tmp/belib-seed-wrapper-test-snapshots")
+    seed_wrapper.SNAPSHOT_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    snapshot = seed_wrapper.SNAPSHOT_ROOT / source_sha
+    shutil.rmtree(snapshot, ignore_errors=True)
+    snapshot.mkdir(mode=0o700)
     for relative in seed_wrapper.SNAPSHOT_REQUIRED_DIRECTORIES:
         (snapshot / relative).mkdir(parents=True, exist_ok=True)
     for relative in seed_wrapper.SNAPSHOT_REQUIRED_FILES:
@@ -48,6 +52,10 @@ def make_verified_snapshot(test_case: unittest.TestCase, source_sha: str = TEST_
     revision_marker = snapshot / seed_wrapper.SNAPSHOT_REVISION_FILE
     revision_marker.write_text(f"{source_sha}\n", encoding="ascii")
     revision_marker.chmod(0o444)
+    manifest = snapshot / seed_wrapper.SNAPSHOT_MANIFEST_FILE
+    manifest.write_text(json.dumps({"schema": "belib-staging-snapshot/v1", "source_sha": source_sha, "files": []}), encoding="utf-8")
+    manifest.chmod(0o444)
+    test_case.addCleanup(shutil.rmtree, snapshot, ignore_errors=True)
     return snapshot
 
 

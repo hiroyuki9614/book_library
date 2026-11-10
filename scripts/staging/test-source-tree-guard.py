@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 GUARD_PATH = Path(__file__).with_name("source-tree-guard.py")
@@ -30,6 +32,7 @@ GIT_ENV = {
 class SourceTreeGuardTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="belib-source-guard-test-")
+        guard.SNAPSHOT_ROOT = Path(self.temporary.name) / "snapshots"
         self.root = Path(self.temporary.name) / "repo"
         for directory in (
             "backend",
@@ -134,7 +137,13 @@ class SourceTreeGuardTests(unittest.TestCase):
             guard.verify_source(self.root, self.revision)
 
     def test_sha_snapshot_survives_checkout_mutation_and_excludes_artifacts(self) -> None:
-        with guard.sha_derived_build_snapshot(self.root, self.revision) as snapshot:
+        snapshot_uid = Path(guard.SNAPSHOT_ROOT.parent).stat().st_uid
+        real_lstat = os.lstat
+        def safe_lstat(path, *args, **kwargs):
+            if path == Path("/tmp"):
+                return type("Stat", (), {"st_mode": stat.S_IFDIR | 0o1777, "st_uid": 0})()
+            return real_lstat(path, *args, **kwargs)
+        with patch.object(guard.os, "getuid", return_value=snapshot_uid), patch.object(guard.os, "lstat", side_effect=safe_lstat), guard.sha_derived_build_snapshot(self.root, self.revision) as snapshot:
             snapshot_source = snapshot / "backend/source.ts"
             self.assertEqual(snapshot_source.read_text(encoding="ascii"), "export const staging = true;\n")
             self.assertEqual(snapshot_source.stat().st_mode & 0o777, 0o644)
@@ -153,6 +162,23 @@ class SourceTreeGuardTests(unittest.TestCase):
             self.assertEqual(snapshot_source.read_text(encoding="ascii"), "export const staging = true;\n")
             self.assertFalse((snapshot / "frontend/test-results/results.json").exists())
             self.assertFalse((snapshot / "frontend/dist/production.js").exists())
+
+
+    def test_persistent_snapshot_reuse_and_corruption_rejection(self) -> None:
+        snapshot_uid = Path(guard.SNAPSHOT_ROOT.parent).stat().st_uid
+        real_lstat = os.lstat
+        def safe_lstat(path, *args, **kwargs):
+            if path == Path("/tmp"):
+                return type("Stat", (), {"st_mode": stat.S_IFDIR | 0o1777, "st_uid": 0})()
+            return real_lstat(path, *args, **kwargs)
+        with patch.object(guard.os, "getuid", return_value=snapshot_uid), patch.object(guard.os, "lstat", side_effect=safe_lstat), guard.sha_derived_build_snapshot(self.root, self.revision) as snapshot:
+            self.assertEqual(snapshot, guard.SNAPSHOT_ROOT / self.revision)
+        with patch.object(guard.os, "getuid", return_value=snapshot_uid), patch.object(guard.os, "lstat", side_effect=safe_lstat), guard.sha_derived_build_snapshot(self.root, self.revision) as reused:
+            self.assertEqual(reused, snapshot)
+        (snapshot / "backend/source.ts").write_text("tampered\n", encoding="ascii")
+        with self.assertRaisesRegex(guard.SourceTreeBlocked, "bytes or modes changed"):
+            with patch.object(guard.os, "getuid", return_value=snapshot_uid), patch.object(guard.os, "lstat", side_effect=safe_lstat), guard.sha_derived_build_snapshot(self.root, self.revision):
+                pass
 
 
 if __name__ == "__main__":

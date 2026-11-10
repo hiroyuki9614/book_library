@@ -6,6 +6,9 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import hashlib
+import ctypes
+import errno
+import json
 import os
 import re
 import stat
@@ -25,6 +28,8 @@ DOCKERFILE_INPUTS = (
     b"scripts/staging/Dockerfile.frontend.staging",
 )
 SNAPSHOT_REVISION_FILE = b".belib-staging-source-sha"
+SNAPSHOT_MANIFEST_FILE = b".belib-staging-manifest.json"
+SNAPSHOT_ROOT = Path("/home/hiroyuki/.local/state/belib-staging/snapshots")
 SNAPSHOT_SUPPORT_FILES = (
     b"compose.staging.yaml",
     b"nginx/nginx.conf",
@@ -385,7 +390,7 @@ def _snapshot_entries(
 
 @contextmanager
 def sha_derived_build_snapshot(root: Path, revision: str) -> Iterator[Path]:
-    """Materialize only committed, effective staging inputs into a private source tree."""
+    """Materialize exact committed inputs to a durable per-SHA path used by live bind mounts."""
     verify_source(root, revision)
     tree = parse_tree(root, revision)
     object_format = git(root, "rev-parse", "--show-object-format").decode("ascii", "strict").strip()
@@ -393,8 +398,17 @@ def sha_derived_build_snapshot(root: Path, revision: str) -> Iterator[Path]:
         raise SourceTreeBlocked("Git object format is unsupported")
     entries = _snapshot_entries(root, tree)
 
-    temporary = tempfile.TemporaryDirectory(prefix="belib-staging-source-", dir="/tmp")
-    snapshot = Path(temporary.name)
+    snapshot_root = SNAPSHOT_ROOT
+    _ensure_private_snapshot_root(snapshot_root, os.getuid())
+    snapshot = snapshot_root / revision
+    if snapshot.exists() or snapshot.is_symlink():
+        _verify_persistent_snapshot(snapshot, revision, entries, object_format)
+        yield snapshot
+        return
+    temporary = tempfile.TemporaryDirectory(prefix=".building-", dir=snapshot_root)
+    building = Path(temporary.name)
+    os.chmod(building, 0o700)
+    snapshot = building
     snapshot_bytes = os.fsencode(snapshot)
     try:
         for relative, (mode, oid) in sorted(entries.items()):
@@ -437,6 +451,33 @@ def sha_derived_build_snapshot(root: Path, revision: str) -> Iterator[Path]:
             patterns = dockerignore_patterns(content)
             verify_context(snapshot, prefix, set(entries), patterns)
 
+        manifest = {
+            "schema": "belib-staging-snapshot/v1",
+            "source_sha": revision,
+            "files": [
+                {"path": os.fsdecode(path), "mode": mode.decode("ascii"), "blob": oid.decode("ascii")}
+                for path, (mode, oid) in sorted(entries.items())
+            ],
+        }
+        manifest_path = os.path.join(snapshot_bytes, SNAPSHOT_MANIFEST_FILE)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        manifest_fd = -1
+        try:
+            manifest_fd = os.open(manifest_path, flags, 0o444)
+            content = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            offset = 0
+            while offset < len(content):
+                count = os.write(manifest_fd, content[offset:])
+                if count <= 0:
+                    raise SourceTreeBlocked("The verified staging snapshot manifest could not be written completely")
+                offset += count
+            os.fchmod(manifest_fd, 0o444)
+        except OSError as exc:
+            raise SourceTreeBlocked("The verified staging snapshot manifest could not be recorded") from exc
+        finally:
+            if manifest_fd >= 0:
+                os.close(manifest_fd)
+
         revision_path = os.path.join(snapshot_bytes, SNAPSHOT_REVISION_FILE)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
@@ -455,9 +496,141 @@ def sha_derived_build_snapshot(root: Path, revision: str) -> Iterator[Path]:
         finally:
             os.close(revision_fd)
 
+        target = snapshot_root / revision
+        try:
+            _rename_directory_noreplace(snapshot, target)
+        except OSError as exc:
+            raise SourceTreeBlocked("The durable staging snapshot could not be published without replacement") from exc
+        temporary.cleanup()
+        snapshot = target
+        _verify_persistent_snapshot(snapshot, revision, entries, object_format)
         yield snapshot
     finally:
         temporary.cleanup()
+
+
+def _ensure_private_snapshot_root(path: Path, uid: int) -> None:
+    if path != SNAPSHOT_ROOT:
+        raise SourceTreeBlocked("The staging snapshot root is not the fixed private path")
+    current = Path("/")
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            try:
+                os.mkdir(current, 0o700)
+            except OSError as exc:
+                raise SourceTreeBlocked("The private staging snapshot directory could not be created") from exc
+            info = os.lstat(current)
+        mode = stat.S_IMODE(info.st_mode)
+        sticky_private_tmp = info.st_uid == 0 and mode == 0o1777
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid not in (0, uid)
+            or (mode & 0o022 and not sticky_private_tmp)
+        ):
+            raise SourceTreeBlocked("The staging snapshot path contains an unsafe component")
+    info = os.lstat(path)
+    if info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
+        raise SourceTreeBlocked("The staging snapshot root must be private and owned by the operator")
+
+
+def _rename_directory_noreplace(source: Path, destination: Path) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "atomic no-replace rename is unavailable")
+    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    renameat2.restype = ctypes.c_int
+    result = renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1)
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+
+
+def _verify_persistent_snapshot(snapshot: Path, revision: str, entries, object_format: str) -> None:
+    info = os.lstat(snapshot)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise SourceTreeBlocked("The persistent staging snapshot has unsafe ownership or permissions")
+    expected = {os.fsdecode(path) for path in entries} | {
+        SNAPSHOT_REVISION_FILE.decode("ascii"), SNAPSHOT_MANIFEST_FILE.decode("ascii")
+    }
+    expected_dirs = {
+        "/".join(os.fsdecode(path).split("/")[:index])
+        for path in entries
+        for index in range(1, len(os.fsdecode(path).split("/")))
+    }
+    manifest_path = snapshot / SNAPSHOT_MANIFEST_FILE.decode("ascii")
+    try:
+        manifest = json.loads(_read_snapshot_metadata(manifest_path, maximum=8 * 1024 * 1024).decode("utf-8", "strict"))
+    except (OSError, ValueError) as exc:
+        raise SourceTreeBlocked("The persistent staging snapshot manifest is invalid") from exc
+    expected_manifest = {
+        "schema": "belib-staging-snapshot/v1", "source_sha": revision,
+        "files": [{"path": os.fsdecode(path), "mode": mode.decode("ascii"), "blob": oid.decode("ascii")} for path, (mode, oid) in sorted(entries.items())],
+    }
+    if manifest != expected_manifest:
+        raise SourceTreeBlocked("The persistent staging snapshot manifest differs from the selected source")
+    for marker in (SNAPSHOT_REVISION_FILE, SNAPSHOT_MANIFEST_FILE):
+        marker_info = os.lstat(snapshot / marker.decode("ascii"))
+        if not stat.S_ISREG(marker_info.st_mode) or stat.S_ISLNK(marker_info.st_mode) or marker_info.st_uid != os.getuid() or stat.S_IMODE(marker_info.st_mode) != 0o444:
+            raise SourceTreeBlocked("The persistent staging snapshot metadata has unsafe permissions")
+    if _read_snapshot_metadata(snapshot / SNAPSHOT_REVISION_FILE.decode("ascii"), maximum=64) != f"{revision}\n".encode("ascii"):
+        raise SourceTreeBlocked("The persistent staging snapshot revision marker changed")
+    found = set()
+    found_dirs = set()
+    for current, dirs, files in os.walk(snapshot, followlinks=False):
+        for name in dirs:
+            path = Path(current) / name
+            if path.is_symlink() or not path.is_dir():
+                raise SourceTreeBlocked("The persistent staging snapshot contains an unsafe directory")
+            relative_dir = path.relative_to(snapshot).as_posix()
+            directory_info = path.stat()
+            if relative_dir not in expected_dirs or directory_info.st_uid != os.getuid() or stat.S_IMODE(directory_info.st_mode) != 0o755:
+                raise SourceTreeBlocked("The persistent staging snapshot contains an unexpected directory")
+            found_dirs.add(relative_dir)
+        for name in files:
+            path = Path(current) / name
+            relative = path.relative_to(snapshot).as_posix()
+            if path.is_symlink() or not path.is_file() or relative not in expected:
+                raise SourceTreeBlocked("The persistent staging snapshot contains an unexpected path")
+            found.add(relative)
+    if found != expected or found_dirs != expected_dirs:
+        raise SourceTreeBlocked("The persistent staging snapshot is incomplete")
+    for path, (mode, oid) in entries.items():
+        full = os.path.join(os.fsencode(snapshot), path)
+        actual_oid, actual_mode, _ = hash_regular_file(full, object_format)
+        metadata = os.lstat(full)
+        required_mode = 0o755 if mode == b"100755" else 0o644
+        if actual_oid != oid or metadata.st_uid != os.getuid() or stat.S_IMODE(actual_mode) != required_mode:
+            raise SourceTreeBlocked("The persistent staging snapshot bytes or modes changed")
+
+
+def _read_snapshot_metadata(path: Path, *, maximum: int) -> bytes:
+    try:
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) != 0o444 or before.st_size > maximum:
+            raise SourceTreeBlocked("The persistent staging snapshot metadata is unsafe")
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise SourceTreeBlocked("The persistent staging snapshot metadata is unavailable") from exc
+    try:
+        after = os.fstat(fd)
+        if (after.st_dev, after.st_ino, after.st_size) != (before.st_dev, before.st_ino, before.st_size):
+            raise SourceTreeBlocked("The persistent staging snapshot metadata changed")
+        data = bytearray()
+        while len(data) <= maximum:
+            chunk = os.read(fd, min(65536, maximum + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) != before.st_size:
+            raise SourceTreeBlocked("The persistent staging snapshot metadata changed while read")
+        return bytes(data)
+    finally:
+        os.close(fd)
 
 
 def main() -> int:
