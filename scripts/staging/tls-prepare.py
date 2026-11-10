@@ -549,7 +549,7 @@ def collect_plan_inputs(source: Path, source_sha: str) -> dict:
                 serve = TLS.TailscaleServeClient()
                 serve_raw, etag = serve.get()
                 TLS.validate_original_serve_config(serve_raw)
-                version = subprocess.run(["/usr/bin/tailscale", "version"], stdin=subprocess.DEVNULL,
+                version = subprocess.run(["/usr/local/bin/tailscale", "version"], stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False, timeout=8,
                     env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})
                 TLS.verify_tailscale_version(version.stdout if version.returncode == 0 else "")
