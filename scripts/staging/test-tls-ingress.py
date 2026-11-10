@@ -358,6 +358,14 @@ class TlsIngressTests(unittest.TestCase):
             tls.restore_original(client, original, expected, current, etag, remove_tcp443_first=False)
         self.assertIn(b"OperatorChange", client.raw)
 
+    def test_actual_cli_version_layout_requires_exact_long_build(self):
+        tls.verify_tailscale_version("1.104.5\n  long version: " + tls.TAILSCALE_BUILD + "\n")
+        with self.assertRaises(tls.TlsIngressError):
+            tls.verify_tailscale_version("1.104.5\n  long version: 1.104.5-other\n")
+        with self.assertRaises(tls.TlsIngressError):
+            tls.verify_tailscale_version("1.104.5")
+
+
 
 if __name__ == "__main__":
     unittest.main()

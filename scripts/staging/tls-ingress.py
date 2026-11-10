@@ -504,6 +504,12 @@ def restore_original(client: TailscaleServeClient, original_raw: bytes, original
 
 
 def verify_tailscale_version(version_text: str) -> None:
-    first_line = version_text.splitlines()[0] if version_text.splitlines() else ""
-    if first_line.strip() != TAILSCALE_BUILD:
-        raise TlsIngressError("Tailscale LocalAPI client build differs from the pinned 1.104.5 build")
+    lines = version_text.splitlines()
+    first_line = lines[0].strip() if lines else ""
+    long_versions = [line.strip().removeprefix("long version: ")
+                     for line in lines[1:] if line.strip().startswith("long version: ")]
+    if first_line == TAILSCALE_BUILD and not long_versions:
+        return
+    if first_line == TAILSCALE_VERSION and long_versions == [TAILSCALE_BUILD]:
+        return
+    raise TlsIngressError("Tailscale LocalAPI client build differs from the pinned 1.104.5 build")

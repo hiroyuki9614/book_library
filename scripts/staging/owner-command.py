@@ -61,7 +61,7 @@ def make_loader_command(source_sha: str, helper_sha: str, plan_sha: str) -> str:
         raise PackageError("Helper and plan digests must be lowercase SHA-256")
     source_root = HOME / ".local/state/belib-staging/snapshots" / source_sha
     helper_path = source_root / "scripts/staging/owner-serve-cas.py"
-    helper_raw = read_verified(helper_path, limit=MAX_HELPER, expected_sha=helper_sha, uid=1000, mode=(0o444, 0o644))
+    helper_raw = read_verified(helper_path, limit=MAX_HELPER, expected_sha=helper_sha, uid=1000, mode=(0o644, 0o644))
     plan_raw = read_verified(PLAN_PATH, limit=MAX_PLAN, expected_sha=plan_sha, uid=1000, mode=0o600)
     try:
         plan = json.loads(plan_raw.decode("utf-8", "strict"), object_pairs_hook=_unique_pairs)
@@ -104,7 +104,7 @@ def make_loader_command(source_sha: str, helper_sha: str, plan_sha: str) -> str:
         " finally: os.close(fd)",
         " if hashlib.sha256(data).hexdigest()!=sha: raise RuntimeError('pinned digest mismatch')",
         " return data",
-        "helper=read(HP,131072,HH,(0o444,0o644)); plan=read(PP,16384,PH,0o600)",
+        "helper=read(HP,131072,HH,(0o644,0o644)); plan=read(PP,16384,PH,0o600)",
         "ns={'__name__':'_belib_reviewed_owner_helper','__file__':HP}",
         "exec(compile(helper,HP,'exec'),ns,ns)",
         "print(json.dumps(ns['run'](plan,PH),sort_keys=True,separators=(',',':')))",
