@@ -159,6 +159,40 @@ describe('PdfReader navigation, outline, and progress', () => {
 		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92), { timeout: 1_500 });
 	});
 
+	test('復元先未到着でホイール移動するとページ保存が再開し古い復元エコーを無視する', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		// A real user gesture interrupts the outstanding programmatic restore.
+		view.getByTestId('pdf-viewport').element().dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 150 }));
+		mocks.scrollState.currentPage = 2;
+		mocks.viewportScrollState.currentPage = 2;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 2, 'reading', 17), { timeout: 1_500 });
+
+		// The interrupted restore can still emit page 10, but must not save it.
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		window.dispatchEvent(new Event('pagehide'));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalledWith(7, 10, 'reading', 83);
+
+		// A later native observation should save again rather than stay blocked.
+		mocks.scrollState.currentPage = 3;
+		mocks.viewportScrollState.currentPage = 3;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 3, 'reading', 25), { timeout: 1_500 });
+		expect(mocks.scrollToPage).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalledWith(7, 10, 'reading', 83);
+	});
+
 	test('復元途中の明示的なページ入力による移動は新しいページとして保存する', async () => {
 		mocks.scrollState.currentPage = 1;
 		mocks.scrollState.totalPages = 12;

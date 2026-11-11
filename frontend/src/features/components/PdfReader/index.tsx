@@ -216,10 +216,21 @@ const usePageNavigation = ({ bookId, documentId, initialPage, initialReadingInfo
 		if (pageNumber !== currentPage) requestPage(pageNumber);
 	}, [getPage, requestPage, state.totalPages]);
 	const handleNativeScrollIntent = useCallback(() => {
-		// A new wheel/drag/key gesture owns subsequent passive observations,
-		// including a deliberate scroll back to the initial restore page.
-		if (navigationRef.current.phase === 'ready') lateRestorePage.current = null;
-	}, []);
+		// Actual wheel/drag/touch motion overrides a pending programmatic jump.
+		// Otherwise an interrupted restore could strand navigation in "navigating"
+		// and ignore every new renderer page observation until the old target lands.
+		const pending = navigationRef.current;
+		if (pending.phase === 'ready') {
+			lateRestorePage.current = null;
+			return;
+		}
+		if (pending.phase !== 'navigating') return;
+		// The old command may still acknowledge late. Ignore that echo, but accept
+		// new user-scrolled pages once they differ from the current visible page.
+		lateRestorePage.current = pending.pageNumber;
+		lastAcceptedPage.current = state.currentPage;
+		updateNavigation({ phase: 'ready' });
+	}, [state.currentPage, updateNavigation]);
 
 	useEffect(() => {
 		const handler = { documentId, turnPage, getPage };
