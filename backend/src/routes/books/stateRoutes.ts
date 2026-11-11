@@ -90,6 +90,10 @@ function parseBookId(raw: string | undefined) {
 	return Number.isSafeInteger(value) ? value : null;
 }
 
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 async function getAuthorizedReadingContext(c: BooksContext, bookId: number, requireReadingSession = false) {
 	const user = await getAuthenticatedUser(c);
 	if (!user) return { response: jsonError(c, 401, 'Authentication required', 'UNAUTHORIZED') };
@@ -195,6 +199,9 @@ app.patch('/:bookId/reading-info', async (c) => {
 			body = await c.req.json();
 		} catch {
 			return jsonError(c, 400, 'Request body must be valid JSON', 'INVALID_REQUEST');
+		}
+		if (!isJsonObject(body)) {
+			return jsonError(c, 400, 'Request body must be a JSON object', 'INVALID_REQUEST');
 		}
 
 		const input = body as { currentPage?: unknown; currentPosition?: unknown; progressPercentage?: unknown; readStatus?: unknown };

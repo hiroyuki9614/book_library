@@ -186,6 +186,24 @@ describe('reading-info API', () => {
 		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
 	});
 
+	test('PATCHはJSONオブジェクトでないbodyを400で拒否しDBへ書き込まない', async () => {
+		for (const body of [null, [], 'reading', 3, true]) {
+			const response = await app.request('/1/reading-info', {
+				method: 'PATCH',
+				headers: JSON_READING_HEADERS,
+				body: JSON.stringify(body),
+			});
+
+			expect(response.status).toBe(400);
+			expect(await response.json()).toMatchObject({ code: 'INVALID_REQUEST' });
+		}
+
+		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
+		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
+		expect(mocks.readingInfoCreate).not.toHaveBeenCalled();
+		expect(mocks.readingInfoUpdate).not.toHaveBeenCalled();
+	});
+
 	test('未認証ユーザーはreading-infoを401で拒否される', async () => {
 		mocks.getSession.mockResolvedValue(null);
 
@@ -207,6 +225,14 @@ describe('reading-info API', () => {
 		expect(mocks.bookFindUnique).toHaveBeenCalled();
 		expect(mocks.permissionFindUnique).toHaveBeenCalled();
 		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
+	});
+
+	test('GETは別アカウントのreading-info hintを409で拒否し記録に触れない', async () => {
+		const response = await app.request('/1/reading-info', { headers: { 'X-BeLib-User-Id': '8' } });
+
+		expect(response.status).toBe(409);
+		expect(await response.json()).toMatchObject({ code: 'READING_SESSION_MISMATCH' });
+		expect(mocks.readingInfoFindUnique).not.toHaveBeenCalled();
 	});
 
 	test('閲覧権限がないユーザーはreading-infoを403で拒否される', async () => {

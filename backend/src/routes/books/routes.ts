@@ -30,6 +30,7 @@ type BookWithRelations = {
 		originalFileName: string;
 		fileUrl: string;
 	}>;
+	readingInfos?: ReadingProgressRecord[];
 };
 
 type BookFileRecord = BookWithRelations['bookFiles'][number];
@@ -65,6 +66,10 @@ function parseBookId(rawBookId: string | undefined) {
 
 	const bookId = Number(rawBookId);
 	return Number.isSafeInteger(bookId) ? bookId : null;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function getSupportedBookFileType(file: BookFileRecord): SupportedBookFileType | null {
@@ -173,7 +178,11 @@ app.get('/', async (c) => {
 			prisma.book.count({ where }),
 			prisma.book.findMany({
 				where,
-				include: { category: true, bookFiles: { orderBy: { id: 'asc' } } },
+				include: {
+					category: true,
+					bookFiles: { orderBy: { id: 'asc' } },
+					readingInfos: { where: { userId: user.id }, take: 1 },
+				},
 				orderBy: { createdAt: 'desc' },
 				skip: (page - 1) * limit,
 				take: limit,
@@ -184,7 +193,7 @@ app.get('/', async (c) => {
 			total,
 			page,
 			limit,
-			books: books.map((book) => toBookResponse(book as BookWithRelations)),
+			books: books.map((book) => toBookResponse(book as BookWithRelations, (book as BookWithRelations).readingInfos?.[0] ?? null)),
 		});
 	} catch (error) {
 		console.error(error);
@@ -199,7 +208,7 @@ app.get('/:bookId/reading-info', async (c) => {
 			return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
 		}
 
-		const result = await getAuthorizedBook(c, bookId);
+		const result = await getAuthorizedBook(c, bookId, true);
 		if ('response' in result) {
 			return result.response;
 		}
@@ -231,6 +240,9 @@ app.patch('/:bookId/reading-info', async (c) => {
 			body = await c.req.json();
 		} catch {
 			return jsonError(c, 400, 'Request body must be valid JSON', 'INVALID_REQUEST');
+		}
+		if (!isJsonObject(body)) {
+			return jsonError(c, 400, 'Request body must be a JSON object', 'INVALID_REQUEST');
 		}
 
 		const input = body as { currentPage?: unknown; currentPosition?: unknown; progressPercentage?: unknown; readStatus?: unknown };
