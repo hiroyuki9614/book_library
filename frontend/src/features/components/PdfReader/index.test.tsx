@@ -193,6 +193,38 @@ describe('PdfReader navigation, outline, and progress', () => {
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalledWith(7, 10, 'reading', 83);
 	});
 
+	test('移動先のページが先に描画された直後のホイール操作でも保存を落とさない', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		const input = view.getByRole('spinbutton', { name: 'ページ番号' });
+		await input.fill('11');
+		input.element().closest('form')?.requestSubmit();
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 11, behavior: 'auto' }));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		// EmbedPDF emits the target page just before the React navigation effect.
+		// The next wheel gesture must persist that already visible explicit page.
+		mocks.scrollState.currentPage = 11;
+		mocks.viewportScrollState.currentPage = 11;
+		view.getByTestId('pdf-viewport').element().dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 120 }));
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92), { timeout: 1_500 });
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+		mocks.scrollState.currentPage = 12;
+		mocks.viewportScrollState.currentPage = 12;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100), { timeout: 1_500 });
+	});
+
 	test('復元途中の明示的なページ入力による移動は新しいページとして保存する', async () => {
 		mocks.scrollState.currentPage = 1;
 		mocks.scrollState.totalPages = 12;

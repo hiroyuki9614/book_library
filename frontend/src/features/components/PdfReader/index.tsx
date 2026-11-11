@@ -225,12 +225,23 @@ const usePageNavigation = ({ bookId, documentId, initialPage, initialReadingInfo
 			return;
 		}
 		if (pending.phase !== 'navigating') return;
-		// The old command may still acknowledge late. Ignore that echo, but accept
-		// new user-scrolled pages once they differ from the current visible page.
-		lateRestorePage.current = pending.pageNumber;
+		// A renderer may already show the explicit target while its navigation
+		// acknowledgement effect is still pending. Persist that reached position
+		// once; initial restore itself must never issue a PATCH.
+		const targetReached = state.currentPage === pending.pageNumber;
+		if (targetReached && !pending.initial && lastAcceptedPage.current !== state.currentPage) {
+			const percentage = getPdfProgressPercentage(state.currentPage, state.totalPages);
+			if (percentage !== null) {
+				const readStatus = state.currentPage >= state.totalPages ? 'completed' : 'reading';
+				save(state.currentPage, readStatus, percentage);
+			}
+		}
+		// A stale command may still emit the interrupted target later. Suppress
+		// that echo only when it has not already been observed on screen.
+		lateRestorePage.current = targetReached ? null : pending.pageNumber;
 		lastAcceptedPage.current = state.currentPage;
 		updateNavigation({ phase: 'ready' });
-	}, [state.currentPage, updateNavigation]);
+	}, [save, state.currentPage, state.totalPages, updateNavigation]);
 
 	useEffect(() => {
 		const handler = { documentId, turnPage, getPage };
