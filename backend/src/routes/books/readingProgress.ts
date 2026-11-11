@@ -68,6 +68,10 @@ export async function persistReadingInfo(
 	prisma: ReadingInfoPersistence,
 	input: PersistReadingInfoInput,
 ): Promise<ReadingProgressRecord> {
+	if (input.currentPosition.length > MAX_CURRENT_POSITION_LENGTH) {
+		throw new RangeError(`currentPosition must be ${MAX_CURRENT_POSITION_LENGTH} characters or fewer`);
+	}
+
 	const where = {
 		userId_bookId: { userId: input.userId, bookId: input.bookId },
 	};
