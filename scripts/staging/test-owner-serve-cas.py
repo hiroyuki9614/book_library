@@ -153,6 +153,15 @@ class OwnerServeTests(unittest.TestCase):
                                 if item[0] == "journal" and item[1] == "phase-intent" and item[2]["phase"] == phase)
             post_index = next(i for i, item in enumerate(ordered) if item[0] == "POST" and item[1] == post_number)
             self.assertLess(intent_index, post_index)
+        # Actual BRI file must remain HTTP 200, not the old 404 placeholder.
+        legacy = [p for p in self.probes if p[0] == "tls" and p[2] == owner.LEGACY_BRI_HOST]
+        self.assertTrue(legacy)
+        self.assertTrue(all(p[4]["expect_status"] == 200 for p in legacy))
+        self.assertIn(("tls", 18443, owner.LEGACY_BRI_HOST, owner.BRI, {"expect_status": 200}), legacy)
+        first_post = next(i for i, p in enumerate(self.probes) if p[0] == "POST")
+        for port in (443, 18443):
+            self.assertTrue(any(i < first_post and p[0] == "tls" and p[1] == port and p[2] == owner.LEGACY_BRI_HOST
+                                for i, p in enumerate(self.probes)))
         fixed = [probe for probe in self.probes if probe[0] == "tls" and probe[1] == 443]
         self.assertTrue(fixed)
         self.assertTrue(all(item[4]["connect_host"] == owner.SELF_IP for item in fixed))
@@ -165,6 +174,24 @@ class OwnerServeTests(unittest.TestCase):
         no_sni = next(i for i, probe in enumerate(self.probes) if probe[0] == "no_sni" and probe[1] == 443)
         self.assertLess(positives[0], no_sni)
         self.assertGreater(positives[-1], no_sni)
+
+    def test_missing_or_404_legacy_bri_fails_before_nonce_and_serve_posts(self):
+        real_tls_mock = owner.tls_request
+        for blocked_port in (443, 18443):
+            with self.subTest(blocked_port=blocked_port):
+                self.api = FakeAPI()
+                self.used_nonces.clear()
+                def legacy_unavailable(port, hostname, path, **kwargs):
+                    if port == blocked_port and hostname == owner.LEGACY_BRI_HOST:
+                        raise owner.Stop("BRI must return HTTP 200; observed 404")
+                    return real_tls_mock(port, hostname, path, **kwargs)
+                with patch.object(owner, "tls_request", side_effect=legacy_unavailable):
+                    with self.assertRaisesRegex(owner.Stop, "BRI must return HTTP 200"):
+                        self.execute()
+                self.assertEqual(self.api.posts, 0)
+                self.assertEqual(self.used_nonces, set())
+                self.assertEqual(owner.canonical(owner.config(self.api.raw)),
+                                 owner.canonical(owner.config(baseline())))
 
     def test_plan_digest_canonicality_expiry_and_wrong_host_fail_before_api(self):
         raw = owner.canonical(new_plan())
@@ -299,7 +326,7 @@ class OwnerServeTests(unittest.TestCase):
         def fail_after_c(port, hostname, path, **kwargs):
             nonlocal calls
             calls += 1
-            if port == 443 and calls == 4:
+            if port == 443 and hostname == owner.CUSTOM and path == "/health":
                 raise owner.Stop("post-C acceptance failure")
             return original_tls(port, hostname, path, **kwargs)
         with patch.object(owner, "tls_request", side_effect=fail_after_c):

@@ -26,6 +26,7 @@ CUSTOM = "stg-bl.hiroyuki9614.com"
 SELF = "ubuntu-worker.tail63cd2d.ts.net"
 SELF_IP = "100.109.171.70"
 BRI = "/bri-referee-pilot-comp.png"
+LEGACY_BRI_HOST = "fedora-worker.tail63cd2d.ts.net"
 BRI_FILE = "/home/hiroyuki/tailscale-share/bri-referee-pilot-comp.png"
 JOURNAL = Path("/var/lib/belib-staging/tls-serve")
 CA_FILE = "/etc/ssl/certs/ca-certificates.crt"
@@ -477,6 +478,11 @@ def _serve_transaction(plan, plan_sha256):
     tls_no_sni_rejected(18443)
     tls_request(18443, CUSTOM, "/health", fingerprint=pin)
 
+    # The old BRI URL must answer with its real asset (not 404), both before
+    # and through the candidate SNI ingress. Fail BEFORE nonce/journal/Serve POST.
+    tls_request(443, LEGACY_BRI_HOST, BRI, connect_host=SELF_IP, expect_status=200)
+    tls_request(18443, LEGACY_BRI_HOST, BRI, expect_status=200)
+
     validate_plan(plan)  # Readiness probes must not outlive the pinned authorization.
     journal = journal_start(plan, original, etag, plan_sha256)
     current, current_etag = original, etag
@@ -491,8 +497,9 @@ def _serve_transaction(plan, plan_sha256):
             owned.append((current, current_etag))
             inflight = None
             journal_event(journal, "phase-committed", phase=phase_name, config_sha256=digest(current), etag=current_etag)
-            # Tailnet SNI is routed through nginx to the preserved BRI handler.
-            tls_request(18443, SELF, BRI, expect_status=404)
+            # The old host must remain available at both HTTPS listeners.
+            tls_request(443, LEGACY_BRI_HOST, BRI, connect_host=SELF_IP, expect_status=200)
+            tls_request(8443, LEGACY_BRI_HOST, BRI, connect_host=SELF_IP, expect_status=200)
 
         desired_b = phase_b(current)
         journal_event(journal, "phase-intent", phase="B", desired_sha256=digest(desired_b), etag=current_etag)
@@ -517,7 +524,7 @@ def _serve_transaction(plan, plan_sha256):
         tls_unknown_rejected(443, connect_host=SELF_IP)
         tls_no_sni_rejected(443, connect_host=SELF_IP)
         tls_request(443, CUSTOM, "/health", connect_host=SELF_IP, fingerprint=pin)
-        tls_request(443, SELF, BRI, connect_host=SELF_IP, expect_status=404)
+        tls_request(443, LEGACY_BRI_HOST, BRI, connect_host=SELF_IP, expect_status=200)
         journal_event(journal, "complete", config_sha256=digest(current), etag=current_etag)
         return {"status": "complete", "serve_config_sha256": digest(current), "serve_etag": current_etag}
     except BaseException as failure:
