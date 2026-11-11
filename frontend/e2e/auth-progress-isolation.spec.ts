@@ -127,14 +127,18 @@ async function readReadingInfo(page: Page, bookId: number) {
 }
 
 async function assertShelfProgress(page: Page, title: string, expectedProgress: number) {
-	const listResponse = page.waitForResponse((response) => {
-		if (!isApiResponse(response, '/api/v1/books') || response.request().method() !== 'GET' || response.status() !== 200) return false;
-		const url = new URL(response.url());
-		return url.searchParams.get('page') === '1' && url.searchParams.get('limit') === '100';
-	});
+	// Read the JSON while its fetch is alive, not from a Playwright Response
+	// captured during reload: Chromium may discard the body after navigation.
 	await page.reload();
-	const list = await listResponse;
-	const body = await list.json() as { books: Array<{ title: string; progressPercentage: number | null }> };
+	await expect(page.getByRole('textbox', { name: '書籍を検索' })).toBeVisible();
+	const { status, body } = await page.evaluate(async (origin) => {
+		const response = await fetch(`${origin}/api/v1/books?page=1&limit=100`, { credentials: 'include' });
+		return {
+			status: response.status,
+			body: await response.json() as { books: Array<{ title: string; progressPercentage: number | null }> },
+		};
+	}, apiOrigin);
+	expect(status).toBe(200);
 	const book = body.books.find((entry) => entry.title === title);
 	expect(book?.progressPercentage).toBe(expectedProgress);
 
