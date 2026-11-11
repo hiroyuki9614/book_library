@@ -27,7 +27,7 @@ import { SCROLL_PLUGIN_ID } from '@embedpdf/plugin-scroll';
 import type { ScrollState } from '@embedpdf/plugin-scroll';
 
 import { SelectionLayer, SelectionPluginPackage, useSelectionCapability, type SelectionSelectionMenuRenderFn } from '@embedpdf/plugin-selection/react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { fetchBookFile } from '@/api/books';
 import { fetchReadingInfo, type ReadingInfo } from '@/api/readingInfo';
 import ReadingSaveStatus from '../ReadingSaveStatus';
@@ -37,44 +37,42 @@ export type AppState = GlobalStoreState<{
 	[SCROLL_PLUGIN_ID]: ScrollState;
 }>;
 
-function createCommands(direction: PageTurnDirection): Record<string, Command<AppState>> { return {
+type PageTurnHandler = { documentId: string; turnPage: (delta: number) => void; getPage: () => number };
+
+function createCommands(direction: PageTurnDirection, getPageTurnHandler: () => PageTurnHandler | null): Record<string, Command<AppState>> { return {
 	'nav.previous': {
 		id: 'nav.previous',
 		label: direction === 'rtl' ? '>' : '<',
 		shortcuts: [direction === 'rtl' ? 'arrowright' : 'arrowleft', 'k'],
-		action: ({ registry, documentId }) => {
-			const scrollPlugin = registry.getPlugin('scroll');
-			const scroll = scrollPlugin?.provides?.().forDocument(documentId);
-
-			if (scroll) {
-				scroll.scrollToPage({ pageNumber: Math.max(1, scroll.getCurrentPage() - 1), behavior: 'auto' });
-			}
+		action: ({ documentId }) => {
+			const handler = getPageTurnHandler();
+			if (handler?.documentId === documentId) handler.turnPage(-1);
 		},
 		disabled: ({ state, documentId }) => {
 			const scrollState = state.plugins.scroll.documents[documentId];
-			return scrollState ? scrollState.currentPage <= 1 : true;
+			const handler = getPageTurnHandler();
+			const page = handler?.documentId === documentId ? handler.getPage() : scrollState?.currentPage;
+			return page === undefined || page <= 1;
 		},
 	},
 	'nav.next': {
 		id: 'nav.next',
 		label: direction === 'rtl' ? '<' : '>',
 		shortcuts: [direction === 'rtl' ? 'arrowleft' : 'arrowright', 'j'],
-		action: ({ registry, documentId }) => {
-			const scrollPlugin = registry.getPlugin('scroll');
-			const scroll = scrollPlugin?.provides?.().forDocument(documentId);
-
-			if (scroll) {
-				scroll.scrollToPage({ pageNumber: Math.min(scroll.getTotalPages(), scroll.getCurrentPage() + 1), behavior: 'auto' });
-			}
+		action: ({ documentId }) => {
+			const handler = getPageTurnHandler();
+			if (handler?.documentId === documentId) handler.turnPage(1);
 		},
 		disabled: ({ state, documentId }) => {
 			const scrollState = state.plugins.scroll.documents[documentId];
-			return scrollState ? scrollState.currentPage >= scrollState.totalPages : true;
+			const handler = getPageTurnHandler();
+			const page = handler?.documentId === documentId ? handler.getPage() : scrollState?.currentPage;
+			return !scrollState || page === undefined || page >= scrollState.totalPages;
 		},
 	},
 }; }
 
-function createPlugins(documentData: ArrayBuffer, direction: PageTurnDirection) {
+function createPlugins(documentData: ArrayBuffer, direction: PageTurnDirection, getPageTurnHandler: () => PageTurnHandler | null) {
 	return [
 		createPluginRegistration(DocumentManagerPluginPackage, {
 			initialDocuments: [{ buffer: documentData, name: 'book.pdf' }],
@@ -92,29 +90,56 @@ function createPlugins(documentData: ArrayBuffer, direction: PageTurnDirection) 
 			defaultPageGap: 10,
 		}),
 		createPluginRegistration(CommandsPluginPackage, {
-			commands: createCommands(direction),
+			commands: createCommands(direction, getPageTurnHandler),
 		}),
 	];
 }
 
-type PageNavigationProps = { bookId: number; documentId: string; initialPage: number; initialReadingInfo: ReadingInfo | null; pageTurnDirection: PageTurnDirection };
+type PageNavigationProps = { bookId: number; documentId: string; initialPage: number; initialReadingInfo: ReadingInfo | null; pageTurnDirection: PageTurnDirection; pageTurnRef: RefObject<PageTurnHandler | null> };
+
+type PdfNavigationState =
+	| { phase: 'waiting-layout'; queuedPage: number | null }
+	| { phase: 'navigating'; pageNumber: number; initial: boolean; queuedPage: number | null }
+	| { phase: 'ready' };
+
+function getNavigationPage(navigation: PdfNavigationState, currentPage: number) {
+	if (navigation.phase === 'ready') return currentPage;
+	if (navigation.queuedPage !== null) return navigation.queuedPage;
+	if (navigation.phase === 'navigating' && !navigation.initial) return navigation.pageNumber;
+	return currentPage;
+}
 
 function getPdfProgressPercentage(currentPage: number, totalPages: number) {
 	if (!Number.isSafeInteger(currentPage) || !Number.isSafeInteger(totalPages) || currentPage < 1 || totalPages < 1 || currentPage > totalPages) return null;
 	return Math.round((currentPage / totalPages) * 100);
 }
 
-const usePageNavigation = ({ bookId, documentId, initialPage, initialReadingInfo, pageTurnDirection, userId }: PageNavigationProps & { userId?: number }) => {
-	const { provides: scroll, state } = useScroll(documentId);
+const usePageNavigation = ({ bookId, documentId, initialPage, initialReadingInfo, pageTurnDirection, pageTurnRef, userId }: PageNavigationProps & { userId?: number }) => {
+	const { state } = useScroll(documentId);
 	const [pageInputOverride, setPageInputOverride] = useState<string | null>(null);
 	const pageInput = pageInputOverride ?? String(state.currentPage);
-	const restoredDocument = useRef<string | null>(null);
 	const { provides: scrollCapability } = useScrollCapability();
-	const [targetPage, setTargetPage] = useState<number | null>(null);
-	const lastPersistedPage = useRef<number | null>(null);
+	const [navigation, setNavigation] = useState<PdfNavigationState>({ phase: 'waiting-layout', queuedPage: null });
+	const navigationRef = useRef(navigation);
+	const lastAcceptedPage = useRef<number | null>(null);
+	const lateRestorePage = useRef<number | null>(null);
 	const { save, status, retry, confirmInitialStatus } = useReadingSave(bookId, userId);
 	const previousCommand = useCommand('nav.previous', documentId);
 	const nextCommand = useCommand('nav.next', documentId);
+	const navigationPage = getNavigationPage(navigation, state.currentPage);
+
+	const updateNavigation = useCallback((next: PdfNavigationState) => {
+		navigationRef.current = next;
+		setNavigation(next);
+	}, []);
+
+	const dispatchPage = useCallback((pageNumber: number, initial = false, queuedPage: number | null = null) => {
+		if (!scrollCapability) return;
+		// An explicit return to the restored page is a new intent, not an echo.
+		if (!initial && pageNumber === lateRestorePage.current) lateRestorePage.current = null;
+		updateNavigation({ phase: 'navigating', pageNumber, initial, queuedPage });
+		scrollCapability.forDocument(documentId).scrollToPage({ pageNumber, behavior: 'auto' });
+	}, [documentId, scrollCapability, updateNavigation]);
 
 	useEffect(() => {
 		if (initialReadingInfo) confirmInitialStatus(initialReadingInfo);
@@ -122,43 +147,91 @@ const usePageNavigation = ({ bookId, documentId, initialPage, initialReadingInfo
 
 	useEffect(() => {
 		if (!scrollCapability) return;
+		let active = true;
 		// LayoutReady is replayed to late subscribers and carries the real page count.
 		// useScroll's initial 1/1 state is not evidence that a document is ready.
-		return scrollCapability.onLayoutReady((event) => {
-			if (event.documentId !== documentId || restoredDocument.current === documentId) return;
+		const unsubscribe = scrollCapability.onLayoutReady((event) => {
+			const pending = navigationRef.current;
+			if (!active || event.documentId !== documentId || pending.phase !== 'waiting-layout') return;
 			const page = Math.max(1, Math.min(initialPage, event.totalPages));
-			restoredDocument.current = documentId;
-			// Do not persist the old scroll-state snapshot while restoration is
-			// pending. Wait until the scroll capability reports the target page.
-			lastPersistedPage.current = null;
-			setTargetPage(page);
-			scrollCapability.forDocument(documentId).scrollToPage({ pageNumber: page, behavior: 'auto' });
+			dispatchPage(page, true, pending.queuedPage);
 		});
-	}, [documentId, initialPage, scrollCapability]);
+		return () => {
+			active = false;
+			unsubscribe();
+		};
+	}, [dispatchPage, documentId, initialPage, scrollCapability]);
 
 	useEffect(() => {
-		if (targetPage === null || restoredDocument.current !== documentId || state.totalPages < 1) return;
-		if (lastPersistedPage.current === null) {
-			// Layout-ready can precede the scroll update. Wait until the saved
-			// target is observed, without PATCHing the initial page or target.
-			if (state.currentPage !== targetPage) return;
-			lastPersistedPage.current = targetPage;
-			return;
-		}
-		if (lastPersistedPage.current === state.currentPage) return;
-		lastPersistedPage.current = state.currentPage;
-		const readStatus = state.currentPage >= state.totalPages ? 'completed' : 'reading';
+		if (navigationRef.current !== navigation || navigation.phase === 'waiting-layout') return;
 		const progressPercentage = getPdfProgressPercentage(state.currentPage, state.totalPages);
+		if (progressPercentage === null) return;
+		if (navigation.phase === 'navigating') {
+			if (state.currentPage !== navigation.pageNumber) return;
+			// Only one command is in flight. A newer intent replaces the queued
+			// target, and the superseded acknowledgement never reaches the save hook.
+			if (navigation.queuedPage !== null) {
+				if (navigation.initial) lateRestorePage.current = navigation.pageNumber;
+				const queuedPage = navigation.queuedPage;
+				let active = true;
+				// Dispatch after the synchronous effect phase; cancel when replaced or unmounted.
+				queueMicrotask(() => {
+					if (active && navigationRef.current === navigation) dispatchPage(queuedPage);
+				});
+				return () => { active = false; };
+			}
+			lastAcceptedPage.current = state.currentPage;
+			// A renderer acknowledgement is observed in this effect. Reconcile UI state asynchronously.
+			queueMicrotask(() => {
+				if (navigationRef.current === navigation) updateNavigation({ phase: 'ready' });
+			});
+			if (navigation.initial) return;
+		} else {
+			// Native scrolling has no queued command. Accept changed pages after
+			// restoration, but not a late restore echo after a queued explicit jump.
+			if (state.currentPage === lastAcceptedPage.current || state.currentPage === lateRestorePage.current) return;
+			lastAcceptedPage.current = state.currentPage;
+		}
+		const readStatus = state.currentPage >= state.totalPages ? 'completed' : 'reading';
 		save(state.currentPage, readStatus, progressPercentage);
-	}, [documentId, state.currentPage, state.totalPages, targetPage, save]);
+	}, [dispatchPage, navigation, state.currentPage, state.totalPages, save, updateNavigation]);
+
+	const requestPage = useCallback((pageNumber: number) => {
+		if (!Number.isSafeInteger(pageNumber) || pageNumber < 1 || pageNumber > state.totalPages) return;
+		const pending = navigationRef.current;
+		if (pending.phase === 'ready') dispatchPage(pageNumber);
+		else updateNavigation({ ...pending, queuedPage: pageNumber });
+		setPageInputOverride(null);
+	}, [dispatchPage, state.totalPages, updateNavigation]);
+
+	const getPage = useCallback(() => {
+		const pending = navigationRef.current;
+		// Use the last acknowledged reader page for an already-ready command.
+		// A stale viewport observation must not send a turn from an older page.
+		return pending.phase === 'ready' ? (lastAcceptedPage.current ?? state.currentPage) : getNavigationPage(pending, state.currentPage);
+	}, [state.currentPage]);
+	const turnPage = useCallback((delta: number) => {
+		const currentPage = getPage();
+		const pageNumber = Math.max(1, Math.min(state.totalPages, currentPage + delta));
+		if (pageNumber !== currentPage) requestPage(pageNumber);
+	}, [getPage, requestPage, state.totalPages]);
+	const handleNativeScrollIntent = useCallback(() => {
+		// A new wheel/drag/key gesture owns subsequent passive observations,
+		// including a deliberate scroll back to the initial restore page.
+		if (navigationRef.current.phase === 'ready') lateRestorePage.current = null;
+	}, []);
+
+	useEffect(() => {
+		const handler = { documentId, turnPage, getPage };
+		pageTurnRef.current = handler;
+		return () => {
+			if (pageTurnRef.current === handler) pageTurnRef.current = null;
+		};
+	}, [documentId, getPage, pageTurnRef, turnPage]);
 
 	const handleGoToPage = (e: React.FormEvent<HTMLFormElement>) => {
 		e.preventDefault();
-		const pageNumber = parseInt(pageInput, 10);
-		if (pageNumber >= 1 && pageNumber <= state.totalPages) {
-			scroll?.scrollToPage({ pageNumber });
-			setPageInputOverride(null);
-		}
+		requestPage(Number(pageInput));
 	};
 
 	return {
@@ -166,8 +239,11 @@ const usePageNavigation = ({ bookId, documentId, initialPage, initialReadingInfo
 		pageInput,
 		setPageInput: setPageInputOverride,
 		handleGoToPage,
-		previousCommand,
-		nextCommand,
+		previousCommand: previousCommand && { ...previousCommand, disabled: navigationPage <= 1 },
+		nextCommand: nextCommand && { ...nextCommand, disabled: navigationPage >= state.totalPages },
+		requestPage,
+		turnPage,
+		handleNativeScrollIntent,
 		status,
 		retry,
 		pageTurnDirection,
@@ -228,9 +304,9 @@ function BookmarkItems({ bookmarks, currentPage, onJump, depth = 0 }: {
 	});
 }
 
-function PdfTableOfContents({ documentId, open, onOpenChange, inline = false }: { documentId: string; open: boolean; onOpenChange: (open: boolean) => void; inline?: boolean }) {
+function PdfTableOfContents({ documentId, open, onOpenChange, onJump, inline = false }: { documentId: string; open: boolean; onOpenChange: (open: boolean) => void; onJump: (page: number) => void; inline?: boolean }) {
 	const { provides: bookmarksCapability } = useBookmarkCapability();
-	const { provides: scroll, state } = useScroll(documentId);
+	const { state } = useScroll(documentId);
 	const [bookmarks, setBookmarks] = useState<PdfBookmarkObject[] | null>(null);
 
 	useEffect(() => {
@@ -249,7 +325,7 @@ function PdfTableOfContents({ documentId, open, onOpenChange, inline = false }: 
 	}, [bookmarksCapability, documentId]);
 
 	const jump = (page: number) => {
-		scroll?.scrollToPage({ pageNumber: Math.max(1, Math.min(page, state.totalPages)), behavior: 'auto' });
+		onJump(Math.max(1, Math.min(page, state.totalPages)));
 		onOpenChange(false);
 	};
 
@@ -279,7 +355,7 @@ function PdfTableOfContents({ documentId, open, onOpenChange, inline = false }: 
 	);
 }
 
-const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, currentPage, totalPages }: { documentId: string; pageTurnDirection: PageTurnDirection; navigationDisabled: boolean; currentPage: number; totalPages: number }) => {
+const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, onTurn, onNativeScrollIntent }: { documentId: string; pageTurnDirection: PageTurnDirection; navigationDisabled: boolean; onTurn: (delta: number) => void; onNativeScrollIntent: () => void }) => {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const [hasRenderedPage, setHasRenderedPage] = useState(false);
 	const [copyMode, setCopyMode] = useState(false);
@@ -288,14 +364,9 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, curren
 	const [copyStatus, setCopyStatus] = useState<'idle' | 'copying' | 'copied' | 'unavailable' | 'failed'>('idle');
 	const { provides: scroll } = useScroll(documentId);
 	const { provides: selection } = useSelectionCapability();
-	const pageStateRef = useRef({ currentPage, totalPages });
 	const longPressTimer = useRef<number | null>(null);
 	const pointerIds = useRef(new Set<number>());
 	const pointerStart = useRef<{ id: number; x: number; y: number } | null>(null);
-	useEffect(() => {
-		pageStateRef.current = { currentPage, totalPages };
-	}, [currentPage, totalPages]);
-
 	useEffect(() => {
 		const container = containerRef.current;
 		if (!container || !scroll) return;
@@ -315,16 +386,9 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, curren
 				return { left: bounds.left, width: bounds.width };
 			},
 			getSelectionText: () => window.getSelection()?.toString() ?? '',
-			onTurn: (action) => {
-				// Use the same page state shown in the toolbar. EmbedPDF's capability
-				// snapshot can briefly lag after a page input or restored position.
-				const currentState = pageStateRef.current;
-				const delta = action === 'next' ? 1 : -1;
-				const pageNumber = Math.max(1, Math.min(currentState.totalPages, currentState.currentPage + delta));
-				if (pageNumber !== currentState.currentPage) scroll.scrollToPage({ pageNumber, behavior: 'auto' });
-			},
+			onTurn: (action) => onTurn(action === 'next' ? 1 : -1),
 		});
-	}, [copyMode, longPressMenuOpen, navigationDisabled, pageTurnDirection, scroll]);
+	}, [copyMode, longPressMenuOpen, navigationDisabled, onTurn, pageTurnDirection, scroll]);
 
 	const cancelLongPress = useCallback(() => {
 		if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
@@ -371,14 +435,21 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, curren
 		const onPointerMove = (event: PointerEvent) => {
 			const start = pointerStart.current;
 			if (!start || start.id !== event.pointerId) return;
-			if (Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 10) cancelLongPress();
+			if (Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 10) {
+				cancelLongPress();
+				onNativeScrollIntent();
+			}
 		};
 		const onPointerEnd = (event: PointerEvent) => {
 			activePointerIds.delete(event.pointerId);
 			cancelLongPress();
 		};
-		const onWheel = () => cancelLongPress();
+		const onWheel = (event: WheelEvent) => {
+			cancelLongPress();
+			if (!event.ctrlKey && (event.deltaX !== 0 || event.deltaY !== 0)) onNativeScrollIntent();
+		};
 		const onTouchStart = (event: TouchEvent) => { if (event.touches.length > 1) cancelLongPress(); };
+		const onTouchMove = (event: TouchEvent) => { if (event.touches.length === 1) onNativeScrollIntent(); };
 		container.addEventListener('pointerdown', onPointerDown);
 		window.addEventListener('pointermove', onPointerMove, { capture: true, passive: true });
 		// Edge navigation observes pointerup in window capture and may stop it
@@ -388,6 +459,7 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, curren
 		window.addEventListener('pointercancel', onPointerEnd, { capture: true });
 		container.addEventListener('wheel', onWheel, { passive: true });
 		container.addEventListener('touchstart', onTouchStart, { passive: true });
+		container.addEventListener('touchmove', onTouchMove, { passive: true });
 		return () => {
 			container.removeEventListener('pointerdown', onPointerDown);
 			window.removeEventListener('pointermove', onPointerMove, { capture: true });
@@ -395,10 +467,11 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, curren
 			window.removeEventListener('pointercancel', onPointerEnd, { capture: true });
 			container.removeEventListener('wheel', onWheel);
 			container.removeEventListener('touchstart', onTouchStart);
+			container.removeEventListener('touchmove', onTouchMove);
 			activePointerIds.clear();
 			cancelLongPress();
 		};
-	}, [cancelLongPress, copyMode, longPressMenuOpen]);
+	}, [cancelLongPress, copyMode, longPressMenuOpen, onNativeScrollIntent]);
 
 	const handleCopy = useCallback(async () => {
 		const scope = selection?.forDocument(documentId);
@@ -497,11 +570,11 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, curren
 	);
 };
 
-function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialReadingInfo, pageTurnDirection, userId, restoreError, mobileMenuOpen, onMobileMenuChange }: { bookId: number; bookTitle?: string; documentId: string; initialPage: number; initialReadingInfo: ReadingInfo | null; pageTurnDirection: PageTurnDirection; userId?: number; restoreError: boolean; mobileMenuOpen: boolean; onMobileMenuChange: (open: boolean) => void }) {
+function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialReadingInfo, pageTurnDirection, pageTurnRef, userId, restoreError, mobileMenuOpen, onMobileMenuChange }: { bookId: number; bookTitle?: string; documentId: string; initialPage: number; initialReadingInfo: ReadingInfo | null; pageTurnDirection: PageTurnDirection; pageTurnRef: RefObject<PageTurnHandler | null>; userId?: number; restoreError: boolean; mobileMenuOpen: boolean; onMobileMenuChange: (open: boolean) => void }) {
 	const [tocOpen, setTocOpen] = useState(false);
 	const [mobileTocOpen, setMobileTocOpen] = useState(false);
 	const [settingsOpen, setSettingsOpen] = useState(false);
-	const navigation = usePageNavigation({ bookId, documentId, initialPage, initialReadingInfo, pageTurnDirection, userId });
+	const navigation = usePageNavigation({ bookId, documentId, initialPage, initialReadingInfo, pageTurnDirection, pageTurnRef, userId });
 	return (
 		<div className='flex h-full flex-col'>
 			<header className='flex shrink-0 items-center gap-1 border-b px-1 py-1 sm:gap-2 sm:px-3 sm:py-2 xl:py-[3.5px]'>
@@ -509,7 +582,7 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialRe
 				<span className='min-w-0 flex-1 truncate px-1 text-center text-sm font-medium text-foreground'>{bookTitle || 'PDFリーダー'}</span>
 				<div className='max-w-[7rem] shrink md:max-w-none'><ReadingSaveStatus status={navigation.status} retry={navigation.retry} /></div>
 				<div className='hidden shrink-0 items-center gap-2 md:flex'>
-					<PdfTableOfContents documentId={documentId} open={tocOpen} onOpenChange={setTocOpen} />
+					<PdfTableOfContents documentId={documentId} open={tocOpen} onOpenChange={setTocOpen} onJump={navigation.requestPage} />
 					<Sheet open={settingsOpen} onOpenChange={setSettingsOpen}>
 						<SheetTrigger asChild><Button type='button' variant='outline' className='min-h-11 px-3'>表示設定</Button></SheetTrigger>
 						<SheetContent side='right' className='w-[min(88vw,22rem)] [&>button]:size-11'>
@@ -532,13 +605,15 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialRe
 							<section aria-label='表示設定'><h3 className='mb-2 font-medium'>表示設定</h3><ZoomToolbar documentId={documentId} compact /></section>
 							<PageNavigation navigation={navigation} />
 							<Button type='button' variant='outline' className='min-h-11 w-full justify-start' aria-expanded={mobileTocOpen} onClick={() => setMobileTocOpen((open) => !open)}>目次</Button>
-							{mobileTocOpen && <PdfTableOfContents inline documentId={documentId} open={mobileTocOpen} onOpenChange={setMobileTocOpen} />}
+							{mobileTocOpen && <PdfTableOfContents inline documentId={documentId} open={mobileTocOpen} onOpenChange={setMobileTocOpen} onJump={navigation.requestPage} />}
 						</div>
 					</div>
 				</SheetContent>
 			</Sheet>
-			<main tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white outline-none'>
-				<PdfViewport documentId={documentId} pageTurnDirection={pageTurnDirection} navigationDisabled={tocOpen || mobileMenuOpen} currentPage={navigation.state.currentPage} totalPages={navigation.state.totalPages} />
+			<main tabIndex={0} className='relative min-h-0 flex-1 overflow-hidden bg-white outline-none' onKeyDown={(event) => {
+				if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) navigation.handleNativeScrollIntent();
+			}}>
+				<PdfViewport documentId={documentId} pageTurnDirection={pageTurnDirection} navigationDisabled={tocOpen || mobileMenuOpen} onTurn={navigation.turnPage} onNativeScrollIntent={navigation.handleNativeScrollIntent} />
 			</main>
 			<footer data-testid='pdf-reader-footer' aria-hidden={mobileMenuOpen ? true : undefined} inert={mobileMenuOpen || undefined} className='flex shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t bg-white px-2 py-1 sm:px-4'>
 				<div className='hidden md:block'><ZoomToolbar documentId={documentId} /></div>
@@ -555,6 +630,9 @@ function PdfReaderSession({ bookId, bookTitle, pageTurnDirection = 'ltr', userId
 	const [initialPage, setInitialPage] = useState<number | null>(null);
 	const [initialReadingInfo, setInitialReadingInfo] = useState<ReadingInfo | null>(null);
 	const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+	// Stable mutable command bridge: plugin definitions are constructed during render,
+	// so do not pass a React ref through the render-phase plugin factory.
+	const [pageTurnBridge] = useState<{ current: PageTurnHandler | null }>(() => ({ current: null }));
 	const { engine, isLoading, error: engineError } = usePdfiumEngine({ wasmUrl: new URL(pdfiumWasmUrl, window.location.href).href });
 
 	useEffect(() => {
@@ -590,7 +668,8 @@ function PdfReaderSession({ bookId, bookTitle, pageTurnDirection = 'ltr', userId
 		};
 	}, [bookId, userId]);
 
-	const plugins = useMemo(() => (documentData ? createPlugins(documentData, pageTurnDirection) : []), [documentData, pageTurnDirection]);
+	const getPageTurnHandler = useCallback(() => pageTurnBridge.current, [pageTurnBridge]);
+	const plugins = useMemo(() => (documentData ? createPlugins(documentData, pageTurnDirection, getPageTurnHandler) : []), [documentData, pageTurnDirection, getPageTurnHandler]);
 
 	if (fileError || engineError) return <p role='alert'>PDFファイルまたは描画エンジンを読み込めませんでした。</p>;
 
@@ -611,7 +690,7 @@ function PdfReaderSession({ bookId, bookTitle, pageTurnDirection = 'ltr', userId
 							<DocumentContent documentId={activeDocumentId}>
 								{({ isLoaded }) =>
 									isLoaded && (
-										<ReaderWorkspace key={activeDocumentId} bookId={bookId} bookTitle={bookTitle} documentId={activeDocumentId} initialPage={initialPage} initialReadingInfo={initialReadingInfo} pageTurnDirection={pageTurnDirection} userId={userId} restoreError={restoreError} mobileMenuOpen={mobileMenuOpen} onMobileMenuChange={setMobileMenuOpen} />
+										<ReaderWorkspace key={activeDocumentId} bookId={bookId} bookTitle={bookTitle} documentId={activeDocumentId} initialPage={initialPage} initialReadingInfo={initialReadingInfo} pageTurnDirection={pageTurnDirection} pageTurnRef={pageTurnBridge} userId={userId} restoreError={restoreError} mobileMenuOpen={mobileMenuOpen} onMobileMenuChange={setMobileMenuOpen} />
 									)
 								}
 							</DocumentContent>
