@@ -122,6 +122,46 @@ describe('reading-info API', () => {
 		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
 	});
 
+	test('PATCHは255文字を超えるEPUBのcurrentPositionを保存する', async () => {
+		const currentPosition = 'x'.repeat(333);
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition, progressPercentage: 25, readStatus: 'reading' });
+
+		const response = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPosition, progressPercentage: 25 }),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition, currentPage: 1, progressPercentage: 25, readStatus: 'reading' });
+		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
+			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' } },
+			data: { currentPosition, readStatus: 'reading', progressPercentage: 25 },
+		});
+	});
+
+	test('PATCHは16384文字を超えるcurrentPositionを認証と権限確認後に400で拒否する', async () => {
+		const currentPosition = 'x'.repeat(16_385);
+
+		const response = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPosition }),
+		});
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({
+			message: 'currentPosition must be a non-empty string of 16384 characters or fewer',
+			code: 'INVALID_CURRENT_POSITION',
+		});
+		expect(mocks.getSession).toHaveBeenCalled();
+		expect(mocks.userFindFirst).toHaveBeenCalledWith({ where: { id: 7 }, select: { id: true, roleId: true } });
+		expect(mocks.permissionFindUnique).toHaveBeenCalledWith({ where: { roleId_bookId: { roleId: 2, bookId: 1 } } });
+		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
+		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
+		expect(mocks.readingInfoCreate).not.toHaveBeenCalled();
+	});
+
 	test('PATCHは正の整数でないcurrentPageを400で拒否する', async () => {
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',

@@ -5,7 +5,7 @@ import { Readable } from 'node:stream';
 import { auth } from '../../lib/auth.js';
 import { BookStorageNotFoundError, getBookFileAccess } from '../../lib/bookStorage.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
-import { hasReadingSessionUserMismatch, normalizeProgressPercentage, normalizeReadStatus, persistReadingInfo, READING_SESSION_USER_HEADER, toReadingInfoResponse, toReadingProgress, type ReadingProgressRecord } from './readingProgress.js';
+import { hasReadingSessionUserMismatch, MAX_CURRENT_POSITION_LENGTH, normalizeProgressPercentage, normalizeReadStatus, persistReadingInfo, READING_SESSION_USER_HEADER, toReadingInfoResponse, toReadingProgress, type ReadingProgressRecord } from './readingProgress.js';
 
 const app = new Hono<PrismaVariables>();
 
@@ -246,8 +246,8 @@ app.patch('/:bookId/reading-info', async (c) => {
 			}
 			currentPosition = String(input.currentPage);
 		} else {
-			if (typeof input.currentPosition !== 'string' || !input.currentPosition.trim() || input.currentPosition.length > 255) {
-				return jsonError(c, 400, 'currentPosition must be a non-empty string of 255 characters or fewer', 'INVALID_CURRENT_POSITION');
+			if (typeof input.currentPosition !== 'string' || !input.currentPosition.trim() || input.currentPosition.length > MAX_CURRENT_POSITION_LENGTH) {
+				return jsonError(c, 400, `currentPosition must be a non-empty string of ${MAX_CURRENT_POSITION_LENGTH} characters or fewer`, 'INVALID_CURRENT_POSITION');
 			}
 			currentPosition = input.currentPosition;
 		}
