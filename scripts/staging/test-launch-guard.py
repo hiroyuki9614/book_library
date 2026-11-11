@@ -137,7 +137,55 @@ class LaunchReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(launch.LaunchBlocked, "full lowercase Git SHA"):
             launch.validate_handoff_receipt(approved_receipt(), "B" * 40)
 
-    def test_launcher_waits_for_external_signed_approval_under_project_lock(self) -> None:
+    def test_cli_fails_closed_before_candidate_imports_for_each_operation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="belib-pregrant-import-test-") as directory:
+            candidate = Path(directory)
+            marker = candidate / "pregrant-import-ran"
+            payload = (
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('ran', encoding='ascii')\n"
+            )
+            for name in ("seed.py", "approval.py", "source-tree-guard.py"):
+                (candidate / name).write_text(payload, encoding="utf-8")
+
+            common = [
+                "--source-sha", SOURCE_SHA,
+                "--evidence-sha256", "e" * 64,
+                "--env-file", str(candidate / "outside.env"),
+            ]
+            operation_args = {
+                "deploy": [],
+                "resume-ingress": ["--prior-source-sha", launch.RETAINED_PRIOR_SHA,
+                                   "--retained-state-sha256", "d" * 64],
+                "manifest-ingress": ["--prior-source-sha", launch.RETAINED_PRIOR_SHA],
+            }
+            with patch.object(launch, "ADMITTED_SOURCE_ROOT", candidate):
+                for operation, extra_args in operation_args.items():
+                    with self.subTest(operation=operation):
+                        stderr = io.StringIO()
+                        with (
+                            patch.object(launch, "verify_python_runtime") as runtime_check,
+                            patch.object(launch, "reject_caller_environment") as environment_check,
+                            patch.object(launch, "load_seed_module", wraps=launch.load_seed_module) as seed_load,
+                            patch.object(launch, "load_approval_module", wraps=launch.load_approval_module) as approval_load,
+                            patch.object(launch, "load_source_tree_guard", wraps=launch.load_source_tree_guard) as source_guard_load,
+                            patch.object(launch, "_admission_source_root") as source_admission,
+                            patch.object(launch, "project_lock") as project_lock,
+                            patch.object(launch, "_run") as shell_or_docker_action,
+                            patch.object(launch, "_run_preflight") as preflight,
+                            redirect_stderr(stderr),
+                        ):
+                            result = launch.main([*common, *extra_args, operation])
+
+                        self.assertEqual(result, 1)
+                        self.assertIn("independent operator-installed immutable bootstrap", stderr.getvalue())
+                        for untouched in (runtime_check, environment_check, seed_load, approval_load,
+                                          source_guard_load, source_admission, project_lock,
+                                          shell_or_docker_action, preflight):
+                            untouched.assert_not_called()
+                        self.assertFalse(marker.exists())
+
+    def test_mocked_operator_seam_keeps_legacy_signed_approval_check_testable(self) -> None:
         account = pwd.getpwuid(os.getuid())
         error_output = io.StringIO()
         arguments = [
@@ -148,6 +196,9 @@ class LaunchReceiptTests(unittest.TestCase):
         ]
         fake_approval = SimpleNamespace(ApprovalError=RuntimeError, request_and_wait=Mock(side_effect=RuntimeError("no verifier configured")))
         with (
+            # This test seam exercises the preserved legacy path without inventing
+            # or accepting an unsigned grant. Production admission always blocks.
+            patch.object(launch, "_require_operator_bootstrap_admission", return_value=None),
             patch.object(launch, "verify_python_runtime"),
             patch.object(launch, "reject_caller_environment"),
             patch.object(launch, "EXPECTED_USER", account.pw_name),
@@ -499,6 +550,9 @@ class LaunchOperationTests(unittest.TestCase):
             "deploy",
         ]
         with (
+            # Explicitly mock only the unavailable external admission seam so this
+            # legacy defense-in-depth failure test can reach the snapshot check.
+            patch.object(launch, "_require_operator_bootstrap_admission", return_value=None),
             patch.object(launch, "verify_python_runtime"),
             patch.object(launch, "reject_caller_environment"),
             patch.object(launch, "EXPECTED_USER", account.pw_name),

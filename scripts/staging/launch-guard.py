@@ -63,6 +63,22 @@ class LaunchBlocked(Exception):
     pass
 
 
+OPERATOR_BOOTSTRAP_BLOCK_REASON = (
+    "No independent operator-installed immutable bootstrap and verifier is available; "
+    "staging operations are blocked"
+)
+
+
+def _require_operator_bootstrap_admission() -> None:
+    """Fail closed until an independently installed trust root is integrated.
+
+    This candidate-controlled source cannot authenticate itself or the candidate
+    approval helper. No grant format or key is trusted here; the external bootstrap,
+    verifier, and one-use grant integration are not available in this checkout.
+    """
+    raise LaunchBlocked(OPERATOR_BOOTSTRAP_BLOCK_REASON)
+
+
 def load_approval_module():
     if ADMITTED_SOURCE_ROOT is None:
         raise LaunchBlocked("Exact detached staging source has not been admitted")
@@ -993,6 +1009,10 @@ def _run_preflight(repo_root: Path, env_file: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     try:
+        # Keep this as the first action in main: candidate helpers, argument-driven
+        # operations, shell files, and Docker must stay unreachable without an
+        # independently installed operator bootstrap.
+        _require_operator_bootstrap_admission()
         verify_python_runtime()
         reject_caller_environment(os.environ)
         parser = argparse.ArgumentParser(description=__doc__)
