@@ -127,15 +127,20 @@ async function readReadingInfo(page: Page, bookId: number) {
 }
 
 async function assertShelfProgress(page: Page, title: string, expectedProgress: number) {
-	const listResponse = page.waitForResponse((response) => {
-		if (!isApiResponse(response, '/api/v1/books') || response.request().method() !== 'GET' || response.status() !== 200) return false;
-		const url = new URL(response.url());
-		return url.searchParams.get('page') === '1' && url.searchParams.get('limit') === '100';
-	});
 	await page.reload();
-	const list = await listResponse;
-	const body = await list.json() as { books: Array<{ title: string; progressPercentage: number | null }> };
-	const book = body.books.find((entry) => entry.title === title);
+	await expect(page.getByRole('textbox', { name: '書籍を検索' })).toBeVisible();
+
+	// Capture the JSON in the live page context. A Playwright Response handle can
+	// lose its body when a reload or auth redirect replaces the network request.
+	const list = await page.evaluate(async (origin) => {
+		const response = await fetch(`${origin}/api/v1/books?page=1&limit=100`, { credentials: 'include' });
+		const body = await response.json() as {
+			books: Array<{ title: string; progressPercentage: number | null }>;
+		};
+		return { status: response.status, body };
+	}, apiOrigin);
+	expect(list.status).toBe(200);
+	const book = list.body.books.find((entry) => entry.title === title);
 	expect(book?.progressPercentage).toBe(expectedProgress);
 
 	await page.getByRole('textbox', { name: '書籍を検索' }).fill(title);
