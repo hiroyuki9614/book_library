@@ -285,7 +285,7 @@ Known authorization requirement drift:
 
 ## ReadingInfo
 
-`ReadingInfo.currentPosition VARCHAR(255)` is used without a schema migration for both formats.
+The candidate schema uses nullable `TEXT` for `ReadingInfo.currentPosition`, with a forward migration; this task does not apply it to a database. The reading API accepts non-empty positions up to 16,384 characters.
 `ReadingInfo.progressPercentage INTEGER` is nullable and stores the per-user PDF/EPUB reader measurement when valid; it is the narrow §6.8 exception for Issue #90, not a total-page/location-history table.
 
 PDF request example:
@@ -308,7 +308,7 @@ EPUB request example:
 
 Rules:
 
-- exactly one of `currentPage` or `currentPosition` is accepted.
+- exactly one of `currentPage` or `currentPosition` is accepted; `currentPosition` must be non-empty and at most 16,384 characters.
 - omitted `readStatus` defaults to `reading` for backward compatibility.
 - explicit status may be `reading` or `completed`.
 - GET returns both `currentPosition` and a numeric compatibility `currentPage`.
@@ -415,7 +415,7 @@ Important constraints already present:
 - `BookFile.fileHash` unique.
 - `ReadingInfo` unique by `userId + bookId`.
 - `RoleBookPermission` unique by `roleId + bookId`.
-- `ReadingInfo.currentPosition` is nullable `VARCHAR(255)` and can contain a PDF page string or EPUB CFI.
+- `ReadingInfo.currentPosition` is nullable `TEXT` and can contain a PDF page string or EPUB CFI; the API caps values at 16,384 characters.
 - `ReadingInfo.progressPercentage` is nullable `INTEGER` with a database check constraint from 0 through 100.
 - the reading percentage is scoped by the existing `ReadingInfo.userId + bookId` unique key and is returned only through the current user's authorized book/reading-info queries.
 

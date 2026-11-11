@@ -48,6 +48,8 @@ RETAINED_VOLUMES = {
     "belib-isolated-i5_staging-postgres-data",
     "belib-isolated-i5_staging-book-files",
 }
+FRESH_PROJECT_VOLUMES = frozenset(f"{COMPOSE_PROJECT}_{name}" for name in ("staging-postgres-data", "staging-book-files"))
+FRESH_PROJECT_NETWORKS = frozenset(f"{COMPOSE_PROJECT}_{name}" for name in ("isolated", "ingress"))
 
 OPERATION_ARGS: dict[str, tuple[str, ...]] = {
     "start-db": ("up", "-d", "db"),
@@ -94,6 +96,33 @@ def _docker_read(command: list[str], environment: Mapping[str, str], *, runner=s
     if result.returncode != 0 or len(result.stdout or "") > 2 * 1024 * 1024:
         raise LaunchBlocked("Read-only retained-state inspection failed")
     return result.stdout or ""
+
+
+def reject_existing_fresh_project_resources(
+    build_root: Path, environment: Mapping[str, str], *, runner=subprocess.run,
+) -> None:
+    """Reject pre-existing resources using exact Compose-resolved names, independent of labels."""
+    docker = [DOCKER_CLI, "--context", CONTEXT_NAME]
+    inventory = {}
+    for kind in ("volume", "network"):
+        try:
+            result = runner(
+                [*docker, kind, "ls", "--format", "{{.Name}}"], cwd=build_root,
+                env=dict(environment), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, check=False, timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise LaunchBlocked("Could not safely inventory staging project volumes and networks") from error
+        if result.returncode != 0 or not isinstance(result.stdout, str) or len(result.stdout) > 2 * 1024 * 1024:
+            raise LaunchBlocked("Could not safely inventory staging project volumes and networks")
+        names = result.stdout.splitlines()
+        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", name) for name in names):
+            raise LaunchBlocked("Staging Docker resource inventory is malformed")
+        inventory[kind] = set(names)
+
+    collisions = (inventory["volume"] & FRESH_PROJECT_VOLUMES) | (inventory["network"] & FRESH_PROJECT_NETWORKS)
+    if collisions:
+        raise LaunchBlocked("Staging project named volumes or networks already exist; separate resume review is required")
 
 
 def _lines_json(text: str) -> list[dict]:
@@ -555,6 +584,7 @@ def run_deploy_transaction(
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False, timeout=20)
         if inventory.returncode != 0 or volumes.returncode != 0:
             raise LaunchBlocked("Could not safely inventory the staging project before first Docker mutation")
+        reject_existing_fresh_project_resources(build_root, environment, runner=runner)
         if (inventory.stdout or "").strip() or (volumes.stdout or "").strip():
             raise LaunchBlocked("Staging project containers or volumes already exist; separate resume review is required")
         receipt("STAGING_RESOURCE_INVENTORY_EMPTY")

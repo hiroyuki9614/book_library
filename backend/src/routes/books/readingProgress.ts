@@ -9,6 +9,7 @@ export type ReadingProgressRecord = {
 };
 
 export const READING_SESSION_USER_HEADER = 'X-BeLib-User-Id';
+export const MAX_CURRENT_POSITION_LENGTH = 16_384;
 
 export function parseReadingSessionUserId(value: string | undefined) {
 	if (!value) return null;

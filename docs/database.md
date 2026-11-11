@@ -24,7 +24,7 @@
 - `Book.categoryId` はrequired
 - `Book.pageTurnDirection` のdefaultは `ltr`
 - `BookFile.fileHash` はunique
-- `ReadingInfo.currentPosition` はnullable text
+- `ReadingInfo.currentPosition` はnullable PostgreSQL `TEXT`。APIは非空文字列を最大16,384文字まで受け付ける
 - `ReadingInfo.progressPercentage` はreaderが有効な位置と総量を計測できた場合のnullable整数（0〜100）
 - `ReadingInfo.progressPercentage` はIssue #90の§6.8例外として、セッションをまたぐ本棚・ホーム表示用の派生スナップショットだけを保持する。総ページ数やEPUB location総数、読書履歴は追加しない
 - `ReadingInfo.readStatus` のdefaultは `unread`

@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import type { PrismaVariables } from '../../lib/prisma.js';
+import { MAX_CURRENT_POSITION_LENGTH } from './readingProgress.js';
 import booksRoutes from './routes.js';
 
 const mocks = vi.hoisted(() => ({
@@ -94,6 +95,30 @@ describe('reading-info API', () => {
 
 		expect(response.status).toBe(200);
 		expect(await response.json()).toMatchObject({ bookId: 1, currentPage: 3, progressPercentage: 25, readStatus: 'reading' });
+	});
+
+	test('PATCHはcurrentPositionの上限値を受け入れ、上限超過と非文字列を拒否する', async () => {
+		const maxPosition = 'x'.repeat(MAX_CURRENT_POSITION_LENGTH);
+		mocks.readingInfoUpsert.mockImplementation(({ create }) => create);
+
+		const accepted = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPosition: maxPosition, readStatus: 'completed' }),
+		});
+		expect(accepted.status).toBe(200);
+		expect((await accepted.json()).currentPosition).toBe(maxPosition);
+
+		for (const currentPosition of ['x'.repeat(MAX_CURRENT_POSITION_LENGTH + 1), 7]) {
+			const response = await app.request('/1/reading-info', {
+				method: 'PATCH',
+				headers: JSON_READING_HEADERS,
+				body: JSON.stringify({ currentPosition }),
+			});
+			expect(response.status).toBe(400);
+			expect(await response.json()).toMatchObject({ code: 'INVALID_CURRENT_POSITION' });
+		}
+		expect(mocks.readingInfoUpsert).toHaveBeenCalledTimes(1);
 	});
 
 	test('GETはReadingInfo未作成時に1ページ目を返す', async () => {

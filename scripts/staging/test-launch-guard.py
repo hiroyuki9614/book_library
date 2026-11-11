@@ -615,6 +615,67 @@ class LaunchOperationTests(unittest.TestCase):
         self.assertFalse(any(" stop " in " " + " ".join(command) + " " for command in commands))
         self.assertNotIn("STAGING_ROLLBACK_PASS stopped-project-services-volumes-preserved", reports)
 
+    def test_exact_unlabeled_fresh_project_volumes_and_networks_block_before_compose_mutation(self) -> None:
+        named_resources = [
+            ("volume", name) for name in launch.FRESH_PROJECT_VOLUMES
+        ] + [
+            ("network", name) for name in launch.FRESH_PROJECT_NETWORKS
+        ]
+        for kind, name in named_resources:
+            commands = []
+
+            def runner(command, **kwargs):
+                commands.append(command)
+                if command[3:5] == [kind, "ls"]:
+                    return SimpleNamespace(returncode=0, stdout=name + "\n")
+                return SimpleNamespace(returncode=0, stdout="")
+
+            with self.subTest(kind=kind, name=name), self.assertRaisesRegex(launch.LaunchBlocked, "already exist"):
+                launch.run_deploy_transaction(
+                    compose=["/usr/bin/docker", "--context", launch.CONTEXT_NAME, "compose", "-p", launch.COMPOSE_PROJECT],
+                    env_file=Path("/tmp/env"), build_root=Path("/tmp/source"), environment={}, env_fd=9,
+                    seed=SimpleNamespace(main=Mock(return_value=0)), source_sha=SOURCE_SHA, port="18080",
+                    stage_values={}, docker_endpoint=Path("/run/user/1000/docker.sock"), runner=runner,
+                    sleep=lambda _: None, monotonic=lambda: 0, report=Mock(),
+                )
+            self.assertFalse(any("compose" in command and any(word in command for word in ("up", "run", "stop", "down"))
+                                 for command in commands))
+
+    def test_fresh_deploy_keeps_project_label_volume_guard(self) -> None:
+        commands = []
+        def runner(command, **kwargs):
+            commands.append(command)
+            return SimpleNamespace(returncode=0, stdout="legacy-project-data\n" if "--filter" in command else "")
+        with self.assertRaises(launch.LaunchBlocked):
+            launch.run_deploy_transaction(
+                compose=["/usr/bin/docker", "--context", launch.CONTEXT_NAME, "compose", "-p", launch.COMPOSE_PROJECT],
+                env_file=Path("/tmp/env"), build_root=Path("/tmp/source"), environment={}, env_fd=9,
+                seed=SimpleNamespace(main=Mock(return_value=0)), source_sha=SOURCE_SHA, port="18080",
+                stage_values={}, docker_endpoint=Path("/run/user/1000/docker.sock"), runner=runner,
+                sleep=lambda _: None, monotonic=lambda: 0, report=Mock(),
+            )
+        self.assertFalse(any("compose" in command and any(word in command for word in ("up", "run", "stop", "down"))
+                             for command in commands))
+
+    def test_fresh_project_resource_inventory_accepts_absence_and_unrelated_names(self) -> None:
+        for volume_names, network_names in (("", ""), ("unrelated-data\n", "unrelated-network\n")):
+            def runner(command, **kwargs):
+                output = volume_names if command[3:5] == ["volume", "ls"] else network_names
+                return SimpleNamespace(returncode=0, stdout=output)
+
+            launch.reject_existing_fresh_project_resources(Path("/tmp/source"), {}, runner=runner)
+
+    def test_fresh_project_resource_inventory_fails_closed_on_errors_and_malformed_output(self) -> None:
+        cases = [
+            lambda command: SimpleNamespace(returncode=1, stdout=""),
+            lambda command: SimpleNamespace(returncode=0, stdout="bad resource name\n"),
+        ]
+        for response in cases:
+            with self.subTest(response=response), self.assertRaises(launch.LaunchBlocked):
+                launch.reject_existing_fresh_project_resources(
+                    Path("/tmp/source"), {}, runner=lambda command, **kwargs: response(command),
+                )
+
     def test_oneoff_remaining_or_failed_inventory_prevents_rollback_pass(self) -> None:
         for inspect_code, remaining in ((0, "oneoff-id"), (1, ""), (0, "")):
             reports = []

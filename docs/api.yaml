@@ -580,7 +580,7 @@ components:
           type: integer
         currentPosition:
           type: string
-          maxLength: 255
+          maxLength: 16384
           nullable: true
           description: PDF page number string or EPUB CFI.
         currentPage:
@@ -623,7 +623,7 @@ components:
         currentPosition:
           type: string
           minLength: 1
-          maxLength: 255
+          maxLength: 16384
           description: EPUB CFI or another supported textual reading position.
         progressPercentage:
           type: integer

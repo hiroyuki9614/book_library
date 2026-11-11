@@ -143,7 +143,7 @@ model ReadingInfo {
   id              Int      @id @default(autoincrement())
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
-  currentPosition    String?  @map("current_position") @db.VarChar(255)
+  currentPosition    String?  @map("current_position")
   progressPercentage Int?     @map("progress_percentage")
   readStatus         String   @default("unread") @map("read_status") @db.VarChar(50)
   userId             Int      @map("user_id")

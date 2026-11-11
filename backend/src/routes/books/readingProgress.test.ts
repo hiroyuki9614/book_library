@@ -16,6 +16,28 @@ function createPersistence() {
 }
 
 describe('persistReadingInfo', () => {
+	test('persists and returns a long EPUB CFI through the persistence seam', async () => {
+		const cfi = `epubcfi(/6/${'4/'.repeat(159)}4:0)`;
+		const prisma = createPersistence();
+		prisma.readingInfo.updateMany.mockResolvedValue({ count: 0 });
+		prisma.readingInfo.findUnique.mockResolvedValue(null);
+		prisma.readingInfo.create.mockImplementation(({ data }) => data);
+
+		const saved = await persistReadingInfo(prisma, {
+			userId: 7,
+			bookId: 1,
+			currentPosition: cfi,
+			readStatus: 'reading',
+			progressPercentage: undefined,
+		});
+
+		expect(cfi).toHaveLength(333);
+		expect(prisma.readingInfo.create).toHaveBeenCalledWith({
+			data: { userId: 7, bookId: 1, currentPosition: cfi, readStatus: 'reading' },
+		});
+		expect(saved.currentPosition).toBe(cfi);
+	});
+
 	test('normalizes unread, completed, and unmeasured legacy states', () => {
 		expect(toReadingProgress(null)).toBe(0);
 		expect(toReadingProgress({ readStatus: 'completed', progressPercentage: 12 })).toBe(100);
