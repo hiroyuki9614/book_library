@@ -180,7 +180,11 @@ def _hash_snapshot(root_fd: int) -> dict[str, str]:
                 file_fd = os.open(name, file_flags, dir_fd=directory_fd)
                 try:
                     opened = os.fstat(file_fd)
-                    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino)
+                        or opened.st_nlink != 1
+                    ):
                         raise BootstrapReferenceError("Source file changed during verification")
                     digest = hashlib.sha256()
                     while True:

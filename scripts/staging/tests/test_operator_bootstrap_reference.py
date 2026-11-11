@@ -245,6 +245,15 @@ class OperatorBootstrapReferenceTests(unittest.TestCase):
         with self.assertRaises(reference.BootstrapReferenceError):
             self.verify(self.make_envelope())
 
+    def test_hard_link_alias_in_source_snapshot_is_rejected(self) -> None:
+        source_file = self.source_root / "candidate.py"
+        outside_alias = self.root / "outside-alias"
+        self.source_root.chmod(0o755)
+        os.link(source_file, outside_alias)
+        self.source_root.chmod(0o555)
+        with self.assertRaises(reference.BootstrapReferenceError):
+            reference.verify_source_manifest(self.source_root, self.manifest)
+
     def test_writable_source_snapshot_is_rejected(self) -> None:
         (self.source_root / "candidate.py").chmod(0o644)
         with self.assertRaises(reference.BootstrapReferenceError):
