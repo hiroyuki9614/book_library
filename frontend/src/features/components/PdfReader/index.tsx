@@ -236,9 +236,11 @@ const usePageNavigation = ({ bookId, documentId, initialPage, initialReadingInfo
 				save(state.currentPage, readStatus, percentage);
 			}
 		}
-		// A stale command may still emit the interrupted target later. Suppress
-		// that echo only when it has not already been observed on screen.
-		lateRestorePage.current = targetReached ? null : pending.pageNumber;
+		// Preserve an earlier pending restore echo (e.g. page 10) when a queued
+		// explicit jump (page 11) has already reached its target. Clearing that
+		// marker would let the old restore overwrite the newer user position.
+		// Otherwise suppress the interrupted command's own late echo.
+		if (!targetReached) lateRestorePage.current = pending.pageNumber;
 		lastAcceptedPage.current = state.currentPage;
 		updateNavigation({ phase: 'ready' });
 	}, [save, state.currentPage, state.totalPages, updateNavigation]);
