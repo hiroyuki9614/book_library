@@ -224,7 +224,20 @@ def _inspect_service(service):
     )
     result = _run(["docker", "--host", DOCKER_SOCKET, "inspect", "--format", template, container])
     if result.returncode != 0:
-        return {"exists": False, "running": False, "health": "unknown", "restart": "unknown"}
+        # A failed inspect proves absence only for Docker's exact, allowlisted
+        # not-found messages naming this expected container. All other
+        # failures (including mixed output) are unavailable observations.
+        escaped_container = re.escape(container)
+        missing_container = re.compile(
+            rf"(?:Error: No such (?:object|container): {escaped_container}|"
+            rf"Error response from daemon: No such (?:object|container): {escaped_container})"
+        )
+        diagnostic = result.stderr.removesuffix("\n")
+        if not result.stdout and missing_container.fullmatch(diagnostic):
+            return {"exists": False, "running": False, "health": "unknown", "restart": "unknown"}
+        raise WatchError("docker_inspect_failed")
+    if result.stderr:
+        raise WatchError("docker_output_invalid")
     fields = result.stdout.strip().split("|")
     if len(fields) != 6:
         raise WatchError("docker_output_invalid")

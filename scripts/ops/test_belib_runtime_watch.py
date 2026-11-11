@@ -122,6 +122,52 @@ class RuntimeWatchTests(unittest.TestCase):
         self.assertIn('index .State "Health"', template)
         self.assertEqual(result["health"], "not_configured")
 
+    def test_service_inspect_accepts_only_exact_not_found_for_expected_container(self):
+        for message in (
+            f"Error: No such object: {watch.CONTAINERS['backend']}\n",
+            f"Error response from daemon: No such container: {watch.CONTAINERS['backend']}\n",
+        ):
+            with self.subTest(message=message):
+                with patch.object(watch, "_run", return_value=subprocess.CompletedProcess(
+                    ["docker"], 1, "", message
+                )):
+                    result = watch._inspect_service("backend")
+                self.assertEqual(result, {
+                    "exists": False, "running": False,
+                    "health": "unknown", "restart": "unknown",
+                })
+
+    def test_service_inspect_permission_and_daemon_failures_are_unavailable(self):
+        cases = (
+            "permission denied: secret /private/docker.sock\n",
+            "Cannot connect to the Docker daemon at /private/docker.sock\n",
+            f"Error: No such object: {watch.CONTAINERS['frontend']}-unexpected\n",
+            f"Error: No such object: {watch.CONTAINERS['backend']}\nextra diagnostic\n",
+        )
+        for stderr in cases:
+            with self.subTest(stderr=stderr):
+                with patch.object(watch, "_run", return_value=subprocess.CompletedProcess(
+                    ["docker"], 1, "", stderr
+                )):
+                    with self.assertRaises(watch.WatchError) as error:
+                        watch._inspect_service("backend")
+                self.assertEqual(str(error.exception), "docker_inspect_failed")
+
+    def test_service_inspect_malformed_success_and_conflicting_stderr_fail_closed(self):
+        cases = (
+            subprocess.CompletedProcess(["docker"], 0, "secret host path|running", ""),
+            subprocess.CompletedProcess(
+                ["docker"], 0,
+                "running|healthy|unless-stopped|||mode=local;\n", "private warning\n",
+            ),
+        )
+        for result in cases:
+            with self.subTest(stderr=bool(result.stderr), stdout=result.stdout):
+                with patch.object(watch, "_run", return_value=result):
+                    with self.assertRaises(watch.WatchError) as error:
+                        watch._inspect_service("backend")
+                self.assertEqual(str(error.exception), "docker_output_invalid")
+
     def test_runtime_warning_does_not_become_health_outage(self):
         warning_output = (
             "container ID already in use\n"
@@ -400,7 +446,9 @@ class RuntimeWatchTests(unittest.TestCase):
     def test_missing_service_and_volume_are_alerts(self):
         def failing(args, **kwargs):
             if args[0] == "docker" and "volume" not in args and args[-1] == "belib-production-backend-1":
-                return subprocess.CompletedProcess(args, 1, "", "private error detail")
+                return subprocess.CompletedProcess(
+                    args, 1, "", f"Error: No such object: {watch.CONTAINERS['backend']}\n"
+                )
             if args[0] == "docker" and "volume" in args and args[-1] == watch.VOLUMES["book_files"]:
                 return subprocess.CompletedProcess(
                     args, 1, "",
@@ -588,17 +636,26 @@ class RuntimeWatchTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 1, "", "private docker error")
             return self.command(args, **kwargs)
 
-        with patch.object(watch.subprocess, "run", side_effect=backend_inspect_failure), \
-                patch.object(watch, "_run_journal", return_value=subprocess.CompletedProcess(
-                    ["journalctl"], 0, "", ""
-                )):
-            report = watch.collect(10, uid=watch.APPROVED_UID, http_get=lambda _path: 200)
+        with patch.object(watch.subprocess, "run", side_effect=backend_inspect_failure):
+            with self.assertRaises(watch.WatchError) as error:
+                watch.collect(10, uid=watch.APPROVED_UID, http_get=lambda _path: 200)
+        self.assertEqual(str(error.exception), "docker_inspect_failed")
 
-        self.assertEqual(report["status"], "ALERT")
-        self.assertNotIn("book_files_rw_attached", report["services"]["backend"])
-        self.assertIn("service_backend_missing", report["failures"])
-        self.assertIn("backend_storage_mode_invalid", report["failures"])
-        self.assertNotIn("private", json.dumps(report))
+    def test_service_inspect_failure_stderr_is_not_reflected_in_final_json(self):
+        private = "permission denied: SECRET=/private/docker.sock"
+        output = io.StringIO()
+        with patch.object(watch.os, "getuid", return_value=watch.APPROVED_UID), \
+                patch.object(watch, "_run", return_value=subprocess.CompletedProcess(
+                    ["docker"], 1, "", private
+                )), contextlib.redirect_stdout(output):
+            code = watch.main(["--window-minutes", "5"])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "status": "ALERT", "failures": ["collection_failed"],
+        })
+        self.assertNotIn("SECRET", output.getvalue())
+        self.assertNotIn("private", output.getvalue())
 
     def test_malformed_docker_output_fails_closed_without_reflection(self):
         def malformed(args, **kwargs):
