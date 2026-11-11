@@ -8,6 +8,21 @@ The previously reported i5 state is application SHA `81256268276d7ead95029849037
 
 ### P1 bootstrap trust boundary — BLOCKED
 
+A **source-only, untrusted reference** verifier is proposed in
+`scripts/staging/operator_bootstrap_reference.py`, with offline adversarial tests in
+`scripts/staging/tests/test_operator_bootstrap_reference.py`. Its code and test
+success do **not** install an external trust root, verify the operational signer,
+approve an i5 deployment, or lift the unconditional `launch-guard.py` block.
+The reference consumes only ephemeral test grants. A separately reviewed,
+operator-owned immutable installation and independent digest/key/manifest
+pinning outside the candidate principal, including an immutable expected
+operation/evidence SHA256 digest (currently unmet), protected nonce state, a
+real signed one-use grant and TOCTOU-safe execution snapshot are still
+prerequisites.
+Do not run the reference file as a deployment entrypoint or supply real grants
+to a candidate-controlled checkout.
+
+
 The reported defect is real: the candidate-controlled `launch-guard.py` imported candidate-controlled `seed.py` before requesting approval through candidate-controlled `approval.py`. Its own path/SHA self-check and the admitted tree cannot authenticate the launcher that performs those checks. Moving those imports or adding a digest check inside the same candidate tree would not create an independent trust root.
 
 This patch preserves the existing deploy, resume-ingress, and manifest-ingress transaction implementations and their safety tests, but blocks entry to all three operations before candidate helper imports. The refusal is a fail-closed stop for this checkout, not proof that candidate code has independent provenance, and not an operator-installed bootstrap artifact. Until a separately trusted bootstrap exists, do not run any old command example in this runbook.
