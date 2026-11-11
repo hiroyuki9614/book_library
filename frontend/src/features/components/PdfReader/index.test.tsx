@@ -113,6 +113,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 	afterEach(async () => {
 		await cleanup();
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 		mocks.fetchBookFile.mockReset();
 		mocks.fetchReadingInfo.mockReset();
 		mocks.saveReadingInfo.mockReset();
@@ -197,7 +198,8 @@ describe('PdfReader navigation, outline, and progress', () => {
 		const input = view.getByRole('spinbutton', { name: 'ページ番号' });
 		await input.fill('11');
 		input.element().closest('form')?.requestSubmit();
-		await new Promise((resolve) => setTimeout(resolve, 850));
+		// Force an immediate flush boundary instead of relying on a sleep shorter than debounce.
+		window.dispatchEvent(new Event('pagehide'));
 		expect(mocks.scrollToPage).toHaveBeenCalledTimes(1);
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 
@@ -215,7 +217,8 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.scrollState.currentPage = 10;
 		mocks.viewportScrollState.currentPage = 10;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await new Promise((resolve) => setTimeout(resolve, 900));
+		// If the late restored page queued a stale save, pagehide would flush it now.
+		window.dispatchEvent(new Event('pagehide'));
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalledWith(7, 10, 'reading', 83);
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
 
@@ -239,7 +242,8 @@ describe('PdfReader navigation, outline, and progress', () => {
 		const input = view.getByRole('spinbutton', { name: 'ページ番号' });
 		await input.fill('1');
 		input.element().closest('form')?.requestSubmit();
-		await new Promise((resolve) => setTimeout(resolve, 850));
+		// Force an immediate flush boundary instead of relying on a sleep shorter than debounce.
+		window.dispatchEvent(new Event('pagehide'));
 		expect(mocks.scrollToPage).toHaveBeenCalledTimes(1);
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 
@@ -257,9 +261,72 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.scrollState.currentPage = 10;
 		mocks.viewportScrollState.currentPage = 10;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await new Promise((resolve) => setTimeout(resolve, 900));
+		// If the late restored page queued a stale save, pagehide would flush it now.
+		window.dispatchEvent(new Event('pagehide'));
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalledWith(7, 10, 'reading', 83);
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+	});
+
+	test('ページ入力11→12で11のPATCHが遅延しても後続の12を正規APIが順序保証し保存する', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+
+		// Keep the reader's actual UI but replace its default API mock with the real
+		// reading-info client. This exercises its same-book serial PATCH queue.
+		const actualApi = await vi.importActual<typeof import('@/api/readingInfo')>('@/api/readingInfo');
+		mocks.saveReadingInfo.mockImplementation(actualApi.saveReadingInfo);
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		let releaseOldSave!: () => void;
+		const firstSavePending = new Promise<void>((resolve) => { releaseOldSave = resolve; });
+		const requests: string[] = [];
+		let persistedPage = 10;
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			if (options?.method === 'PATCH') {
+				const { currentPage } = JSON.parse(String(options.body)) as { currentPage: number };
+				requests.push(`PATCH ${currentPage}`);
+				if (currentPage === 11) await firstSavePending;
+				persistedPage = currentPage;
+			} else {
+				requests.push(`GET ${persistedPage}`);
+			}
+			return new Response(JSON.stringify({
+				bookId: 7, currentPosition: String(persistedPage), currentPage: persistedPage,
+				progressPercentage: Math.round(persistedPage / 12 * 100),
+				readStatus: persistedPage === 12 ? 'completed' : 'reading',
+			}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+		});
+
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		const input = view.getByRole('spinbutton', { name: 'ページ番号' });
+		await input.fill('11');
+		input.element().closest('form')?.requestSubmit();
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 11, behavior: 'auto' }));
+		mocks.scrollState.currentPage = 11;
+		mocks.viewportScrollState.currentPage = 11;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(requests).toEqual(['PATCH 11']), { timeout: 1_750 });
+
+		await input.fill('12');
+		input.element().closest('form')?.requestSubmit();
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 12, behavior: 'auto' }));
+		mocks.scrollState.currentPage = 12;
+		mocks.viewportScrollState.currentPage = 12;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100));
+		// Page 12 has been requested through the real API but cannot overtake page 11.
+		expect(requests).toEqual(['PATCH 11']);
+		releaseOldSave();
+		await vi.waitFor(() => expect(requests).toEqual(['PATCH 11', 'PATCH 12']));
+		await expect(actualApi.fetchReadingInfo(7)).resolves.toMatchObject({ currentPage: 12, readStatus: 'completed' });
+		expect(persistedPage).toBe(12);
+		expect(requests).toEqual(['PATCH 11', 'PATCH 12', 'GET 12']);
 	});
 
 	test.each(['wheel', 'page-input'])('復元後の利用者による復元ページへの移動は保存する (%s)', async (intent) => {
