@@ -256,7 +256,17 @@ def _volume_exists(name):
     template = "{{.Name}}"
     result = _run(["docker", "--host", DOCKER_SOCKET, "volume", "inspect", "--format", template, name])
     if result.returncode != 0:
-        return False
+        # Only Docker's exact not-found response proves absence. Permission,
+        # daemon, and otherwise ambiguous failures must fail closed without
+        # reflecting command output that may contain sensitive details.
+        escaped_name = re.escape(name)
+        missing_volume = re.compile(
+            rf"(?:(?i:Error response from daemon: get ){escaped_name}(?i:: no such volume)|"
+            rf"(?i:Error: No such volume: ){escaped_name})",
+        )
+        if not result.stdout.strip() and missing_volume.fullmatch(result.stderr.strip()):
+            return False
+        raise WatchError("docker_volume_inspect_failed")
     if result.stdout.strip() != name:
         raise WatchError("docker_output_invalid")
     return True
@@ -374,7 +384,7 @@ def collect(minutes, *, uid=None, http_get=None):
     elif backend_storage_mode == "local" and not services["backend"].get("book_files_rw_attached", False):
         failures.append("book_files_volume_not_rw_attached")
     for name, exists in volumes.items():
-        if not exists:
+        if not exists and not (name == "book_files" and backend_storage_mode == "r2"):
             failures.append(f"volume_{name}_missing")
     if not docker_service["active"]:
         failures.append("docker_service_inactive")

@@ -402,7 +402,10 @@ class RuntimeWatchTests(unittest.TestCase):
             if args[0] == "docker" and "volume" not in args and args[-1] == "belib-production-backend-1":
                 return subprocess.CompletedProcess(args, 1, "", "private error detail")
             if args[0] == "docker" and "volume" in args and args[-1] == watch.VOLUMES["book_files"]:
-                return subprocess.CompletedProcess(args, 1, "", "private volume detail")
+                return subprocess.CompletedProcess(
+                    args, 1, "",
+                    f"Error response from daemon: get {watch.VOLUMES['book_files']}: no such volume",
+                )
             return self.command(args, **kwargs)
 
         with patch.object(watch.subprocess, "run", side_effect=failing):
@@ -461,6 +464,96 @@ class RuntimeWatchTests(unittest.TestCase):
         self.assertEqual(report["services"]["backend"]["storage_mode"], "r2")
         self.assertFalse(report["services"]["backend"]["book_files_rw_attached"])
         self.assertNotIn("book_files_volume_not_rw_attached", report["failures"])
+
+    def test_r2_backend_without_unused_book_files_volume_is_healthy(self):
+        def r2_without_volume(args, **kwargs):
+            if args[0] == "docker" and "inspect" in args and args[-1] == watch.CONTAINERS["backend"]:
+                return subprocess.CompletedProcess(
+                    args, 0, "running|healthy|unless-stopped|||mode=r2;\n", ""
+                )
+            if args[0] == "docker" and "volume" in args and args[-1] == watch.VOLUMES["book_files"]:
+                return subprocess.CompletedProcess(
+                    args, 1, "",
+                    f"Error response from daemon: get {watch.VOLUMES['book_files']}: no such volume",
+                )
+            return self.command(args, **kwargs)
+
+        with patch.object(watch.subprocess, "run", side_effect=r2_without_volume), \
+                patch.object(watch, "_run_journal", return_value=subprocess.CompletedProcess(
+                    ["journalctl"], 0, "", ""
+                )):
+            report = watch.collect(10, uid=watch.APPROVED_UID, http_get=lambda path: (
+                401 if path == "/api/v1/books" else 200
+            ))
+
+        self.assertEqual(report["status"], "HEALTHY")
+        self.assertFalse(report["volumes"]["book_files"])
+        self.assertNotIn("volume_book_files_missing", report["failures"])
+
+    def test_r2_missing_postgres_volume_is_always_alert(self):
+        def r2_without_postgres_volume(args, **kwargs):
+            if args[0] == "docker" and "inspect" in args and args[-1] == watch.CONTAINERS["backend"]:
+                return subprocess.CompletedProcess(
+                    args, 0, "running|healthy|unless-stopped|||mode=r2;\n", ""
+                )
+            if args[0] == "docker" and "volume" in args and args[-1] == watch.VOLUMES["postgres"]:
+                return subprocess.CompletedProcess(
+                    args, 1, "",
+                    f"Error response from daemon: get {watch.VOLUMES['postgres']}: no such volume",
+                )
+            return self.command(args, **kwargs)
+
+        with patch.object(watch.subprocess, "run", side_effect=r2_without_postgres_volume), \
+                patch.object(watch, "_run_journal", return_value=subprocess.CompletedProcess(
+                    ["journalctl"], 0, "", ""
+                )):
+            report = watch.collect(10, uid=watch.APPROVED_UID, http_get=lambda path: (
+                401 if path == "/api/v1/books" else 200
+            ))
+
+        self.assertEqual(report["status"], "ALERT")
+        self.assertIn("volume_postgres_missing", report["failures"])
+        self.assertNotIn("volume_book_files_missing", report["failures"])
+
+    def test_volume_inspect_unknown_failures_fail_closed_without_output_leak(self):
+        cases = (
+            ("permission denied", "Error response from daemon: permission denied: secret /private/socket"),
+            ("daemon unavailable", "Cannot connect to the Docker daemon at /private/docker.sock"),
+            ("ambiguous empty failure", ""),
+            ("wrong volume name", "Error: No such volume: another-volume"),
+            (
+                "wrong case volume name",
+                f"Error: No such volume: {watch.VOLUMES['book_files'].upper()}",
+            ),
+            (
+                "absence with extra output",
+                f"Error response from daemon: get {watch.VOLUMES['book_files']}: no such volume\nsecret detail",
+            ),
+        )
+        for label, stderr in cases:
+            with self.subTest(failure=label):
+                def failed_volume_inspect(args, **kwargs):
+                    if args[0] == "docker" and "volume" in args and args[-1] == watch.VOLUMES["book_files"]:
+                        return subprocess.CompletedProcess(args, 1, "", stderr)
+                    return self.command(args, **kwargs)
+
+                output = io.StringIO()
+                with patch.object(watch.os, "getuid", return_value=watch.APPROVED_UID), \
+                        patch.object(watch.subprocess, "run", side_effect=failed_volume_inspect), \
+                        patch.object(watch, "_run_journal", return_value=subprocess.CompletedProcess(
+                            ["journalctl"], 0, "", ""
+                        )), \
+                        patch.object(watch, "_http_status", side_effect=lambda path: (
+                            401 if path == "/api/v1/books" else 200
+                        )), \
+                        contextlib.redirect_stdout(output):
+                    code = watch.main(["--window-minutes", "10"])
+
+                self.assertEqual(code, 2)
+                report = json.loads(output.getvalue())
+                self.assertEqual(report, {"status": "ALERT", "failures": ["collection_failed"]})
+                self.assertNotIn("secret", output.getvalue())
+                self.assertNotIn("private", output.getvalue())
 
     def test_backend_storage_mode_absent_invalid_or_ambiguous_fails_closed(self):
         cases = (
