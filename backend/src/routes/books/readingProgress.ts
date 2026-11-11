@@ -9,6 +9,7 @@ export type ReadingProgressRecord = {
 };
 
 export const READING_SESSION_USER_HEADER = 'X-BeLib-User-Id';
+export const MAX_CURRENT_POSITION_LENGTH = 16_384;
 
 export function parseReadingSessionUserId(value: string | undefined) {
 	if (!value) return null;
@@ -67,6 +68,10 @@ export async function persistReadingInfo(
 	prisma: ReadingInfoPersistence,
 	input: PersistReadingInfoInput,
 ): Promise<ReadingProgressRecord> {
+	if (input.currentPosition.length > MAX_CURRENT_POSITION_LENGTH) {
+		throw new RangeError(`currentPosition must be ${MAX_CURRENT_POSITION_LENGTH} characters or fewer`);
+	}
+
 	const where = {
 		userId_bookId: { userId: input.userId, bookId: input.bookId },
 	};
