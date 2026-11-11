@@ -626,7 +626,7 @@ class LaunchOperationTests(unittest.TestCase):
 
             def runner(command, **kwargs):
                 commands.append(command)
-                if command[3:5] == [kind, "ls"]:
+                if command[3:5] == [kind, "ls"] and "--filter" not in command:
                     return SimpleNamespace(returncode=0, stdout=name + "\n")
                 return SimpleNamespace(returncode=0, stdout="")
 
