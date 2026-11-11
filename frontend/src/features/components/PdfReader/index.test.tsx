@@ -126,7 +126,8 @@ describe('PdfReader navigation, outline, and progress', () => {
 		const { getByText } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
 		await expect.element(getByText('2 / 5 ページ 40%')).toBeInTheDocument();
-		await new Promise((resolve) => setTimeout(resolve, 850));
+		// A pagehide flush proves no pending restore save without elapsed-time guesses.
+		window.dispatchEvent(new Event('pagehide'));
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 	});
 
@@ -141,13 +142,15 @@ describe('PdfReader navigation, outline, and progress', () => {
 
 		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
-		await new Promise((resolve) => setTimeout(resolve, 850));
+		// A pagehide flush proves no pending restore save without elapsed-time guesses.
+		window.dispatchEvent(new Event('pagehide'));
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 
 		mocks.scrollState.currentPage = 10;
 		mocks.viewportScrollState.currentPage = 10;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await new Promise((resolve) => setTimeout(resolve, 850));
+		// A pagehide flush proves no pending restore save without elapsed-time guesses.
+		window.dispatchEvent(new Event('pagehide'));
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 
 		mocks.scrollState.currentPage = 11;
@@ -170,7 +173,8 @@ describe('PdfReader navigation, outline, and progress', () => {
 		const pageInput = view.getByRole('spinbutton', { name: 'ページ番号' });
 		await pageInput.fill('11');
 		pageInput.element().closest('form')?.requestSubmit();
-		await new Promise((resolve) => setTimeout(resolve, 850));
+		// A pagehide flush proves no pending restore save without elapsed-time guesses.
+		window.dispatchEvent(new Event('pagehide'));
 		expect(mocks.scrollToPage).toHaveBeenCalledTimes(1);
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 
