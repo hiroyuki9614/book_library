@@ -198,6 +198,11 @@ describe('PdfReader navigation, outline, and progress', () => {
 		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
 
+		// The restoration command may run before React observes the saved page.
+		// Flush the restored page's state before simulating a real page turn.
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
 		mocks.scrollState.currentPage = 3;
 		mocks.viewportScrollState.currentPage = 3;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
