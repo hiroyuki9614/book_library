@@ -70,18 +70,22 @@ class TlsIngressTests(unittest.TestCase):
         self.assertEqual(a["TCP"]["443"], {"HTTPS": True})
         self.assertEqual(a["TCP"]["8443"], {"HTTPS": True})
         stale = "fedora-worker.tail63cd2d.ts.net:443"
+        legacy_8443 = "fedora-worker.tail63cd2d.ts.net:8443"
         current = f"{tls.TAILNET_HOST}:8443"
         self.assertEqual(a["Web"][stale], original_config()["Web"][stale])
+        self.assertEqual(a["Web"][legacy_8443], original_config()["Web"][stale])
         self.assertEqual(a["Web"][current], original_config()["Web"][stale])
         b = json.loads(tls.plan_phase_b(tls.canonical_json(a)))
         self.assertNotIn("443", b["TCP"])
         self.assertNotIn(stale, b["Web"])
+        self.assertEqual(b["Web"][legacy_8443], original_config()["Web"][stale])
         self.assertIn(current, b["Web"])
         c = json.loads(tls.plan_phase_c(tls.canonical_json(b)))
         self.assertEqual(c["TCP"]["443"], {"TCPForward": "127.0.0.1:18443"})
         self.assertEqual(tls.plan_phase_b(tls.canonical_json(a)), tls.canonical_json(b))
         self.assertEqual(tls.plan_phase_c(tls.canonical_json(b)), tls.canonical_json(c))
         self.assertEqual(c["TCP"]["8443"], {"HTTPS": True})
+        self.assertEqual(c["Web"][legacy_8443], original_config()["Web"][stale])
 
     def test_localapi_unix_host_is_the_tailscale_sock_host(self):
         connection = tls._UnixHTTPConnection(Path("/unused.sock"), 1)

@@ -211,6 +211,24 @@ describe('reading-info API', () => {
 		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
 	});
 
+	test('PATCHはJSONオブジェクトでないbodyを400で拒否しDBへ書き込まない', async () => {
+		for (const body of [null, [], 'reading', 3, true]) {
+			const response = await app.request('/1/reading-info', {
+				method: 'PATCH',
+				headers: JSON_READING_HEADERS,
+				body: JSON.stringify(body),
+			});
+
+			expect(response.status).toBe(400);
+			expect(await response.json()).toMatchObject({ code: 'INVALID_REQUEST' });
+		}
+
+		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
+		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
+		expect(mocks.readingInfoCreate).not.toHaveBeenCalled();
+		expect(mocks.readingInfoUpdate).not.toHaveBeenCalled();
+	});
+
 	test('未認証ユーザーはreading-infoを401で拒否される', async () => {
 		mocks.getSession.mockResolvedValue(null);
 

@@ -410,7 +410,8 @@ def plan_phase_a(original_raw: bytes, current_dns: str = TAILNET_HOST) -> bytes:
         raise TlsIngressError("Current Tailscale DNS name does not match the reviewed i5 host")
     original = validate_original_serve_config(original_raw)
     tcp, web = original["TCP"], original["Web"]
-    if "8443" in tcp or f"{current_dns}:8443" in web:
+    if ("8443" in tcp or f"{current_dns}:8443" in web
+            or "fedora-worker.tail63cd2d.ts.net:8443" in web):
         raise TlsIngressError("Tailscale port 8443 is already occupied")
     old_bri = [(name, value) for name, value in web.items() if name.endswith(":443")
                and isinstance(value, dict) and BRI_PATH in value.get("Handlers", {})]
@@ -419,6 +420,7 @@ def plan_phase_a(original_raw: bytes, current_dns: str = TAILNET_HOST) -> bytes:
         raise TlsIngressError("Original Serve 443 handlers are not the reviewed single BRI handler")
     updated = copy.deepcopy(original)
     updated["TCP"]["8443"] = {"HTTPS": True}
+    updated["Web"]["fedora-worker.tail63cd2d.ts.net:8443"] = copy.deepcopy(old_bri[0][1])
     updated["Web"][f"{current_dns}:8443"] = copy.deepcopy(old_bri[0][1])
     return _canonical_config(updated)
 
@@ -430,6 +432,8 @@ def plan_phase_b(phase_a_raw: bytes) -> bytes:
     other_443 = [name for name in updated["Web"] if name.endswith(":443") and all(name != old_name for old_name, _ in old_bri)]
     if (len(old_bri) != 1 or other_443 or updated["TCP"].get("443", {}).get("HTTPS") is not True
             or updated["TCP"].get("8443", {}).get("HTTPS") is not True
+            or updated["Web"].get("fedora-worker.tail63cd2d.ts.net:8443", {}).get("Handlers")
+            != old_bri[0][1].get("Handlers")
             or updated["Web"].get(f"{TAILNET_HOST}:8443", {}).get("Handlers") != old_bri[0][1].get("Handlers")):
         raise TlsIngressError("Phase B may remove only the reviewed original HTTPS 443 mapping")
     del updated["TCP"]["443"]

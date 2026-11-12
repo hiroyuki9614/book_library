@@ -300,6 +300,24 @@ describe('book state routes', () => {
 		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
 	});
 
+	test('PATCHはJSONオブジェクトでないbodyを400で拒否しDBへ書き込まない', async () => {
+		for (const body of [null, [], 'reading', 3, true]) {
+			const response = await app.request('/1/reading-info', {
+				method: 'PATCH',
+				headers: JSON_READING_HEADERS,
+				body: JSON.stringify(body),
+			});
+
+			expect(response.status).toBe(400);
+			expect(await response.json()).toMatchObject({ code: 'INVALID_REQUEST' });
+		}
+
+		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
+		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
+		expect(mocks.readingInfoCreate).not.toHaveBeenCalled();
+		expect(mocks.readingInfoUpdate).not.toHaveBeenCalled();
+	});
+
 	test('PDF最終ページをcompletedとして保存でき、currentPage互換を維持する', async () => {
 		mocks.readingInfoUpsert.mockResolvedValue({ currentPosition: '12', progressPercentage: 100, readStatus: 'completed' });
 

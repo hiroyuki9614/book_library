@@ -39,6 +39,14 @@ def new_plan(now=None):
             "tls_config_sha256": "d" * 64, "nonce": "e" * 64, "expires_at": now + 1200}
 
 
+class FakeClock:
+    def __init__(self, now):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
 class FakeAPI:
     def __init__(self, raw=None):
         self.raw = raw or baseline()
@@ -144,7 +152,10 @@ class OwnerServeTests(unittest.TestCase):
         self.assertEqual(result["status"], "complete")
         config = owner.config(self.api.raw)
         self.assertEqual(config["TCP"], {"8443": {"HTTPS": True}, "443": {"TCPForward": "127.0.0.1:18443"}})
-        self.assertEqual(set(config["Web"]), {f"{owner.SELF}:8443"})
+        legacy_8443 = f"{owner.LEGACY_BRI_HOST}:8443"
+        self.assertEqual(set(config["Web"]), {f"{owner.SELF}:8443", legacy_8443})
+        for host_port in (f"{owner.SELF}:8443", legacy_8443):
+            self.assertEqual(config["Web"][host_port], {"Handlers": {owner.BRI: {"Path": owner.BRI_FILE}}})
         posts = [event for event in self.probes if event[0] == "journal" and event[1] == "phase-intent"]
         self.assertEqual([entry[2]["phase"] for entry in posts], ["A", "B", "C"])
         ordered = self.api.events
@@ -157,11 +168,17 @@ class OwnerServeTests(unittest.TestCase):
         legacy = [p for p in self.probes if p[0] == "tls" and p[2] == owner.LEGACY_BRI_HOST]
         self.assertTrue(legacy)
         self.assertTrue(all(p[4]["expect_status"] == 200 for p in legacy))
-        self.assertIn(("tls", 18443, owner.LEGACY_BRI_HOST, owner.BRI, {"expect_status": 200}), legacy)
+        self.assertTrue(all(p[4]["expected_body_sha256"] == owner.LEGACY_BRI_SHA256 for p in legacy))
         first_post = next(i for i, p in enumerate(self.probes) if p[0] == "POST")
-        for port in (443, 18443):
-            self.assertTrue(any(i < first_post and p[0] == "tls" and p[1] == port and p[2] == owner.LEGACY_BRI_HOST
-                                for i, p in enumerate(self.probes)))
+        legacy_443_before = [i for i, p in enumerate(self.probes)
+                             if p[0] == "tls" and p[1] == 443 and p[2] == owner.LEGACY_BRI_HOST]
+        legacy_8443_after_a = [i for i, p in enumerate(self.probes)
+                               if p[0] == "tls" and p[1] in (8443, 18443) and p[2] == owner.LEGACY_BRI_HOST]
+        self.assertTrue(legacy_443_before and legacy_443_before[0] < first_post)
+        phase_b_post = next(i for i, p in enumerate(self.probes)
+                            if p[0] == "POST" and p[1] == 2)
+        self.assertEqual(len(legacy_8443_after_a), 2)
+        self.assertTrue(all(first_post < i < phase_b_post for i in legacy_8443_after_a))
         fixed = [probe for probe in self.probes if probe[0] == "tls" and probe[1] == 443]
         self.assertTrue(fixed)
         self.assertTrue(all(item[4]["connect_host"] == owner.SELF_IP for item in fixed))
@@ -175,23 +192,137 @@ class OwnerServeTests(unittest.TestCase):
         self.assertLess(positives[0], no_sni)
         self.assertGreater(positives[-1], no_sni)
 
-    def test_missing_or_404_legacy_bri_fails_before_nonce_and_serve_posts(self):
+    def test_original_legacy_bri_must_match_before_nonce_and_any_serve_write(self):
         real_tls_mock = owner.tls_request
-        for blocked_port in (443, 18443):
-            with self.subTest(blocked_port=blocked_port):
-                self.api = FakeAPI()
-                self.used_nonces.clear()
-                def legacy_unavailable(port, hostname, path, **kwargs):
-                    if port == blocked_port and hostname == owner.LEGACY_BRI_HOST:
-                        raise owner.Stop("BRI must return HTTP 200; observed 404")
-                    return real_tls_mock(port, hostname, path, **kwargs)
-                with patch.object(owner, "tls_request", side_effect=legacy_unavailable):
-                    with self.assertRaisesRegex(owner.Stop, "BRI must return HTTP 200"):
-                        self.execute()
-                self.assertEqual(self.api.posts, 0)
-                self.assertEqual(self.used_nonces, set())
-                self.assertEqual(owner.canonical(owner.config(self.api.raw)),
-                                 owner.canonical(owner.config(baseline())))
+        self.api = FakeAPI()
+        self.used_nonces.clear()
+        def legacy_unavailable(port, hostname, path, **kwargs):
+            if port == 443 and hostname == owner.LEGACY_BRI_HOST:
+                raise owner.Stop("BRI original HTTPS route did not return the verified asset")
+            return real_tls_mock(port, hostname, path, **kwargs)
+        with patch.object(owner, "tls_request", side_effect=legacy_unavailable):
+            with self.assertRaisesRegex(owner.Stop, "original HTTPS route"):
+                self.execute()
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(self.used_nonces, set())
+        self.assertEqual(owner.canonical(owner.config(self.api.raw)),
+                         owner.canonical(owner.config(baseline())))
+
+    def test_candidate_legacy_route_failure_after_phase_a_rolls_back_and_burns_nonce(self):
+        plan = new_plan()
+        real_tls_mock = owner.tls_request
+        def candidate_unavailable(port, hostname, path, **kwargs):
+            if port == 18443 and hostname == owner.LEGACY_BRI_HOST:
+                raise owner.Stop("candidate legacy BRI route did not return the verified asset")
+            return real_tls_mock(port, hostname, path, **kwargs)
+        with patch.object(owner, "tls_request", side_effect=candidate_unavailable):
+            with self.assertRaisesRegex(owner.Stop, "candidate legacy BRI route"):
+                self.execute(plan)
+        self.assertEqual(self.api.posts, 2)  # phase A, then owned rollback
+        self.assertEqual(self.used_nonces, {plan["nonce"]})
+        self.assertEqual(owner.canonical(owner.config(self.api.raw)),
+                         owner.canonical(owner.config(baseline())))
+
+        # A rollback does not make the externally signed one-use plan reusable.
+        self.api = FakeAPI()
+        with patch.object(owner, "tls_request", return_value=None):
+            with self.assertRaisesRegex(owner.Stop, "nonce replay"):
+                self.execute(plan)
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(owner.canonical(owner.config(self.api.raw)),
+                         owner.canonical(owner.config(baseline())))
+
+    def test_plan_expiry_after_phase_a_rolls_back_before_phase_b_and_burns_nonce(self):
+        plan = new_plan(now=1000)
+        clock = FakeClock(1000)
+        original_event = self.journal_mock.side_effect
+        def expire_after_phase_a(journal, event, **fields):
+            original_event(journal, event, **fields)
+            if event == "phase-committed" and fields.get("phase") == "A":
+                clock.now = plan["expires_at"] + 1
+        with patch.object(owner.time, "time", new=clock), \
+             patch.object(owner, "tls_request", return_value=None):
+            self.journal_mock.side_effect = expire_after_phase_a
+            try:
+                with self.assertRaisesRegex(owner.Stop, "expired"):
+                    self.execute(plan)
+            finally:
+                self.journal_mock.side_effect = original_event
+            self.assertEqual(self.api.posts, 2)  # phase A, then owned rollback
+            self.assertEqual(self.used_nonces, {plan["nonce"]})
+            self.assertEqual(owner.canonical(owner.config(self.api.raw)),
+                             owner.canonical(owner.config(baseline())))
+
+            clock.now = 1000
+            self.api = FakeAPI()
+            with self.assertRaisesRegex(owner.Stop, "nonce replay"):
+                self.execute(plan)
+            self.assertEqual(self.api.posts, 0)
+            self.assertEqual(owner.canonical(owner.config(self.api.raw)),
+                             owner.canonical(owner.config(baseline())))
+
+    def test_plan_expiry_during_nonce_journal_blocks_phase_a_cas(self):
+        plan = new_plan(now=1000)
+        clock = FakeClock(1000)
+        mark_nonce = owner.journal_start.side_effect
+        def expire_during_journal(*args):
+            result = mark_nonce(*args)
+            clock.now = plan["expires_at"] + 1
+            return result
+        with patch.object(owner.time, "time", new=clock), \
+             patch.object(owner, "journal_start", side_effect=expire_during_journal), \
+             patch.object(owner, "tls_request", return_value=None):
+            with self.assertRaisesRegex(owner.Stop, "expired"):
+                self.execute(plan)
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(self.used_nonces, {plan["nonce"]})
+        self.assertEqual(owner.canonical(owner.config(self.api.raw)),
+                         owner.canonical(owner.config(baseline())))
+
+    def test_plan_expiry_during_phase_a_cas_prewrite_get_blocks_forward_post(self):
+        plan = new_plan(now=1000)
+        clock = FakeClock(1000)
+        original_get = self.api.get
+        def expire_after_phase_a_cas_get():
+            result = original_get()
+            if self.api.get_count == 2:  # initial baseline read, then CAS pre-write read
+                clock.now = plan["expires_at"] + 1
+            return result
+        with patch.object(owner.time, "time", new=clock), \
+             patch.object(self.api, "get", side_effect=expire_after_phase_a_cas_get), \
+             patch.object(owner, "tls_request", return_value=None):
+            with self.assertRaisesRegex(owner.Stop, "expired"):
+                self.execute(plan)
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(self.used_nonces, {plan["nonce"]})
+        self.assertEqual(owner.canonical(owner.config(self.api.raw)),
+                         owner.canonical(owner.config(baseline())))
+
+    def test_plan_expiry_during_phase_b_cas_rolls_back_without_phase_c_post(self):
+        plan = new_plan(now=1000)
+        clock = FakeClock(1000)
+        original_set = self.api.set
+        def expire_during_phase_b(raw, etag, attempt):
+            result = original_set(raw, etag, attempt)
+            if self.api.posts == 2:
+                clock.now = plan["expires_at"] + 1
+            return result
+        with patch.object(owner.time, "time", new=clock), \
+             patch.object(self.api, "set", side_effect=expire_during_phase_b), \
+             patch.object(owner, "tls_request", return_value=None):
+            with self.assertRaisesRegex(owner.Stop, "expired"):
+                self.execute(plan)
+        phase_intents = [entry[2]["phase"] for entry in self.api.events
+                         if len(entry) == 3 and entry[0] == "journal" and entry[1] == "phase-intent"]
+        self.assertEqual(phase_intents, ["A", "B", "C"])
+        self.assertEqual(self.api.posts, 3)  # A, B, and owned restore; phase C never posts
+        phase_c = owner.phase_c(owner.phase_b(owner.phase_a(baseline())))
+        posted_configs = [entry[2] for entry in self.api.events
+                          if len(entry) == 3 and entry[0] == "POST"]
+        self.assertNotIn(phase_c, posted_configs)
+        self.assertEqual(self.used_nonces, {plan["nonce"]})
+        self.assertEqual(owner.canonical(owner.config(self.api.raw)),
+                         owner.canonical(owner.config(baseline())))
 
     def test_plan_digest_canonicality_expiry_and_wrong_host_fail_before_api(self):
         raw = owner.canonical(new_plan())
@@ -371,6 +502,8 @@ class OwnerServeTests(unittest.TestCase):
                 RealLocalAPI().status()
 
     def test_positive_tls_uses_fixed_ca_store_and_fixed_connect_address(self):
+        class RawSocket:
+            def close(self): pass
         leaf = b"synthetic DER cert"
         class Secure:
             def __enter__(self): return self
@@ -388,13 +521,66 @@ class OwnerServeTests(unittest.TestCase):
             def read(self, _): return b"ok"
         context = Context()
         with patch.object(owner.ssl, "create_default_context", return_value=context) as make_context, \
-             patch.object(owner.socket, "create_connection", return_value=object()) as connect, \
+             patch.object(owner.socket, "create_connection", return_value=RawSocket()) as connect, \
              patch.object(owner.http.client, "HTTPResponse", Response):
             RealTlsRequest(443, owner.CUSTOM, "/health", connect_host=owner.SELF_IP,
                            fingerprint=owner.digest(leaf))
         make_context.assert_called_once_with(cafile=owner.CA_FILE)
         connect.assert_called_once_with((owner.SELF_IP, 443), timeout=4)
         self.assertEqual(context.server_hostname, owner.CUSTOM)
+
+    def test_legacy_http_200_must_match_exact_bounded_asset_bytes(self):
+        class RawSocket:
+            def close(self): pass
+        class Secure:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def sendall(self, _): pass
+        class Context:
+            def wrap_socket(self, raw, *, server_hostname):
+                return Secure()
+        class Response:
+            status = 200
+            body = b"verified original asset fixture"
+            def __init__(self, _): pass
+            def begin(self): pass
+            def read(self, limit):
+                self.limit = limit
+                return self.body
+
+        with patch.object(owner.ssl, "create_default_context", return_value=Context()), \
+             patch.object(owner.socket, "create_connection", return_value=RawSocket()), \
+             patch.object(owner.http.client, "HTTPResponse", Response), \
+             patch.object(owner, "LEGACY_BRI_SHA256", hashlib.sha256(Response.body).hexdigest()):
+            self.assertIsNone(RealTlsRequest(443, owner.LEGACY_BRI_HOST, owner.BRI, connect_host=owner.SELF_IP,
+                                             expected_body_sha256=owner.LEGACY_BRI_SHA256))
+            Response.body = b"not the original image"
+            with self.assertRaisesRegex(owner.Stop, "original asset"):
+                RealTlsRequest(443, owner.LEGACY_BRI_HOST, owner.BRI, connect_host=owner.SELF_IP,
+                               expected_body_sha256=owner.LEGACY_BRI_SHA256)
+
+            Response.body = b"x" * (owner.MAX_TLS_RESPONSE_BYTES + 1)
+            with self.assertRaisesRegex(owner.Stop, "fixed bound"):
+                RealTlsRequest(443, owner.LEGACY_BRI_HOST, owner.BRI, connect_host=owner.SELF_IP,
+                               expected_body_sha256=owner.LEGACY_BRI_SHA256)
+
+    def test_tls_handshake_and_transport_exceptions_fail_closed(self):
+        with patch.object(owner.socket, "create_connection", side_effect=OSError("listener unavailable")):
+            with self.assertRaisesRegex(owner.Stop, "TLS/HTTP readiness probe failed"):
+                RealTlsRequest(8443, owner.LEGACY_BRI_HOST, owner.BRI, connect_host=owner.SELF_IP,
+                               expected_body_sha256=owner.LEGACY_BRI_SHA256)
+
+        class RawSocket:
+            def close(self): pass
+        class BadContext:
+            def wrap_socket(self, raw, *, server_hostname):
+                raise owner.ssl.SSLCertVerificationError("wrong legacy hostname certificate")
+
+        with patch.object(owner.ssl, "create_default_context", return_value=BadContext()), \
+             patch.object(owner.socket, "create_connection", return_value=RawSocket()):
+            with self.assertRaisesRegex(owner.Stop, "TLS/HTTP readiness probe failed"):
+                RealTlsRequest(8443, owner.LEGACY_BRI_HOST, owner.BRI, connect_host=owner.SELF_IP,
+                               expected_body_sha256=owner.LEGACY_BRI_SHA256)
 
     def test_nonce_replay_is_rejected_before_any_serve_write(self):
         plan = new_plan()

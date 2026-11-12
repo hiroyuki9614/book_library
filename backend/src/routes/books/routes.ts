@@ -67,6 +67,10 @@ function parseBookId(rawBookId: string | undefined) {
 	return Number.isSafeInteger(bookId) ? bookId : null;
 }
 
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function getSupportedBookFileType(file: BookFileRecord): SupportedBookFileType | null {
 	const extension = file.extension.trim().toLowerCase();
 	const mimeType = file.mimeType.split(';', 1)[0].trim().toLowerCase();
@@ -231,6 +235,9 @@ app.patch('/:bookId/reading-info', async (c) => {
 			body = await c.req.json();
 		} catch {
 			return jsonError(c, 400, 'Request body must be valid JSON', 'INVALID_REQUEST');
+		}
+		if (!isJsonObject(body)) {
+			return jsonError(c, 400, 'Request body must be a JSON object', 'INVALID_REQUEST');
 		}
 
 		const input = body as { currentPage?: unknown; currentPosition?: unknown; progressPercentage?: unknown; readStatus?: unknown };
