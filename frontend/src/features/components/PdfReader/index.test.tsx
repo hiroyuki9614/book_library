@@ -579,7 +579,12 @@ describe('PdfReader navigation, outline, and progress', () => {
 	});
 
 	test('LTRの右端タップは次ページへ進み、ドラッグはページ移動しない', async () => {
-		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		// The viewport can appear before the asynchronous scroll plugin is ready.
+		// A tap is meaningful only after initial page restoration is acknowledged.
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		const { getByTestId } = view;
 		const viewport = getByTestId('pdf-viewport');
 		await expect.element(viewport).toBeInTheDocument();
 		const element = viewport.element() as HTMLElement;
@@ -636,7 +641,10 @@ describe('PdfReader navigation, outline, and progress', () => {
 	});
 
 	test('RTLの左端タップは次ページへ進む', async () => {
-		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='rtl' />);
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='rtl' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='rtl' />);
+		const { getByTestId } = view;
 		await expect.element(getByTestId('pdf-viewport')).toBeInTheDocument();
 		const element = getByTestId('pdf-viewport').element() as HTMLElement;
 		vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 600, width: 1000, height: 600, x: 0, y: 0, toJSON: () => ({}) });
