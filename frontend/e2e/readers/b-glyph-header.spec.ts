@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { epubFixture } from './fixtures';
+import { createStoredZip } from '../../scripts/aozoraAssets';
 
 type ReaderKind = 'epub' | 'pdf';
 // Position baselines are measured from a direct-text button in the same
@@ -34,6 +35,52 @@ async function ready(page: Page, kind: ReaderKind) {
 		await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 30_000 });
 	}
 	await page.evaluate(() => document.fonts.ready);
+}
+
+const SHEET_CHAPTERS = Array.from({ length: 24 }, (_, index) => `Chapter ${String(index + 1).padStart(2, '0')}`);
+
+function sheetEpubFixture() {
+	const toc = SHEET_CHAPTERS.map((title, index) => `<li><a href="body.xhtml#chapter-${index}">${title}</a></li>`).join('');
+	const body = SHEET_CHAPTERS.map((title, index) => `<h2 id="chapter-${index}">${title}</h2><p>Synthetic reader sheet content.</p>`).join('');
+	return createStoredZip([
+		{ name: 'mimetype', data: Buffer.from('application/epub+zip') },
+		{
+			name: 'META-INF/container.xml',
+			data: Buffer.from('<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OPS/book.opf" media-type="application/oebps-package+xml"/></rootfiles></container>'),
+		},
+		{
+			name: 'OPS/book.opf',
+			data: Buffer.from('<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">belib-sheet-regression</dc:identifier><dc:title>Reader sheet fixture</dc:title><dc:language>en</dc:language><meta property="dcterms:modified">2026-11-12T00:00:00Z</meta></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="body" href="body.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="body"/></spine></package>'),
+		},
+		{
+			name: 'OPS/nav.xhtml',
+			data: Buffer.from(`<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Contents</title></head><body><nav epub:type="toc"><ol>${toc}</ol></nav></body></html>`),
+		},
+		{
+			name: 'OPS/body.xhtml',
+			data: Buffer.from(`<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Reader sheet fixture</title></head><body>${body}</body></html>`),
+		},
+	]);
+}
+
+async function checkOpenedSheet(page: Page, viewportWidth: number) {
+	const sheet = page.locator('[data-slot="sheet-content"][data-side="right"]');
+	await expect(sheet).toBeVisible();
+	// Wait for the real slide-in animation to finish before measuring its position.
+	await expect(sheet).toBeInViewport({ ratio: 1 });
+	const bounds = (await sheet.boundingBox())!;
+	const expectedWidth = viewportWidth < 640 ? 208 : 224;
+	expect(bounds.width, 'rendered sheet width stays within the B design limit').toBeLessThanOrEqual(expectedWidth);
+	expect(bounds.width, 'rendered sheet keeps its intended usable width').toBeGreaterThanOrEqual(expectedWidth - 1);
+	expect(bounds.x).toBeGreaterThanOrEqual(0);
+	expect(bounds.x + bounds.width).toBeCloseTo(viewportWidth, 1);
+	expect(bounds.y).toBeGreaterThanOrEqual(0);
+	expect(bounds.y + bounds.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+	expect(await sheet.evaluate((element) => element.scrollWidth <= element.clientWidth), 'sheet has no horizontal content overflow').toBe(true);
+	const close = (await sheet.getByRole('button', { name: '閉じる', exact: true }).boundingBox())!;
+	expect(close.width).toBeGreaterThanOrEqual(44);
+	expect(close.height).toBeGreaterThanOrEqual(44);
+	return { sheet, bounds };
 }
 
 async function geometry(page: Page, kind: ReaderKind) {
@@ -277,3 +324,80 @@ test('epub desktop: failed server restore keeps the 52px header and visible warn
 	expect(observed.footer).toEqual({ x: 0, y: 794, width: 1280, height: 57 });
 	expect(api.attempts, 'failed server GET must not trigger an initial save').toEqual([]);
 });
+
+for (const kind of ['epub', 'pdf'] as const) {
+	for (const width of [1280, 1440, 1663, 393, 320]) {
+		test(`${kind} ${width}: production-built sheets scroll internally and preserve reader width on close`, async ({ page, browser }) => {
+			let file: Buffer;
+			if (kind === 'epub') file = sheetEpubFixture();
+			else {
+				const source = await browser.newPage();
+				try {
+					await source.setContent(`<style>h1{break-before:page}</style>${SHEET_CHAPTERS.map((title) => `<h1>${title}</h1><p>Synthetic reader sheet content.</p>`).join('')}`);
+					file = await source.pdf({ outline: true, tagged: true });
+				} finally {
+					await source.close();
+				}
+			}
+			const api = await useProtectedBook(page, file, kind);
+			await page.setViewportSize({ width, height: 851 });
+			await page.goto(`/e2e/readers/harness.html?kind=${kind}&direction=ltr`);
+			await ready(page, kind);
+			const reader = kind === 'epub' ? page.locator('[data-reader-viewport]') : page.getByTestId('pdf-viewport');
+			await expect(reader).toBeVisible();
+			const readerBefore = (await reader.boundingBox())!;
+			expect(readerBefore.width, 'closed sheets leave the full viewport available for reading').toBe(width);
+			const mobilePdf = kind === 'pdf' && width < 768;
+			const header = page.locator('header');
+			const tocTrigger = header.getByRole('button', { name: mobilePdf ? '操作メニューを開く' : '目次', exact: true });
+			await tocTrigger.click();
+			// PDF mobile exposes both settings and an expandable TOC in its operation sheet.
+			if (mobilePdf) await page.getByRole('dialog', { name: '操作メニュー', exact: true }).getByRole('button', { name: '目次', exact: true }).click();
+			const toc = page.getByRole('navigation', { name: kind === 'epub' ? 'EPUB目次' : 'PDF目次', exact: true });
+			await expect(toc).toBeVisible();
+			await expect(toc.getByRole('button')).toHaveCount(SHEET_CHAPTERS.length);
+			const contents = await checkOpenedSheet(page, width);
+			const scroller = mobilePdf ? contents.sheet.locator(':scope > .overflow-y-auto') : toc;
+			await expect(scroller).toBeVisible();
+			const scrolling = await scroller.evaluate((element) => ({
+				clientHeight: element.clientHeight,
+				scrollHeight: element.scrollHeight,
+				clientWidth: element.clientWidth,
+				scrollWidth: element.scrollWidth,
+			}));
+			expect(scrolling.clientHeight).toBeGreaterThan(0);
+			expect(scrolling.scrollHeight, 'real publication contents overflow inside the sheet').toBeGreaterThan(scrolling.clientHeight);
+			expect(scrolling.scrollWidth).toBeLessThanOrEqual(scrolling.clientWidth);
+			const lastChapter = toc.getByRole('button', { name: SHEET_CHAPTERS[SHEET_CHAPTERS.length - 1], exact: true });
+			await expect(lastChapter).not.toBeInViewport();
+			await scroller.hover();
+			await page.mouse.wheel(0, scrolling.scrollHeight);
+			await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+			await expect(lastChapter).toBeInViewport({ ratio: 1 });
+			const scrollTop = await scroller.evaluate((element) => element.scrollTop);
+			await expect(contents.sheet.locator('[data-slot="sheet-header"]')).toBeInViewport({ ratio: 1 });
+			expect(await page.evaluate(() => ({ x: scrollX, y: scrollY })), 'scrolling stays inside the sheet').toEqual({ x: 0, y: 0 });
+			expect((await reader.boundingBox())!.width).toBe(readerBefore.width);
+			await page.keyboard.press('Escape');
+			await expect(contents.sheet).toHaveCount(0);
+			await expect(reader).toBeVisible();
+			const readerAfterContents = (await reader.boundingBox())!;
+			expect(readerAfterContents.width).toBe(readerBefore.width);
+
+			const settingsTrigger = header.getByRole('button', { name: mobilePdf ? '操作メニューを開く' : '表示設定', exact: true });
+			await settingsTrigger.focus();
+			await settingsTrigger.press('Enter');
+			const settings = await checkOpenedSheet(page, width);
+			const settingControl = kind === 'epub' ? settings.sheet.getByRole('combobox') : settings.sheet.getByRole('button', { name: '拡大', exact: true });
+			await expect(settingControl).toBeInViewport({ ratio: 1 });
+			expect((await reader.boundingBox())!.width).toBe(readerBefore.width);
+			await settings.sheet.getByRole('button', { name: '閉じる', exact: true }).click();
+			await expect(settings.sheet).toHaveCount(0);
+			await expect(reader).toBeVisible();
+			const readerAfterSettings = (await reader.boundingBox())!;
+			expect(readerAfterSettings.width).toBe(readerBefore.width);
+			expect(api.attempts, 'sheet interactions must not turn or save a reading page').toEqual([]);
+			console.log(JSON.stringify({ kind, width, contents: contents.bounds, settings: settings.bounds, scrolling: { ...scrolling, scrollTop }, readerBefore, readerAfterContents, readerAfterSettings }));
+		});
+	}
+}
