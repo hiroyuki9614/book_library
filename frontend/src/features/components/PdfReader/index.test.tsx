@@ -579,11 +579,21 @@ describe('PdfReader navigation, outline, and progress', () => {
 	});
 
 	test('LTRの右端タップは次ページへ進み、ドラッグはページ移動しない', async () => {
+		// Begin with an actual pre-restore scroll snapshot; a mocked scrollToPage
+		// invocation alone does not prove that EmbedPDF has reported the target page.
+		mocks.scrollState.currentPage = 1;
+		mocks.viewportScrollState.currentPage = 1;
 		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		// The viewport can appear before the asynchronous scroll plugin is ready.
-		// A tap is meaningful only after initial page restoration is acknowledged.
 		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
+		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(1);
+		// Simulate the scroll plugin's renderer acknowledgement, then verify it
+		// is consumed by the visible navigation state before the edge tap.
+		mocks.scrollState.currentPage = 2;
+		mocks.viewportScrollState.currentPage = 2;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(2);
+		await expect.element(view.getByTestId('pdf-reader-footer')).toHaveTextContent('2 / 5 ページ 40%');
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 		const { getByTestId } = view;
 		const viewport = getByTestId('pdf-viewport');
 		await expect.element(viewport).toBeInTheDocument();
@@ -641,9 +651,18 @@ describe('PdfReader navigation, outline, and progress', () => {
 	});
 
 	test('RTLの左端タップは次ページへ進む', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.viewportScrollState.currentPage = 1;
 		const view = await render(<PdfReader bookId={7} pageTurnDirection='rtl' />);
 		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
+		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(1);
+		// Only the plugin-observed page transition acknowledges the restore.
+		mocks.scrollState.currentPage = 2;
+		mocks.viewportScrollState.currentPage = 2;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='rtl' />);
+		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(2);
+		await expect.element(view.getByTestId('pdf-reader-footer')).toHaveTextContent('2 / 5 ページ 40%');
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 		const { getByTestId } = view;
 		await expect.element(getByTestId('pdf-viewport')).toBeInTheDocument();
 		const element = getByTestId('pdf-viewport').element() as HTMLElement;
