@@ -81,6 +81,27 @@ The loopback HTTP endpoint and browser HTTPS origin have different purposes. Aft
 
 Before any future ingress setup, the owner must approve the certificate and ingress method, verify Tailnet ACLs and device identity, ensure there is no Funnel or public listener, and confirm that only the intended host ingress can reach the loopback-published service. Recheck DNS, certificate hostname/SNI, and HTTPS browser access from an authorized Tailnet client before GUI acceptance. None of these host-side gates is met by offline Compose checks. At the last recorded inspection, the four retained staging services were reported healthy at application source SHA `81256268276d7ead95029849037f69ec6beec202`; no HTTPS ingress was applied or verified.
 
+## Same physical i5 after Fedora-to-Ubuntu reinstall (2026-11-13)
+
+The owner confirmed that historical `fedora-worker` and current `ubuntu-worker`
+are the same physical i5. Do not ask for a separate Fedora machine or repeatedly
+check the already missing PNG on Ubuntu. The old Serve entry needs an explicit
+migration disposition; this fact alone does not authorize deleting it.
+
+`scripts/staging/plan-legacy-host-migration.py` prepares a **proposal only** from
+bounded, nonsecret observations. It never contacts a host, applies a Serve
+configuration, signs a grant, or authorizes deployment. Its original configuration
+and digest identify the rollback evidence, not proof that rollback was executed.
+Unknown routes, a present/unknown legacy asset, or an unconfirmed host identity
+must stop planning rather than silently drop data or routes.
+
+Review the proposed old-handler retirement separately with the owner. Even after
+that decision, the existing owner-only helper, nginx configuration, trusted
+bootstrap, signed operation, live pre/post verification and rollback gates must
+be adapted and independently reviewed before any runtime change. The existing
+legacy-preservation helper cannot execute this proposal as-is. Keep its pending
+WIP untouched until its claim is reconciled.
+
 ## Safety boundaries
 
 - Use `compose.staging.yaml` **alone**; never combine it with `compose.yaml` or the existing production `.env`.

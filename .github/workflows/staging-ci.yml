@@ -171,6 +171,7 @@ jobs:
           /usr/bin/python3 -I -B scripts/staging/test-source-tree-guard.py
           /usr/bin/python3 -I -B scripts/staging/test-tls-ingress.py
           /usr/bin/python3 -I -B scripts/staging/test-owner-serve-cas.py
+          /usr/bin/python3 -I -B scripts/staging/test-plan-legacy-host-migration.py
           /usr/bin/python3 -I -B scripts/staging/test-owner-command.py
           /usr/bin/python3 -I -B scripts/staging/test-tls-prepare.py
           bash scripts/staging/test-compose-isolation.sh
