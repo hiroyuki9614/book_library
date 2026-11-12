@@ -262,8 +262,9 @@ def request_and_wait(
         if tls_binding is None:
             raise ApprovalError("TLS approval requires its distinct retained-state binding")
         # Reuse the fixed-schema validator before creating a challenge.
-        payload = expected_payload(source_sha, operation, "0" * 64, 0, evidence_sha256, tls_binding=tls_binding)
-        validate_payload(payload, source_sha, operation, "0" * 64, evidence_sha256, int(time.time()),
+        now = int(time.time())
+        payload = expected_payload(source_sha, operation, "0" * 64, now, evidence_sha256, tls_binding=tls_binding)
+        validate_payload(payload, source_sha, operation, "0" * 64, evidence_sha256, now,
                          tls_binding=tls_binding)
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ApprovalError("Source revision must be a full lowercase Git SHA")

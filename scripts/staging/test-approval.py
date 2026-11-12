@@ -176,6 +176,15 @@ class ApprovalTests(unittest.TestCase):
                             ("project", "production")):
             with self.subTest(name=name), self.assertRaises(approval.ApprovalError):
                 self.verify_tls_tamper(binding, name, value)
+        # Valid TLS binding must reach the one-use challenge, not fail at preflight expiry.
+        state_root = self.root / "tls-state"
+        state_root.mkdir(mode=0o700)
+        with patch.object(approval, "STATE_ROOT", state_root):
+            with self.assertRaises(approval.ApprovalError) as raised:
+                approval.request_and_wait("a" * 40, "tls-ingress", "d" * 64, uid=os.getuid(),
+                                          output=io.StringIO(), timeout=0, tls_binding=binding)
+            self.assertEqual(str(raised.exception), "Timed out waiting for the one-time external approval")
+            self.assertEqual(list(state_root.iterdir()), [])
         with self.assertRaises(approval.ApprovalError):
             approval.request_and_wait("a" * 40, "tls-ingress", "d" * 64, uid=os.getuid(),
                                       output=io.StringIO(), timeout=0)
