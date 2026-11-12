@@ -586,13 +586,16 @@ describe('PdfReader navigation, outline, and progress', () => {
 		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
 		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(1);
+		await expect.element(view.getByTestId('pdf-reader-footer')).toHaveTextContent('1 / 5 ページ 20%');
 		// Simulate the scroll plugin's renderer acknowledgement, then verify it
 		// is consumed by the visible navigation state before the edge tap.
-		mocks.scrollState.currentPage = 2;
-		mocks.viewportScrollState.currentPage = 2;
+		mocks.scrollState = { ...mocks.scrollState, currentPage: 2 };
+		mocks.viewportScrollState = { ...mocks.viewportScrollState, currentPage: 2 };
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(2);
 		await expect.element(view.getByTestId('pdf-reader-footer')).toHaveTextContent('2 / 5 ページ 40%');
+		// Flush any pending debounced save before asserting restore stayed read-only.
+		window.dispatchEvent(new Event('pagehide'));
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 		const { getByTestId } = view;
 		const viewport = getByTestId('pdf-viewport');
@@ -656,12 +659,15 @@ describe('PdfReader navigation, outline, and progress', () => {
 		const view = await render(<PdfReader bookId={7} pageTurnDirection='rtl' />);
 		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
 		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(1);
+		await expect.element(view.getByTestId('pdf-reader-footer')).toHaveTextContent('1 / 5 ページ 20%');
 		// Only the plugin-observed page transition acknowledges the restore.
-		mocks.scrollState.currentPage = 2;
-		mocks.viewportScrollState.currentPage = 2;
+		mocks.scrollState = { ...mocks.scrollState, currentPage: 2 };
+		mocks.viewportScrollState = { ...mocks.viewportScrollState, currentPage: 2 };
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='rtl' />);
 		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(2);
 		await expect.element(view.getByTestId('pdf-reader-footer')).toHaveTextContent('2 / 5 ページ 40%');
+		// Flush any pending debounced save before asserting restore stayed read-only.
+		window.dispatchEvent(new Event('pagehide'));
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 		const { getByTestId } = view;
 		await expect.element(getByTestId('pdf-viewport')).toBeInTheDocument();
