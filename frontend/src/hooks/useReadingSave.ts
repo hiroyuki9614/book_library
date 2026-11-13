@@ -21,6 +21,7 @@ export function useReadingSave(bookId: number, userId?: number) {
 
 	const confirmInitialStatus = useCallback((info: ReadingInfo) => {
 		if (version.current > 0) return;
+		if (info.saveConflict) { setStatus('error'); return; }
 		const hasSavedPosition = (typeof info.currentPosition === 'string' && info.currentPosition.length > 0)
 			|| info.readStatus !== 'unread'
 			|| info.currentPage > 1;
@@ -72,6 +73,9 @@ export function useReadingSave(bookId: number, userId?: number) {
 					: undefined;
 				if (typeof retrySequence === 'string' && /^\d+$/.test(retrySequence)) {
 					queued.saveSequence = retrySequence;
+				} else if (error instanceof Error && (error as Error & { code?: string }).code === 'STALE_READING_SAVE') {
+					queued.saveSequence = undefined;
+					queued.submitted = false;
 				}
 				setStatus('error');
 			},

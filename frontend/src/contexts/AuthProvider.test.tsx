@@ -165,7 +165,8 @@ describe('AuthProvider session loading', () => {
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
 			const headers = new Headers(init?.headers);
 			requests.push({ method: init?.method ?? 'GET', body: String(init?.body ?? ''), userId: headers.get('X-BeLib-User-Id') });
-			return new Response(JSON.stringify({ bookId: 99, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading' }), {
+			const patchBody = init?.method === 'PATCH' ? JSON.parse(String(init.body)) as { saveSequence?: string } : undefined;
+			return new Response(JSON.stringify({ bookId: 99, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading', saveSequence: patchBody?.saveSequence ?? '0' }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' },
 			});
@@ -200,13 +201,13 @@ describe('AuthProvider session loading', () => {
 		const patchRequests = () => requests.filter((request) => request.method === 'PATCH');
 		const oldSessionSave = {
 			method: 'PATCH',
-			body: JSON.stringify({ currentPage: 2, readStatus: 'reading', progressPercentage: 20, saveSequence: '1' }),
+			body: JSON.stringify({ currentPage: 2, readStatus: 'reading', progressPercentage: 20, saveSequence: '1', expectedSaveSequence: '0' }),
 			userId: String(oldUser.id),
 		};
 		expect(patchRequests()).toEqual([oldSessionSave]);
 		expect(patchRequests()[0]).toEqual({
 			method: 'PATCH',
-			body: JSON.stringify({ currentPage: 2, readStatus: 'reading', progressPercentage: 20, saveSequence: '1' }),
+			body: JSON.stringify({ currentPage: 2, readStatus: 'reading', progressPercentage: 20, saveSequence: '1', expectedSaveSequence: '0' }),
 			userId: String(oldUser.id),
 		});
 
@@ -215,7 +216,7 @@ describe('AuthProvider session loading', () => {
 		expect(patchRequests()[0]).toEqual(oldSessionSave);
 		expect(patchRequests()[1]).toEqual({
 			method: 'PATCH',
-			body: JSON.stringify({ currentPage: 2, readStatus: 'reading', progressPercentage: 20, saveSequence: '1' }),
+			body: JSON.stringify({ currentPage: 2, readStatus: 'reading', progressPercentage: 20, saveSequence: '1', expectedSaveSequence: '0' }),
 			userId: String(newUser.id),
 		});
 	});

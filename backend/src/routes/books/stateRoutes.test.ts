@@ -189,7 +189,7 @@ describe('book state routes', () => {
 			body: JSON.stringify({ currentPosition: cfi, progressPercentage: 42, readStatus: 'reading' }),
 		});
 		expect(patch.status).toBe(200);
-		expect(await patch.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading' });
+		expect(await patch.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading', saveSequence: '0' });
 		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
 			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' }, saveSequence: { equals: 0n } },
 			data: { currentPosition: cfi, readStatus: 'reading', progressPercentage: 42, saveSequence: 0n },
@@ -329,7 +329,7 @@ describe('book state routes', () => {
 		});
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '12', currentPage: 12, progressPercentage: 100, readStatus: 'completed' });
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '12', currentPage: 12, progressPercentage: 100, readStatus: 'completed', saveSequence: '0' });
 		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
 			where: { userId: 7, bookId: 1, saveSequence: { equals: 0n } },
 			data: { currentPosition: '12', readStatus: 'completed', progressPercentage: 100, saveSequence: 0n },
@@ -364,6 +364,6 @@ describe('book state routes', () => {
 			data: { currentPosition: '3', readStatus: 'completed', progressPercentage: 100, saveSequence: 0n },
 		});
 		expect(mocks.readingInfoUpdate).not.toHaveBeenCalled();
-		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 100, readStatus: 'completed' });
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 100, readStatus: 'completed', saveSequence: '0' });
 	});
 });

@@ -12,7 +12,13 @@ const READING_SAVE_TEST_DB_NAME = 'belib-reading-saves';
 
 function openReadingSaveTestDatabase() {
 	return new Promise<IDBDatabase>((resolve, reject) => {
-		const request = indexedDB.open(READING_SAVE_TEST_DB_NAME);
+		const request = indexedDB.open(READING_SAVE_TEST_DB_NAME, 2);
+		request.onupgradeneeded = () => {
+			const database = request.result;
+			if (!database.objectStoreNames.contains('sequence')) database.createObjectStore('sequence', { autoIncrement: true });
+			if (!database.objectStoreNames.contains('sequence-by-scope')) database.createObjectStore('sequence-by-scope', { keyPath: 'scopeKey' });
+			if (!database.objectStoreNames.contains('outbox')) database.createObjectStore('outbox', { keyPath: 'scopeKey' });
+		};
 		request.onsuccess = () => resolve(request.result);
 		request.onerror = () => reject(request.error ?? new Error('Could not open reading save test database'));
 	});
@@ -54,6 +60,14 @@ async function writeReadingSaveRecord(storeName: string, value: unknown, key?: I
 	}
 }
 
+async function seedReadingSaveBaseline(bookId: number, userId: number, sequence = '0') {
+	await writeReadingSaveRecord('sequence-by-scope', {
+		scopeKey: `user:${userId}:book:${bookId}`,
+		saveSequence: sequence,
+		serverSequence: sequence,
+	});
+}
+
 async function clearReadingSaveTestDatabase() {
 	const database = await openReadingSaveTestDatabase();
 	try {
@@ -78,14 +92,17 @@ describe('reading-info API client', () => {
 	function expectVersionedRequestBody(expected: Record<string, unknown>) {
 		const request = vi.mocked(fetch).mock.calls[0]?.[1];
 		const body = JSON.parse(String(request?.body)) as Record<string, unknown>;
-		expect(body).toEqual({ ...expected, saveSequence: expect.any(String) });
-		expect(BigInt(String(body.saveSequence))).toBeGreaterThan(0n);
+		expect(body).toEqual({ ...expected, saveSequence: expect.any(String), expectedSaveSequence: expect.any(String) });
+		expect(BigInt(String(body.saveSequence))).toBeGreaterThan(BigInt(String(body.expectedSaveSequence)));
 	}
 
 	test('一時的なIndexedDB open失敗後に再試行し、sequenceをユーザーと書籍ごとに保つ', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		const bookId = 9401;
 		const userId = 9402;
+		await seedReadingSaveBaseline(bookId, userId);
+		await seedReadingSaveBaseline(bookId, userId + 1);
+		await seedReadingSaveBaseline(bookId + 1, userId);
 		const openError = new DOMException('Temporary IndexedDB failure', 'UnknownError');
 		const failedRequest = {
 			error: openError,
@@ -95,7 +112,7 @@ describe('reading-info API client', () => {
 		} as IDBOpenDBRequest;
 		const openSpy = vi.spyOn(indexedDB, 'open').mockReturnValueOnce(failedRequest);
 		const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-			new Response(JSON.stringify({ bookId, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading' }), {
+			new Response(JSON.stringify({ bookId, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading', saveSequence: '1' }), {
 				headers: { 'Content-Type': 'application/json' },
 			}),
 		);
@@ -134,7 +151,7 @@ describe('reading-info API client', () => {
 			}),
 		);
 
-		await expect(fetchReadingInfo(7, 7)).resolves.toEqual({ bookId: 7, currentPosition: '3', currentPage: 3, progressPercentage: 30, readStatus: 'reading' });
+		await expect(fetchReadingInfo(7, 7)).resolves.toEqual({ bookId: 7, currentPosition: '3', currentPage: 3, progressPercentage: 30, readStatus: 'reading', saveSequence: '0' });
 		expect(fetch).toHaveBeenCalledWith(
 			'http://localhost:3000/api/v1/books/7/reading-info',
 			expect.objectContaining({
@@ -146,8 +163,9 @@ describe('reading-info API client', () => {
 
 	test('PDF現在ページとcompleted状態をPATCHで保存する', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		await seedReadingSaveBaseline(7, 7);
 		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-			new Response(JSON.stringify({ bookId: 7, currentPosition: '4', currentPage: 4, progressPercentage: 100, readStatus: 'completed' }), {
+			new Response(JSON.stringify({ bookId: 7, currentPosition: '4', currentPage: 4, progressPercentage: 100, readStatus: 'completed', saveSequence: '1' }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' },
 			}),
@@ -159,6 +177,7 @@ describe('reading-info API client', () => {
 			currentPage: 4,
 			progressPercentage: 100,
 			readStatus: 'completed',
+			saveSequence: '1',
 		});
 		expect(fetch).toHaveBeenCalledWith(
 			'http://localhost:3000/api/v1/books/7/reading-info',
@@ -176,9 +195,10 @@ describe('reading-info API client', () => {
 
 	test('EPUB CFIをcurrentPositionとして保存する', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		await seedReadingSaveBaseline(7, 7);
 		const cfi = 'epubcfi(/6/2!/4/1:0)';
 		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-			new Response(JSON.stringify({ bookId: 7, currentPosition: cfi, currentPage: 1, progressPercentage: 30, readStatus: 'reading' }), {
+			new Response(JSON.stringify({ bookId: 7, currentPosition: cfi, currentPage: 1, progressPercentage: 30, readStatus: 'reading', saveSequence: '1' }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' },
 			}),
@@ -220,6 +240,8 @@ describe('reading-info API client', () => {
 
 	test('ユーザーごとに同じ書籍の保存キューを分離する', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		await seedReadingSaveBaseline(99, 7);
+		await seedReadingSaveBaseline(99, 8);
 		let release!: () => void;
 		const firstFinished = new Promise<void>((resolve) => { release = resolve; });
 		const calls: string[] = [];
@@ -227,7 +249,7 @@ describe('reading-info API client', () => {
 			const body = JSON.parse(String(options?.body)) as { currentPage: number };
 			calls.push(`PATCH ${body.currentPage}`);
 			if (body.currentPage === 2) await firstFinished;
-			return new Response(JSON.stringify({ bookId: 99, currentPosition: String(body.currentPage), currentPage: body.currentPage, progressPercentage: body.currentPage === 2 ? 20 : 80, readStatus: 'reading' }), {
+			return new Response(JSON.stringify({ bookId: 99, currentPosition: String(body.currentPage), currentPage: body.currentPage, progressPercentage: body.currentPage === 2 ? 20 : 80, readStatus: 'reading', saveSequence: String((JSON.parse(String(options?.body)) as { saveSequence: string }).saveSequence) }), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		});
@@ -242,6 +264,8 @@ describe('reading-info API client', () => {
 	test('保存sequenceは書籍ごとに独立して増える', async () => {
 		const firstBook = 9301;
 		const secondBook = 9302;
+		await seedReadingSaveBaseline(firstBook, 901);
+		await seedReadingSaveBaseline(secondBook, 901);
 
 		await expect(reserveReadingSave(firstBook, 1, 'reading', 10, 901)).resolves.toBe('1');
 		await expect(reserveReadingSave(secondBook, 1, 'reading', 10, 901)).resolves.toBe('1');
@@ -249,6 +273,8 @@ describe('reading-info API client', () => {
 	});
 
 	test('旧ブラウザ全体のsequence履歴が100万を超えても、新しい書籍は1から始まる', async () => {
+		await seedReadingSaveBaseline(9303, 901);
+		await seedReadingSaveBaseline(9304, 901);
 		const database = await openReadingSaveTestDatabase();
 		try {
 			const transaction = database.transaction('sequence', 'readwrite');
@@ -265,6 +291,7 @@ describe('reading-info API client', () => {
 	});
 
 	test('同じ書籍への同時予約は順番を保ち、outboxには最新保存を残す', async () => {
+		await seedReadingSaveBaseline(9305, 901);
 		const reservations = await Promise.all([
 			reserveReadingSave(9305, 2, 'reading', 20, 901),
 			reserveReadingSave(9305, 9, 'reading', 90, 901),
@@ -274,11 +301,111 @@ describe('reading-info API client', () => {
 		await expect(readReadingSaveRecord('outbox', 'user:901:book:9305')).resolves.toMatchObject({
 			position: 9,
 			saveSequence: '2',
-			sequenceVersion: 2,
+			sequenceVersion: 3,
+			expectedSaveSequence: '0',
 		});
 	});
 
+	test('pagehideの後続PATCHが409になったとき同一browserの先行PATCH ACKだけで一度だけ進め直す', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		const bookId = 93051;
+		const userId = 901;
+		await seedReadingSaveBaseline(bookId, userId, '0');
+		let releaseFirst!: () => void;
+		let markFirstStarted!: () => void;
+		let markSecondStarted!: () => void;
+		let releaseSecondConflict!: () => void;
+		const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+		const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+		const firstMayResolve = new Promise<void>((resolve) => { releaseFirst = resolve; });
+		const secondMayConflict = new Promise<void>((resolve) => { releaseSecondConflict = resolve; });
+		const bodies: Array<Record<string, unknown>> = [];
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			if (options?.method === 'PATCH') {
+				const body = JSON.parse(String(options.body)) as Record<string, unknown>;
+				bodies.push(body);
+				if (bodies.length === 1) {
+					markFirstStarted();
+					await firstMayResolve;
+					return new Response(JSON.stringify({ bookId, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading', saveSequence: '1' }), { headers: { 'Content-Type': 'application/json' } });
+				}
+				if (bodies.length === 2) {
+					markSecondStarted();
+					await secondMayConflict;
+					return new Response(JSON.stringify({ code: 'STALE_READING_SAVE' }), { status: 409 });
+				}
+				return new Response(JSON.stringify({ bookId, currentPosition: '3', currentPage: 3, progressPercentage: 30, readStatus: 'reading', saveSequence: '2' }), { headers: { 'Content-Type': 'application/json' } });
+			}
+			return new Response(JSON.stringify({ bookId, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading', saveSequence: '1' }), { headers: { 'Content-Type': 'application/json' } });
+		});
+
+		const first = saveReadingInfo(bookId, 2, 'reading', 20, userId);
+		await firstStarted;
+		const pagehide = saveReadingInfo(bookId, 3, 'reading', 30, userId, undefined, true);
+		await secondStarted;
+		releaseFirst();
+		await expect(first).resolves.toMatchObject({ saveSequence: '1' });
+		releaseSecondConflict();
+		await expect(pagehide).resolves.toMatchObject({ saveSequence: '2' });
+
+		expect(bodies).toHaveLength(3);
+		expect(bodies[0]).toMatchObject({ saveSequence: '1', expectedSaveSequence: '0' });
+		expect(bodies[1]).toMatchObject({ saveSequence: '2', expectedSaveSequence: '0' });
+		expect(bodies[2]).toMatchObject({ saveSequence: '2', expectedSaveSequence: '1' });
+		await expect(readReadingSaveRecord('outbox', `user:${userId}:book:${bookId}`)).resolves.toBeUndefined();
+	});
+
+	test('先行PATCHのACKが不明ならpagehide競合を再採番せず、authoritative conflictとして止める', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		const bookId = 93052;
+		const userId = 901;
+		await seedReadingSaveBaseline(bookId, userId, '0');
+		let rejectFirst!: () => void;
+		let markFirstStarted!: () => void;
+		let markSecondStarted!: () => void;
+		let releaseSecondConflict!: () => void;
+		const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+		const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+		const firstMayReject = new Promise<void>((resolve) => { rejectFirst = resolve; });
+		const secondMayConflict = new Promise<void>((resolve) => { releaseSecondConflict = resolve; });
+		const bodies: Array<Record<string, unknown>> = [];
+		const requestMethods: string[] = [];
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			if (options?.method === 'PATCH') {
+				const body = JSON.parse(String(options.body)) as Record<string, unknown>;
+				bodies.push(body);
+				if (bodies.length === 1) {
+					markFirstStarted();
+					await firstMayReject;
+					throw new TypeError('Lost acknowledgement');
+				}
+				markSecondStarted();
+				await secondMayConflict;
+				return new Response(JSON.stringify({ code: 'STALE_READING_SAVE' }), { status: 409 });
+			}
+			requestMethods.push('GET');
+			return new Response(JSON.stringify({ bookId, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading', saveSequence: '1' }), { headers: { 'Content-Type': 'application/json' } });
+		});
+
+		const first = saveReadingInfo(bookId, 2, 'reading', 20, userId);
+		await firstStarted;
+		const pagehide = saveReadingInfo(bookId, 3, 'reading', 30, userId, undefined, true);
+		await secondStarted;
+		rejectFirst();
+		await expect(first).rejects.toThrow('Lost acknowledgement');
+		releaseSecondConflict();
+		await expect(pagehide).rejects.toMatchObject({ status: 409 });
+
+		expect(bodies).toHaveLength(2);
+		expect(bodies[0]).toMatchObject({ saveSequence: '1', expectedSaveSequence: '0' });
+		expect(bodies[1]).toMatchObject({ saveSequence: '2', expectedSaveSequence: '0' });
+		expect(requestMethods).toEqual(['GET']);
+		await expect(readReadingSaveRecord('outbox', `user:${userId}:book:${bookId}`)).resolves.toBeUndefined();
+	});
+
 	test('アカウント切替後もsequenceは各ユーザーと書籍の組み合わせで分離する', async () => {
+		await seedReadingSaveBaseline(9306, 7);
+		await seedReadingSaveBaseline(9306, 8);
 		await expect(reserveReadingSave(9306, 2, 'reading', 20, 7)).resolves.toBe('1');
 		await invalidateReadingSaves();
 
@@ -288,10 +415,13 @@ describe('reading-info API client', () => {
 
 	test('永続化したoutbox保存は次の読書情報取得時に再送される', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		await seedReadingSaveBaseline(9307, 902);
 		const sequence = await reserveReadingSave(9307, 6, 'reading', 60, 902);
 		await expect(readReadingSaveRecord('outbox', 'user:902:book:9307')).resolves.toMatchObject({
 			position: 6,
 			saveSequence: sequence,
+			sequenceVersion: 3,
+			expectedSaveSequence: '0',
 		});
 
 		const calls: string[] = [];
@@ -303,13 +433,13 @@ describe('reading-info API client', () => {
 				});
 			}
 			calls.push('GET');
-			return new Response(JSON.stringify({ bookId: 9307, currentPosition: '6', currentPage: 6, progressPercentage: 60, readStatus: 'reading', saveSequence: sequence }), {
+			return new Response(JSON.stringify({ bookId: 9307, currentPosition: '1', currentPage: 1, progressPercentage: 10, readStatus: 'reading', saveSequence: '0' }), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		});
 
 		await expect(fetchReadingInfo(9307, 902)).resolves.toMatchObject({ currentPage: 6 });
-		expect(calls).toEqual(['PATCH', 'GET']);
+		expect(calls).toEqual(['GET', 'PATCH']);
 		await expect(readReadingSaveRecord('outbox', 'user:902:book:9307')).resolves.toBeUndefined();
 	});
 
@@ -318,6 +448,8 @@ describe('reading-info API client', () => {
 		const bookId = 99;
 		const oldUserId = 7;
 		const newUserId = 8;
+		await seedReadingSaveBaseline(bookId, oldUserId);
+		await seedReadingSaveBaseline(bookId, newUserId);
 		await reserveReadingSave(bookId, 7, 'reading', 70, oldUserId);
 
 		await expect(invalidateReadingSaves()).resolves.toBeUndefined();
@@ -330,8 +462,12 @@ describe('reading-info API client', () => {
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
 			if (options?.method === 'PATCH') {
 				patchUserIds.push(new Headers(options.headers).get('X-BeLib-User-Id') ?? '');
+				const body = JSON.parse(String(options.body)) as { saveSequence: string };
+				return new Response(JSON.stringify({ bookId, currentPosition: '7', currentPage: 7, progressPercentage: 70, readStatus: 'reading', saveSequence: body.saveSequence }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
 			}
-			return new Response(JSON.stringify({ bookId, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'unread' }), {
+			return new Response(JSON.stringify({ bookId, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'unread', saveSequence: '0' }), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		});
@@ -340,13 +476,14 @@ describe('reading-info API client', () => {
 		expect(patchUserIds).toEqual([]);
 		await expect(readReadingSaveRecord('outbox', `user:${oldUserId}:book:${bookId}`)).resolves.toMatchObject({ position: 7 });
 
-		await expect(fetchReadingInfo(bookId, oldUserId)).resolves.toMatchObject({ currentPage: 1 });
+		await expect(fetchReadingInfo(bookId, oldUserId)).resolves.toMatchObject({ currentPage: 7 });
 		expect(patchUserIds).toEqual([String(oldUserId)]);
 		await expect(readReadingSaveRecord('outbox', `user:${oldUserId}:book:${bookId}`)).resolves.toBeUndefined();
 	});
 
 	test('認証無効化で中断されたPATCHは最新のdurable outboxを破棄しない', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		await seedReadingSaveBaseline(99, 7);
 		let markPatchStarted!: () => void;
 		const patchStarted = new Promise<void>((resolve) => { markPatchStarted = resolve; });
 		let patchSignal: AbortSignal | undefined;
@@ -374,6 +511,7 @@ describe('reading-info API client', () => {
 
 	test('logout flush失敗後もcurrent accountのoutboxを残す', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		await seedReadingSaveBaseline(99, 7);
 		vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ message: 'temporary failure' }), { status: 503 }));
 		const unregister = registerReadingFlush(99, () => {
 			void saveReadingInfo(99, 8, 'reading', 80, 7).catch(() => undefined);
@@ -388,6 +526,7 @@ describe('reading-info API client', () => {
 
 	test('保留中の旧アカウント保存は新しいセッションへ書き込まれない', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		await seedReadingSaveBaseline(99, 7);
 		let activeSessionUserId = 7;
 		let release!: () => void;
 		const firstFinished = new Promise<void>((resolve) => { release = resolve; });
@@ -401,7 +540,7 @@ describe('reading-info API client', () => {
 			if (headers.get('X-BeLib-User-Id') !== String(requestSessionUserId)) {
 				return new Response(JSON.stringify({ code: 'READING_SESSION_MISMATCH' }), { status: 409 });
 			}
-			return new Response(JSON.stringify({ bookId: 99, currentPosition: String(body.currentPage), currentPage: body.currentPage, progressPercentage: 20, readStatus: 'reading' }), {
+			return new Response(JSON.stringify({ bookId: 99, currentPosition: String(body.currentPage), currentPage: body.currentPage, progressPercentage: 20, readStatus: 'reading', saveSequence: String((JSON.parse(String(options?.body)) as { saveSequence: string }).saveSequence) }), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		});
@@ -422,20 +561,24 @@ describe('reading-info API client', () => {
 
 	test('遅い古いPATCHを追い越さず、再入場のGETも最新保存を待つ', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		await seedReadingSaveBaseline(99, 7);
 		let release!: () => void;
 		const firstFinished = new Promise<void>((resolve) => {
 			release = resolve;
 		});
 		const calls: string[] = [];
 		let position = '1';
+		let serverSequence = '0';
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
 			if (options?.method === 'PATCH') {
-				const page = String(JSON.parse(String(options.body)).currentPage);
+				const body = JSON.parse(String(options.body)) as { currentPage: number; saveSequence: string };
+				const page = String(body.currentPage);
 				calls.push(`PATCH ${page}`);
 				if (page === '2') await firstFinished;
 				position = page;
+				serverSequence = body.saveSequence;
 			} else calls.push(`GET ${position}`);
-			return new Response(JSON.stringify({ bookId: 99, currentPosition: position, currentPage: Number(position), readStatus: 'reading' }), {
+			return new Response(JSON.stringify({ bookId: 99, currentPosition: position, currentPage: Number(position), readStatus: 'reading', saveSequence: serverSequence }), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		});
@@ -449,16 +592,13 @@ describe('reading-info API client', () => {
 		expect(calls).toEqual(['PATCH 2', 'PATCH 9', 'GET 9']);
 	});
 
-	test('新しいブラウザのローカルsequenceが古いとき、409後にサーバー版を読み直して最新位置を再送する', async () => {
+	test('新しいブラウザはserver baselineをGETしてからexpected-base付きで1回だけ保存する', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		const patchBodies: Array<Record<string, unknown>> = [];
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
 			if (options?.method === 'PATCH') {
 				const body = JSON.parse(String(options.body)) as Record<string, unknown>;
 				patchBodies.push(body);
-				if (patchBodies.length === 1) {
-					return new Response(JSON.stringify({ code: 'STALE_READING_SAVE' }), { status: 409 });
-				}
 				return new Response(JSON.stringify({
 					bookId: 99,
 					currentPosition: '9',
@@ -480,26 +620,22 @@ describe('reading-info API client', () => {
 
 		await expect(saveReadingInfo(99, 9, 'reading', 80, 7)).resolves.toMatchObject({ currentPage: 9 });
 
-		expect(patchBodies).toHaveLength(2);
-		expect(typeof patchBodies[0].saveSequence).toBe('string');
-		expect(BigInt(String(patchBodies[0].saveSequence))).toBeLessThan(50n);
-		expect(patchBodies[1]).toMatchObject({ currentPage: 9, readStatus: 'reading', progressPercentage: 80, saveSequence: '51' });
+		expect(patchBodies).toHaveLength(1);
+		expect(patchBodies[0]).toMatchObject({ currentPage: 9, readStatus: 'reading', progressPercentage: 80, saveSequence: '51', expectedSaveSequence: '50' });
 	});
 
-	test('409 reconciliation後の再送失敗は更新済みsequenceとoutboxを保持する', async () => {
+	test('409は同じpayloadをrebaseせず、authoritative位置を返して該当outboxだけを消す', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		const bookId = 9309;
 		const userId = 904;
+		await seedReadingSaveBaseline(bookId, userId);
 		const originalSequence = await reserveReadingSave(bookId, 9, 'reading', 80, userId);
 		const patchSequences: string[] = [];
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
 			if (options?.method === 'PATCH') {
 				const body = JSON.parse(String(options.body)) as { saveSequence: string };
 				patchSequences.push(body.saveSequence);
-				if (patchSequences.length === 1) {
-					return new Response(JSON.stringify({ code: 'STALE_READING_SAVE' }), { status: 409 });
-				}
-				return new Response(JSON.stringify({ message: 'temporary failure' }), { status: 503 });
+				return new Response(JSON.stringify({ code: 'STALE_READING_SAVE' }), { status: 409 });
 			}
 			return new Response(JSON.stringify({
 				bookId,
@@ -512,16 +648,41 @@ describe('reading-info API client', () => {
 		});
 
 		await expect(saveReadingInfo(bookId, 9, 'reading', 80, userId, undefined, false, originalSequence))
-			.rejects.toMatchObject({ status: 503, saveSequence: '51' });
+			.rejects.toMatchObject({ status: 409 });
 
-		expect(patchSequences).toEqual(['1', '51']);
-		await expect(readReadingSaveRecord('outbox', `user:${userId}:book:${bookId}`)).resolves.toMatchObject({
-			position: 9,
-			saveSequence: '51',
-		});
+		expect(patchSequences).toEqual([originalSequence]);
+		await expect(readReadingSaveRecord('outbox', `user:${userId}:book:${bookId}`)).resolves.toBeUndefined();
 	});
 
-	test('legacy outboxの100万超sequenceは409 rebase後に更新し、後続予約もserverより進む', async () => {
+	test('lost ACK後に別端末の保存が進んでいれば、古いoutboxを再PATCHせず競合として回収する', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		const bookId = 9310;
+		const userId = 905;
+		await seedReadingSaveBaseline(bookId, userId, '0');
+		const fetchMock = vi.spyOn(globalThis, 'fetch')
+			.mockRejectedValueOnce(new TypeError('Connection lost after request may have reached server'))
+			.mockResolvedValueOnce(new Response(JSON.stringify({
+				bookId,
+				currentPosition: '9',
+				currentPage: 9,
+				progressPercentage: 90,
+				readStatus: 'reading',
+				saveSequence: '1',
+			}), { headers: { 'Content-Type': 'application/json' } }));
+
+		await expect(saveReadingInfo(bookId, 5, 'reading', 50, userId)).rejects.toThrow('Connection lost');
+		await expect(readReadingSaveRecord('outbox', `user:${userId}:book:${bookId}`)).resolves.toMatchObject({
+			position: 5,
+			expectedSaveSequence: '0',
+		});
+
+		await expect(fetchReadingInfo(bookId, userId)).resolves.toMatchObject({ currentPage: 9, saveConflict: true });
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock.mock.calls.map(([, options]) => options?.method ?? 'GET')).toEqual(['PATCH', 'GET']);
+		await expect(readReadingSaveRecord('outbox', `user:${userId}:book:${bookId}`)).resolves.toBeUndefined();
+	});
+
+	test('base不明のlegacy outboxは送信せず競合を返し、次の明示保存はserver baselineから始める', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		const bookId = 9308;
 		const userId = 903;
@@ -538,26 +699,20 @@ describe('reading-info API client', () => {
 		});
 
 		const patchSequences: string[] = [];
-		let getCount = 0;
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
 			if (options?.method === 'PATCH') {
 				const body = JSON.parse(String(options.body)) as { saveSequence: string };
 				patchSequences.push(body.saveSequence);
-				if (patchSequences.length === 1) return new Response(JSON.stringify({ code: 'STALE_READING_SAVE' }), { status: 409 });
-				return new Response(JSON.stringify({ bookId, currentPosition: '8', currentPage: 8, progressPercentage: 80, readStatus: 'reading', saveSequence: body.saveSequence }), {
-					headers: { 'Content-Type': 'application/json' },
-				});
 			}
-			getCount += 1;
-			const saveSequence = getCount === 1 ? '0' : '1';
-			return new Response(JSON.stringify({ bookId, currentPosition: '8', currentPage: 8, progressPercentage: 80, readStatus: 'reading', saveSequence }), {
+			return new Response(JSON.stringify({ bookId, currentPosition: '8', currentPage: 8, progressPercentage: 80, readStatus: 'reading', saveSequence: '0' }), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		});
 
-		await expect(fetchReadingInfo(bookId, userId)).resolves.toMatchObject({ currentPage: 8 });
-		expect(patchSequences).toEqual(['1000001', '1']);
-		await expect(reserveReadingSave(bookId, 9, 'reading', 90, userId)).resolves.toBe('2');
+		await expect(fetchReadingInfo(bookId, userId)).resolves.toMatchObject({ currentPage: 8, saveConflict: true });
+		expect(patchSequences).toEqual([]);
+		await expect(readReadingSaveRecord('outbox', scopeKey)).resolves.toBeUndefined();
+		await expect(reserveReadingSave(bookId, 9, 'reading', 90, userId)).resolves.toBe('1');
 	});
 
 	test('ログアウト世代が変わったsequence conflictはread-backを中止しoutboxを保持する', async () => {
@@ -587,7 +742,7 @@ describe('reading-info API client', () => {
 		await invalidation;
 		await expect(save).rejects.toThrow('Reading save invalidated by authentication change');
 
-		expect(requests).toEqual(['PATCH']);
+		expect(requests).toEqual(['GET', 'PATCH']);
 		await expect(readReadingSaveRecord('outbox', 'user:7:book:99')).resolves.toMatchObject({
 			position: 2,
 			userId: 7,
@@ -597,13 +752,10 @@ describe('reading-info API client', () => {
 	test('サーバー版がJavaScript safe integerを超えてもdecimal stringのまま1つ進める', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		const sequences: string[] = [];
-		let patchCount = 0;
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
 			if (options?.method === 'PATCH') {
 				const body = JSON.parse(String(options.body)) as { saveSequence: string };
 				sequences.push(body.saveSequence);
-				patchCount += 1;
-				if (patchCount === 1) return new Response(JSON.stringify({ code: 'STALE_READING_SAVE' }), { status: 409 });
 				return new Response(JSON.stringify({ bookId: 99, currentPosition: '9', currentPage: 9, progressPercentage: 80, readStatus: 'reading', saveSequence: body.saveSequence }), {
 					headers: { 'Content-Type': 'application/json' },
 				});
@@ -614,6 +766,6 @@ describe('reading-info API client', () => {
 		});
 
 		await saveReadingInfo(99, 9, 'reading', 80, 7);
-		expect(sequences[1]).toBe('9007199254740994');
+		expect(sequences).toEqual(['9007199254740994']);
 	});
 });

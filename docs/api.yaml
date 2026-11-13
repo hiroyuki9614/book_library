@@ -189,7 +189,7 @@ paths:
         現在のCookie sessionと一致しない保存は拒否する。hintの照合は書籍の存在と
         RoleBookPermissionの確認後に行い、hintを省略した既存callerも受け入れる。
         readStatusを省略した場合はreading。明示値はreadingまたはcompleted。
-        saveSequenceを指定した保存がSTALE_READING_SAVEで409になった場合、現在ユーザーのGETを読み直し、返された版より1つ大きい版で同じ最新保留payloadを再送できる。これはサーバー版のCAS順序を示すが、複数端末の実時間順序を保証しない。
+        新しい認証済みcallerはsaveSequenceとexpectedSaveSequenceを一緒に送り、expectedSaveSequenceは直前にGETで確認したサーバー版でなければならない。サーバーはこの版との完全一致をPATCHで原子的に確認する。古いoutboxのpayloadを409後に再採番して再送してはならない。STALE_READING_SAVEでは最新GETを表示し、古いpendingを破棄して競合を示す。次の明示的なユーザー操作は新しいGET済みbaseで予約する。saveSequenceとexpectedSaveSequenceがない旧callerはサーバー版0の間だけ互換扱いとする。
       requestBody:
         required: true
         content:
@@ -472,7 +472,7 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     ReadingSaveConflict:
-      description: The request's expected authenticated user does not match the Cookie session, or the supplied reading save sequence is stale. For STALE_READING_SAVE, read the authenticated reading-info GET and retry the still-current payload with a strictly higher decimal-string sequence; an identity mismatch must not be retried.
+      description: The request's expected authenticated user does not match the Cookie session, or the supplied reading save sequence is stale. For STALE_READING_SAVE, read the authenticated reading-info GET, discard the matching stale outbox entry, and surface the authoritative position as a conflict. Do not automatically retry or rebase that payload; a later explicit user action may save against a newly observed base.
       content:
         application/json:
           schema:
@@ -633,11 +633,20 @@ components:
           enum: [reading, completed]
           default: reading
         saveSequence:
-          description: Optional client CAS version. The server accepts legacy safe JSON integers, but new clients should send the decimal-string form.
+          description: Monotonic client reservation number for this user and book. It is not a cross-device version; send it with the server-derived expectedSaveSequence and use the decimal-string form.
           oneOf:
             - type: string
               pattern: '^[0-9]+$'
               description: Decimal string from 0 through 9223372036854775807 inclusive; leading zeroes are accepted.
+            - type: integer
+              minimum: 0
+              maximum: 9007199254740991
+        expectedSaveSequence:
+          description: Exact server base returned by the most recent authoritative GET or proven prior PATCH acknowledgement. A stale base returns 409 and must not be rebased automatically.
+          oneOf:
+            - type: string
+              pattern: '^[0-9]+$'
+              description: Decimal string from 0 through 9223372036854775807 inclusive.
             - type: integer
               minimum: 0
               maximum: 9007199254740991
@@ -662,11 +671,20 @@ components:
           enum: [reading, completed]
           default: reading
         saveSequence:
-          description: Optional client CAS version. The server accepts legacy safe JSON integers, but new clients should send the decimal-string form.
+          description: Monotonic client reservation number for this user and book. It is not a cross-device version; send it with the server-derived expectedSaveSequence and use the decimal-string form.
           oneOf:
             - type: string
               pattern: '^[0-9]+$'
               description: Decimal string from 0 through 9223372036854775807 inclusive; leading zeroes are accepted.
+            - type: integer
+              minimum: 0
+              maximum: 9007199254740991
+        expectedSaveSequence:
+          description: Exact server base returned by the most recent authoritative GET or proven prior PATCH acknowledgement. A stale base returns 409 and must not be rebased automatically.
+          oneOf:
+            - type: string
+              pattern: '^[0-9]+$'
+              description: Decimal string from 0 through 9223372036854775807 inclusive.
             - type: integer
               minimum: 0
               maximum: 9007199254740991

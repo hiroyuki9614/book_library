@@ -174,9 +174,9 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		// changing the spread's start CFI.
 		const moved = { start: { cfi: 'epubcfi(/6/4!/4/2/1:0)' }, atEnd: false };
 		relocated(moved);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, moved.start.cfi, 'reading', 0), { timeout: 1500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, moved.start.cfi, 'reading', 0, undefined, undefined, false, undefined), { timeout: 1500 });
 		relocated({ ...moved, atEnd: true });
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, moved.start.cfi, 'completed', 100));
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, moved.start.cfi, 'completed', 100, undefined, undefined, false, undefined));
 	});
 
 	test('compact header keeps save and navigation controls while the footer owns position and spread controls', async () => {
