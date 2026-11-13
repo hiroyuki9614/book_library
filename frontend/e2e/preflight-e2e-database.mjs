@@ -136,19 +136,37 @@ export function validatePreflightConfiguration(env, cwd) {
   return { ok: true };
 }
 
-function hasExpectedIdentity(identity) {
-  return (
-    identity?.database_name === EXPECTED_DATABASE.database &&
-    identity?.current_user === EXPECTED_DATABASE.username &&
-    identity?.session_user === EXPECTED_DATABASE.username &&
-    isIP(identity?.server_address ?? '') !== 0 &&
-    Number(identity?.server_port) === Number(EXPECTED_DATABASE.port) &&
-    isIP(identity?.client_address ?? '') !== 0 &&
-    identity?.current_schema === 'public' &&
-    Number(identity?.server_version_num) >= 160000 &&
-    Number(identity?.server_version_num) < 170000 &&
-    identity?.is_replica === false
-  );
+function inspectIdentity(identity) {
+  const safeIdentifier = (value) =>
+    typeof value === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(value) ? value : '<invalid>';
+  const safeInteger = (value) => Number.isSafeInteger(Number(value)) ? Number(value) : '<invalid>';
+  const addressFamily = (value) => {
+    const family = isIP(typeof value === 'string' ? value : '');
+    return family === 4 ? 'IPv4' : family === 6 ? 'IPv6' : 'invalid';
+  };
+  const checks = {
+    database_name: identity?.database_name === EXPECTED_DATABASE.database,
+    current_user: identity?.current_user === EXPECTED_DATABASE.username,
+    session_user: identity?.session_user === EXPECTED_DATABASE.username,
+    server_address: isIP(typeof identity?.server_address === 'string' ? identity.server_address : '') !== 0,
+    server_port: Number(identity?.server_port) === Number(EXPECTED_DATABASE.port),
+    client_address: isIP(typeof identity?.client_address === 'string' ? identity.client_address : '') !== 0,
+    current_schema: identity?.current_schema === 'public',
+    server_version: Number(identity?.server_version_num) >= 160000 && Number(identity?.server_version_num) < 170000,
+    primary: identity?.is_replica === false,
+  };
+  const observed = {
+    database_name: safeIdentifier(identity?.database_name),
+    current_user: safeIdentifier(identity?.current_user),
+    session_user: safeIdentifier(identity?.session_user),
+    server_address_family: addressFamily(identity?.server_address),
+    server_port: safeInteger(identity?.server_port),
+    client_address_family: addressFamily(identity?.client_address),
+    current_schema: safeIdentifier(identity?.current_schema),
+    server_version_num: safeInteger(identity?.server_version_num),
+    is_replica: typeof identity?.is_replica === 'boolean' ? identity.is_replica : '<invalid>',
+  };
+  return { checks, observed };
 }
 
 function readNonNegativeCount(row, name) {
@@ -184,8 +202,17 @@ export async function runReadOnlyPreflight({ env, cwd, createClient }) {
 
     const identityResult = await client.query(IDENTITY_QUERY);
     const identity = identityResult?.rows?.[0];
-    if (!hasExpectedIdentity(identity)) {
-      return refusal('connected database identity or endpoint did not match the expected PostgreSQL 16 reader-e2e service.');
+    const identityCheck = inspectIdentity(identity);
+    const failedChecks = Object.entries(identityCheck.checks)
+      .filter(([, passed]) => !passed)
+      .map(([name]) => name);
+    if (failedChecks.length > 0) {
+      return refusal(
+        'connected database identity or endpoint did not match the expected PostgreSQL 16 reader-e2e service; failed checks: ' +
+          failedChecks.join(', ') +
+          '; observed identity (no credentials): ' +
+          JSON.stringify(identityCheck.observed),
+      );
     }
 
     const schemaResult = await client.query(SCHEMA_QUERY);

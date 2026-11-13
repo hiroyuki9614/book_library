@@ -137,6 +137,8 @@ test('rejects an unexpected database identity', async () => {
 
   assert.equal(result.ok, false);
   assert.match(result.error, /identity or endpoint/);
+  assert.match(result.error, /failed checks: database_name/);
+  assert.match(result.error, /\"database_name\":\"retained_prod\"/);
   assert.ok(!result.error.includes('ci-only-password'));
   assert.ok(mock.statements.includes('ROLLBACK'));
 });
