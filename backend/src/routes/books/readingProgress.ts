@@ -88,9 +88,8 @@ function isUniqueConflict(error: unknown) {
 		&& error.code === 'P2002';
 }
 
-function sequenceCondition(saveSequence: bigint | undefined, expectedSaveSequence: bigint | undefined) {
+function sequenceCondition(expectedSaveSequence: bigint | undefined) {
 	if (expectedSaveSequence !== undefined) return { equals: expectedSaveSequence };
-	const sequence = saveSequence ?? 0n;
 	return { equals: 0n };
 }
 
@@ -134,7 +133,7 @@ export async function persistReadingInfo(
 	if (expectedSaveSequence !== undefined && (saveSequence === undefined || saveSequence <= expectedSaveSequence || saveSequence - expectedSaveSequence > MAX_FORWARD_SAVE_SEQUENCE_GAP)) {
 		throw new StaleReadingInfoError();
 	}
-	const sequencePredicate = sequenceCondition(saveSequence, expectedSaveSequence);
+	const sequencePredicate = sequenceCondition(expectedSaveSequence);
 
 	const progressFields = input.progressPercentage === undefined
 		? {}
