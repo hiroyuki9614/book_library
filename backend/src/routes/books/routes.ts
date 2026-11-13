@@ -30,6 +30,7 @@ type BookWithRelations = {
 		originalFileName: string;
 		fileUrl: string;
 	}>;
+	readingInfos?: ReadingProgressRecord[];
 };
 
 type BookFileRecord = BookWithRelations['bookFiles'][number];
@@ -177,7 +178,11 @@ app.get('/', async (c) => {
 			prisma.book.count({ where }),
 			prisma.book.findMany({
 				where,
-				include: { category: true, bookFiles: { orderBy: { id: 'asc' } } },
+				include: {
+					category: true,
+					bookFiles: { orderBy: { id: 'asc' } },
+					readingInfos: { where: { userId: user.id }, take: 1 },
+				},
 				orderBy: { createdAt: 'desc' },
 				skip: (page - 1) * limit,
 				take: limit,
@@ -188,7 +193,7 @@ app.get('/', async (c) => {
 			total,
 			page,
 			limit,
-			books: books.map((book) => toBookResponse(book as BookWithRelations)),
+			books: books.map((book) => toBookResponse(book as BookWithRelations, (book as BookWithRelations).readingInfos?.[0] ?? null)),
 		});
 	} catch (error) {
 		console.error(error);
