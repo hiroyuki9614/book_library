@@ -485,10 +485,20 @@ async function fetchAuthoritativeReadingInfo(bookId: number, userId: number, gen
 		headers: { [READING_SESSION_USER_HEADER]: String(userId) },
 	});
 	assertReadingSaveGeneration(generation);
-	assertReadingSaveProtocol(result);
-	const serverSequence = requireReadingSaveSequence(result.saveSequence);
+	const capabilityKey = readingSaveCapabilityKey(bookId, userId, generation);
+	let serverSequence: string;
+	try {
+		assertReadingSaveProtocol(result);
+		serverSequence = requireReadingSaveSequence(result.saveSequence);
+	} catch (error) {
+		const code = error instanceof Error ? (error as ReadingApiError).code : undefined;
+		if (code === 'READING_SAVE_PROTOCOL_UNSUPPORTED' || code === 'READING_SAVE_PROTOCOL_INVALID') {
+			verifiedReadingSaveCapabilities.delete(capabilityKey);
+		}
+		throw error;
+	}
 	await observeServerReadingSaveSequence(getReadingScopeKey(bookId, userId), serverSequence, generation);
-	verifiedReadingSaveCapabilities.add(readingSaveCapabilityKey(bookId, userId, generation));
+	verifiedReadingSaveCapabilities.add(capabilityKey);
 	return { ...result, saveSequence: serverSequence };
 }
 

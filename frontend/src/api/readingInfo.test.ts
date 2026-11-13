@@ -196,6 +196,24 @@ describe('reading-info API client', () => {
 		expect(methods).not.toContain('PATCH');
 	});
 
+	test('previously verified capability is cleared after a malformed CAS GET', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		const methods: string[] = [];
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			methods.push(options?.method ?? 'GET');
+			const payload = methods.length === 1
+				? { bookId: 9424, currentPosition: null, currentPage: 1, progressPercentage: null, readStatus: 'unread', saveSequence: '4', readingSaveProtocol: 'cas-v1' }
+				: { bookId: 9424, currentPosition: null, currentPage: 1, progressPercentage: null, readStatus: 'unread', readingSaveProtocol: 'cas-v1' };
+			return new Response(JSON.stringify(payload), { headers: { 'Content-Type': 'application/json' } });
+		});
+
+		await expect(fetchReadingInfo(9424, 9425)).resolves.toMatchObject({ saveSequence: '4' });
+		await expect(fetchReadingInfo(9424, 9425)).rejects.toMatchObject({ code: 'READING_SAVE_PROTOCOL_INVALID' });
+		await expect(saveReadingInfo(9424, 2, 'reading', 20, 9425)).rejects.toMatchObject({ code: 'READING_SAVE_PROTOCOL_INVALID' });
+		expect(methods).toEqual(['GET', 'GET', 'GET']);
+		expect(methods).not.toContain('PATCH');
+	});
+
 	test('authenticated reading-info GET preserves READING_SESSION_MISMATCH for the hook', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(
