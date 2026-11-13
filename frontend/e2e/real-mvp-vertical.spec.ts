@@ -43,6 +43,7 @@ type ReadingInfoBody = {
 	currentPage: number;
 	progressPercentage: number | null;
 	readStatus: string;
+	saveSequence?: string;
 };
 
 async function patchReadingInfo(page: Page, bookId: number, body: { currentPage: number; progressPercentage?: number | null; readStatus?: 'reading' | 'completed' }) {
@@ -191,6 +192,8 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		progressPercentage: 100,
 		readStatus: 'completed',
 	});
+	expect(prepared.body.saveSequence).toMatch(/^\d+$/);
+	const preparedSaveSequence = prepared.body.saveSequence!;
 	const openReadingInfoResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
 		&& response.request().method() === 'GET');
 	const fileResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.pdfBookId}/file`));
@@ -326,6 +329,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		readStatus: 'completed',
 		progressPercentage: 100,
 		saveSequence: expect.stringMatching(/^[1-9]\d*$/),
+		expectedSaveSequence: preparedSaveSequence,
 	});
 	expect(savedResponse.status()).toBe(200);
 	expect(await savedResponse.json()).toMatchObject({
