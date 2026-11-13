@@ -129,6 +129,57 @@ describe('PdfReader navigation, outline, and progress', () => {
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 	});
 
+
+	test.each([
+		{ currentPage: 1, totalPages: 7, expected: '1 / 7 ページ 14%' },
+		{ currentPage: 2, totalPages: 7, expected: '2 / 7 ページ 29%' },
+		{ currentPage: 5, totalPages: 8, expected: '5 / 8 ページ 63%' },
+		{ currentPage: 7, totalPages: 7, expected: '7 / 7 ページ 100%' },
+	])('PDFの読書進捗を整数表示する ($currentPage/$totalPages)', async ({ currentPage, totalPages, expected }) => {
+		mocks.scrollState.currentPage = currentPage;
+		mocks.scrollState.totalPages = totalPages;
+		mocks.viewportScrollState.currentPage = currentPage;
+		mocks.viewportScrollState.totalPages = totalPages;
+		mocks.scrollProvides.getCurrentPage.mockReturnValue(currentPage);
+		mocks.fetchReadingInfo.mockResolvedValue({
+			bookId: 7,
+			currentPosition: String(currentPage),
+			currentPage,
+			readStatus: 'reading',
+		});
+		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await expect.element(getByTestId('pdf-reader-footer')).toHaveTextContent(expected);
+	});
+
+
+	test('同じ本でuserIdが変わるとPDFの復元ページを新しいユーザーから読み直す', async () => {
+		mocks.fetchReadingInfo.mockImplementation((_bookId: number, userId: number) => Promise.resolve({
+			bookId: 7,
+			currentPosition: String(userId === 11 ? 2 : 4),
+			currentPage: userId === 11 ? 2 : 4,
+			readStatus: 'reading',
+		}));
+		const view = await render(<PdfReader bookId={7} userId={11} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
+
+		mocks.scrollToPage.mockClear();
+		await view.rerender(<PdfReader bookId={7} userId={22} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 4, behavior: 'auto' }));
+		expect(mocks.fetchReadingInfo).toHaveBeenCalledWith(7, 22);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+	});
+
+	test('ページ移動時に現在ページと総ページから進捗率を保存する', async () => {
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
+
+		mocks.scrollState.currentPage = 3;
+		mocks.viewportScrollState.currentPage = 3;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 3, 'reading', 60, undefined, undefined, false, undefined), { timeout: 1_500 });
+	});
+
 	test('places title, save state, outline and display settings in the header with reading controls below the page', async () => {
 		const { getByRole, getByTestId } = await render(<PdfReader bookId={7} bookTitle='A long PDF title' pageTurnDirection='ltr' />);
 

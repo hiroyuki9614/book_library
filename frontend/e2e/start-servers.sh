@@ -44,6 +44,8 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+node --test "$SCRIPT_DIR/preflight-e2e-database.test.mjs"
+
 if [ -z "${E2E_DATABASE_URL:-}" ] || [ -z "${E2E_ADMIN_EMAIL:-}" ] || [ -z "${E2E_ADMIN_NAME:-}" ] || [ -z "${E2E_ADMIN_PASSWORD:-}" ] || [ -z "${E2E_MVP_PASSWORD:-}" ] || [ -z "${E2E_BOOK_FILE_STORAGE_ROOT:-}" ] || [ -z "${E2E_MVP_METADATA_PATH:-}" ]; then
   echo 'ERROR: E2E_DATABASE_URL, admin credentials, E2E_MVP_PASSWORD, E2E_BOOK_FILE_STORAGE_ROOT, and E2E_MVP_METADATA_PATH are required (values omitted).'
   exit 1
@@ -54,6 +56,7 @@ node "$SCRIPT_DIR/validate-e2e-db-url.mjs"
 BETTER_AUTH_SECRET=$(openssl rand -hex 32)
 
 cd ../backend
+node "$SCRIPT_DIR/preflight-e2e-database.mjs"
 DATABASE_URL="$E2E_DATABASE_URL" npx prisma db push --accept-data-loss >/dev/null 2>&1 || {
   echo 'ERROR: isolated E2E database schema synchronization failed (values omitted).'
   exit 1

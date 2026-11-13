@@ -27,7 +27,7 @@ app.use(
 	'/api/*',
 	cors({
 		origin: frontendUrl,
-		allowHeaders: ['Content-Type'],
+		allowHeaders: ['Content-Type', 'X-BeLib-User-Id'],
 		allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
 		credentials: true,
 	}),

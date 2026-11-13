@@ -27,8 +27,16 @@ function Home() {
 		if (isLoading) return '読み込み中';
 		return `${count}冊`;
 	};
-	// The existing API provides saved statuses, not reader-derived percentages.
-	const progressLabel = '未計測';
+	const measuredProgresses = books
+		.map((book) => book.progressPercentage)
+		.filter((progress): progress is number => typeof progress === 'number' && Number.isFinite(progress));
+	const progressLabel = isError
+		? '取得失敗'
+		: isLoading
+			? '読み込み中'
+			: measuredProgresses.length === 0
+				? `未計測（計測済み0/${books.length}冊）`
+				: `${Math.round(measuredProgresses.reduce((sum, progress) => sum + progress, 0) / measuredProgresses.length)}%（計測済み${measuredProgresses.length}/${books.length}冊）`;
 
 	return (
 		<>

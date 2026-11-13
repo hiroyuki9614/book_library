@@ -153,45 +153,13 @@ npm run build:frontend
 ```bash
 npm --prefix backend test
 npm --prefix frontend test
-npm --prefix frontend run test:e2e
 ```
 
 ## Portfolio EPUB/PDF demo / browser E2E
 
-E2Eは、一般ユーザーへ公開するEPUB/PDF 2冊とadmin限定の既存蔵書相当1冊をtask-owned DB/storageへ作成します。`E2E_DATABASE_URL` は必ず `_e2e` で終わるDB名にし、実値は環境変数だけに設定してください。
+このE2Eは既存の release-ci.yml reader-e2e jobで実行する前提です。preflightはjob名等の環境値・workspace・localhostの reader_e2e DB設定を照合し、通常のローカル実行は接続前に拒否します。DB接続後はidentityと空状態もread-onlyで確認します。この確認はrunnerの真正性を認証するものではなく、手動で環境値を模倣した実行を防ぐセキュリティ境界ではありません。E2Eは既存のGitHub Actions workflowから実行してください。ローカル用DBの作成・削除手順はありません。
 
-```bash
-mkdir -p .tmp/e2e-book-files
-docker compose --env-file .env.development -f docker-compose.dev.yml exec -T db \
-  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-  -c "CREATE DATABASE booklib_demo_e2e OWNER $POSTGRES_USER;"
-
-export E2E_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/booklib_demo_e2e"
-export E2E_ADMIN_EMAIL="phase-c-admin@example.test"
-export E2E_ADMIN_NAME="Phase C Admin"
-export E2E_ADMIN_PASSWORD="replace-with-a-local-password"
-export E2E_MVP_PASSWORD="replace-with-a-local-password"
-export E2E_BOOK_FILE_STORAGE_ROOT="$(pwd)/.tmp/e2e-book-files"
-export E2E_MVP_METADATA_PATH="$(pwd)/.tmp/e2e-metadata.json"
-# 生成済みの青空文庫2冊でreaderも確認する場合のみ指定
-export E2E_AOZORA_MANIFEST_PATH="$(pwd)/.tmp/aozora-demo/manifest.generated.json"
-
-npm --prefix frontend run test:e2e
-```
-
-このdemoは、一般ユーザーが公開2冊だけを一覧・検索できること、admin限定本の詳細・ファイル・進捗GET/PATCHと管理APIを拒否されること、adminは全冊を見られること、保護PDFページとEPUB CFIを保存・復元できることを確認します。`E2E_CAPTURE_PORTFOLIO_SCREENSHOTS=true` を指定した実行では、非公開書籍を含まないログイン/本棚画像を `docs/images/` へ更新します。
-
-同じtask-owned E2E DBとstorageでdemoを再実行する場合は、fixtureが既存roleとPDFを再利用しないため、先に次を実行します。
-
-```bash
-docker compose --env-file .env.development -f docker-compose.dev.yml exec -T db \
-  psql -U "$POSTGRES_USER" -d postgres \
-  -c 'DROP DATABASE IF EXISTS booklib_demo_e2e WITH (FORCE);' \
-  -c "CREATE DATABASE booklib_demo_e2e OWNER $POSTGRES_USER;"
-find .tmp/e2e-book-files -type f -delete
-rm -f .tmp/e2e-metadata.json
-```
-
+CI jobはtask-ownedの一時DB/storageへ一般ユーザー向けEPUB/PDF 2冊とadmin限定本1冊を作成し、公開範囲、権限、保護PDFページ、EPUB CFI、読書位置の保存と復元を検証します.
 ## 現在のMVP完了判定
 
 現在の「MVPコア VERIFIED」は次の縦切りを意味します。
