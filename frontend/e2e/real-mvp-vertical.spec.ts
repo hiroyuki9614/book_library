@@ -325,7 +325,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		currentPage: 2,
 		readStatus: 'completed',
 		progressPercentage: 100,
-		saveSequence: expect.stringMatching(/^[1-9]\\d*$/),
+		saveSequence: expect.stringMatching(/^[1-9]\d*$/),
 	});
 	expect(savedResponse.status()).toBe(200);
 	expect(await savedResponse.json()).toMatchObject({
