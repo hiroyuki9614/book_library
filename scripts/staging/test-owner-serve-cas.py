@@ -29,6 +29,13 @@ def baseline():
             owner.BRI: {"Path": owner.BRI_FILE}}}},}, separators=(",", ":")).encode()
 
 
+def tailscale_wire(raw):
+    """Model Go json omitempty on empty Serve config maps without inventing its ETag."""
+    value = json.loads(raw)
+    return json.dumps({key: child for key, child in value.items() if child},
+                      sort_keys=True, separators=(",", ":")).encode()
+
+
 def new_plan(now=None):
     now = int(owner.time.time()) if now is None else now
     original = baseline()
@@ -87,11 +94,13 @@ class FakeAPI:
             status = self.deny_at[self.posts]
             if self.posts in self.foreign_on_deny:
                 # Simulate a different writer producing the exact desired payload.
-                self.raw = raw
+                self.raw = tailscale_wire(raw)
                 self.etag = hashlib.sha256(raw + b"foreign").hexdigest()
             raise owner.HTTPFailure(status)
-        self.raw = raw
-        self.etag = hashlib.sha256(raw + str(self.posts).encode()).hexdigest()
+        self.raw = tailscale_wire(raw)
+        # Model the ETag as an opaque server token, independent of normalized config.
+        self.etag = f"{self.posts + 100:064x}"
+        self.events.append(("WIRE", self.posts, self.raw))
         attempt.post_accepted = True
         if self.posts in self.ambiguous_after:
             raise owner.TransportFailure("simulated lost response after apply")
@@ -163,6 +172,10 @@ class OwnerServeTests(unittest.TestCase):
         self.assertEqual(owner.config(self.api.raw),
                          {"TCP": {"443": {"TCPForward": "127.0.0.1:18443"}}, "Web": {}})
         self.assertEqual(self.api.posts, 2)
+        wire_states = [item[2] for item in self.api.events if item[0] == "WIRE"]
+        self.assertEqual(wire_states, [
+            b"{}", b'{"TCP":{"443":{"TCPForward":"127.0.0.1:18443"}}}',
+        ])
         events = self.api.events
         intent = next(i for i, item in enumerate(events) if item[0] == "journal" and item[1] == "retirement-intent")
         post = next(i for i, item in enumerate(events) if item[0] == "POST")
@@ -206,6 +219,10 @@ class OwnerServeTests(unittest.TestCase):
                 self.execute(plan)
         self.assertEqual(self.api.posts, 4)  # two forward steps, then remove owned forward and restore baseline
         self.assertEqual(self.used_nonces, {plan["nonce"]})
+        self.assertEqual(owner.canonical(owner.config(self.api.raw)), owner.canonical(owner.config(baseline())))
+        wire_states = [item[2] for item in self.api.events if item[0] == "WIRE"]
+        self.assertIn(b"{}", wire_states)
+        self.assertIn(b'{"TCP":{"443":{"TCPForward":"127.0.0.1:18443"}}}', wire_states)
         self.assertEqual(owner.canonical(owner.config(self.api.raw)), owner.canonical(owner.config(baseline())))
 
     def test_plan_expiry_during_journal_blocks_write_and_after_commit_rolls_back(self):
@@ -338,6 +355,16 @@ class OwnerServeTests(unittest.TestCase):
         for item in variants:
             with self.subTest(item=item), self.assertRaises(owner.Stop):
                 owner.baseline(owner.canonical(item))
+
+    def test_omitted_serve_maps_normalize_but_null_and_unknown_scopes_reject(self):
+        self.assertEqual(owner.config(b"{}"), {"TCP": {}, "Web": {}})
+        self.assertEqual(owner.config(b'{"TCP":{"443":{"TCPForward":"127.0.0.1:18443"}}}'),
+                         {"TCP": {"443": {"TCPForward": "127.0.0.1:18443"}}, "Web": {}})
+        for raw in (b'{"TCP":null}', b'{"Web":[]}', b'{"Other":{}}'):
+            with self.subTest(raw=raw), self.assertRaises(owner.Stop):
+                owner.config(raw)
+        with self.assertRaises(owner.Stop):
+            owner.baseline(b"{}")
 
     def test_definite_401_403_412_never_adopt_a_foreign_matching_desired(self):
         original = baseline()

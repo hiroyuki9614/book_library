@@ -384,8 +384,12 @@ def _config_object(raw: bytes) -> dict[str, Any]:
         config = json.loads(raw.decode("utf-8", "strict"))
     except (UnicodeError, json.JSONDecodeError) as error:
         raise TlsIngressError("Tailscale Serve config is malformed") from error
-    if not isinstance(config, dict) or not isinstance(config.get("TCP"), dict) or not isinstance(config.get("Web"), dict):
-        raise TlsIngressError("Tailscale Serve config has an unsupported shape")
+    if not isinstance(config, dict) or set(config) - {"TCP", "Web"}:
+        raise TlsIngressError("Tailscale Serve config has unknown scopes")
+    tcp, web = config.get("TCP", {}), config.get("Web", {})
+    if not isinstance(tcp, dict) or not isinstance(web, dict):
+        raise TlsIngressError("Present Tailscale TCP and Web scopes must be objects")
+    config = {"TCP": tcp, "Web": web}
     def has_funnel_enabled(value: Any) -> bool:
         if isinstance(value, dict):
             return any((key == "AllowFunnel" and isinstance(child, dict) and any(flag is True for flag in child.values()))
@@ -416,7 +420,7 @@ def plan_retirement(original_raw: bytes) -> bytes:
 
 
 def _same_config(raw: bytes, expected: bytes) -> bool:
-    return canonical_json(json.loads(raw)) == canonical_json(json.loads(expected))
+    return canonical_json(_config_object(raw)) == canonical_json(_config_object(expected))
 
 
 def _set_cas(client: TailscaleServeClient, expected_raw: bytes, expected_etag: str, desired_raw: bytes) -> tuple[bytes, str]:

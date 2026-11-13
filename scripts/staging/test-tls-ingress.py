@@ -31,6 +31,12 @@ def original_bytes():
     return json.dumps(original_config(), indent=2).encode()
 
 
+def tailscale_wire(raw):
+    value = json.loads(raw)
+    return json.dumps({key: child for key, child in value.items() if child},
+                      sort_keys=True, separators=(",", ":")).encode()
+
+
 class FakeServeClient:
     def __init__(self, raw=None):
         self.raw = raw or original_bytes()
@@ -57,8 +63,8 @@ class FakeServeClient:
             raise tls.LocalApiError(412)
         if etag != self.etag:
             raise tls.LocalApiError(412)
-        self.raw = body
-        self.etag = hashlib.sha256(body + str(self.posts).encode()).hexdigest()
+        self.raw = tailscale_wire(body)
+        self.etag = f"{self.posts + 100:064x}"
         if self.posts in self.raise_after_apply:
             raise OSError("simulated lost LocalAPI response after commit")
 
@@ -82,6 +88,30 @@ class TlsIngressTests(unittest.TestCase):
         config["Web"]["other:443"] = {"Handlers": {"/": {"Proxy": "http://localhost"}}}
         with self.assertRaises(tls.TlsIngressError):
             tls.plan_retirement(json.dumps(config).encode())
+
+    def test_omitted_serve_maps_are_semantically_empty_but_null_and_unknown_scopes_reject(self):
+        self.assertEqual(tls._config_object(b"{}"), {"TCP": {}, "Web": {}})
+        self.assertTrue(tls._same_config(b"{}", b'{"TCP":{},"Web":{}}'))
+        self.assertEqual(tls._config_object(b'{"TCP":{"443":{"TCPForward":"127.0.0.1:18443"}}}'),
+                         {"TCP": {"443": {"TCPForward": "127.0.0.1:18443"}}, "Web": {}})
+        for raw in (b'{"TCP":null}', b'{"Web":[]}', b'{"AllowFunnel":{}}'):
+            with self.subTest(raw=raw), self.assertRaises(tls.TlsIngressError):
+                tls._config_object(raw)
+
+    def test_clear_then_activate_and_rollback_accept_go_omitted_readbacks_and_keep_etags(self):
+        client = FakeServeClient()
+        original, original_etag = client.get()
+        empty, final = tls.plan_retirement_steps(original)
+        empty_raw, empty_etag = tls._set_cas(client, original, original_etag, empty)
+        self.assertEqual(empty_raw, b"{}")
+        self.assertEqual(empty_etag, client.etag)
+        final_raw, final_etag = tls._set_cas(client, empty_raw, empty_etag, final)
+        self.assertEqual(final_raw, b'{"TCP":{"443":{"TCPForward":"127.0.0.1:18443"}}}')
+        self.assertEqual(final_etag, client.etag)
+        self.assertNotEqual(final_etag, hashlib.sha256(tls.canonical_json(tls._config_object(final_raw))).hexdigest())
+        tls.restore_original(client, original, original_etag, final_raw, final_etag, remove_tcp443_first=True)
+        self.assertTrue(tls._same_config(client.raw, original))
+        self.assertEqual(client.posts, 4)
 
     def test_localapi_unix_host_is_the_tailscale_sock_host(self):
         connection = tls._UnixHTTPConnection(Path("/unused.sock"), 1)
@@ -330,7 +360,7 @@ class TlsIngressTests(unittest.TestCase):
             client.etag = hashlib.sha256(client.raw).hexdigest()
             raise OSError("ambiguous response")
         client.set = conflicting_set
-        with self.assertRaisesRegex(tls.TlsIngressError, "conflicts with both owned states"):
+        with self.assertRaisesRegex(tls.TlsIngressError, "unknown scopes"):
             tls._set_cas(client, original, client.etag, tls.plan_retirement(original))
         self.assertIn(b"ConcurrentOwnerChange", client.raw)
 

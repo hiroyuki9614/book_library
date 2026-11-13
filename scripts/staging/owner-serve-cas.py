@@ -120,10 +120,12 @@ def validate_plan(plan, now=None):
 
 def config(raw: bytes):
     value = strict_json(raw)
-    if (not isinstance(value, dict) or set(value) != {"TCP", "Web"}
-            or not isinstance(value["TCP"], dict) or not isinstance(value["Web"], dict)):
+    if not isinstance(value, dict) or set(value) - {"TCP", "Web"}:
         raise Stop("Serve config must contain only the reviewed TCP and Web scopes")
-    return value
+    tcp, web = value.get("TCP", {}), value.get("Web", {})
+    if not isinstance(tcp, dict) or not isinstance(web, dict):
+        raise Stop("Serve TCP and Web scopes must be objects when present")
+    return {"TCP": tcp, "Web": web}
 
 
 def baseline(raw: bytes):
