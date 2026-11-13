@@ -393,11 +393,26 @@ function assertReadingSaveProtocol(readingInfo: ReadingInfo) {
 	throw error;
 }
 
+function requireReadingSaveSequence(value: unknown) {
+	if (typeof value !== 'string' || !/^\d+$/.test(value)) {
+		const error = new Error('Reading save protocol returned an invalid save sequence') as ReadingApiError;
+		error.code = 'READING_SAVE_PROTOCOL_INVALID';
+		throw error;
+	}
+	const sequence = normalizeReadingSaveSequence(value);
+	if (sequence === undefined) {
+		const error = new Error('Reading save protocol returned an invalid save sequence') as ReadingApiError;
+		error.code = 'READING_SAVE_PROTOCOL_INVALID';
+		throw error;
+	}
+	return sequence;
+}
+
 function readingSaveCapabilityKey(bookId: number, userId: number, generation: number) {
 	return `${getApiBaseUrl() ?? ''}\u0000${generation}\u0000${getReadingScopeKey(bookId, userId)}`;
 }
 
-async function patchReadingInfo(path: string, options: RequestInit) {
+async function requestReadingInfo<T>(path: string, options: RequestInit): Promise<T> {
 	const baseUrl = getApiBaseUrl();
 	if (!baseUrl) throw new Error('VITE_API_BASE_URL is not configured');
 
@@ -421,7 +436,7 @@ async function patchReadingInfo(path: string, options: RequestInit) {
 		throw error;
 	}
 	try {
-		return await response.json();
+		return (await response.json()) as T;
 	} catch {
 		throw new Error('Failed to parse JSON response from API');
 	}
@@ -466,12 +481,12 @@ export function reserveReadingSave(
 
 async function fetchAuthoritativeReadingInfo(bookId: number, userId: number, generation: number) {
 	assertReadingSaveGeneration(generation);
-	const result = await apiFetch<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`, {
+	const result = await requestReadingInfo<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`, {
 		headers: { [READING_SESSION_USER_HEADER]: String(userId) },
 	});
 	assertReadingSaveGeneration(generation);
 	assertReadingSaveProtocol(result);
-	const serverSequence = normalizeReadingSaveSequence(result.saveSequence) ?? '0';
+	const serverSequence = requireReadingSaveSequence(result.saveSequence);
 	await observeServerReadingSaveSequence(getReadingScopeKey(bookId, userId), serverSequence, generation);
 	verifiedReadingSaveCapabilities.add(readingSaveCapabilityKey(bookId, userId, generation));
 	return { ...result, saveSequence: serverSequence };
@@ -657,7 +672,7 @@ export function saveReadingInfo(
 			const controller = new AbortController();
 			inFlightReadingSaves.add(controller);
 			try {
-				const result = await patchReadingInfo(`/api/v1/books/${bookId}/reading-info`, {
+				const result = await requestReadingInfo<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`, {
 					method: 'PATCH',
 					headers,
 					body: serializedBody,

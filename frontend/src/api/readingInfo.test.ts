@@ -152,18 +152,66 @@ describe('reading-info API client', () => {
 	test('保存済みの読書位置を取得する', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-			new Response(JSON.stringify({ bookId: 7, currentPosition: '3', currentPage: 3, progressPercentage: 30, readStatus: 'reading', readingSaveProtocol: 'cas-v1' }), {
+			new Response(JSON.stringify({ bookId: 7, currentPosition: '3', currentPage: 3, progressPercentage: 30, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' },
 			}),
 		);
 
-		await expect(fetchReadingInfo(7, 7)).resolves.toEqual({ bookId: 7, currentPosition: '3', currentPage: 3, progressPercentage: 30, readStatus: 'reading', readingSaveProtocol: 'cas-v1', saveSequence: '0' });
+		await expect(fetchReadingInfo(7, 7)).resolves.toEqual({ bookId: 7, currentPosition: '3', currentPage: 3, progressPercentage: 30, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' });
 		expect(fetch).toHaveBeenCalledWith(
 			'http://localhost:3000/api/v1/books/7/reading-info',
 			expect.objectContaining({
 				credentials: 'include',
 				headers: { 'X-BeLib-User-Id': '7' },
+			}),
+		);
+	});
+
+	test.each([
+		['missing', undefined],
+		['number', 0],
+		['malformed', 'not-a-sequence'],
+		['out-of-range', '9223372036854775808'],
+	] as const)('CAS GET rejects %s saveSequence and never enables PATCH', async (_case, saveSequence) => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		const methods: string[] = [];
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			methods.push(options?.method ?? 'GET');
+			const payload = {
+				bookId: 9420,
+				currentPosition: null,
+				currentPage: 1,
+				progressPercentage: null,
+				readStatus: 'unread',
+				readingSaveProtocol: 'cas-v1',
+				...(saveSequence === undefined ? {} : { saveSequence }),
+			};
+			return new Response(JSON.stringify(payload), { headers: { 'Content-Type': 'application/json' } });
+		});
+
+		await expect(fetchReadingInfo(9420, 9421)).rejects.toMatchObject({ code: 'READING_SAVE_PROTOCOL_INVALID' });
+		await expect(saveReadingInfo(9420, 2, 'reading', 20, 9421)).rejects.toMatchObject({ code: 'READING_SAVE_PROTOCOL_INVALID' });
+		expect(methods).toEqual(['GET', 'GET']);
+		expect(methods).not.toContain('PATCH');
+	});
+
+	test('authenticated reading-info GET preserves READING_SESSION_MISMATCH for the hook', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(
+			JSON.stringify({ code: 'READING_SESSION_MISMATCH' }),
+			{ status: 409, headers: { 'Content-Type': 'application/json' } },
+		));
+
+		await expect(fetchReadingInfo(9422, 9423)).rejects.toMatchObject({
+			status: 409,
+			code: 'READING_SESSION_MISMATCH',
+		});
+		expect(fetchMock).toHaveBeenCalledWith(
+			'http://localhost:3000/api/v1/books/9422/reading-info',
+			expect.objectContaining({
+				credentials: 'include',
+				headers: { 'X-BeLib-User-Id': '9423' },
 			}),
 		);
 	});
