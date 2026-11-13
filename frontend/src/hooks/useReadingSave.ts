@@ -68,14 +68,17 @@ export function useReadingSave(bookId: number, userId?: number) {
 			() => { if (isCurrent()) setStatus('saved'); },
 			(error: unknown) => {
 				if (!isCurrent()) return;
+				if (error instanceof Error && (error as Error & { code?: string }).code === 'STALE_READING_SAVE') {
+					latest.current = null;
+					pending.current = false;
+					setStatus('error');
+					return;
+				}
 				const retrySequence = error instanceof Error
 					? (error as Error & { saveSequence?: unknown }).saveSequence
 					: undefined;
 				if (typeof retrySequence === 'string' && /^\d+$/.test(retrySequence)) {
 					queued.saveSequence = retrySequence;
-				} else if (error instanceof Error && (error as Error & { code?: string }).code === 'STALE_READING_SAVE') {
-					queued.saveSequence = undefined;
-					queued.submitted = false;
 				}
 				setStatus('error');
 			},

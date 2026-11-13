@@ -148,10 +148,10 @@ describe('useReadingSave', () => {
 		unmount();
 	});
 
-	test('409 reconciliation後の保存要求失敗をretryすると更新済みsequenceを使う', async () => {
+	test('STALE_READING_SAVEはretryで再予約せず、別のreader saveだけを送る', async () => {
 		mocks.saveReadingInfo.mockRejectedValueOnce(Object.assign(
-			new Error('network failure after sequence reconciliation'),
-			{ saveSequence: '51' },
+			new Error('stale reading save'),
+			{ code: 'STALE_READING_SAVE', saveSequence: '51' },
 		));
 		const { result, unmount, act } = await renderHook(() => useReadingSave(99, 7));
 
@@ -161,13 +161,25 @@ describe('useReadingSave', () => {
 			window.dispatchEvent(new Event('pagehide'));
 		});
 		expect(result.current.status).toBe('error');
+		expect(mocks.reserveReadingSave).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
 
 		await act(async () => {
 			result.current.retry();
 		});
+		expect(mocks.reserveReadingSave).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+		expect(result.current.status).toBe('error');
 
+		await act(async () => {
+			result.current.save(3);
+			await Promise.resolve();
+			window.dispatchEvent(new Event('pagehide'));
+		});
+		expect(mocks.reserveReadingSave).toHaveBeenCalledTimes(2);
+		expect(mocks.reserveReadingSave).toHaveBeenLastCalledWith(99, 3, 'reading', undefined, 7, 11);
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(2);
-		expect(mocks.saveReadingInfo).toHaveBeenLastCalledWith(99, 2, 'reading', undefined, 7, 11, false, '51');
+		expect(mocks.saveReadingInfo).toHaveBeenLastCalledWith(99, 3, 'reading', undefined, 7, 11, true, '23');
 		expect(result.current.status).toBe('saved');
 		unmount();
 	});

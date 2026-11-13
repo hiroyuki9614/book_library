@@ -260,7 +260,7 @@ describe('MVP API contract RED tests based on docs/api.yaml', () => {
 			});
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
-			expect(body).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: null, readStatus: 'reading' });
+			expect(body).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: null, readStatus: 'reading', saveSequence: '0' });
 		});
 
 		test('PATCH /api/v1/books/{bookId}/reading-info は明示された不一致ヒントを409で拒否する', async () => {
@@ -282,7 +282,7 @@ describe('MVP API contract RED tests based on docs/api.yaml', () => {
 			});
 			expect(response.status).toBe(200);
 			const body = await expectJsonObject(response);
-			expect(body).toEqual({ bookId: 1, currentPosition: '4', currentPage: 4, progressPercentage: 100, readStatus: 'completed' });
+			expect(body).toEqual({ bookId: 1, currentPosition: '4', currentPage: 4, progressPercentage: 100, readStatus: 'completed', saveSequence: '0' });
 		});
 
 		test('PATCH /api/v1/books/{bookId}/reading-info はapi.yaml上のfinishedをDB正規値ではないため400で拒否する', async () => {

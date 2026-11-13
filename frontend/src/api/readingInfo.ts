@@ -431,7 +431,7 @@ export async function fetchReadingInfo(bookId: number, userId?: number): Promise
 		return readingInfo;
 	}
 
-	let readingInfo = await fetchAuthoritativeReadingInfo(bookId, sessionUserId, requestGeneration);
+	let readingInfo: ReadingInfo = await fetchAuthoritativeReadingInfo(bookId, sessionUserId, requestGeneration);
 	const pending = await readPendingReadingSave(scopeKey).catch(() => null);
 	if (!pending) return readingInfo;
 
