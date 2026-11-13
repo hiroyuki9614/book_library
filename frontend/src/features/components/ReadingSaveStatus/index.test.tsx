@@ -60,4 +60,14 @@ describe('ReadingSaveStatus compact reader header status', () => {
 		expect(element?.textContent).not.toContain('再試行');
 		expect(retry).not.toHaveBeenCalled();
 	});
+	test('stale save conflict says the current position was not saved and has no retry action', async () => {
+		const retry = vi.fn();
+		const { container } = await render(<ReadingSaveStatus status='stale' retry={retry} />);
+		const element = container.querySelector('[role="alert"]');
+		expect(element?.querySelector('[aria-hidden="true"]')?.textContent).toBe('保存競合');
+		expect(element?.querySelector('[aria-hidden="true"]')?.getAttribute('title')).toBe('この位置は保存されていません。ページを移動すると新しい位置を保存できます。');
+		expect(element?.querySelector('.sr-only')?.textContent).toBe('この位置は保存されていません。ページを移動すると新しい位置を保存できます。');
+		expect(element?.querySelector('button')).toBeNull();
+		expect(retry).not.toHaveBeenCalled();
+	});
 });

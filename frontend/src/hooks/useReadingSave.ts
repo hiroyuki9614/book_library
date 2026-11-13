@@ -12,7 +12,7 @@ type LatestReadingSave = {
 };
 
 export function useReadingSave(bookId: number, userId?: number) {
-	const [status, setStatus] = useState<'unknown' | 'saved' | 'saving' | 'error' | 'conflict'>('unknown');
+	const [status, setStatus] = useState<'unknown' | 'saved' | 'saving' | 'error' | 'conflict' | 'stale'>('unknown');
 	const latest = useRef<LatestReadingSave | null>(null);
 	const version = useRef(0);
 	const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -71,7 +71,7 @@ export function useReadingSave(bookId: number, userId?: number) {
 				if (error instanceof Error && (error as Error & { code?: string }).code === 'STALE_READING_SAVE') {
 					latest.current = null;
 					pending.current = false;
-					setStatus('error');
+					setStatus('stale');
 					return;
 				}
 				const retrySequence = error instanceof Error

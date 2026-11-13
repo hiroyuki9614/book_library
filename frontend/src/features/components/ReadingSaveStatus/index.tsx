@@ -1,5 +1,5 @@
 type ReadingSaveStatusProps = {
-	status: 'unknown' | 'saved' | 'saving' | 'error' | 'conflict';
+	status: 'unknown' | 'saved' | 'saving' | 'error' | 'conflict' | 'stale';
 	retry: () => void;
 };
 
@@ -7,7 +7,9 @@ export default function ReadingSaveStatus({ status, retry }: ReadingSaveStatusPr
 	const detail =
 		status === 'conflict'
 			? '最新の保存位置を読み込みました。ページを移動すると保存できます。'
-			: status === 'error'
+			: status === 'stale'
+				? 'この位置は保存されていません。ページを移動すると新しい位置を保存できます。'
+				: status === 'error'
 				? '読書位置を保存できませんでした。'
 				: status === 'saving'
 					? '読書位置を保存中…'
@@ -18,7 +20,7 @@ export default function ReadingSaveStatus({ status, retry }: ReadingSaveStatusPr
 	return (
 		<div
 			className='flex min-h-11 min-w-0 items-center gap-1 text-xs text-muted-foreground'
-			role={status === 'error' ? 'alert' : 'status'}
+			role={status === 'error' || status === 'stale' ? 'alert' : 'status'}
 		>
 			{status === 'error' ? (
 				<>
@@ -30,8 +32,8 @@ export default function ReadingSaveStatus({ status, retry }: ReadingSaveStatusPr
 				</>
 			) : (
 				<>
-					<span aria-hidden='true' title={detail} className={`whitespace-nowrap${status === 'conflict' ? ' text-amber-700' : ''}`}>
-						{status === 'conflict' ? '最新の保存位置を読み込み済み' : status === 'saving' ? '保存中…' : status === 'saved' ? '✓ 保存済み' : '未確認'}
+					<span aria-hidden='true' title={detail} className={`whitespace-nowrap${status === 'conflict' || status === 'stale' ? ' text-amber-700' : ''}`}>
+						{status === 'conflict' ? '最新の保存位置を読み込み済み' : status === 'stale' ? '保存競合' : status === 'saving' ? '保存中…' : status === 'saved' ? '✓ 保存済み' : '未確認'}
 					</span>
 					<span className='sr-only'>{detail}</span>
 				</>

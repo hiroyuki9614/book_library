@@ -160,7 +160,7 @@ describe('useReadingSave', () => {
 			await Promise.resolve();
 			window.dispatchEvent(new Event('pagehide'));
 		});
-		expect(result.current.status).toBe('error');
+		expect(result.current.status).toBe('stale');
 		expect(mocks.reserveReadingSave).toHaveBeenCalledTimes(1);
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
 
@@ -169,7 +169,7 @@ describe('useReadingSave', () => {
 		});
 		expect(mocks.reserveReadingSave).toHaveBeenCalledTimes(1);
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
-		expect(result.current.status).toBe('error');
+		expect(result.current.status).toBe('stale');
 
 		await act(async () => {
 			result.current.save(3);
