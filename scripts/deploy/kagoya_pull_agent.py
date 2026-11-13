@@ -27,7 +27,14 @@ from urllib.request import (
     build_opener,
 )
 
-from public_demo_accounts import PublicDemoError, empty_build_args, load_accounts, verify_accounts
+from public_demo_accounts import (
+    PublicDemoError,
+    drop_legacy_admin_build_args,
+    empty_build_args,
+    load_accounts,
+    public_user_build_args,
+    verify_accounts,
+)
 from release_gate import GateError, GitHubAPI, TransientGitHubAPIError, validate_release
 from kagoya_compose import (
     ComposeIdentityError,
@@ -444,18 +451,23 @@ def _frontend_compose_env(
     image_ref: str,
 ) -> dict[str, str]:
     email, password = public_demo_credentials
-    return {
+    try:
+        public_demo_build_args = drop_legacy_admin_build_args(
+            config.get("_public_demo_build_args", {})
+        )
+    except PublicDemoError:
+        raise DeployError("The public demo build argument names are unsupported") from None
+    env = {
         "COMPOSE_PROFILES": "",
         "VCS_REF": source_sha,
         "BELIB_FRONTEND_IMAGE": image_ref,
         "VITE_API_BASE_URL": config["expected_api_base_url"],
         "VITE_PUBLIC_DEMO_EMAIL": email,
         "VITE_PUBLIC_DEMO_PASSWORD": password,
-        "VITE_PUBLIC_DEMO_ADMIN_EMAIL": "",
-        "VITE_PUBLIC_DEMO_ADMIN_PASSWORD": "",
-        "PUBLIC_DEMO_ACCOUNTS_SHA256": "",
-        **config.get("_public_demo_build_args", {}),
+        "PUBLIC_DEMO_USER_BUILD_SHA256": "",
+        **public_demo_build_args,
     }
+    return env
 
 
 def _compose_prefix(config: dict, checkout: Path) -> list[str]:
@@ -778,8 +790,8 @@ def _verify_target_image(config: dict, source_sha: str) -> dict:
         or labels.get("org.opencontainers.image.revision", "").lower() != source_sha
     ):
         raise DeployError("The built frontend image revision label does not match the source SHA")
-    expected_fingerprint = config.get('_public_demo_build_args', empty_build_args())['PUBLIC_DEMO_ACCOUNTS_SHA256']
-    if labels.get('com.belib.public-demo-accounts-sha256', '') != expected_fingerprint:
+    expected_fingerprint = config.get('_public_demo_build_args', empty_build_args())['PUBLIC_DEMO_USER_BUILD_SHA256']
+    if labels.get('com.belib.public-demo-user-build-sha256', '') != expected_fingerprint:
         raise DeployError('The frontend public demo configuration differs; a new reviewed source release is required')
     return image
 
@@ -900,13 +912,24 @@ def deploy_frontend(
             dual_args, dual_accounts = load_accounts(config)
         except (PublicDemoError, OSError):
             raise DeployError('Public demo configuration is unavailable or invalid') from None
-        config = {**config, '_public_demo_build_args': dual_args}
     if public_demo_source is None:
         public_demo_source = _load_public_demo_source(config)
     public_demo_candidate = public_demo_source.candidate
     public_demo_credentials = (
         public_demo_candidate.pair if public_demo_candidate is not None else ("", "")
     )
+    if dual_args is not None:
+        public_demo_credentials = (
+            dual_args['VITE_PUBLIC_DEMO_EMAIL'],
+            dual_args['VITE_PUBLIC_DEMO_PASSWORD'],
+        )
+    try:
+        public_demo_build_args = public_user_build_args(*public_demo_credentials)
+    except PublicDemoError:
+        raise DeployError('The public demo configuration is invalid') from None
+    if dual_args is not None and public_demo_build_args != dual_args:
+        raise DeployError('The public demo configuration is invalid')
+    config = {**config, '_public_demo_build_args': public_demo_build_args}
     _validate_public_demo_api_base_url(config)
     public_demo_identity = (
         _validate_public_demo_candidate(public_demo_candidate)

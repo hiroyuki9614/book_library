@@ -36,6 +36,7 @@ from kagoya_pull_agent import (
     PUBLIC_DEMO_VALIDATION_ORIGIN,
     PUBLIC_DEMO_VALIDATION_TIMEOUT,
     _load_public_demo_credentials,
+    _frontend_compose_env,
     _previous_state_record,
     _load_state,
     _http_get,
@@ -55,7 +56,7 @@ from kagoya_pull_agent import (
     rollback_frontend,
 )
 from release_gate import GateError, TransientGitHubAPIError
-from public_demo_accounts import PublicDemoError, empty_build_args
+from public_demo_accounts import PublicDemoError, empty_build_args, public_user_build_args
 
 
 SOURCE_SHA = "a" * 40
@@ -147,9 +148,7 @@ class FakeDocker:
                             "VITE_API_BASE_URL": (env or {}).get("VITE_API_BASE_URL"),
                             "VITE_PUBLIC_DEMO_EMAIL": (env or {}).get("VITE_PUBLIC_DEMO_EMAIL", ""),
                             "VITE_PUBLIC_DEMO_PASSWORD": (env or {}).get("VITE_PUBLIC_DEMO_PASSWORD", ""),
-                            "VITE_PUBLIC_DEMO_ADMIN_EMAIL": (env or {}).get("VITE_PUBLIC_DEMO_ADMIN_EMAIL", ""),
-                            "VITE_PUBLIC_DEMO_ADMIN_PASSWORD": (env or {}).get("VITE_PUBLIC_DEMO_ADMIN_PASSWORD", ""),
-                            "PUBLIC_DEMO_ACCOUNTS_SHA256": (env or {}).get("PUBLIC_DEMO_ACCOUNTS_SHA256", ""),
+                            "PUBLIC_DEMO_USER_BUILD_SHA256": (env or {}).get("PUBLIC_DEMO_USER_BUILD_SHA256", ""),
                         },
                         "context": str((checkout / "frontend").resolve()),
                         "dockerfile": "Dockerfile",
@@ -191,7 +190,7 @@ class FakeDocker:
                 image_id = NEW_ID if source_sha == SOURCE_SHA else DEPLOYED_ID
                 self.images[f"belib-frontend:{source_sha}"] = {
                     "Id": image_id,
-                    "Config": {"Labels": {"org.opencontainers.image.revision": source_sha, "com.belib.public-demo-accounts-sha256": (env or {}).get("PUBLIC_DEMO_ACCOUNTS_SHA256", "")}},
+                    "Config": {"Labels": {"org.opencontainers.image.revision": source_sha, "com.belib.public-demo-user-build-sha256": (env or {}).get("PUBLIC_DEMO_USER_BUILD_SHA256", "")}},
                 }
             elif "up" in argv:
                 ref = (env or {}).get("BELIB_FRONTEND_IMAGE", f"belib-frontend:{SOURCE_SHA}")
@@ -992,6 +991,7 @@ class PullAgentDeploymentTests(unittest.TestCase):
             ):
                 self.assertEqual(env["VITE_PUBLIC_DEMO_EMAIL"], "")
                 self.assertEqual(env["VITE_PUBLIC_DEMO_PASSWORD"], "")
+                self.assertEqual(env["PUBLIC_DEMO_USER_BUILD_SHA256"], "")
         self.assertTrue(compose_commands)
 
     def test_missing_public_demo_sidecar_is_blank_after_parent_validation(self):
@@ -1228,6 +1228,31 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 self.run_deploy(lambda _base_url: None)
         self.assertNotIn(SYNTHETIC_DEMO_EMAIL, str(raised.exception) + stdout.getvalue() + stderr.getvalue())
         self.assertNotIn(SYNTHETIC_DEMO_PASSWORD, str(raised.exception) + stdout.getvalue() + stderr.getvalue())
+
+    def test_general_only_pair_has_a_nonblank_image_fingerprint_and_rejects_old_empty_label(self):
+        self.write_public_demo_sidecar()
+        self.run_deploy(lambda _base_url: None)
+
+        expected_args = public_user_build_args(SYNTHETIC_DEMO_EMAIL, SYNTHETIC_DEMO_PASSWORD)
+        build_env = next(env for argv, env in self.docker.commands if "build" in argv)
+        self.assertEqual(build_env["VITE_PUBLIC_DEMO_EMAIL"], SYNTHETIC_DEMO_EMAIL)
+        self.assertEqual(build_env["VITE_PUBLIC_DEMO_PASSWORD"], SYNTHETIC_DEMO_PASSWORD)
+        expected_fingerprint = expected_args["PUBLIC_DEMO_USER_BUILD_SHA256"]
+        self.assertRegex(expected_fingerprint, r"^[0-9a-f]{64}$")
+        self.assertEqual(build_env["PUBLIC_DEMO_USER_BUILD_SHA256"], expected_fingerprint)
+
+        expected_config = {**self.config, "_public_demo_build_args": expected_args}
+        image = self.docker.images[f"belib-frontend:{SOURCE_SHA}"]
+        labels = image["Config"]["Labels"]
+        self.assertEqual(labels["com.belib.public-demo-user-build-sha256"], expected_fingerprint)
+        with patch("kagoya_pull_agent._run", side_effect=self.docker.run):
+            _verify_target_image(expected_config, SOURCE_SHA)
+            labels["com.belib.public-demo-user-build-sha256"] = "d" * 64
+            with self.assertRaisesRegex(DeployError, "public demo configuration differs"):
+                _verify_target_image(expected_config, SOURCE_SHA)
+            labels["com.belib.public-demo-user-build-sha256"] = ""
+            with self.assertRaisesRegex(DeployError, "public demo configuration differs"):
+                _verify_target_image(expected_config, SOURCE_SHA)
 
     def test_identity_change_after_build_blocks_public_switch(self):
         self.write_public_demo_sidecar()
@@ -1607,20 +1632,48 @@ class PullAgentDeploymentTests(unittest.TestCase):
                 self.docker.up_targets.clear()
         self.config["agent_uid"] = os.getuid()
 
-    def test_explicit_public_accounts_reach_build_only_after_role_checks(self):
+    def test_explicit_public_accounts_are_verified_but_admin_credentials_do_not_reach_build(self):
         self.config['publish_demo_accounts'] = True
-        args = {**empty_build_args(), 'VITE_PUBLIC_DEMO_EMAIL': 'user@example.test',
-                'VITE_PUBLIC_DEMO_PASSWORD': 'synthetic-user-pass',
-                'VITE_PUBLIC_DEMO_ADMIN_EMAIL': 'admin@example.test',
-                'VITE_PUBLIC_DEMO_ADMIN_PASSWORD': 'synthetic-admin-pass',
-                'PUBLIC_DEMO_ACCOUNTS_SHA256': 'c' * 64}
-        with patch('kagoya_pull_agent.load_accounts', return_value=(args, {'synthetic': True})), patch('kagoya_pull_agent.verify_accounts') as verify:
+        args = public_user_build_args('user@example.test', 'synthetic-user-pass')
+        accounts = {
+            'admin': {'email': 'admin@example.test', 'password': 'synthetic-admin-pass', 'user_id': 11},
+            'user': {'email': 'user@example.test', 'password': 'synthetic-user-pass', 'user_id': 12},
+        }
+        with patch('kagoya_pull_agent.load_accounts', return_value=(args, accounts)), patch('kagoya_pull_agent.verify_accounts') as verify:
             result = self.run_deploy(lambda _: None)
         self.assertFalse(result['no_op'])
         self.assertEqual(verify.call_count, 2)
         build_env = next(env for argv, env in self.docker.commands if 'build' in argv)
-        for key, value in args.items(): self.assertEqual(build_env[key], value)
+        for key, value in args.items():
+            self.assertEqual(build_env[key], value)
+        self.assertFalse(any(key.startswith('VITE_PUBLIC_DEMO_ADMIN') for key in build_env))
         self.assertEqual(self.docker.up_targets, ['frontend'])
+
+    def test_rejects_admin_demo_compose_build_args_before_build_or_switch(self):
+        self.docker.frontend_build_arg_overrides['VITE_PUBLIC_DEMO_ADMIN_EMAIL'] = 'build-boundary-placeholder'
+        with self.assertRaises(DeployError):
+            self.run_deploy(lambda _base_url: None)
+        self.assertEqual(self.docker.current_id, OLD_ID)
+        self.assertEqual(self.docker.up_targets, [])
+        self.assertFalse(any('build' in argv for argv, _env in self.docker.commands))
+
+    def test_frontend_compose_env_drops_only_known_legacy_admin_keys(self):
+        config = {
+            'expected_api_base_url': 'https://example.test',
+            '_public_demo_build_args': {
+                'VITE_PUBLIC_DEMO_EMAIL': 'user@example.test',
+                'VITE_PUBLIC_DEMO_PASSWORD': 'synthetic-user-pass',
+                'VITE_PUBLIC_DEMO_ADMIN_EMAIL': 'admin@example.test',
+                'VITE_PUBLIC_DEMO_ADMIN_PASSWORD': 'synthetic-admin-pass',
+                'PUBLIC_DEMO_USER_BUILD_SHA256': 'c' * 64,
+            },
+        }
+        env = _frontend_compose_env(config, SOURCE_SHA, ('', ''), f'belib-frontend:{SOURCE_SHA}')
+        self.assertNotIn('VITE_PUBLIC_DEMO_ADMIN_EMAIL', env)
+        self.assertNotIn('VITE_PUBLIC_DEMO_ADMIN_PASSWORD', env)
+        config['_public_demo_build_args']['VITE_PUBLIC_DEMO_ADMIN_PASSWORD_COPY'] = 'synthetic-only-marker'
+        with self.assertRaisesRegex(DeployError, '^The public demo build argument names are unsupported$'):
+            _frontend_compose_env(config, SOURCE_SHA, ('', ''), f'belib-frontend:{SOURCE_SHA}')
 
     def test_public_account_auth_failure_stops_before_build(self):
         self.config["publish_demo_accounts"] = True
@@ -1631,14 +1684,14 @@ class PullAgentDeploymentTests(unittest.TestCase):
     def test_public_accounts_change_during_build_stops_before_switch(self):
         self.config["publish_demo_accounts"] = True
         args = empty_build_args()
-        with patch('kagoya_pull_agent.load_accounts', side_effect=[(args, None), ({**args, 'PUBLIC_DEMO_ACCOUNTS_SHA256': 'c'*64}, None)]):
+        with patch('kagoya_pull_agent.load_accounts', side_effect=[(args, None), ({**args, 'PUBLIC_DEMO_USER_BUILD_SHA256': 'c'*64}, None)]):
             with self.assertRaisesRegex(DeployError, 'revalidation failed'): self.run_deploy(lambda _: None)
         self.assertEqual(self.docker.up_targets, [])
 
     def test_same_source_different_public_configuration_is_not_a_silent_noop(self):
         self.run_deploy(lambda _: None)
         self.config["publish_demo_accounts"] = True
-        args = {**empty_build_args(), 'PUBLIC_DEMO_ACCOUNTS_SHA256': 'c'*64}
+        args = {**empty_build_args(), 'PUBLIC_DEMO_USER_BUILD_SHA256': 'c'*64}
         with patch('kagoya_pull_agent.load_accounts', return_value=(args, None)):
             with self.assertRaises(DeployError): self.run_deploy(lambda _: None)
         self.assertEqual(self.docker.up_targets, ['frontend'])
