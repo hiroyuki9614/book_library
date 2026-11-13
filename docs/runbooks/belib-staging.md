@@ -71,9 +71,9 @@ The owner receives one reviewed command: rootless preparation first, followed on
 
 The nginx overlay publishes TLS only at 127.0.0.1:18443 alongside existing HTTP 127.0.0.1:18083. It uses the owner's existing certificate read-only and rejects unknown/no SNI. Syntax, local TLS/HTTP, exact retained identities, and a receipt must succeed before the owner helper can proceed.
 
-**TLS/BRI P1 HOLD — source-only repair (2026-11-13):** The published source deleted the legacy `fedora-worker.tail63cd2d.ts.net:443` handler during phase B and its nginx SNI map omitted that hostname. The transaction source now adds the same legacy file handler on Serve HTTPS 8443 in phase A, keeps it through phases B/C, and routes legacy SNI through nginx to Serve 8443. Before any nonce or Serve write, the owner transaction still requires CA-verified TLS and HTTP 200 from the original 443 endpoint, with response bytes matching SHA-256 `59c4e76b2f7c6d67a4d65a123f224f36e8b445d8e826b1bff68160b81760cc02` and a 4 MiB response bound. After phase A, it rechecks the original 443 route and requires the same exact asset on direct Serve 8443 and nginx loopback 18443 before phase B. If a candidate check or plan-expiry check fails, it attempts ownership-checked rollback; the one-use nonce remains consumed. The final 443 legacy route is checked again after phase C. A status 200 with different bytes, oversized content, an invalid/missing certificate, or a TLS/transport failure is a block.
+**Old Fedora image-handler retirement — source update (2026-11-13):** The owner explicitly authorized retiring only the old `fedora-worker.tail63cd2d.ts.net:443` BRI image-publication mapping. This does not authorize deleting the PNG or changing any book, database, volume, or other Serve route. The current transaction accepts only the exact reviewed old Fedora HTTPS/handler baseline. It first CAS-clears HTTPS 443 and its Web handler to an empty Serve config, then CAS-adds `TCP 443 -> 127.0.0.1:18443` with `Web: {}`; this separate clear-and-set sequence is required when changing Tailscale Serve types on the same port. Its strict retirement-plan schema and disposition reject the prior preserve-legacy packet. nginx routes only `stg-bl.hiroyuki9614.com`; unknown SNI, no SNI, and both old and current machine SNI must fail TLS on loopback 18443 before the Serve writes and on 443 after cutover. The custom hostname still requires the pinned CA-verified certificate and exact leaf fingerprint. The owner transaction retains its lock, one-use nonce journal, fresh ETag CAS, expiry validation at each POST boundary, post-write probes, and ownership-checked rollback. No runtime change has been executed or verified; fresh exact-source CI, independent review, trusted bootstrap, and the separate external one-use signed owner approval remain required. HTTPS browser and physical GUI acceptance remain HOLD.
 
-The measured i5 is the same physical host after Fedora-to-Ubuntu reinstall, and the original asset was observed absent on the current installation. Valid HTTPS continuity for the old hostname has not been established; the observed certificate-domain claim names only current `ubuntu-worker`. Tailscale Serve uses HTTPS certificates for machine tailnet DNS names, so adding an SNI map does not manufacture a valid certificate for the stale `fedora-worker` name. No runtime is authorized or claimed: until valid legacy certificate continuity and the original asset bytes are independently established and all real probes pass, the command must stop. Do not create or substitute an image, accept a 404, disable certificate verification, retire the handler, route through Funnel, or treat mocked TLS tests as runtime evidence. Fresh exact-HEAD CI, independent P1 review, and the separate one-use signed owner approval remain required. HTTPS and physical GUI acceptance remain HOLD.
+The original PNG was observed absent on the current installation; it is no longer a retirement precondition, and the transaction does not create, copy, or delete it. Valid old-host certificate continuity was not established and is intentionally not used as a route or fallback. The explicit owner decision applies to that one old image-publication handler only.
 
 A fixed root-owned operation lock, exclusive nonce journal, write-ahead phase records, and ownership-checked CAS rollback prevent replay and foreign-state overwrite. Definitive permission/CAS failures do not authorize adopting another writer's matching state. If rollback ownership is uncertain, fail closed and preserve the prepared nginx plus all application data for inspection. Never fall back to raw Serve/Docker commands. The precise source, plan expiry, hashes, and owner command belong in the current Work checkpoint; this runbook is not a deployment grant.
 
@@ -87,22 +87,21 @@ Before any future ingress setup, the owner must approve the certificate and ingr
 
 The owner confirmed that historical `fedora-worker` and current `ubuntu-worker`
 are the same physical i5. Do not ask for a separate Fedora machine or repeatedly
-check the already missing PNG on Ubuntu. The old Serve entry needs an explicit
-migration disposition; this fact alone does not authorize deleting it.
+check the already missing PNG on Ubuntu. The owner has explicitly authorized
+retiring the old Fedora image-publication Serve handler only; this does not
+authorize data, book, database, volume, asset, or unrelated route deletion.
 
-`scripts/staging/plan-legacy-host-migration.py` prepares a **proposal only** from
-bounded, nonsecret observations. It never contacts a host, applies a Serve
-configuration, signs a grant, or authorizes deployment. Its original configuration
-and digest identify the rollback evidence, not proof that rollback was executed.
-Unknown routes, a present/unknown legacy asset, or an unconfirmed host identity
-must stop planning rather than silently drop data or routes.
+`scripts/staging/plan-legacy-host-migration.py` is a historical **proposal-only**
+tool from bounded, nonsecret observations. It never contacts a host, applies a
+Serve configuration, signs a grant, or authorizes deployment. Its original
+configuration and digest identify rollback evidence, not proof that rollback was
+executed. Its old observation rules are not prerequisites for the separately
+authorized exact-handler retirement transaction.
 
-Review the proposed old-handler retirement separately with the owner. Even after
-that decision, the existing owner-only helper, nginx configuration, trusted
-bootstrap, signed operation, live pre/post verification and rollback gates must
-be adapted and independently reviewed before any runtime change. The existing
-legacy-preservation helper cannot execute this proposal as-is. Keep its pending
-WIP untouched until its claim is reconciled.
+The planner remains historical proposal evidence only; it does not execute the
+new retirement transaction or authorize runtime changes. The dedicated owner
+helper, exact plan disposition, nginx SNI allowlist, trusted bootstrap, external
+signature, fresh live checks, and rollback gates remain separate runtime controls.
 
 ## Safety boundaries
 

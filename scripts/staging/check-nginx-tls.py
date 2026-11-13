@@ -45,7 +45,6 @@ def main():
             "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777",
             "--tmpfs", "/var/cache/nginx:rw,nosuid,nodev,mode=0755",
             "--add-host", "backend:127.0.0.1", "--add-host", "frontend:127.0.0.1",
-            "--add-host", "ubuntu-worker.tail63cd2d.ts.net:100.109.171.70",
         ]
         for source_name, target in configs.items():
             command += ["--mount", f"type=bind,src={root / 'scripts/staging' / source_name},dst={target},readonly"]

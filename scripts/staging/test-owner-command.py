@@ -29,7 +29,7 @@ class OwnerCommandTests(unittest.TestCase):
         self.helper.chmod(0o644)
         self.plan_path = self.home / ".local/state/belib-staging/tls-work-context/owner-plan.json"
         self.plan_path.parent.mkdir(parents=True)
-        self.plan = {"schema": "belib-tls-owner-plan/v1", "source_sha": self.source_sha,
+        self.plan = {"schema": "belib-tls-owner-retirement-plan/v1", "disposition": "retire-old-fedora-bri-image-publication-handler-only", "source_sha": self.source_sha,
                      "prior_application_sha": "81256268276d7ead95029849037f69ec6beec202",
                      "retained_state_sha256": "b" * 64, "serve_config_sha256": "c" * 64,
                      "serve_etag": "d" * 64, "certificate_sha256": "e" * 64,
@@ -94,6 +94,12 @@ class OwnerCommandTests(unittest.TestCase):
         changed = dict(self.plan)
         changed["ready_receipt_sha256"] = "9" * 64
         self.plan_path.write_text(json.dumps(changed, sort_keys=True, separators=(",", ":")))
+        self.plan_path.chmod(0o600)
+        digest = hashlib.sha256(self.plan_path.read_bytes()).hexdigest()
+        with self.assertRaises(packager.PackageError):
+            packager.make_loader_command(self.source_sha, self.helper_sha, digest)
+        old_packet = dict(self.plan, schema="belib-tls-owner-plan/v1")
+        self.plan_path.write_text(json.dumps(old_packet, sort_keys=True, separators=(",", ":")))
         self.plan_path.chmod(0o600)
         digest = hashlib.sha256(self.plan_path.read_bytes()).hexdigest()
         with self.assertRaises(packager.PackageError):

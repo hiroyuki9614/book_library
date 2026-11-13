@@ -40,6 +40,8 @@ TLS_STATE_FIELDS = {
     "funnel_enabled", "unknown_sni", "owner_plan_sha256",
 }
 BRI_PATH = "/bri-referee-pilot-comp.png"
+OWNER_PLAN_SCHEMA = "belib-tls-owner-retirement-plan/v1"
+OWNER_PLAN_DISPOSITION = "retire-old-fedora-bri-image-publication-handler-only"
 EXPECTED_SERVE_ETAG = "031c8cd8bbc73f27c4b6a503142d1dd0a0bc0e0f1536a497041a4faa0cd1de5e"
 BRI_FILE = "/home/hiroyuki/tailscale-share/bri-referee-pilot-comp.png"
 
@@ -285,13 +287,8 @@ def validate_tls_compose_overlay(base: dict[str, Any], combined: dict[str, Any],
         if (mount.get("type") != "bind" or observed != expected or mount.get("read_only") is not True
                 or not isinstance(bind, dict) or bind.get("create_host_path") is not False):
             raise TlsIngressError("TLS configuration and certificate binds must be exact and readonly")
-    extra_hosts = actual.get("extra_hosts")
-    if extra_hosts not in (
-        {TAILNET_HOST: "100.109.171.70"},
-        [f"{TAILNET_HOST}:100.109.171.70"],
-        [f"{TAILNET_HOST}=100.109.171.70"],
-    ):
-        raise TlsIngressError("TLS stream may route only the verified current Tailnet hostname")
+    if actual.get("extra_hosts") not in (None, [], {}):
+        raise TlsIngressError("TLS stream may not route any Tailnet hostname through the retired handler")
 
 
 def tls_state_sha256(state: dict[str, Any]) -> str:
@@ -405,48 +402,17 @@ def _canonical_config(config: dict[str, Any]) -> bytes:
     return canonical_json(config)
 
 
-def plan_phase_a(original_raw: bytes, current_dns: str = TAILNET_HOST) -> bytes:
-    if current_dns != TAILNET_HOST:
-        raise TlsIngressError("Current Tailscale DNS name does not match the reviewed i5 host")
-    original = validate_original_serve_config(original_raw)
-    tcp, web = original["TCP"], original["Web"]
-    if ("8443" in tcp or f"{current_dns}:8443" in web
-            or "fedora-worker.tail63cd2d.ts.net:8443" in web):
-        raise TlsIngressError("Tailscale port 8443 is already occupied")
-    old_bri = [(name, value) for name, value in web.items() if name.endswith(":443")
-               and isinstance(value, dict) and BRI_PATH in value.get("Handlers", {})]
-    other_443 = [name for name in web if name.endswith(":443") and all(name != old_name for old_name, _ in old_bri)]
-    if len(old_bri) != 1 or other_443:
-        raise TlsIngressError("Original Serve 443 handlers are not the reviewed single BRI handler")
-    updated = copy.deepcopy(original)
-    updated["TCP"]["8443"] = {"HTTPS": True}
-    updated["Web"]["fedora-worker.tail63cd2d.ts.net:8443"] = copy.deepcopy(old_bri[0][1])
-    updated["Web"][f"{current_dns}:8443"] = copy.deepcopy(old_bri[0][1])
-    return _canonical_config(updated)
+def plan_retirement_steps(original_raw: bytes) -> tuple[bytes, bytes]:
+    """Plan the supported clear-then-set transitions for the exact old handler."""
+    validate_original_serve_config(original_raw)
+    empty = _canonical_config({"TCP": {}, "Web": {}})
+    final = _canonical_config({"TCP": {"443": {"TCPForward": "127.0.0.1:18443"}}, "Web": {}})
+    return empty, final
 
 
-def plan_phase_b(phase_a_raw: bytes) -> bytes:
-    updated = copy.deepcopy(_config_object(phase_a_raw))
-    old_bri = [(name, value) for name, value in updated["Web"].items()
-               if name.endswith(":443") and isinstance(value, dict) and BRI_PATH in value.get("Handlers", {})]
-    other_443 = [name for name in updated["Web"] if name.endswith(":443") and all(name != old_name for old_name, _ in old_bri)]
-    if (len(old_bri) != 1 or other_443 or updated["TCP"].get("443", {}).get("HTTPS") is not True
-            or updated["TCP"].get("8443", {}).get("HTTPS") is not True
-            or updated["Web"].get("fedora-worker.tail63cd2d.ts.net:8443", {}).get("Handlers")
-            != old_bri[0][1].get("Handlers")
-            or updated["Web"].get(f"{TAILNET_HOST}:8443", {}).get("Handlers") != old_bri[0][1].get("Handlers")):
-        raise TlsIngressError("Phase B may remove only the reviewed original HTTPS 443 mapping")
-    del updated["TCP"]["443"]
-    del updated["Web"][old_bri[0][0]]
-    return _canonical_config(updated)
-
-
-def plan_phase_c(phase_b_raw: bytes) -> bytes:
-    updated = copy.deepcopy(_config_object(phase_b_raw))
-    if "443" in updated["TCP"] or any(name.endswith(":443") for name in updated["Web"]):
-        raise TlsIngressError("Phase C requires the original 443 HTTPS mapping to be absent")
-    updated["TCP"]["443"] = {"TCPForward": "127.0.0.1:18443"}
-    return _canonical_config(updated)
+def plan_retirement(original_raw: bytes) -> bytes:
+    """Return final state after verifying the exact old-handler baseline."""
+    return plan_retirement_steps(original_raw)[1]
 
 
 def _same_config(raw: bytes, expected: bytes) -> bool:

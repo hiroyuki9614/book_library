@@ -64,28 +64,24 @@ class FakeServeClient:
 
 
 class TlsIngressTests(unittest.TestCase):
-    def test_three_phase_transition_preserves_bri_and_all_unrelated_fields(self):
-        original = original_bytes()
-        a = json.loads(tls.plan_phase_a(original))
-        self.assertEqual(a["TCP"]["443"], {"HTTPS": True})
-        self.assertEqual(a["TCP"]["8443"], {"HTTPS": True})
-        stale = "fedora-worker.tail63cd2d.ts.net:443"
-        legacy_8443 = "fedora-worker.tail63cd2d.ts.net:8443"
-        current = f"{tls.TAILNET_HOST}:8443"
-        self.assertEqual(a["Web"][stale], original_config()["Web"][stale])
-        self.assertEqual(a["Web"][legacy_8443], original_config()["Web"][stale])
-        self.assertEqual(a["Web"][current], original_config()["Web"][stale])
-        b = json.loads(tls.plan_phase_b(tls.canonical_json(a)))
-        self.assertNotIn("443", b["TCP"])
-        self.assertNotIn(stale, b["Web"])
-        self.assertEqual(b["Web"][legacy_8443], original_config()["Web"][stale])
-        self.assertIn(current, b["Web"])
-        c = json.loads(tls.plan_phase_c(tls.canonical_json(b)))
-        self.assertEqual(c["TCP"]["443"], {"TCPForward": "127.0.0.1:18443"})
-        self.assertEqual(tls.plan_phase_b(tls.canonical_json(a)), tls.canonical_json(b))
-        self.assertEqual(tls.plan_phase_c(tls.canonical_json(b)), tls.canonical_json(c))
-        self.assertEqual(c["TCP"]["8443"], {"HTTPS": True})
-        self.assertEqual(c["Web"][legacy_8443], original_config()["Web"][stale])
+    def test_nginx_sni_allowlist_contains_only_custom_host_and_rejects_default(self):
+        config = Path(__file__).with_name("nginx-tls.conf").read_text(encoding="utf-8")
+        self.assertIn("stg-bl.hiroyuki9614.com belib_custom_tls;", config)
+        self.assertIn("default reject_unknown_sni;", config)
+        self.assertNotIn("fedora-worker.tail63cd2d.ts.net", config)
+        self.assertNotIn("ubuntu-worker.tail63cd2d.ts.net", config)
+        self.assertNotIn("tailscale_serve_tls", config)
+
+    def test_retirement_replaces_only_exact_old_handler_with_custom_tls_forward(self):
+        desired = json.loads(tls.plan_retirement(original_bytes()))
+        self.assertEqual(desired, {"TCP": {"443": {"TCPForward": "127.0.0.1:18443"}}, "Web": {}})
+        empty_raw, final_raw = tls.plan_retirement_steps(original_bytes())
+        self.assertEqual(json.loads(empty_raw), {"TCP": {}, "Web": {}})
+        self.assertEqual(tls.canonical_json(desired), final_raw)
+        config = original_config()
+        config["Web"]["other:443"] = {"Handlers": {"/": {"Proxy": "http://localhost"}}}
+        with self.assertRaises(tls.TlsIngressError):
+            tls.plan_retirement(json.dumps(config).encode())
 
     def test_localapi_unix_host_is_the_tailscale_sock_host(self):
         connection = tls._UnixHTTPConnection(Path("/unused.sock"), 1)
@@ -105,11 +101,11 @@ class TlsIngressTests(unittest.TestCase):
         config = original_config()
         config["TCP"]["8443"] = {"HTTPS": True}
         with self.assertRaisesRegex(tls.TlsIngressError, "Serve baseline"):
-            tls.plan_phase_a(json.dumps(config).encode())
+            tls.plan_retirement(json.dumps(config).encode())
         config = original_config()
         config["Web"]["unrelated:443"] = {"Handlers": {"/": {"Proxy": "http://localhost"}}}
         with self.assertRaisesRegex(tls.TlsIngressError, "TCP 443 and one legacy Web host"):
-            tls.plan_phase_a(json.dumps(config).encode())
+            tls.plan_retirement(json.dumps(config).encode())
 
     def test_serve_baseline_rejects_extra_scopes_handlers_and_siblings(self):
         for mutate in (
@@ -222,15 +218,16 @@ class TlsIngressTests(unittest.TestCase):
                 {"type": "bind", "source": source, "target": target, "read_only": True,
                  "bind": {"create_host_path": False}} for source, target in mounts
             ]
-            combined["services"]["nginx"]["extra_hosts"] = [f"{tls.TAILNET_HOST}=100.109.171.70"]
             with patch.object(tls, "CERT_PATH", cert), patch.object(tls, "KEY_PATH", key):
                 tls.validate_tls_compose_overlay(base, combined, root, 18083)
-                for mutation in ("duplicate", "udp", "host"):
+                for mutation in ("duplicate", "udp", "host", "tailnet-host"):
                     invalid = copy.deepcopy(combined)
                     if mutation == "duplicate":
                         invalid["services"]["nginx"]["ports"].append(copy.deepcopy(invalid["services"]["nginx"]["ports"][0]))
                     elif mutation == "udp":
                         invalid["services"]["nginx"]["ports"][1]["protocol"] = "udp"
+                    elif mutation == "tailnet-host":
+                        invalid["services"]["nginx"]["extra_hosts"] = [f"{tls.TAILNET_HOST}=100.109.171.70"]
                     else:
                         invalid["services"]["nginx"]["ports"][1]["mode"] = "host"
                     with self.subTest(mutation=mutation), self.assertRaises(tls.TlsIngressError):
@@ -261,7 +258,7 @@ class TlsIngressTests(unittest.TestCase):
         observed = client.get()
         client.etag = "e" * 64
         with self.assertRaisesRegex(tls.TlsIngressError, "changed outside"):
-            tls._set_cas(client, observed[0], observed[1], tls.plan_phase_a(before))
+            tls._set_cas(client, observed[0], observed[1], tls.plan_retirement(before))
         self.assertEqual(client.posts, 0)
 
         for denied_status in (401, 403, 412):
@@ -286,13 +283,11 @@ class TlsIngressTests(unittest.TestCase):
         self.assertEqual(captured["host"], "local-tailscaled.sock")
 
     def test_failure_after_each_serve_phase_restores_exact_original(self):
-        for failed_phase in (1, 2, 3):
+        for failed_phase in (1,):
             with self.subTest(failed_phase=failed_phase):
                 client = FakeServeClient()
                 original, original_etag = client.get()
-                phases = (tls.plan_phase_a(original),)
-                phases += (tls.plan_phase_b(phases[-1]),)
-                phases += (tls.plan_phase_c(phases[-1]),)
+                phases = (tls.plan_retirement(original),)
                 owned = []
                 current, etag = original, original_etag
                 try:
@@ -306,13 +301,13 @@ class TlsIngressTests(unittest.TestCase):
                     phase_number = next(number for raw, tag, number in reversed(owned)
                                         if tls._same_config(raw, observed) and tag == observed_etag)
                     tls.restore_original(client, original, original_etag, observed, observed_etag,
-                                         remove_tcp443_first=(phase_number == 3))
+                                         remove_tcp443_first=True)
                 self.assertTrue(tls._same_config(client.raw, original))
 
     def test_lost_post_response_reconciles_owned_desired_state_without_retry(self):
         client = FakeServeClient()
         client.raise_after_apply.add(1)
-        desired = tls.plan_phase_a(client.raw)
+        desired = tls.plan_retirement(client.raw)
         updated, etag = tls._set_cas(client, client.raw, client.etag, desired)
         self.assertTrue(tls._same_config(updated, desired))
         self.assertEqual(client.posts, 1)
@@ -320,7 +315,7 @@ class TlsIngressTests(unittest.TestCase):
     def test_lost_first_readback_is_reconciled_by_read_only_retry(self):
         client = FakeServeClient()
         client.fail_get_numbers.add(2)
-        desired = tls.plan_phase_a(client.raw)
+        desired = tls.plan_retirement(client.raw)
         updated, _ = tls._set_cas(client, client.raw, client.etag, desired)
         self.assertTrue(tls._same_config(updated, desired))
         self.assertEqual(client.posts, 1)
@@ -336,13 +331,13 @@ class TlsIngressTests(unittest.TestCase):
             raise OSError("ambiguous response")
         client.set = conflicting_set
         with self.assertRaisesRegex(tls.TlsIngressError, "conflicts with both owned states"):
-            tls._set_cas(client, original, client.etag, tls.plan_phase_a(original))
+            tls._set_cas(client, original, client.etag, tls.plan_retirement(original))
         self.assertIn(b"ConcurrentOwnerChange", client.raw)
 
     def test_rollback_lost_response_reconciles_exact_original(self):
         client = FakeServeClient()
         original, original_etag = client.get()
-        phase_a, etag_a = tls._set_cas(client, original, original_etag, tls.plan_phase_a(original))
+        phase_a, etag_a = tls._set_cas(client, original, original_etag, tls.plan_retirement(original))
         client.raise_after_apply.add(2)
         tls.restore_original(client, original, original_etag, phase_a, etag_a, remove_tcp443_first=False)
         self.assertTrue(tls._same_config(client.raw, original))
@@ -351,7 +346,7 @@ class TlsIngressTests(unittest.TestCase):
     def test_rollback_refuses_to_overwrite_foreign_config(self):
         client = FakeServeClient()
         original = client.raw
-        phase_a = tls.plan_phase_a(original)
+        phase_a = tls.plan_retirement(original)
         expected = client.etag
         current, etag = tls._set_cas(client, original, expected, phase_a)
         foreign = json.loads(current)

@@ -4,8 +4,6 @@ services:
   nginx:
     ports:
       - "127.0.0.1:18443:8443"
-    extra_hosts:
-      - "ubuntu-worker.tail63cd2d.ts.net:100.109.171.70"
     volumes:
       - type: bind
         source: ./scripts/staging/nginx-tls.conf

@@ -28,12 +28,13 @@ SELF_IP = "100.109.171.70"
 BRI = "/bri-referee-pilot-comp.png"
 LEGACY_BRI_HOST = "fedora-worker.tail63cd2d.ts.net"
 BRI_FILE = "/home/hiroyuki/tailscale-share/bri-referee-pilot-comp.png"
-LEGACY_BRI_SHA256 = "59c4e76b2f7c6d67a4d65a123f224f36e8b445d8e826b1bff68160b81760cc02"
 MAX_TLS_RESPONSE_BYTES = 4 * 1024 * 1024
 JOURNAL = Path("/var/lib/belib-staging/tls-serve")
 CA_FILE = "/etc/ssl/certs/ca-certificates.crt"
 MAX_CONFIG = 1024 * 1024
-PLAN_KEYS = {"schema", "source_sha", "prior_application_sha", "retained_state_sha256", "serve_config_sha256",
+PLAN_SCHEMA = "belib-tls-owner-retirement-plan/v1"
+PLAN_DISPOSITION = "retire-old-fedora-bri-image-publication-handler-only"
+PLAN_KEYS = {"schema", "disposition", "source_sha", "prior_application_sha", "retained_state_sha256", "serve_config_sha256",
              "serve_etag", "certificate_sha256", "tls_config_sha256", "nonce", "expires_at"}
 TAILSCALE_BUILD = "1.104.5-t788384763-gd9218e278"
 PRIOR_APP_SHA = "81256268276d7ead95029849037f69ec6beec202"
@@ -99,14 +100,15 @@ def canonical(value) -> bytes:
 
 def validate_plan(plan, now=None):
     now = int(time.time()) if now is None else now
-    if not isinstance(plan, dict) or set(plan) != PLAN_KEYS or plan["schema"] != "belib-tls-owner-plan/v1":
+    if (not isinstance(plan, dict) or set(plan) != PLAN_KEYS or plan["schema"] != PLAN_SCHEMA
+            or plan["disposition"] != PLAN_DISPOSITION):
         raise Stop("Plan schema is not the fixed owner contract")
     if plan["prior_application_sha"] != PRIOR_APP_SHA:
         raise Stop("Live application revision differs from the approved TLS baseline")
     for field in ("source_sha",):
         if not isinstance(plan[field], str) or not re.fullmatch(r"[0-9a-f]{40}", plan[field]):
             raise Stop("Malformed source identity")
-    for field in PLAN_KEYS - {"schema", "source_sha", "prior_application_sha", "expires_at", "nonce"}:
+    for field in PLAN_KEYS - {"schema", "disposition", "source_sha", "prior_application_sha", "expires_at", "nonce"}:
         if not isinstance(plan[field], str) or not re.fullmatch(r"[0-9a-f]{64}", plan[field]):
             raise Stop("Malformed plan evidence digest")
     if type(plan["expires_at"]) is not int or not now < plan["expires_at"] <= now + 1800:
@@ -137,37 +139,19 @@ def baseline(raw: bytes):
     return value
 
 
-def phase_a(raw: bytes):
-    value = baseline(raw)
-    value["TCP"]["8443"] = {"HTTPS": True}
-    value["Web"][f"{LEGACY_BRI_HOST}:8443"] = {"Handlers": {BRI: {"Path": BRI_FILE}}}
-    value["Web"][f"{SELF}:8443"] = {"Handlers": {BRI: {"Path": BRI_FILE}}}
-    return canonical(value)
+def remove_legacy_handler(raw: bytes):
+    baseline(raw)
+    return canonical({"TCP": {}, "Web": {}})
 
 
-def phase_b(raw: bytes):
-    value = config(raw)
-    old_host = f"{LEGACY_BRI_HOST}:443"
-    old_server = {"Handlers": {BRI: {"Path": BRI_FILE}}}
-    if (value["TCP"] != {"443": {"HTTPS": True}, "8443": {"HTTPS": True}}
-            or value["Web"] != {old_host: old_server, f"{LEGACY_BRI_HOST}:8443": old_server,
-                                f"{SELF}:8443": old_server}):
-        raise Stop("Phase B input is not the exact phase A state")
-    del value["TCP"]["443"]
-    del value["Web"][old_host]
-    return canonical(value)
+def activate_custom_tls(raw: bytes):
+    if config(raw) != {"TCP": {}, "Web": {}}:
+        raise Stop("Custom TLS activation requires the exact empty Serve state")
+    return canonical({"TCP": {"443": {"TCPForward": "127.0.0.1:18443"}}, "Web": {}})
 
 
-def phase_c(raw: bytes):
-    value = config(raw)
-    if (value["TCP"] != {"8443": {"HTTPS": True}}
-            or value["Web"] != {
-                f"{LEGACY_BRI_HOST}:8443": {"Handlers": {BRI: {"Path": BRI_FILE}}},
-                f"{SELF}:8443": {"Handlers": {BRI: {"Path": BRI_FILE}}},
-            }):
-        raise Stop("Phase C requires 443 HTTPS removal")
-    value["TCP"]["443"] = {"TCPForward": "127.0.0.1:18443"}
-    return canonical(value)
+def retire_legacy_handler(raw: bytes):
+    return activate_custom_tls(remove_legacy_handler(raw))
 
 
 class LocalAPI:
@@ -207,8 +191,10 @@ class LocalAPI:
         config(raw)
         return raw, etag
 
-    def set(self, raw, etag, attempt):
+    def set(self, raw, etag, attempt, before_write=None):
         def mark_attempted():
+            if before_write is not None:
+                before_write()
             attempt.post_attempted = True
         self.request("POST", raw, etag, before_send=mark_attempted)
         attempt.post_accepted = True
@@ -247,7 +233,7 @@ def tls_request(port, hostname, path, *, connect_host="127.0.0.1", fingerprint=N
                 if (not isinstance(expected_body_sha256, str)
                         or not re.fullmatch(r"[0-9a-f]{64}", expected_body_sha256)
                         or digest(body) != expected_body_sha256):
-                    raise Stop("Legacy BRI response bytes do not match the preserved original asset")
+                    raise Stop("TLS response bytes do not match the expected digest")
     except Stop:
         raise
     except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError) as exc:
@@ -279,6 +265,14 @@ def tls_unknown_rejected(port, connect_host="127.0.0.1"):
 
 def tls_no_sni_rejected(port, connect_host="127.0.0.1"):
     _negative_tls_rejected(port, connect_host, None)
+
+
+def tls_legacy_sni_rejected(port, connect_host="127.0.0.1"):
+    _negative_tls_rejected(port, connect_host, LEGACY_BRI_HOST)
+
+
+def tls_self_sni_rejected(port, connect_host="127.0.0.1"):
+    _negative_tls_rejected(port, connect_host, SELF)
 
 
 def http_18083():
@@ -419,10 +413,8 @@ def cas(api, expected, etag, desired, attempt=None, before_write=None):
     current, current_etag = api.get()
     if current_etag != etag or canonical(config(current)) != canonical(config(expected)):
         raise Stop("Serve config changed outside this plan")
-    if before_write is not None:
-        before_write()
     try:
-        api.set(desired, current_etag, attempt)
+        api.set(desired, current_etag, attempt, before_write=before_write)
     except HTTPFailure:
         # Every HTTP error is a typed denial. Only I/O loss leaves a POST outcome
         # ambiguous enough to reconcile against the two operation-owned states.
@@ -496,25 +488,25 @@ def _serve_transaction(plan, plan_sha256):
 
     http_18083()
     pin = plan["certificate_sha256"]
-    # Positive, negative, and positive probes use the same actual TLS ingress.
+    # Prove the custom SNI route and fail-closed default before consuming the plan.
     tls_request(18443, CUSTOM, "/health", fingerprint=pin)
     tls_unknown_rejected(18443)
     tls_no_sni_rejected(18443)
+    tls_legacy_sni_rejected(18443)
+    tls_self_sni_rejected(18443)
     tls_request(18443, CUSTOM, "/health", fingerprint=pin)
 
-    # The original BRI URL must still serve the exact asset before any mutation.
-    # Candidate routes are unavailable until phase A has installed HTTPS 8443.
-    tls_request(443, LEGACY_BRI_HOST, BRI, connect_host=SELF_IP, expect_status=200,
-                expected_body_sha256=LEGACY_BRI_SHA256)
-
-    validate_plan(plan)  # Readiness probes must not outlive the pinned authorization.
+    validate_plan(plan)
     journal = journal_start(plan, original, etag, plan_sha256)
     current, current_etag = original, etag
     owned = []
     inflight = None
     try:
-        for phase_name, desired in (("A", phase_a(original)),):
-            journal_event(journal, "phase-intent", phase=phase_name, desired_sha256=digest(desired), etag=current_etag)
+        empty = remove_legacy_handler(original)
+        final = activate_custom_tls(empty)
+        for phase, desired in (("remove-old-https", empty), ("add-custom-tls", final)):
+            journal_event(journal, "retirement-intent", phase=phase, disposition=PLAN_DISPOSITION,
+                          desired_sha256=digest(desired), etag=current_etag)
             validate_plan(plan)
             attempt = MutationAttempt()
             inflight = (current, current_etag, desired, attempt)
@@ -522,50 +514,19 @@ def _serve_transaction(plan, plan_sha256):
                                         before_write=lambda: validate_plan(plan))
             owned.append((current, current_etag))
             inflight = None
-            journal_event(journal, "phase-committed", phase=phase_name, config_sha256=digest(current), etag=current_etag)
-            # Phase A prepares the legacy name on Serve 8443. Prove both the
-            # old 443 route, direct listener, and nginx SNI route before phase B.
-            tls_request(443, LEGACY_BRI_HOST, BRI, connect_host=SELF_IP, expect_status=200,
-                        expected_body_sha256=LEGACY_BRI_SHA256)
-            tls_request(8443, LEGACY_BRI_HOST, BRI, connect_host=SELF_IP, expect_status=200,
-                        expected_body_sha256=LEGACY_BRI_SHA256)
-            tls_request(18443, LEGACY_BRI_HOST, BRI, expect_status=200,
-                        expected_body_sha256=LEGACY_BRI_SHA256)
+            journal_event(journal, "retirement-committed", phase=phase,
+                          config_sha256=digest(current), etag=current_etag)
+            validate_plan(plan)
 
-        # A readiness probe may run long enough to outlive the signed owner plan.
-        # If so, compensate phase A while still retaining the original 443 route.
-        validate_plan(plan)
-
-        desired_b = phase_b(current)
-        journal_event(journal, "phase-intent", phase="B", desired_sha256=digest(desired_b), etag=current_etag)
-        validate_plan(plan)
-        attempt = MutationAttempt()
-        inflight = (current, current_etag, desired_b, attempt)
-        current, current_etag = cas(api, current, current_etag, desired_b, attempt,
-                                    before_write=lambda: validate_plan(plan))
-        owned.append((current, current_etag))
-        inflight = None
-        journal_event(journal, "phase-committed", phase="B", config_sha256=digest(current), etag=current_etag)
-
-        desired_c = phase_c(current)
-        journal_event(journal, "phase-intent", phase="C", desired_sha256=digest(desired_c), etag=current_etag)
-        validate_plan(plan)
-        attempt = MutationAttempt()
-        inflight = (current, current_etag, desired_c, attempt)
-        current, current_etag = cas(api, current, current_etag, desired_c, attempt,
-                                    before_write=lambda: validate_plan(plan))
-        owned.append((current, current_etag))
-        inflight = None
-        journal_event(journal, "phase-committed", phase="C", config_sha256=digest(current), etag=current_etag)
-
-        # Connect to the fixed Tailnet address while validating each hostname.
+        # The final Serve state exposes only this machine's custom TLS ingress.
         tls_request(443, CUSTOM, "/health", connect_host=SELF_IP, fingerprint=pin)
         tls_unknown_rejected(443, connect_host=SELF_IP)
         tls_no_sni_rejected(443, connect_host=SELF_IP)
+        tls_legacy_sni_rejected(443, connect_host=SELF_IP)
+        tls_self_sni_rejected(443, connect_host=SELF_IP)
         tls_request(443, CUSTOM, "/health", connect_host=SELF_IP, fingerprint=pin)
-        tls_request(443, LEGACY_BRI_HOST, BRI, connect_host=SELF_IP, expect_status=200,
-                    expected_body_sha256=LEGACY_BRI_SHA256)
-        journal_event(journal, "complete", config_sha256=digest(current), etag=current_etag)
+        journal_event(journal, "complete", disposition=PLAN_DISPOSITION,
+                      config_sha256=digest(current), etag=current_etag)
         return {"status": "complete", "serve_config_sha256": digest(current), "serve_etag": current_etag}
     except BaseException as failure:
         # Definitive HTTP denials are never reconciled as operation-owned writes.

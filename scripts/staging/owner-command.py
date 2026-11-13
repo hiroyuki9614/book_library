@@ -68,10 +68,11 @@ def make_loader_command(source_sha: str, helper_sha: str, plan_sha: str) -> str:
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise PackageError("Fixed owner plan is malformed") from exc
     if (not isinstance(plan, dict) or plan.get("source_sha") != source_sha
-            or set(plan) != {"schema", "source_sha", "prior_application_sha", "retained_state_sha256",
+            or set(plan) != {"schema", "disposition", "source_sha", "prior_application_sha", "retained_state_sha256",
                              "serve_config_sha256", "serve_etag", "certificate_sha256", "tls_config_sha256",
                              "nonce", "expires_at"}
-            or plan.get("schema") != "belib-tls-owner-plan/v1"
+            or plan.get("schema") != "belib-tls-owner-retirement-plan/v1"
+            or plan.get("disposition") != "retire-old-fedora-bri-image-publication-handler-only"
             or json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() != plan_raw):
         raise PackageError("Owner plan does not bind the selected admitted source")
     if hashlib.sha256(helper_raw).hexdigest() != helper_sha or hashlib.sha256(plan_raw).hexdigest() != plan_sha:

@@ -152,10 +152,15 @@ class TlsPrepareTests(unittest.TestCase):
         self.assertEqual(plan["expires_at"], 1900)
         owner = cli._module("owner_cas_contract_test", Path(__file__).with_name("owner-serve-cas.py"))
         self.assertEqual(set(plan), owner.PLAN_KEYS)
-        self.assertEqual(plan["schema"], "belib-tls-owner-plan/v1")
+        self.assertEqual(plan["schema"], tls.OWNER_PLAN_SCHEMA)
+        self.assertEqual(plan["disposition"], tls.OWNER_PLAN_DISPOSITION)
         self.assertEqual(owner.validate_plan(plan, now=101), plan)
-        self.assertEqual(set(plan), {"schema", "source_sha", "prior_application_sha", "retained_state_sha256",
+        self.assertEqual(set(plan), {"schema", "disposition", "source_sha", "prior_application_sha", "retained_state_sha256",
             "serve_config_sha256", "serve_etag", "certificate_sha256", "tls_config_sha256", "nonce", "expires_at"})
+        prior_packet = dict(plan, schema="belib-tls-owner-plan/v1")
+        prior_raw = cli.canonical(prior_packet)
+        with self.assertRaises(cli.PrepareError):
+            cli.validate_plan(prior_raw, cli.digest(prior_raw), now=101)
         with self.assertRaisesRegex(cli.PrepareError, "digest"):
             cli.validate_plan(raw, "e" * 64, now=101)
         with self.assertRaisesRegex(cli.PrepareError, "expired"):
@@ -266,9 +271,9 @@ class TlsPrepareTests(unittest.TestCase):
             command = seen["command"]
             for required in ("--pull", "never", "--read-only", "--cap-drop", "ALL", "--cap-add", "CHOWN",
                 "--security-opt", "no-new-privileges", "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777",
-                "/var/cache/nginx:rw,nosuid,nodev,mode=0755", "backend:127.0.0.1", "frontend:127.0.0.1",
-                "ubuntu-worker.tail63cd2d.ts.net:100.109.171.70"):
+                "/var/cache/nginx:rw,nosuid,nodev,mode=0755", "backend:127.0.0.1", "frontend:127.0.0.1"):
                 self.assertIn(required, command)
+            self.assertNotIn("ubuntu-worker.tail63cd2d.ts.net:100.109.171.70", command)
             self.assertIn(f"type=bind,src={effects.build_root / 'scripts/staging/nginx-tls.conf'},dst=/etc/nginx/nginx.conf,readonly", command)
 
     def test_concrete_recreate_reacquires_nginx_id_even_when_command_throws(self):

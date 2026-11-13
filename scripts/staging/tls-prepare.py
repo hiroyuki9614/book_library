@@ -124,7 +124,8 @@ def create_plan(source_sha: str, manifest: dict, serve_raw: bytes, serve_etag: s
         certificate_sha256=certificate_sha, tls_config=b"", owner_plan_sha256="0" * 64,
         tls_config_sha256=tls_config_sha)
     plan = {
-        "schema": "belib-tls-owner-plan/v1", "source_sha": source_sha,
+        "schema": TLS.OWNER_PLAN_SCHEMA, "disposition": TLS.OWNER_PLAN_DISPOSITION,
+        "source_sha": source_sha,
         "prior_application_sha": TLS.PRIOR_APPLICATION_SHA,
         "retained_state_sha256": binding["retained_state_sha256"],
         "serve_config_sha256": binding["serve_config_sha256"], "serve_etag": serve_etag,
@@ -141,11 +142,11 @@ def validate_plan(raw: bytes, expected_sha256: str, *, now: int | None = None) -
         plan = json.loads(raw.decode("utf-8", "strict"))
     except (UnicodeError, json.JSONDecodeError) as error:
         raise PrepareError("Owner plan is malformed") from error
-    fields = {"schema", "source_sha", "prior_application_sha", "retained_state_sha256", "serve_config_sha256",
+    fields = {"schema", "disposition", "source_sha", "prior_application_sha", "retained_state_sha256", "serve_config_sha256",
               "serve_etag", "certificate_sha256", "tls_config_sha256", "nonce", "expires_at"}
     if not isinstance(plan, dict) or set(plan) != fields or canonical(plan) != raw:
         raise PrepareError("Owner plan fields or canonical encoding are invalid")
-    if (plan["schema"] != "belib-tls-owner-plan/v1"
+    if (plan["schema"] != TLS.OWNER_PLAN_SCHEMA or plan["disposition"] != TLS.OWNER_PLAN_DISPOSITION
             or plan["prior_application_sha"] != TLS.PRIOR_APPLICATION_SHA
             or not isinstance(plan["source_sha"], str) or len(plan["source_sha"]) != 40
             or any(c not in "0123456789abcdef" for c in plan["source_sha"])
@@ -355,8 +356,7 @@ class RuntimeEffects:
                    "--security-opt", "no-new-privileges",
                    "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777",
                    "--tmpfs", "/var/cache/nginx:rw,nosuid,nodev,mode=0755",
-                   "--add-host", "backend:127.0.0.1", "--add-host", "frontend:127.0.0.1",
-                   "--add-host", "ubuntu-worker.tail63cd2d.ts.net:100.109.171.70", *mounts,
+                   "--add-host", "backend:127.0.0.1", "--add-host", "frontend:127.0.0.1", *mounts,
                    "--entrypoint", "nginx", image, "-t"]
         result = _run(command, cwd=self.build_root, env=self.docker_env, timeout=60)
         if result.returncode:
