@@ -20,9 +20,9 @@ const IDENTITY_QUERY = `
     current_database() AS database_name,
     current_user AS current_user,
     session_user AS session_user,
-    inet_server_addr()::text AS server_address,
+    host(inet_server_addr()) AS server_address,
     inet_server_port() AS server_port,
-    inet_client_addr()::text AS client_address,
+    host(inet_client_addr()) AS client_address,
     current_schema() AS current_schema,
     current_setting('server_version_num')::integer AS server_version_num,
     pg_is_in_recovery() AS is_replica

@@ -81,6 +81,9 @@ test('accepts the expected GitHub-hosted reader-e2e service shape using read-onl
   assert.equal(mock.statements.at(-2), 'ROLLBACK');
   assert.equal(mock.statements.at(-1), 'END');
   assert.ok(mock.statements.filter((statement) => statement.startsWith('SELECT')).length === 3);
+  const identityQuery = mock.statements.find((statement) => statement.includes('current_database()'));
+  assert.ok(identityQuery.includes('host(inet_server_addr()) AS server_address'));
+  assert.ok(identityQuery.includes('host(inet_client_addr()) AS client_address'));
   assert.ok(!mock.statements.some((statement) => /\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE)\b/i.test(statement)));
 });
 
