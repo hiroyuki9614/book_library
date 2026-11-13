@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { invalidateReadingSaves } from '@/api/readingInfo';
+import { flushReadingSaves, invalidateReadingSaves } from '@/api/readingInfo';
 import { authClient } from '@/lib/auth-client';
 import { getCurrentUser } from '@/api/me';
 import { authContext } from './authContext';
@@ -11,6 +11,7 @@ interface Props {
 }
 
 const SIGN_OUT_REFRESH_WAIT_TIMEOUT_MS = 5_000;
+const SIGN_OUT_READING_SAVE_FLUSH_TIMEOUT_MS = 1_500;
 
 type SignOutStatus = 'idle' | 'pending' | 'uncertain';
 
@@ -56,6 +57,22 @@ async function verifySessionAbsence() {
 	}
 }
 
+async function flushReadingSavesBeforeSignOut(userId: number | undefined) {
+	if (userId === undefined) return;
+	let timeoutId: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<void>((resolve) => {
+		timeoutId = setTimeout(resolve, SIGN_OUT_READING_SAVE_FLUSH_TIMEOUT_MS);
+	});
+	try {
+		await Promise.race([flushReadingSaves(userId), timeout]);
+	} catch {
+		// A failed flush leaves the scoped IndexedDB outbox available for the next
+		// authenticated session.
+	} finally {
+		if (timeoutId !== undefined) clearTimeout(timeoutId);
+	}
+}
+
 export function AuthProvider({ children }: Props) {
 	const [user, setUser] = useState<AuthenticatedUser | null>(null);
 	const [isPending, setIsPending] = useState(true);
@@ -69,7 +86,7 @@ export function AuthProvider({ children }: Props) {
 	const [signOutStatus, setSignOutStatus] = useState<SignOutStatus>('idle');
 
 	const applyUser = useCallback((nextUser: AuthenticatedUser | null) => {
-		if (currentUserRef.current?.id !== nextUser?.id) invalidateReadingSaves();
+		if (currentUserRef.current && currentUserRef.current.id !== nextUser?.id) void invalidateReadingSaves();
 		currentUserRef.current = nextUser;
 		setUser(nextUser);
 	}, []);
@@ -129,16 +146,6 @@ export function AuthProvider({ children }: Props) {
 		signOutStatusRef.current = 'pending';
 		setSignOutStatus('pending');
 		const signOutGeneration = ++authRequestGeneration.current;
-		// Retire reader cleanup flushes before changing the identity and before
-		// Better Auth clears the cookie.
-		invalidateReadingSaves();
-		currentUserRef.current = null;
-		setUser(null);
-		// GuestRoute and Login both use isPending as the session boundary. Keep
-		// them blocked until the server confirms logout; a client-side timeout is
-		// not confirmation.
-		setIsPending(true);
-
 		const { completion, resolveCompletion } = createSignOutCompletion();
 		const attempt: SignOutAttempt = {
 			resolveCompletion,
@@ -148,6 +155,20 @@ export function AuthProvider({ children }: Props) {
 		};
 		signOutAttempt.current = attempt;
 		inFlightSignOut.current = completion;
+		const currentUserId = currentUserRef.current?.id;
+		// Trigger current-account reader flush callbacks before unmounting them,
+		// then bound the wait so a stalled PATCH cannot hold logout indefinitely.
+		const readingSaveFlush = flushReadingSavesBeforeSignOut(currentUserId);
+		setIsPending(true);
+		await readingSaveFlush;
+		// Abort remaining old-session requests before Better Auth can change the
+		// cookie. The durable outbox remains scoped to its original user.
+		void invalidateReadingSaves();
+		currentUserRef.current = null;
+		setUser(null);
+		// GuestRoute and Login both use isPending as the session boundary. Keep
+		// them blocked until the server confirms logout; a client-side timeout is
+		// not confirmation.
 
 		const finishSignOut = (status: Exclude<SignOutStatus, 'pending'>) => {
 			if (attempt.retired) return;

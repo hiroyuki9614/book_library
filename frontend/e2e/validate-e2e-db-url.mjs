@@ -20,6 +20,16 @@ if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
   process.exit(3);
 }
 
+if (parsed.hostname !== '127.0.0.1' && parsed.hostname !== '[::1]' && parsed.hostname !== 'localhost') {
+  console.error('ERROR: E2E_DATABASE_URL must use a loopback database host (value omitted).');
+  process.exit(7);
+}
+
+if (value.includes('?') || value.includes('#')) {
+  console.error('ERROR: E2E_DATABASE_URL must not include a query string or fragment.');
+  process.exit(8);
+}
+
 let dbName;
 try {
   dbName = decodeURIComponent(parsed.pathname.replace(/^\//, ''));

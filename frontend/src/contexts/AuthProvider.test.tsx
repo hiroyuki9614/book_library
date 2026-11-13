@@ -181,7 +181,7 @@ describe('AuthProvider session loading', () => {
 		await getByRole('button', { name: 'refresh auth' }).click();
 		await getByRole('button', { name: 'queue progress' }).click();
 		await getByRole('button', { name: 'logout' }).click();
-		expect(authClient.signOut).toHaveBeenCalled();
+		await vi.waitFor(() => expect(authClient.signOut).toHaveBeenCalled(), { timeout: 2_000 });
 		await expect.element(getByTestId('auth-user')).toHaveTextContent('no-user');
 
 		await getByRole('button', { name: 'refresh auth' }).click();
@@ -198,13 +198,24 @@ describe('AuthProvider session loading', () => {
 
 		await new Promise((resolve) => setTimeout(resolve, 850));
 		const patchRequests = () => requests.filter((request) => request.method === 'PATCH');
-		expect(patchRequests()).toHaveLength(0);
-
-		await getByRole('button', { name: 'queue progress' }).click();
-		await vi.waitFor(() => expect(patchRequests()).toHaveLength(1), { timeout: 2_000 });
+		const oldSessionSave = {
+			method: 'PATCH',
+			body: JSON.stringify({ currentPage: 2, readStatus: 'reading', progressPercentage: 20, saveSequence: '1' }),
+			userId: String(oldUser.id),
+		};
+		expect(patchRequests()).toEqual([oldSessionSave]);
 		expect(patchRequests()[0]).toEqual({
 			method: 'PATCH',
-			body: JSON.stringify({ currentPage: 2, readStatus: 'reading', progressPercentage: 20 }),
+			body: JSON.stringify({ currentPage: 2, readStatus: 'reading', progressPercentage: 20, saveSequence: '1' }),
+			userId: String(oldUser.id),
+		});
+
+		await getByRole('button', { name: 'queue progress' }).click();
+		await vi.waitFor(() => expect(patchRequests()).toHaveLength(2), { timeout: 2_000 });
+		expect(patchRequests()[0]).toEqual(oldSessionSave);
+		expect(patchRequests()[1]).toEqual({
+			method: 'PATCH',
+			body: JSON.stringify({ currentPage: 2, readStatus: 'reading', progressPercentage: 20, saveSequence: '1' }),
 			userId: String(newUser.id),
 		});
 	});

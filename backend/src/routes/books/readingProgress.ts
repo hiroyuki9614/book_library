@@ -6,10 +6,13 @@ export type ReadingProgressRecord = {
 	currentPosition?: string | null;
 	progressPercentage?: number | null;
 	readStatus?: string | null;
+	saveSequence?: bigint | number | null;
 };
 
 export const READING_SESSION_USER_HEADER = 'X-BeLib-User-Id';
 export const MAX_CURRENT_POSITION_LENGTH = 16_384;
+const MAX_READING_SAVE_SEQUENCE = 9_223_372_036_854_775_807n;
+const MAX_FORWARD_SAVE_SEQUENCE_GAP = 1_000_000n;
 
 export function parseReadingSessionUserId(value: string | undefined) {
 	if (!value) return null;
@@ -35,6 +38,21 @@ export function normalizeProgressPercentage(value: unknown): number | null {
 	return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 100 ? value : null;
 }
 
+export function parseReadingSaveSequence(value: unknown): bigint | null | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value === 'number') {
+		if (!Number.isSafeInteger(value) || value < 0) return null;
+		return BigInt(value);
+	}
+	if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
+	try {
+		const sequence = BigInt(value);
+		return sequence <= MAX_READING_SAVE_SEQUENCE ? sequence : null;
+	} catch {
+		return null;
+	}
+}
+
 export function toReadingProgress(readingInfo: ReadingProgressRecord | null | undefined): number | null {
 	const status = normalizeReadStatus(readingInfo?.readStatus);
 	if (status === 'unread') return 0;
@@ -50,7 +68,17 @@ type PersistReadingInfoInput = {
 	currentPosition: string;
 	readStatus: 'reading' | 'completed';
 	progressPercentage: number | null | undefined;
+	saveSequence?: bigint;
 };
+
+export class StaleReadingInfoError extends Error {
+	readonly code = 'STALE_READING_SAVE';
+
+	constructor() {
+		super('Reading save is older than the persisted position');
+		this.name = 'StaleReadingInfoError';
+	}
+}
 
 function isUniqueConflict(error: unknown) {
 	return typeof error === 'object'
@@ -59,10 +87,39 @@ function isUniqueConflict(error: unknown) {
 		&& error.code === 'P2002';
 }
 
+function sequenceCondition(saveSequence: bigint | undefined) {
+	const sequence = saveSequence ?? 0n;
+	if (sequence === 0n) return { equals: 0n };
+	return {
+		gte: sequence > MAX_FORWARD_SAVE_SEQUENCE_GAP ? sequence - MAX_FORWARD_SAVE_SEQUENCE_GAP : 0n,
+		lt: sequence,
+	};
+}
+
+function canApplySequence(storedSequence: bigint, incomingSequence: bigint) {
+	if (incomingSequence === 0n) return storedSequence === 0n;
+	const lowerBound = incomingSequence > MAX_FORWARD_SAVE_SEQUENCE_GAP
+		? incomingSequence - MAX_FORWARD_SAVE_SEQUENCE_GAP
+		: 0n;
+	return storedSequence >= lowerBound && storedSequence < incomingSequence;
+}
+
+function getRecordSequence(readingInfo: ReadingProgressRecord | null | undefined) {
+	if (typeof readingInfo?.saveSequence === 'bigint') return readingInfo.saveSequence;
+	if (typeof readingInfo?.saveSequence === 'number' && Number.isSafeInteger(readingInfo.saveSequence) && readingInfo.saveSequence >= 0) {
+		return BigInt(readingInfo.saveSequence);
+	}
+	return 0n;
+}
+
 /**
- * Persist reader state without allowing a stale reading save to downgrade a
- * completed record. The conditional update is atomic at the database row
- * boundary; the create retry closes the unique-key race for a first save.
+ * Persist reader state with a database-enforced per-user/book sequence.
+ * updateMany's sequence predicate is the compare-and-set: a slow request can
+ * finish after a newer request, but it cannot overwrite that newer row.
+ * Sequence-zero requests are the compatibility path for pre-P1 clients and
+ * are accepted only while the row has never received a versioned save. A
+ * versioned save may advance over a bounded gap so browser-global reservations
+ * can arrive out of order without allowing an unbounded sequence jump.
  */
 export async function persistReadingInfo(
 	prisma: ReadingInfoPersistence,
@@ -75,24 +132,9 @@ export async function persistReadingInfo(
 	const where = {
 		userId_bookId: { userId: input.userId, bookId: input.bookId },
 	};
-
-	if (input.readStatus === 'completed') {
-		return prisma.readingInfo.upsert({
-			where,
-			create: {
-				userId: input.userId,
-				bookId: input.bookId,
-				currentPosition: input.currentPosition,
-				readStatus: 'completed',
-				progressPercentage: 100,
-			},
-			update: {
-				currentPosition: input.currentPosition,
-				readStatus: 'completed',
-				progressPercentage: 100,
-			},
-		});
-	}
+	const saveSequence = input.saveSequence;
+	const sequence = saveSequence ?? 0n;
+	const sequencePredicate = sequenceCondition(saveSequence);
 
 	const progressFields = input.progressPercentage === undefined
 		? {}
@@ -100,14 +142,26 @@ export async function persistReadingInfo(
 	const readingData = {
 		currentPosition: input.currentPosition,
 		readStatus: 'reading' as const,
+		saveSequence: sequence,
 		...progressFields,
+	};
+	const completedData = {
+		currentPosition: input.currentPosition,
+		readStatus: 'completed' as const,
+		progressPercentage: 100,
+		saveSequence: sequence,
 	};
 
 	for (let attempt = 0; attempt < 2; attempt += 1) {
-		const updated = await prisma.readingInfo.updateMany({
-			where: { userId: input.userId, bookId: input.bookId, readStatus: { not: 'completed' } },
-			data: readingData,
-		});
+		const updated = input.readStatus === 'completed'
+			? await prisma.readingInfo.updateMany({
+				where: { userId: input.userId, bookId: input.bookId, saveSequence: sequencePredicate },
+				data: completedData,
+			})
+			: await prisma.readingInfo.updateMany({
+				where: { userId: input.userId, bookId: input.bookId, readStatus: { not: 'completed' }, saveSequence: sequencePredicate },
+				data: readingData,
+			});
 		if (updated.count > 0) {
 			const saved = await prisma.readingInfo.findUnique({ where });
 			if (saved) return saved;
@@ -116,31 +170,32 @@ export async function persistReadingInfo(
 
 		const existing = await prisma.readingInfo.findUnique({
 			where,
-			select: { currentPosition: true, progressPercentage: true, readStatus: true },
+			select: { currentPosition: true, progressPercentage: true, readStatus: true, saveSequence: true },
 		});
-		if (existing?.readStatus === 'completed') {
-			const completedUpdate = await prisma.readingInfo.updateMany({
-				where: { userId: input.userId, bookId: input.bookId, readStatus: 'completed' },
-				data: {
-					currentPosition: input.currentPosition,
-					readStatus: 'completed',
-					progressPercentage: 100,
-				},
-			});
-			if (completedUpdate.count > 0) {
-				const saved = await prisma.readingInfo.findUnique({ where });
-				if (saved) return saved;
+		if (existing) {
+			if (!canApplySequence(getRecordSequence(existing), sequence)) throw new StaleReadingInfoError();
+
+			if (input.readStatus === 'reading' && existing.readStatus === 'completed') {
+				const completedUpdate = await prisma.readingInfo.updateMany({
+					where: { userId: input.userId, bookId: input.bookId, readStatus: 'completed', saveSequence: sequencePredicate },
+					data: completedData,
+				});
+				if (completedUpdate.count > 0) {
+					const saved = await prisma.readingInfo.findUnique({ where });
+					if (saved) return saved;
+				}
 			}
 			continue;
 		}
-		if (existing) continue;
+
+		if (sequence > MAX_FORWARD_SAVE_SEQUENCE_GAP) throw new StaleReadingInfoError();
 
 		try {
 			return await prisma.readingInfo.create({
 				data: {
 					userId: input.userId,
 					bookId: input.bookId,
-					...readingData,
+					...(input.readStatus === 'completed' ? completedData : readingData),
 				},
 			});
 		} catch (error) {
@@ -151,16 +206,17 @@ export async function persistReadingInfo(
 	throw new Error('ReadingInfo changed during save');
 }
 
-export function toReadingInfoResponse(bookId: number, readingInfo: ReadingProgressRecord | null | undefined) {
+export function toReadingInfoResponse(bookId: number, readingInfo: ReadingProgressRecord | null | undefined, includeSaveSequence = false) {
 	const currentPosition = readingInfo?.currentPosition ?? null;
 	const parsedPage = currentPosition !== null && /^\d+$/.test(currentPosition) ? Number(currentPosition) : Number.NaN;
 	const currentPage = Number.isSafeInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
 
-	return {
+	const response = {
 		bookId,
 		currentPosition,
 		currentPage,
 		progressPercentage: toReadingProgress(readingInfo),
 		readStatus: normalizeReadStatus(readingInfo?.readStatus),
 	};
+	return includeSaveSequence ? { ...response, saveSequence: getRecordSequence(readingInfo).toString() } : response;
 }

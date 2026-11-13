@@ -1,6 +1,6 @@
 # データベース定義書
 
-- 最終更新: 2026-11-05
+- 最終更新: 2026-11-12
 - DB構造の正本: `backend/prisma/schema.prisma`
 - ER図: `docs/ER図.svg`
 
@@ -28,6 +28,7 @@
 - `ReadingInfo.progressPercentage` はreaderが有効な位置と総量を計測できた場合のnullable整数（0〜100）
 - `ReadingInfo.progressPercentage` はIssue #90の§6.8例外として、セッションをまたぐ本棚・ホーム表示用の派生スナップショットだけを保持する。総ページ数やEPUB location総数、読書履歴は追加しない
 - `ReadingInfo.readStatus` のdefaultは `unread`
+- `ReadingInfo.saveSequence` は per-user/book のCAS版で、PostgreSQL `BIGINT`・default `0`。APIではJSON numberの丸めを避けるため10進文字列として扱い、履歴や端末間の実時間順序は保持しない
 - `ReadingInfo` は `userId + bookId` でunique
 - `RoleBookPermission` は `roleId + bookId` でunique
 

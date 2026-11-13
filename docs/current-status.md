@@ -10,6 +10,26 @@
 - The portfolio MVP is live. The detailed immutable deployment and production-browser evidence is in [the 2026-10-26 production release record](records/2026-10-26-mvp-production-release.md).
 - Scoped update (2026-11-07): authenticated-route session revalidation and stale Admin view masking candidate below; this is not a production acceptance.
 
+## 2026-11-12 cross-device reading-save reconciliation candidate
+
+`ReadingInfo.saveSequence` is now exposed by the authenticated reading-info
+GET as an authoritative decimal string, so clients do not round PostgreSQL
+`BIGINT` versions through JavaScript numbers. A stale sequence 409 is retried
+only for the current authenticated identity: the client reads the current
+server version, replaces the matching durable outbox entry with a strictly
+higher version, and retries the still-current payload. Concurrent writers may
+advance the version again; retries are bounded and the durable outbox remains
+for a later replay when the bound is reached. This version is a CAS order, not
+a guarantee of wall-clock chronology across devices.
+
+Generation checks and account/book-scoped outboxes prevent logout or account
+switch invalidation from performing a read-back/retry or re-inserting an old
+record. Focused backend/frontend regression tests cover the fresh-device
+sequence gap, identity-mismatch non-retry, generation invalidation, and
+decimal-string versioning above JavaScript's safe-integer range. This is a
+source candidate only; no production database or deployment action was
+performed.
+
 ## 2026-11-07 authenticated-route revalidation candidate
 
 The `RequireAuth` boundary now owns focus, visibility-return and `pageshow`
@@ -169,6 +189,7 @@ Known authorization requirement drift:
 
 The candidate schema uses nullable `TEXT` for `ReadingInfo.currentPosition`, with a forward migration; this task does not apply it to a database. The reading API accepts non-empty positions up to 16,384 characters.
 `ReadingInfo.progressPercentage INTEGER` is nullable and stores the per-user PDF/EPUB reader measurement when valid; it is the narrow §6.8 exception for Issue #90, not a total-page/location-history table.
+`ReadingInfo.saveSequence BIGINT` is a per-user/book compare-and-set version with default `0`; the reading-info API serializes it as a decimal string to avoid JavaScript safe-integer loss.
 
 PDF request example:
 
@@ -194,6 +215,7 @@ Rules:
 - omitted `readStatus` defaults to `reading` for backward compatibility.
 - explicit status may be `reading` or `completed`.
 - GET returns both `currentPosition` and a numeric compatibility `currentPage`.
+- authenticated GET also returns the authoritative `saveSequence` decimal string. A `STALE_READING_SAVE` response may be reconciled by reading that version and retrying a still-current payload with a higher version; identity-mismatch 409 responses are not retried.
 - a numeric position restores the PDF page.
 - an EPUB CFI restores through `currentPosition`; `currentPage` remains the compatibility value `1` for non-numeric positions.
 - EpubReader reads the DB CFI first and keeps `reader-location:<bookId>` localStorage only as a fallback/cache.

@@ -177,7 +177,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.viewportScrollState.currentPage = 3;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 3, 'reading', 60), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 3, 'reading', 60, undefined, undefined, false, undefined), { timeout: 1_500 });
 	});
 
 	test('places title, save state, outline and display settings in the header with reading controls below the page', async () => {

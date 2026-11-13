@@ -137,7 +137,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 
 		const secondRelocated = renditionHandler<(value: { start: { cfi: string } }) => void>(second, 'relocated');
 		secondRelocated?.({ start: { cfi: 'epubcfi(account-two-next)' } });
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(account-two-next)', 'reading', 0, 22));
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(account-two-next)', 'reading', 0, 22, undefined, false, undefined));
 	});
 
 	test('スマホ幅では単ページ表示を初期値にする', async () => {
@@ -191,7 +191,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		relocatedHandler?.({ start: { cfi: 'epubcfi(final)', href: 'chapter-2.xhtml' }, atEnd: true });
 
 		expect(localStorage.getItem('reader-location:7')).toBe('epubcfi(final)');
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(final)', 'completed', 100));
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(final)', 'completed', 100, undefined, undefined, false, undefined));
 		await expect.element(document.body).toHaveTextContent('本文位置: 4 / 4');
 		await expect.element(document.body).toHaveTextContent('100%');
 	});
@@ -212,7 +212,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 			atEnd: true,
 		});
 
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(spread-start)', 'completed', 100));
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(spread-start)', 'completed', 100, undefined, undefined, false, undefined));
 		await expect.element(document.body).toHaveTextContent('本文位置: 4 / 4');
 		await expect.element(document.body).toHaveTextContent('100%');
 	});
@@ -233,7 +233,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 			atEnd: false,
 		});
 
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(spread-start)', 'reading', 67), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(spread-start)', 'reading', 67, undefined, undefined, false, undefined), { timeout: 1_500 });
 		await expect.element(document.body).toHaveTextContent('本文位置: 3 / 4');
 		await expect.element(document.body).toHaveTextContent('67%');
 	});
@@ -253,7 +253,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		await expect.element(document.body).not.toHaveTextContent('100%');
 
 		relocatedHandler?.({ start: { cfi: 'epubcfi(final)', href: 'chapter-1.xhtml' }, atEnd: true });
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(final)', 'completed', 100));
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(final)', 'completed', 100, undefined, undefined, false, undefined));
 		await expect.element(document.body).toHaveTextContent('本文位置: 1 / 1');
 		await expect.element(document.body).toHaveTextContent('100%');
 	});
@@ -267,7 +267,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		relocatedHandler?.({ start: { cfi: 'epubcfi(first)', href: 'chapter-1.xhtml' } });
 		relocatedHandler?.({ start: { cfi: 'epubcfi(second)', href: 'chapter-1.xhtml' } });
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(second)', 'reading', 0), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(second)', 'reading', 0, undefined, undefined, false, undefined), { timeout: 1_500 });
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
 	});
 

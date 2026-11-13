@@ -29,6 +29,7 @@ export type AggregateReadingInfo = {
 export type ReadingInfoAvgAggregateOutputType = {
   id: number | null
   progressPercentage: number | null
+  saveSequence: number | null
   userId: number | null
   bookId: number | null
 }
@@ -36,6 +37,7 @@ export type ReadingInfoAvgAggregateOutputType = {
 export type ReadingInfoSumAggregateOutputType = {
   id: number | null
   progressPercentage: number | null
+  saveSequence: bigint | null
   userId: number | null
   bookId: number | null
 }
@@ -47,6 +49,7 @@ export type ReadingInfoMinAggregateOutputType = {
   currentPosition: string | null
   progressPercentage: number | null
   readStatus: string | null
+  saveSequence: bigint | null
   userId: number | null
   bookId: number | null
 }
@@ -58,6 +61,7 @@ export type ReadingInfoMaxAggregateOutputType = {
   currentPosition: string | null
   progressPercentage: number | null
   readStatus: string | null
+  saveSequence: bigint | null
   userId: number | null
   bookId: number | null
 }
@@ -69,6 +73,7 @@ export type ReadingInfoCountAggregateOutputType = {
   currentPosition: number
   progressPercentage: number
   readStatus: number
+  saveSequence: number
   userId: number
   bookId: number
   _all: number
@@ -78,6 +83,7 @@ export type ReadingInfoCountAggregateOutputType = {
 export type ReadingInfoAvgAggregateInputType = {
   id?: true
   progressPercentage?: true
+  saveSequence?: true
   userId?: true
   bookId?: true
 }
@@ -85,6 +91,7 @@ export type ReadingInfoAvgAggregateInputType = {
 export type ReadingInfoSumAggregateInputType = {
   id?: true
   progressPercentage?: true
+  saveSequence?: true
   userId?: true
   bookId?: true
 }
@@ -96,6 +103,7 @@ export type ReadingInfoMinAggregateInputType = {
   currentPosition?: true
   progressPercentage?: true
   readStatus?: true
+  saveSequence?: true
   userId?: true
   bookId?: true
 }
@@ -107,6 +115,7 @@ export type ReadingInfoMaxAggregateInputType = {
   currentPosition?: true
   progressPercentage?: true
   readStatus?: true
+  saveSequence?: true
   userId?: true
   bookId?: true
 }
@@ -118,6 +127,7 @@ export type ReadingInfoCountAggregateInputType = {
   currentPosition?: true
   progressPercentage?: true
   readStatus?: true
+  saveSequence?: true
   userId?: true
   bookId?: true
   _all?: true
@@ -216,6 +226,7 @@ export type ReadingInfoGroupByOutputType = {
   currentPosition: string | null
   progressPercentage: number | null
   readStatus: string
+  saveSequence: bigint
   userId: number
   bookId: number
   _count: ReadingInfoCountAggregateOutputType | null
@@ -250,6 +261,7 @@ export type ReadingInfoWhereInput = {
   currentPosition?: Prisma.StringNullableFilter<"ReadingInfo"> | string | null
   progressPercentage?: Prisma.IntNullableFilter<"ReadingInfo"> | number | null
   readStatus?: Prisma.StringFilter<"ReadingInfo"> | string
+  saveSequence?: Prisma.BigIntFilter<"ReadingInfo"> | bigint | number
   userId?: Prisma.IntFilter<"ReadingInfo"> | number
   bookId?: Prisma.IntFilter<"ReadingInfo"> | number
   book?: Prisma.XOR<Prisma.BookScalarRelationFilter, Prisma.BookWhereInput>
@@ -263,6 +275,7 @@ export type ReadingInfoOrderByWithRelationInput = {
   currentPosition?: Prisma.SortOrderInput | Prisma.SortOrder
   progressPercentage?: Prisma.SortOrderInput | Prisma.SortOrder
   readStatus?: Prisma.SortOrder
+  saveSequence?: Prisma.SortOrder
   userId?: Prisma.SortOrder
   bookId?: Prisma.SortOrder
   book?: Prisma.BookOrderByWithRelationInput
@@ -280,6 +293,7 @@ export type ReadingInfoWhereUniqueInput = Prisma.AtLeast<{
   currentPosition?: Prisma.StringNullableFilter<"ReadingInfo"> | string | null
   progressPercentage?: Prisma.IntNullableFilter<"ReadingInfo"> | number | null
   readStatus?: Prisma.StringFilter<"ReadingInfo"> | string
+  saveSequence?: Prisma.BigIntFilter<"ReadingInfo"> | bigint | number
   userId?: Prisma.IntFilter<"ReadingInfo"> | number
   bookId?: Prisma.IntFilter<"ReadingInfo"> | number
   book?: Prisma.XOR<Prisma.BookScalarRelationFilter, Prisma.BookWhereInput>
@@ -293,6 +307,7 @@ export type ReadingInfoOrderByWithAggregationInput = {
   currentPosition?: Prisma.SortOrderInput | Prisma.SortOrder
   progressPercentage?: Prisma.SortOrderInput | Prisma.SortOrder
   readStatus?: Prisma.SortOrder
+  saveSequence?: Prisma.SortOrder
   userId?: Prisma.SortOrder
   bookId?: Prisma.SortOrder
   _count?: Prisma.ReadingInfoCountOrderByAggregateInput
@@ -312,6 +327,7 @@ export type ReadingInfoScalarWhereWithAggregatesInput = {
   currentPosition?: Prisma.StringNullableWithAggregatesFilter<"ReadingInfo"> | string | null
   progressPercentage?: Prisma.IntNullableWithAggregatesFilter<"ReadingInfo"> | number | null
   readStatus?: Prisma.StringWithAggregatesFilter<"ReadingInfo"> | string
+  saveSequence?: Prisma.BigIntWithAggregatesFilter<"ReadingInfo"> | bigint | number
   userId?: Prisma.IntWithAggregatesFilter<"ReadingInfo"> | number
   bookId?: Prisma.IntWithAggregatesFilter<"ReadingInfo"> | number
 }
@@ -322,6 +338,7 @@ export type ReadingInfoCreateInput = {
   currentPosition?: string | null
   progressPercentage?: number | null
   readStatus?: string
+  saveSequence?: bigint | number
   book: Prisma.BookCreateNestedOneWithoutReadingInfosInput
   user: Prisma.UserCreateNestedOneWithoutReadingInfosInput
 }
@@ -333,6 +350,7 @@ export type ReadingInfoUncheckedCreateInput = {
   currentPosition?: string | null
   progressPercentage?: number | null
   readStatus?: string
+  saveSequence?: bigint | number
   userId: number
   bookId: number
 }
@@ -343,6 +361,7 @@ export type ReadingInfoUpdateInput = {
   currentPosition?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   progressPercentage?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   readStatus?: Prisma.StringFieldUpdateOperationsInput | string
+  saveSequence?: Prisma.BigIntFieldUpdateOperationsInput | bigint | number
   book?: Prisma.BookUpdateOneRequiredWithoutReadingInfosNestedInput
   user?: Prisma.UserUpdateOneRequiredWithoutReadingInfosNestedInput
 }
@@ -354,6 +373,7 @@ export type ReadingInfoUncheckedUpdateInput = {
   currentPosition?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   progressPercentage?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   readStatus?: Prisma.StringFieldUpdateOperationsInput | string
+  saveSequence?: Prisma.BigIntFieldUpdateOperationsInput | bigint | number
   userId?: Prisma.IntFieldUpdateOperationsInput | number
   bookId?: Prisma.IntFieldUpdateOperationsInput | number
 }
@@ -365,6 +385,7 @@ export type ReadingInfoCreateManyInput = {
   currentPosition?: string | null
   progressPercentage?: number | null
   readStatus?: string
+  saveSequence?: bigint | number
   userId: number
   bookId: number
 }
@@ -375,6 +396,7 @@ export type ReadingInfoUpdateManyMutationInput = {
   currentPosition?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   progressPercentage?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   readStatus?: Prisma.StringFieldUpdateOperationsInput | string
+  saveSequence?: Prisma.BigIntFieldUpdateOperationsInput | bigint | number
 }
 
 export type ReadingInfoUncheckedUpdateManyInput = {
@@ -384,6 +406,7 @@ export type ReadingInfoUncheckedUpdateManyInput = {
   currentPosition?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   progressPercentage?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   readStatus?: Prisma.StringFieldUpdateOperationsInput | string
+  saveSequence?: Prisma.BigIntFieldUpdateOperationsInput | bigint | number
   userId?: Prisma.IntFieldUpdateOperationsInput | number
   bookId?: Prisma.IntFieldUpdateOperationsInput | number
 }
@@ -410,6 +433,7 @@ export type ReadingInfoCountOrderByAggregateInput = {
   currentPosition?: Prisma.SortOrder
   progressPercentage?: Prisma.SortOrder
   readStatus?: Prisma.SortOrder
+  saveSequence?: Prisma.SortOrder
   userId?: Prisma.SortOrder
   bookId?: Prisma.SortOrder
 }
@@ -417,6 +441,7 @@ export type ReadingInfoCountOrderByAggregateInput = {
 export type ReadingInfoAvgOrderByAggregateInput = {
   id?: Prisma.SortOrder
   progressPercentage?: Prisma.SortOrder
+  saveSequence?: Prisma.SortOrder
   userId?: Prisma.SortOrder
   bookId?: Prisma.SortOrder
 }
@@ -428,6 +453,7 @@ export type ReadingInfoMaxOrderByAggregateInput = {
   currentPosition?: Prisma.SortOrder
   progressPercentage?: Prisma.SortOrder
   readStatus?: Prisma.SortOrder
+  saveSequence?: Prisma.SortOrder
   userId?: Prisma.SortOrder
   bookId?: Prisma.SortOrder
 }
@@ -439,6 +465,7 @@ export type ReadingInfoMinOrderByAggregateInput = {
   currentPosition?: Prisma.SortOrder
   progressPercentage?: Prisma.SortOrder
   readStatus?: Prisma.SortOrder
+  saveSequence?: Prisma.SortOrder
   userId?: Prisma.SortOrder
   bookId?: Prisma.SortOrder
 }
@@ -446,6 +473,7 @@ export type ReadingInfoMinOrderByAggregateInput = {
 export type ReadingInfoSumOrderByAggregateInput = {
   id?: Prisma.SortOrder
   progressPercentage?: Prisma.SortOrder
+  saveSequence?: Prisma.SortOrder
   userId?: Prisma.SortOrder
   bookId?: Prisma.SortOrder
 }
@@ -542,12 +570,21 @@ export type NullableIntFieldUpdateOperationsInput = {
   divide?: number
 }
 
+export type BigIntFieldUpdateOperationsInput = {
+  set?: bigint | number
+  increment?: bigint | number
+  decrement?: bigint | number
+  multiply?: bigint | number
+  divide?: bigint | number
+}
+
 export type ReadingInfoCreateWithoutUserInput = {
   createdAt?: Date | string
   updatedAt?: Date | string
   currentPosition?: string | null
   progressPercentage?: number | null
   readStatus?: string
+  saveSequence?: bigint | number
   book: Prisma.BookCreateNestedOneWithoutReadingInfosInput
 }
 
@@ -558,6 +595,7 @@ export type ReadingInfoUncheckedCreateWithoutUserInput = {
   currentPosition?: string | null
   progressPercentage?: number | null
   readStatus?: string
+  saveSequence?: bigint | number
   bookId: number
 }
 
@@ -597,6 +635,7 @@ export type ReadingInfoScalarWhereInput = {
   currentPosition?: Prisma.StringNullableFilter<"ReadingInfo"> | string | null
   progressPercentage?: Prisma.IntNullableFilter<"ReadingInfo"> | number | null
   readStatus?: Prisma.StringFilter<"ReadingInfo"> | string
+  saveSequence?: Prisma.BigIntFilter<"ReadingInfo"> | bigint | number
   userId?: Prisma.IntFilter<"ReadingInfo"> | number
   bookId?: Prisma.IntFilter<"ReadingInfo"> | number
 }
@@ -607,6 +646,7 @@ export type ReadingInfoCreateWithoutBookInput = {
   currentPosition?: string | null
   progressPercentage?: number | null
   readStatus?: string
+  saveSequence?: bigint | number
   user: Prisma.UserCreateNestedOneWithoutReadingInfosInput
 }
 
@@ -617,6 +657,7 @@ export type ReadingInfoUncheckedCreateWithoutBookInput = {
   currentPosition?: string | null
   progressPercentage?: number | null
   readStatus?: string
+  saveSequence?: bigint | number
   userId: number
 }
 
@@ -653,6 +694,7 @@ export type ReadingInfoCreateManyUserInput = {
   currentPosition?: string | null
   progressPercentage?: number | null
   readStatus?: string
+  saveSequence?: bigint | number
   bookId: number
 }
 
@@ -662,6 +704,7 @@ export type ReadingInfoUpdateWithoutUserInput = {
   currentPosition?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   progressPercentage?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   readStatus?: Prisma.StringFieldUpdateOperationsInput | string
+  saveSequence?: Prisma.BigIntFieldUpdateOperationsInput | bigint | number
   book?: Prisma.BookUpdateOneRequiredWithoutReadingInfosNestedInput
 }
 
@@ -672,6 +715,7 @@ export type ReadingInfoUncheckedUpdateWithoutUserInput = {
   currentPosition?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   progressPercentage?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   readStatus?: Prisma.StringFieldUpdateOperationsInput | string
+  saveSequence?: Prisma.BigIntFieldUpdateOperationsInput | bigint | number
   bookId?: Prisma.IntFieldUpdateOperationsInput | number
 }
 
@@ -682,6 +726,7 @@ export type ReadingInfoUncheckedUpdateManyWithoutUserInput = {
   currentPosition?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   progressPercentage?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   readStatus?: Prisma.StringFieldUpdateOperationsInput | string
+  saveSequence?: Prisma.BigIntFieldUpdateOperationsInput | bigint | number
   bookId?: Prisma.IntFieldUpdateOperationsInput | number
 }
 
@@ -692,6 +737,7 @@ export type ReadingInfoCreateManyBookInput = {
   currentPosition?: string | null
   progressPercentage?: number | null
   readStatus?: string
+  saveSequence?: bigint | number
   userId: number
 }
 
@@ -701,6 +747,7 @@ export type ReadingInfoUpdateWithoutBookInput = {
   currentPosition?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   progressPercentage?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   readStatus?: Prisma.StringFieldUpdateOperationsInput | string
+  saveSequence?: Prisma.BigIntFieldUpdateOperationsInput | bigint | number
   user?: Prisma.UserUpdateOneRequiredWithoutReadingInfosNestedInput
 }
 
@@ -711,6 +758,7 @@ export type ReadingInfoUncheckedUpdateWithoutBookInput = {
   currentPosition?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   progressPercentage?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   readStatus?: Prisma.StringFieldUpdateOperationsInput | string
+  saveSequence?: Prisma.BigIntFieldUpdateOperationsInput | bigint | number
   userId?: Prisma.IntFieldUpdateOperationsInput | number
 }
 
@@ -721,6 +769,7 @@ export type ReadingInfoUncheckedUpdateManyWithoutBookInput = {
   currentPosition?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   progressPercentage?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   readStatus?: Prisma.StringFieldUpdateOperationsInput | string
+  saveSequence?: Prisma.BigIntFieldUpdateOperationsInput | bigint | number
   userId?: Prisma.IntFieldUpdateOperationsInput | number
 }
 
@@ -733,6 +782,7 @@ export type ReadingInfoSelect<ExtArgs extends runtime.Types.Extensions.InternalA
   currentPosition?: boolean
   progressPercentage?: boolean
   readStatus?: boolean
+  saveSequence?: boolean
   userId?: boolean
   bookId?: boolean
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
@@ -746,6 +796,7 @@ export type ReadingInfoSelectCreateManyAndReturn<ExtArgs extends runtime.Types.E
   currentPosition?: boolean
   progressPercentage?: boolean
   readStatus?: boolean
+  saveSequence?: boolean
   userId?: boolean
   bookId?: boolean
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
@@ -759,6 +810,7 @@ export type ReadingInfoSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.E
   currentPosition?: boolean
   progressPercentage?: boolean
   readStatus?: boolean
+  saveSequence?: boolean
   userId?: boolean
   bookId?: boolean
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
@@ -772,11 +824,12 @@ export type ReadingInfoSelectScalar = {
   currentPosition?: boolean
   progressPercentage?: boolean
   readStatus?: boolean
+  saveSequence?: boolean
   userId?: boolean
   bookId?: boolean
 }
 
-export type ReadingInfoOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "createdAt" | "updatedAt" | "currentPosition" | "progressPercentage" | "readStatus" | "userId" | "bookId", ExtArgs["result"]["readingInfo"]>
+export type ReadingInfoOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "createdAt" | "updatedAt" | "currentPosition" | "progressPercentage" | "readStatus" | "saveSequence" | "userId" | "bookId", ExtArgs["result"]["readingInfo"]>
 export type ReadingInfoInclude<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   book?: boolean | Prisma.BookDefaultArgs<ExtArgs>
   user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
@@ -803,6 +856,7 @@ export type $ReadingInfoPayload<ExtArgs extends runtime.Types.Extensions.Interna
     currentPosition: string | null
     progressPercentage: number | null
     readStatus: string
+    saveSequence: bigint
     userId: number
     bookId: number
   }, ExtArgs["result"]["readingInfo"]>
@@ -1236,6 +1290,7 @@ export interface ReadingInfoFieldRefs {
   readonly currentPosition: Prisma.FieldRef<"ReadingInfo", 'String'>
   readonly progressPercentage: Prisma.FieldRef<"ReadingInfo", 'Int'>
   readonly readStatus: Prisma.FieldRef<"ReadingInfo", 'String'>
+  readonly saveSequence: Prisma.FieldRef<"ReadingInfo", 'BigInt'>
   readonly userId: Prisma.FieldRef<"ReadingInfo", 'Int'>
   readonly bookId: Prisma.FieldRef<"ReadingInfo", 'Int'>
 }

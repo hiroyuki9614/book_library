@@ -191,19 +191,19 @@ describe('book state routes', () => {
 		expect(patch.status).toBe(200);
 		expect(await patch.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading' });
 		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
-			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' } },
-			data: { currentPosition: cfi, readStatus: 'reading', progressPercentage: 42 },
+			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' }, saveSequence: { equals: 0n } },
+			data: { currentPosition: cfi, readStatus: 'reading', progressPercentage: 42, saveSequence: 0n },
 		});
 		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
 
 		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: cfi, progressPercentage: 42, readStatus: 'reading' });
 		const get = await app.request('/1/reading-info', { headers: READING_HEADERS });
-		expect(await get.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading' });
+		expect(await get.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading', saveSequence: '0' });
 	});
 
 	test('currentPositionの上限値を受け入れ、上限超過と非文字列をDB更新前に拒否する', async () => {
 		const maxPosition = 'x'.repeat(MAX_CURRENT_POSITION_LENGTH);
-		mocks.readingInfoUpsert.mockImplementation(({ create }) => create);
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: maxPosition, progressPercentage: 100, readStatus: 'completed', saveSequence: 0n });
 
 		const accepted = await app.request('/1/reading-info', {
 			method: 'PATCH',
@@ -212,8 +212,9 @@ describe('book state routes', () => {
 		});
 
 		expect(accepted.status).toBe(200);
-		expect(mocks.readingInfoUpsert).toHaveBeenCalledWith(expect.objectContaining({
-			create: expect.objectContaining({ currentPosition: maxPosition }),
+		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+			where: expect.objectContaining({ saveSequence: { equals: 0n } }),
+			data: expect.objectContaining({ currentPosition: maxPosition, saveSequence: 0n }),
 		}));
 		expect((await accepted.json()).currentPosition).toBe(maxPosition);
 
@@ -222,7 +223,7 @@ describe('book state routes', () => {
 				updateMany: mocks.readingInfoUpdateMany.mock.calls.length,
 				create: mocks.readingInfoCreate.mock.calls.length,
 				update: mocks.readingInfoUpdate.mock.calls.length,
-				upsert: mocks.readingInfoUpsert.mock.calls.length,
+			upsert: mocks.readingInfoUpsert.mock.calls.length,
 			};
 			const response = await app.request('/1/reading-info', {
 				method: 'PATCH',
@@ -236,7 +237,7 @@ describe('book state routes', () => {
 			expect(mocks.readingInfoUpdate).toHaveBeenCalledTimes(writesBefore.update);
 			expect(mocks.readingInfoUpsert).toHaveBeenCalledTimes(writesBefore.upsert);
 		}
-		expect(mocks.readingInfoUpsert).toHaveBeenCalledTimes(1);
+		expect(mocks.readingInfoUpsert).not.toHaveBeenCalled();
 	});
 
 	test('権限のあるreading-info GETはヒントなしで互換動作する', async () => {
@@ -319,7 +320,7 @@ describe('book state routes', () => {
 	});
 
 	test('PDF最終ページをcompletedとして保存でき、currentPage互換を維持する', async () => {
-		mocks.readingInfoUpsert.mockResolvedValue({ currentPosition: '12', progressPercentage: 100, readStatus: 'completed' });
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '12', progressPercentage: 100, readStatus: 'completed', saveSequence: 0n });
 
 		const response = await app.request('/1/reading-info', {
 			method: 'PATCH',
@@ -329,10 +330,9 @@ describe('book state routes', () => {
 
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '12', currentPage: 12, progressPercentage: 100, readStatus: 'completed' });
-		expect(mocks.readingInfoUpsert).toHaveBeenCalledWith({
-			where: { userId_bookId: { userId: 7, bookId: 1 } },
-			create: { userId: 7, bookId: 1, currentPosition: '12', readStatus: 'completed', progressPercentage: 100 },
-			update: { currentPosition: '12', readStatus: 'completed', progressPercentage: 100 },
+		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
+			where: { userId: 7, bookId: 1, saveSequence: { equals: 0n } },
+			data: { currentPosition: '12', readStatus: 'completed', progressPercentage: 100, saveSequence: 0n },
 		});
 	});
 
@@ -353,15 +353,15 @@ describe('book state routes', () => {
 		expect(response.status).toBe(200);
 		expect(mocks.readingInfoFindUnique).toHaveBeenNthCalledWith(1, {
 			where: { userId_bookId: { userId: 7, bookId: 1 } },
-			select: { currentPosition: true, progressPercentage: true, readStatus: true },
+			select: { currentPosition: true, progressPercentage: true, readStatus: true, saveSequence: true },
 		});
 		expect(mocks.readingInfoUpdateMany).toHaveBeenNthCalledWith(1, {
-			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' } },
-			data: { currentPosition: '3', readStatus: 'reading' },
+			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' }, saveSequence: { equals: 0n } },
+			data: { currentPosition: '3', readStatus: 'reading', saveSequence: 0n },
 		});
 		expect(mocks.readingInfoUpdateMany).toHaveBeenNthCalledWith(2, {
-			where: { userId: 7, bookId: 1, readStatus: 'completed' },
-			data: { currentPosition: '3', readStatus: 'completed', progressPercentage: 100 },
+			where: { userId: 7, bookId: 1, readStatus: 'completed', saveSequence: { equals: 0n } },
+			data: { currentPosition: '3', readStatus: 'completed', progressPercentage: 100, saveSequence: 0n },
 		});
 		expect(mocks.readingInfoUpdate).not.toHaveBeenCalled();
 		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 100, readStatus: 'completed' });
