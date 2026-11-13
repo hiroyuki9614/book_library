@@ -18,6 +18,13 @@ EXPECTED_ACTIVE_SERVICES = {"db", "backend", "frontend", "nginx"}
 ALLOWED_SERVICES = EXPECTED_ACTIVE_SERVICES | {"migrate"}
 APPROVED_OVERRIDE = Path(".deployment/compose.production.yaml")
 PROBE_SHA = "0" * 40
+FRONTEND_HEALTHCHECK = {
+    "test": ["CMD", "busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"],
+    "interval": "30s",
+    "timeout": "3s",
+    "start_period": "10s",
+    "retries": 3,
+}
 
 
 class ComposeIdentityError(RuntimeError):
@@ -303,7 +310,7 @@ def validate_frontend_service(
     services = resolved["services"]
     frontend = services.get("frontend")
     expected_frontend_fields = {
-        "build", "command", "entrypoint", "expose", "image", "logging", "networks", "restart"
+        "build", "command", "entrypoint", "expose", "healthcheck", "image", "logging", "networks", "restart"
     }
     if not isinstance(frontend, dict) or set(frontend) != expected_frontend_fields:
         raise ComposeIdentityError("The frontend Compose service adds unsupported runtime capabilities")
@@ -319,6 +326,8 @@ def validate_frontend_service(
         raise ComposeIdentityError("The frontend Compose service may not override the reviewed image command")
     if frontend.get("expose") != ["8080"] or frontend.get("restart") != "unless-stopped":
         raise ComposeIdentityError("The frontend Compose runtime contract changed")
+    if frontend.get("healthcheck") != FRONTEND_HEALTHCHECK:
+        raise ComposeIdentityError("The frontend Compose healthcheck differs from the approved loopback probe")
     if frontend.get("logging") != {
         "driver": "json-file",
         "options": {"max-file": "3", "max-size": "10m"},

@@ -8,7 +8,7 @@ The smoke test is evidence for a candidate or restore drill; it is not formal MV
 
 ## Checks
 
-1. Confirm the application starts with the isolated `DATABASE_URL`, `BETTER_AUTH_SECRET`, `FRONTEND_URL`, `BETTER_AUTH_URL`, `VITE_API_BASE_URL`, and the intended storage-driver values supplied by the operator. For `local`, confirm `BOOK_FILE_STORAGE_ROOT`; for `r2`, confirm the R2 variables are injected without printing them and run `cd backend && npm run verify:r2` before application smoke. Confirm the frontend build received an operator-supplied API origin rather than a guessed public domain.
+1. Confirm the application starts with the isolated `DATABASE_URL`, `BETTER_AUTH_SECRET`, `FRONTEND_URL`, `BETTER_AUTH_URL`, `VITE_API_BASE_URL`, and the intended storage-driver values supplied by the operator. For `local`, confirm `BOOK_FILE_STORAGE_ROOT`; for `r2`, confirm the R2 variables are injected without printing them. If bucket-level access evidence is needed, use the opt-in read-only preflight documented in [the R2 runbook](r2.md); it does not verify objects or replace isolated application smoke. Confirm the frontend build received an operator-supplied API origin rather than a guessed public domain.
 2. Request `GET /health` and record the expected JSON status `ok` and service `belib-api`.
 3. Open the UI through the isolated origin and record UI reachability. Verify the authentication boundary with a synthetic account: unauthenticated access to protected API behavior is rejected, authentication succeeds with the synthetic account, and sign-out/session expiry is not bypassed.
 4. Verify authenticated `GET /api/v1/me` and the evidenced books API route under `/api/v1/books`. Use only synthetic metadata and a synthetic fixture created for the isolated run.
