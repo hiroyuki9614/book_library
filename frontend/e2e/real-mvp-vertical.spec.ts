@@ -77,6 +77,16 @@ async function assertHomeProgress(page: Page, bookId: number, title: string, exp
 		body?: ListPage;
 		bodyError?: unknown;
 	};
+	const searchInput = page.getByRole('textbox', { name: '書籍を検索' });
+	const row = page.getByRole('link', { name: `${title}を読む` });
+	// login() resolves as soon as the URL changes to '/', before Home has fetched
+	// its complete paginated list. Let that prior Home route finish before
+	// listening for responses from the next navigation below.
+	if (new URL(page.url()).pathname === '/') {
+		await searchInput.fill(title);
+		await expect(row, 'The current Home list must finish loading before capture starts').toBeVisible();
+	}
+
 	const responses = new Map<number, Array<Promise<CapturedListPage>>>();
 	const onResponse = (response: Response) => {
 		const url = new URL(response.url());
@@ -151,8 +161,7 @@ async function assertHomeProgress(page: Page, bookId: number, title: string, exp
 			: `${Math.round(measured.reduce((sum, progress) => sum + progress, 0) / measured.length)}%（計測済み${measured.length}/${total}冊）`;
 
 		await expect(page.getByText(averageLabel, { exact: true }).first()).toBeVisible();
-		await page.getByRole('textbox', { name: '書籍を検索' }).fill(title);
-		const row = page.getByRole('link', { name: `${title}を読む` });
+		await searchInput.fill(title);
 		if (expected === 'unmeasured') {
 			await expect(row.getByText('未計測', { exact: true })).toBeVisible();
 			await expect(row.getByRole('progressbar')).toHaveCount(0);
