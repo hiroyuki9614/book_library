@@ -192,8 +192,6 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		progressPercentage: 100,
 		readStatus: 'completed',
 	});
-	expect(prepared.body.saveSequence).toMatch(/^\d+$/);
-	const preparedSaveSequence = prepared.body.saveSequence!;
 	const openReadingInfoResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
 		&& response.request().method() === 'GET');
 	const fileResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.pdfBookId}/file`));
@@ -235,6 +233,10 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	});
 	await expect.poll(shown).toBe(2);
 	await expect(page.locator('[data-pdf-page="2"] img')).toBeVisible();
+	const pageOneSaveResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
+		&& response.request().method() === 'PATCH'
+		&& response.request().postDataJSON()?.currentPage === 1
+		&& response.request().postDataJSON()?.readStatus === 'reading');
 	if (mobileControls) {
 		await page.getByRole('button', { name: '操作メニューを開く', exact: true }).click();
 		await expect(operationMenu.getByRole('heading', { name: '操作メニュー', exact: true })).toBeVisible();
@@ -248,6 +250,11 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		await pdfFooter.getByRole('button', { name: '前のページへ', exact: true }).click();
 		await expect(footerPageInput).toHaveValue('1');
 	}
+	const pageOneSavedResponse = await pageOneSaveResponse;
+	expect(pageOneSavedResponse.status()).toBe(200);
+	const pageOneSavedBody = await pageOneSavedResponse.json() as ReadingInfoBody;
+	expect(pageOneSavedBody.saveSequence).toMatch(/^[1-9]\d*$/);
+	const pageOneSaveSequence = pageOneSavedBody.saveSequence!;
 	if (mobileControls) {
 		for (const width of [320, 393]) {
 			await page.setViewportSize({ width, height: 851 });
@@ -329,7 +336,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 		readStatus: 'completed',
 		progressPercentage: 100,
 		saveSequence: expect.stringMatching(/^[1-9]\d*$/),
-		expectedSaveSequence: preparedSaveSequence,
+		expectedSaveSequence: pageOneSaveSequence,
 	});
 	expect(savedResponse.status()).toBe(200);
 	expect(await savedResponse.json()).toMatchObject({
