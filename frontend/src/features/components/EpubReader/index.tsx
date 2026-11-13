@@ -65,7 +65,7 @@ function EpubReaderSession({ bookId, bookTitle, pageTurnDirection, userId }: { b
 	const [currentHref, setCurrentHref] = useState('');
 	const setTocVisible = (open: boolean) => { tocOpenRef.current = open; setTocOpen(open); };
 	const storageKey = userId === undefined ? `reader-location:${bookId}` : `reader-location:${userId}:${bookId}`;
-	const { save, status, retry } = useReadingSave(bookId, userId);
+	const { save, status, retry, confirmInitialStatus } = useReadingSave(bookId, userId);
 
 	const enqueue = useCallback((action: (rendition: Rendition) => unknown) => {
 		const rendition = renditionRef.current;
@@ -100,6 +100,7 @@ function EpubReaderSession({ bookId, bookTitle, pageTurnDirection, userId }: { b
 		void readingInfoRequest
 			.then((info) => {
 				if (!active) return;
+				confirmInitialStatus(info);
 				// A successful server response is authoritative, including a fresh book.
 				currentCfiRef.current = info.currentPosition?.startsWith('epubcfi(') ? info.currentPosition : '';
 			})
@@ -115,7 +116,7 @@ function EpubReaderSession({ bookId, bookTitle, pageTurnDirection, userId }: { b
 		return () => {
 			active = false;
 		};
-	}, [bookId, storageKey, userId]);
+	}, [bookId, confirmInitialStatus, storageKey, userId]);
 
 	useEffect(() => {
 		const viewer = viewerRef.current;

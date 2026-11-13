@@ -135,6 +135,7 @@ describe('persistReadingInfo', () => {
 			readStatus: 'reading',
 			progressPercentage: 1,
 			saveSequence: 9223372036854775807n,
+			expectedSaveSequence: 0n,
 		})).rejects.toBeInstanceOf(StaleReadingInfoError);
 
 		expect(persistence.readingInfo.create).not.toHaveBeenCalled();
@@ -157,6 +158,7 @@ describe('persistReadingInfo', () => {
 			readStatus: 'reading',
 			progressPercentage: 2,
 			saveSequence: 9223372036854775807n,
+			expectedSaveSequence: 0n,
 		})).rejects.toBeInstanceOf(StaleReadingInfoError);
 
 		expect(persistence.readingInfo.create).not.toHaveBeenCalled();
@@ -183,6 +185,7 @@ describe('persistReadingInfo', () => {
 			readStatus: 'reading',
 			progressPercentage: 1,
 			saveSequence: 1n,
+			expectedSaveSequence: 0n,
 		})).resolves.toEqual(firstSaved);
 
 		await expect(persistReadingInfo(persistence as never, {
@@ -192,6 +195,7 @@ describe('persistReadingInfo', () => {
 			readStatus: 'reading',
 			progressPercentage: 2,
 			saveSequence: 2n,
+			expectedSaveSequence: 1n,
 		})).resolves.toEqual(secondSaved);
 
 		await expect(persistReadingInfo(persistence as never, {
@@ -201,16 +205,17 @@ describe('persistReadingInfo', () => {
 			readStatus: 'reading',
 			progressPercentage: 2,
 			saveSequence: 2n,
+			expectedSaveSequence: 0n,
 		})).rejects.toBeInstanceOf(StaleReadingInfoError);
 
 		expect(persistence.readingInfo.updateMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
-			where: expect.objectContaining({ saveSequence: { gte: 0n, lt: 1n } }),
+			where: expect.objectContaining({ saveSequence: { equals: 0n } }),
 		}));
 		expect(persistence.readingInfo.updateMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
-			where: expect.objectContaining({ saveSequence: { gte: 0n, lt: 2n } }),
+			where: expect.objectContaining({ saveSequence: { equals: 1n } }),
 		}));
 		expect(persistence.readingInfo.updateMany).toHaveBeenNthCalledWith(3, expect.objectContaining({
-			where: expect.objectContaining({ saveSequence: { gte: 0n, lt: 2n } }),
+			where: expect.objectContaining({ saveSequence: { equals: 0n } }),
 		}));
 	});
 
@@ -227,6 +232,7 @@ describe('persistReadingInfo', () => {
 			readStatus: 'reading',
 			progressPercentage: 80,
 			saveSequence: 2n,
+			expectedSaveSequence: 0n,
 		})).resolves.toEqual(saved);
 
 		expect(persistence.readingInfo.updateMany).toHaveBeenCalledWith({
@@ -234,9 +240,35 @@ describe('persistReadingInfo', () => {
 				userId: 7,
 				bookId: 1,
 				readStatus: { not: 'completed' },
-				saveSequence: { gte: 0n, lt: 2n },
+				saveSequence: { equals: 0n },
 			},
 			data: { currentPosition: '9', readStatus: 'reading', progressPercentage: 80, saveSequence: 2n },
 		});
+	});
+
+	test('rejects a high local sequence when another device advanced the server row past the expected base', async () => {
+		const persistence = createPersistence();
+		persistence.readingInfo.updateMany.mockResolvedValue({ count: 0 });
+		persistence.readingInfo.findUnique.mockResolvedValue({
+			currentPosition: '9',
+			progressPercentage: 90,
+			readStatus: 'reading',
+			saveSequence: 1n,
+		});
+
+		await expect(persistReadingInfo(persistence as never, {
+			userId: 7,
+			bookId: 1,
+			currentPosition: '5',
+			readStatus: 'reading',
+			progressPercentage: 50,
+			saveSequence: 101n,
+			expectedSaveSequence: 0n,
+		})).rejects.toBeInstanceOf(StaleReadingInfoError);
+
+		expect(persistence.readingInfo.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+			where: expect.objectContaining({ saveSequence: { equals: 0n } }),
+		}));
+		expect(persistence.readingInfo.create).not.toHaveBeenCalled();
 	});
 });

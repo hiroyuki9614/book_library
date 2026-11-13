@@ -29,7 +29,7 @@ import type { ScrollState } from '@embedpdf/plugin-scroll';
 import { SelectionLayer, SelectionPluginPackage, useSelectionCapability, type SelectionSelectionMenuRenderFn } from '@embedpdf/plugin-selection/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchBookFile } from '@/api/books';
-import { fetchReadingInfo } from '@/api/readingInfo';
+import { fetchReadingInfo, type ReadingInfo } from '@/api/readingInfo';
 import ReadingSaveStatus from '../ReadingSaveStatus';
 import { useReadingSave } from '@/hooks/useReadingSave';
 
@@ -97,14 +97,14 @@ function createPlugins(documentData: ArrayBuffer, direction: PageTurnDirection) 
 	];
 }
 
-type PageNavigationProps = { bookId: number; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection };
+type PageNavigationProps = { bookId: number; documentId: string; initialPage: number; initialReadingInfo: ReadingInfo | null; pageTurnDirection: PageTurnDirection };
 
 function getPdfProgressPercentage(currentPage: number, totalPages: number) {
 	if (!Number.isSafeInteger(currentPage) || !Number.isSafeInteger(totalPages) || currentPage < 1 || totalPages < 1 || currentPage > totalPages) return null;
 	return Math.round((currentPage / totalPages) * 100);
 }
 
-const usePageNavigation = ({ bookId, documentId, initialPage, pageTurnDirection, userId }: PageNavigationProps & { userId?: number }) => {
+const usePageNavigation = ({ bookId, documentId, initialPage, initialReadingInfo, pageTurnDirection, userId }: PageNavigationProps & { userId?: number }) => {
 	const { provides: scroll, state } = useScroll(documentId);
 	const [pageInputOverride, setPageInputOverride] = useState<string | null>(null);
 	const pageInput = pageInputOverride ?? String(state.currentPage);
@@ -112,9 +112,13 @@ const usePageNavigation = ({ bookId, documentId, initialPage, pageTurnDirection,
 	const { provides: scrollCapability } = useScrollCapability();
 	const [targetPage, setTargetPage] = useState<number | null>(null);
 	const lastPersistedPage = useRef<number | null>(null);
-	const { save, status, retry } = useReadingSave(bookId, userId);
+	const { save, status, retry, confirmInitialStatus } = useReadingSave(bookId, userId);
 	const previousCommand = useCommand('nav.previous', documentId);
 	const nextCommand = useCommand('nav.next', documentId);
+
+	useEffect(() => {
+		if (initialReadingInfo) confirmInitialStatus(initialReadingInfo);
+	}, [confirmInitialStatus, initialReadingInfo]);
 
 	useEffect(() => {
 		if (!scrollCapability) return;
@@ -487,11 +491,11 @@ const PdfViewport = ({ documentId, pageTurnDirection, navigationDisabled, curren
 	);
 };
 
-function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, pageTurnDirection, userId, restoreError, mobileMenuOpen, onMobileMenuChange }: { bookId: number; bookTitle?: string; documentId: string; initialPage: number; pageTurnDirection: PageTurnDirection; userId?: number; restoreError: boolean; mobileMenuOpen: boolean; onMobileMenuChange: (open: boolean) => void }) {
+function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialReadingInfo, pageTurnDirection, userId, restoreError, mobileMenuOpen, onMobileMenuChange }: { bookId: number; bookTitle?: string; documentId: string; initialPage: number; initialReadingInfo: ReadingInfo | null; pageTurnDirection: PageTurnDirection; userId?: number; restoreError: boolean; mobileMenuOpen: boolean; onMobileMenuChange: (open: boolean) => void }) {
 	const [tocOpen, setTocOpen] = useState(false);
 	const [mobileTocOpen, setMobileTocOpen] = useState(false);
 	const [settingsOpen, setSettingsOpen] = useState(false);
-	const navigation = usePageNavigation({ bookId, documentId, initialPage, pageTurnDirection, userId });
+	const navigation = usePageNavigation({ bookId, documentId, initialPage, initialReadingInfo, pageTurnDirection, userId });
 	return (
 		<div className='flex h-full flex-col'>
 			<header className='flex shrink-0 items-center gap-1 border-b px-1 py-1 sm:gap-2 sm:px-3 sm:py-2'>
@@ -543,6 +547,7 @@ function PdfReaderSession({ bookId, bookTitle, pageTurnDirection = 'ltr', userId
 	const [fileError, setFileError] = useState(false);
 	const [restoreError, setRestoreError] = useState(false);
 	const [initialPage, setInitialPage] = useState<number | null>(null);
+	const [initialReadingInfo, setInitialReadingInfo] = useState<ReadingInfo | null>(null);
 	const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 	const { engine, isLoading, error: engineError } = usePdfiumEngine({ wasmUrl: new URL(pdfiumWasmUrl, window.location.href).href });
 
@@ -562,10 +567,13 @@ function PdfReaderSession({ bookId, bookTitle, pageTurnDirection = 'ltr', userId
 		const readingInfoRequest = userId === undefined ? fetchReadingInfo(bookId) : fetchReadingInfo(bookId, userId);
 		void readingInfoRequest
 			.then((readingInfo) => {
-				if (active) setInitialPage(readingInfo.currentPage);
+				if (!active) return;
+				setInitialReadingInfo(readingInfo);
+				setInitialPage(readingInfo.currentPage);
 			})
 			.catch(() => {
 				if (active) {
+					setInitialReadingInfo(null);
 					setInitialPage(1);
 					setRestoreError(true);
 				}
@@ -597,7 +605,7 @@ function PdfReaderSession({ bookId, bookTitle, pageTurnDirection = 'ltr', userId
 							<DocumentContent documentId={activeDocumentId}>
 								{({ isLoaded }) =>
 									isLoaded && (
-										<ReaderWorkspace key={activeDocumentId} bookId={bookId} bookTitle={bookTitle} documentId={activeDocumentId} initialPage={initialPage} pageTurnDirection={pageTurnDirection} userId={userId} restoreError={restoreError} mobileMenuOpen={mobileMenuOpen} onMobileMenuChange={setMobileMenuOpen} />
+										<ReaderWorkspace key={activeDocumentId} bookId={bookId} bookTitle={bookTitle} documentId={activeDocumentId} initialPage={initialPage} initialReadingInfo={initialReadingInfo} pageTurnDirection={pageTurnDirection} userId={userId} restoreError={restoreError} mobileMenuOpen={mobileMenuOpen} onMobileMenuChange={setMobileMenuOpen} />
 									)
 								}
 							</DocumentContent>

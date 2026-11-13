@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as readingInfoApi from '@/api/readingInfo';
-import type { ReadStatus } from '@/api/readingInfo';
+import type { ReadStatus, ReadingInfo } from '@/api/readingInfo';
 
 type LatestReadingSave = {
 	position: number | string;
@@ -12,12 +12,21 @@ type LatestReadingSave = {
 };
 
 export function useReadingSave(bookId: number, userId?: number) {
-	const [status, setStatus] = useState<'saved' | 'saving' | 'error'>('saved');
+	const [status, setStatus] = useState<'unknown' | 'saved' | 'saving' | 'error' | 'conflict' | 'stale'>('unknown');
 	const latest = useRef<LatestReadingSave | null>(null);
 	const version = useRef(0);
 	const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 	const pending = useRef(false);
 	const previousUserId = useRef(userId);
+
+	const confirmInitialStatus = useCallback((info: ReadingInfo) => {
+		if (version.current > 0) return;
+		if (info.saveConflict) { setStatus('conflict'); return; }
+		const hasSavedPosition = (typeof info.currentPosition === 'string' && info.currentPosition.length > 0)
+			|| info.readStatus !== 'unread'
+			|| info.currentPage > 1;
+		setStatus(hasSavedPosition ? 'saved' : 'unknown');
+	}, []);
 	const activeUserId = useRef(userId);
 	const sessionGeneration = readingInfoApi.getReadingSaveGeneration?.();
 	const activeSessionGeneration = useRef(sessionGeneration);
@@ -59,6 +68,12 @@ export function useReadingSave(bookId: number, userId?: number) {
 			() => { if (isCurrent()) setStatus('saved'); },
 			(error: unknown) => {
 				if (!isCurrent()) return;
+				if (error instanceof Error && (error as Error & { code?: string }).code === 'STALE_READING_SAVE') {
+					latest.current = null;
+					pending.current = false;
+					setStatus('stale');
+					return;
+				}
 				const retrySequence = error instanceof Error
 					? (error as Error & { saveSequence?: unknown }).saveSequence
 					: undefined;
@@ -75,7 +90,7 @@ export function useReadingSave(bookId: number, userId?: number) {
 		latest.current = null;
 		pending.current = false;
 		++version.current;
-		setStatus('saved');
+		setStatus('unknown');
 		previousUserId.current = userId;
 	}, [userId]);
 	useEffect(() => {
@@ -127,5 +142,5 @@ export function useReadingSave(bookId: number, userId?: number) {
 			flush();
 		}
 	}, [flush, isActiveSession, queueSave, sessionGeneration, userId]);
-	return { save, status, retry };
+	return { save, status, retry, confirmInitialStatus };
 }

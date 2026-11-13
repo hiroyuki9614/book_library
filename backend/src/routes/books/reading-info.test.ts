@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import type { PrismaVariables } from '../../lib/prisma.js';
+import { MAX_CURRENT_POSITION_LENGTH } from './readingProgress.js';
 import booksRoutes from './routes.js';
 
 const mocks = vi.hoisted(() => ({
@@ -125,6 +126,32 @@ describe('reading-info API', () => {
 		expect(await response.json()).toMatchObject({ bookId: 1, currentPage: 3, progressPercentage: 25, readStatus: 'reading' });
 	});
 
+	test('PATCHはcurrentPositionの上限値を受け入れ、上限超過と非文字列を拒否する', async () => {
+		const maxPosition = 'x'.repeat(MAX_CURRENT_POSITION_LENGTH);
+		mocks.readingInfoUpdateMany.mockResolvedValueOnce({ count: 0 });
+		mocks.readingInfoFindUnique.mockResolvedValueOnce(null);
+		mocks.readingInfoCreate.mockImplementation(({ data }) => data);
+
+		const accepted = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPosition: maxPosition, readStatus: 'completed' }),
+		});
+		expect(accepted.status).toBe(200);
+		expect((await accepted.json()).currentPosition).toBe(maxPosition);
+
+		for (const currentPosition of ['x'.repeat(MAX_CURRENT_POSITION_LENGTH + 1), 7]) {
+			const response = await app.request('/1/reading-info', {
+				method: 'PATCH',
+				headers: JSON_READING_HEADERS,
+				body: JSON.stringify({ currentPosition }),
+			});
+			expect(response.status).toBe(400);
+			expect(await response.json()).toMatchObject({ code: 'INVALID_CURRENT_POSITION' });
+		}
+		expect(mocks.readingInfoCreate).toHaveBeenCalledTimes(1);
+	});
+
 	test('GETはReadingInfo未作成時に1ページ目を返す', async () => {
 		mocks.readingInfoFindUnique.mockResolvedValue(null);
 
@@ -143,7 +170,7 @@ describe('reading-info API', () => {
 		});
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 25, readStatus: 'reading' });
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 25, readStatus: 'reading', saveSequence: '0' });
 		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
 			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' }, saveSequence: { equals: 0n } },
 			data: { currentPosition: '3', readStatus: 'reading', progressPercentage: 25, saveSequence: 0n },
@@ -162,7 +189,7 @@ describe('reading-info API', () => {
 		});
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({ bookId: 1, currentPosition, currentPage: 1, progressPercentage: 25, readStatus: 'reading' });
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition, currentPage: 1, progressPercentage: 25, readStatus: 'reading', saveSequence: '0' });
 		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith({
 			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' }, saveSequence: { equals: 0n } },
 			data: { currentPosition, readStatus: 'reading', progressPercentage: 25, saveSequence: 0n },
@@ -224,17 +251,17 @@ describe('reading-info API', () => {
 		const older = app.request('/1/reading-info', {
 			method: 'PATCH',
 			headers: JSON_READING_HEADERS,
-			body: JSON.stringify({ currentPage: 2, progressPercentage: 20, saveSequence: 1 }),
+			body: JSON.stringify({ currentPage: 2, progressPercentage: 20, saveSequence: 1, expectedSaveSequence: 0 }),
 		});
 		await olderStarted;
 
 		const newerResponse = await app.request('/1/reading-info', {
 			method: 'PATCH',
 			headers: JSON_READING_HEADERS,
-			body: JSON.stringify({ currentPage: 9, progressPercentage: 80, saveSequence: 2 }),
+			body: JSON.stringify({ currentPage: 9, progressPercentage: 80, saveSequence: 2, expectedSaveSequence: 0 }),
 		});
 		expect(newerResponse.status).toBe(200);
-		expect(await newerResponse.json()).toEqual({ bookId: 1, currentPosition: '9', currentPage: 9, progressPercentage: 80, readStatus: 'reading' });
+		expect(await newerResponse.json()).toEqual({ bookId: 1, currentPosition: '9', currentPage: 9, progressPercentage: 80, readStatus: 'reading', saveSequence: '2' });
 
 		releaseOlder();
 		const olderResponse = await older;

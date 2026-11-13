@@ -245,7 +245,7 @@ app.patch('/:bookId/reading-info', async (c) => {
 			return jsonError(c, 400, 'Request body must be a JSON object', 'INVALID_REQUEST');
 		}
 
-		const input = body as { currentPage?: unknown; currentPosition?: unknown; progressPercentage?: unknown; readStatus?: unknown; saveSequence?: unknown };
+		const input = body as { currentPage?: unknown; currentPosition?: unknown; progressPercentage?: unknown; readStatus?: unknown; saveSequence?: unknown; expectedSaveSequence?: unknown };
 		const hasPage = input.currentPage !== undefined;
 		const hasPosition = input.currentPosition !== undefined;
 		if (hasPage === hasPosition) {
@@ -273,8 +273,18 @@ app.patch('/:bookId/reading-info', async (c) => {
 		}
 		const readStatus: 'reading' | 'completed' = requestedReadStatus;
 		const saveSequence = parseReadingSaveSequence(input.saveSequence);
+		const expectedSaveSequence = parseReadingSaveSequence(input.expectedSaveSequence);
 		if (saveSequence === null) {
 			return jsonError(c, 400, 'saveSequence must be a safe non-negative integer', 'INVALID_SAVE_SEQUENCE');
+		}
+		if (expectedSaveSequence === null) {
+			return jsonError(c, 400, 'expectedSaveSequence must be a safe non-negative integer', 'INVALID_EXPECTED_SAVE_SEQUENCE');
+		}
+		if (saveSequence !== undefined && saveSequence > 0n && expectedSaveSequence === undefined) {
+			return jsonError(c, 400, 'Versioned saves require expectedSaveSequence', 'EXPECTED_SAVE_SEQUENCE_REQUIRED');
+		}
+		if (expectedSaveSequence !== undefined && (saveSequence === undefined || saveSequence <= expectedSaveSequence)) {
+			return jsonError(c, 400, 'saveSequence must be greater than expectedSaveSequence', 'INVALID_SAVE_SEQUENCE');
 		}
 		const persistedProgress = readStatus === 'completed'
 			? 100
@@ -289,8 +299,9 @@ app.patch('/:bookId/reading-info', async (c) => {
 			readStatus,
 			progressPercentage: persistedProgress,
 			saveSequence,
+			expectedSaveSequence,
 		});
-		return c.json(toReadingInfoResponse(bookId, readingInfo));
+		return c.json(toReadingInfoResponse(bookId, readingInfo, true));
 	} catch (error) {
 		if (error instanceof StaleReadingInfoError) {
 			return jsonError(c, 409, error.message, error.code);

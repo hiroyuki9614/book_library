@@ -1,6 +1,6 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-11-07
+- Updated: 2026-11-13
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
 - Current main checkpoint for the scoped frontend release candidate: `f8d69c7f1f9a6676ff268ef3da7d815232a779d2`
 - The prior 2026-10-27 implementation snapshot remains historical; this scoped update does not refresh unrelated R2 or portfolio branch state.
@@ -10,24 +10,28 @@
 - The portfolio MVP is live. The detailed immutable deployment and production-browser evidence is in [the 2026-10-26 production release record](records/2026-10-26-mvp-production-release.md).
 - Scoped update (2026-11-07): authenticated-route session revalidation and stale Admin view masking candidate below; this is not a production acceptance.
 
-## 2026-11-12 cross-device reading-save reconciliation candidate
+## 2026-11-13 cross-device reading-save CAS repair candidate
 
-`ReadingInfo.saveSequence` is now exposed by the authenticated reading-info
-GET as an authoritative decimal string, so clients do not round PostgreSQL
-`BIGINT` versions through JavaScript numbers. A stale sequence 409 is retried
-only for the current authenticated identity: the client reads the current
-server version, replaces the matching durable outbox entry with a strictly
-higher version, and retries the still-current payload. Concurrent writers may
-advance the version again; retries are bounded and the durable outbox remains
-for a later replay when the bound is reached. This version is a CAS order, not
-a guarantee of wall-clock chronology across devices.
+`ReadingInfo.saveSequence` is exposed by authenticated reading-info GET as an
+authoritative decimal string. New authenticated PATCH callers send that
+reservation together with `expectedSaveSequence`, the exact server base
+observed when the intent was created. Both book route layers enforce the base
+with a database compare-and-set predicate; a high local sequence without the
+matching base is rejected as `STALE_READING_SAVE` instead of overwriting a
+newer position from another device. Creation remains limited to base `0` and
+legacy sequence-zero callers remain compatible only while the row is still at
+server version `0`.
 
-Generation checks and account/book-scoped outboxes prevent logout or account
-switch invalidation from performing a read-back/retry or re-inserting an old
-record. Focused backend/frontend regression tests cover the fresh-device
-sequence gap, identity-mismatch non-retry, generation invalidation, and
-decimal-string versioning above JavaScript's safe-integer range. This is a
-source candidate only; no production database or deployment action was
+The browser durable outbox is version 3 and records the observed server base.
+Fresh devices perform an authoritative GET before reserving a save. A stale
+outbox is not automatically rebased or replayed: reload returns the
+authoritative server position and marks an initial conflict, while a stale
+write drops only that intent and exposes a distinct stale status without a
+dead retry action. Genuine network failures retain the outbox and remain
+retryable. Account/book scope, generation invalidation, decimal-string
+precision, ordinary same-owner saves, and the proven same-browser
+acknowledgement race remain covered by focused backend/frontend tests. This is
+a source candidate only; no production database or deployment action was
 performed.
 
 ## 2026-11-07 authenticated-route revalidation candidate
@@ -215,7 +219,7 @@ Rules:
 - omitted `readStatus` defaults to `reading` for backward compatibility.
 - explicit status may be `reading` or `completed`.
 - GET returns both `currentPosition` and a numeric compatibility `currentPage`.
-- authenticated GET also returns the authoritative `saveSequence` decimal string. A `STALE_READING_SAVE` response may be reconciled by reading that version and retrying a still-current payload with a higher version; identity-mismatch 409 responses are not retried.
+- authenticated GET also returns the authoritative `saveSequence` decimal string. New authenticated PATCH callers send an exact `expectedSaveSequence` base with their reserved `saveSequence`; a stale base returns `STALE_READING_SAVE` and is never automatically rebased or replayed. Initial reload returns the authoritative position and marks a conflict; a stale write drops only its old intent and leaves the displayed reader position unchanged. Genuine network failures retain the durable outbox for retry.
 - a numeric position restores the PDF page.
 - an EPUB CFI restores through `currentPosition`; `currentPage` remains the compatibility value `1` for non-numeric positions.
 - EpubReader reads the DB CFI first and keeps `reader-location:<bookId>` localStorage only as a fallback/cache.

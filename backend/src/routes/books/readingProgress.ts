@@ -69,6 +69,7 @@ type PersistReadingInfoInput = {
 	readStatus: 'reading' | 'completed';
 	progressPercentage: number | null | undefined;
 	saveSequence?: bigint;
+	expectedSaveSequence?: bigint;
 };
 
 export class StaleReadingInfoError extends Error {
@@ -87,21 +88,14 @@ function isUniqueConflict(error: unknown) {
 		&& error.code === 'P2002';
 }
 
-function sequenceCondition(saveSequence: bigint | undefined) {
-	const sequence = saveSequence ?? 0n;
-	if (sequence === 0n) return { equals: 0n };
-	return {
-		gte: sequence > MAX_FORWARD_SAVE_SEQUENCE_GAP ? sequence - MAX_FORWARD_SAVE_SEQUENCE_GAP : 0n,
-		lt: sequence,
-	};
+function sequenceCondition(expectedSaveSequence: bigint | undefined) {
+	if (expectedSaveSequence !== undefined) return { equals: expectedSaveSequence };
+	return { equals: 0n };
 }
 
-function canApplySequence(storedSequence: bigint, incomingSequence: bigint) {
-	if (incomingSequence === 0n) return storedSequence === 0n;
-	const lowerBound = incomingSequence > MAX_FORWARD_SAVE_SEQUENCE_GAP
-		? incomingSequence - MAX_FORWARD_SAVE_SEQUENCE_GAP
-		: 0n;
-	return storedSequence >= lowerBound && storedSequence < incomingSequence;
+function canApplySequence(storedSequence: bigint, incomingSequence: bigint, expectedSaveSequence: bigint | undefined) {
+	if (expectedSaveSequence !== undefined) return storedSequence === expectedSaveSequence;
+	return incomingSequence === 0n && storedSequence === 0n;
 }
 
 function getRecordSequence(readingInfo: ReadingProgressRecord | null | undefined) {
@@ -133,8 +127,13 @@ export async function persistReadingInfo(
 		userId_bookId: { userId: input.userId, bookId: input.bookId },
 	};
 	const saveSequence = input.saveSequence;
+	const expectedSaveSequence = input.expectedSaveSequence;
 	const sequence = saveSequence ?? 0n;
-	const sequencePredicate = sequenceCondition(saveSequence);
+	if (saveSequence !== undefined && saveSequence > 0n && expectedSaveSequence === undefined) throw new StaleReadingInfoError();
+	if (expectedSaveSequence !== undefined && (saveSequence === undefined || saveSequence <= expectedSaveSequence || saveSequence - expectedSaveSequence > MAX_FORWARD_SAVE_SEQUENCE_GAP)) {
+		throw new StaleReadingInfoError();
+	}
+	const sequencePredicate = sequenceCondition(expectedSaveSequence);
 
 	const progressFields = input.progressPercentage === undefined
 		? {}
@@ -173,7 +172,7 @@ export async function persistReadingInfo(
 			select: { currentPosition: true, progressPercentage: true, readStatus: true, saveSequence: true },
 		});
 		if (existing) {
-			if (!canApplySequence(getRecordSequence(existing), sequence)) throw new StaleReadingInfoError();
+			if (!canApplySequence(getRecordSequence(existing), sequence, expectedSaveSequence)) throw new StaleReadingInfoError();
 
 			if (input.readStatus === 'reading' && existing.readStatus === 'completed') {
 				const completedUpdate = await prisma.readingInfo.updateMany({
@@ -188,6 +187,7 @@ export async function persistReadingInfo(
 			continue;
 		}
 
+		if (expectedSaveSequence !== undefined && expectedSaveSequence !== 0n) throw new StaleReadingInfoError();
 		if (sequence > MAX_FORWARD_SAVE_SEQUENCE_GAP) throw new StaleReadingInfoError();
 
 		try {
