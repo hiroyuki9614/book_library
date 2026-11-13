@@ -74,6 +74,92 @@ const READING_HEADERS = { 'X-BeLib-User-Id': '7' };
 const JSON_READING_HEADERS = { ...READING_HEADERS, 'Content-Type': 'application/json' };
 
 describe('reading-info API', () => {
+	test('new GET followed by old backend CAS-path 404 cannot reach legacy mutation handler', async () => {
+		const legacyBackend = new Hono();
+		let legacyMutation = false;
+		legacyBackend.patch('/:bookId/reading-info', (c) => {
+			legacyMutation = true;
+			return c.json({ accepted: true });
+		});
+
+		const get = await app.request('/1/reading-info', { headers: READING_HEADERS });
+		expect(await get.json()).toMatchObject({ readingSaveProtocol: 'cas-v1', saveSequence: '0' });
+		const patch = await legacyBackend.request('/1/reading-info/cas-v1', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPage: 8, saveSequence: '1', expectedSaveSequence: '0' }),
+		});
+
+		expect(patch.status).toBe(404);
+		expect(legacyMutation).toBe(false);
+		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
+	});
+
+	test('GET baseline followed by strict CAS PATCH saves position and exact progress/status', async () => {
+		mocks.readingInfoFindUnique
+			.mockResolvedValueOnce({ currentPosition: '8', progressPercentage: 42, readStatus: 'reading', saveSequence: 4n })
+			.mockResolvedValueOnce({ currentPosition: '12', progressPercentage: 68, readStatus: 'reading', saveSequence: 5n });
+
+		const get = await app.request('/1/reading-info', { headers: READING_HEADERS });
+		expect(await get.json()).toMatchObject({ saveSequence: '4', readingSaveProtocol: 'cas-v1' });
+		const patch = await app.request('/1/reading-info/cas-v1', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPage: 12, progressPercentage: 68, readStatus: 'reading', saveSequence: '5', expectedSaveSequence: '4' }),
+		});
+
+		expect(patch.status).toBe(200);
+		expect(await patch.json()).toEqual({ bookId: 1, currentPosition: '12', currentPage: 12, progressPercentage: 68, readStatus: 'reading', saveSequence: '5' });
+		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' }, saveSequence: { equals: 4n } },
+			data: expect.objectContaining({ currentPosition: '12', progressPercentage: 68, saveSequence: 5n }),
+		}));
+	});
+
+	test('strict CAS PATCH returns 409 for stale expected sequence without overwriting progress', async () => {
+		mocks.readingInfoUpdateMany.mockResolvedValue({ count: 0 });
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '9', progressPercentage: 90, readStatus: 'reading', saveSequence: 1n });
+		const patch = await app.request('/1/reading-info/cas-v1', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPage: 5, progressPercentage: 50, saveSequence: '2', expectedSaveSequence: '0' }),
+		});
+
+		expect(patch.status).toBe(409);
+		expect(await patch.json()).toMatchObject({ code: 'STALE_READING_SAVE' });
+		expect(mocks.readingInfoCreate).not.toHaveBeenCalled();
+	});
+
+	test('strict CAS PATCH preserves exact EPUB position and completed state', async () => {
+		const cfi = 'epubcfi(/6/4!/4/2/8:0)';
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: cfi, progressPercentage: 100, readStatus: 'completed', saveSequence: 1n });
+		const patch = await app.request('/1/reading-info/cas-v1', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPosition: cfi, progressPercentage: 37, readStatus: 'completed', saveSequence: '1', expectedSaveSequence: '0' }),
+		});
+
+		expect(patch.status).toBe(200);
+		expect(await patch.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 100, readStatus: 'completed', saveSequence: '1' });
+		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+			where: { userId: 7, bookId: 1, saveSequence: { equals: 0n } },
+			data: { currentPosition: cfi, readStatus: 'completed', progressPercentage: 100, saveSequence: 1n },
+		}));
+	});
+
+	test('strict CAS route rejects missing CAS fields before persistence', async () => {
+		const patch = await app.request('/1/reading-info/cas-v1', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPage: 5 }),
+		});
+
+		expect(patch.status).toBe(400);
+		expect(await patch.json()).toMatchObject({ code: 'INVALID_SAVE_SEQUENCE' });
+		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
+		expect(mocks.readingInfoCreate).not.toHaveBeenCalled();
+	});
+
 	test('GETは認証済みで権限のあるユーザー自身の現在ページを返す', async () => {
 		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '3', progressPercentage: 25, readStatus: 'reading' });
 

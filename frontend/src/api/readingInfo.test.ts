@@ -370,7 +370,7 @@ describe('reading-info API client', () => {
 			saveSequence: '1',
 		});
 		expect(fetch).toHaveBeenCalledWith(
-			'http://localhost:3000/api/v1/books/7/reading-info',
+			'http://localhost:3000/api/v1/books/7/reading-info/cas-v1',
 			expect.objectContaining({
 				method: 'PATCH',
 				credentials: 'include',
@@ -401,7 +401,7 @@ describe('reading-info API client', () => {
 
 		await saveReadingInfo(7, cfi, 'reading', 30, 7);
 		expect(fetch).toHaveBeenCalledWith(
-			'http://localhost:3000/api/v1/books/7/reading-info',
+			'http://localhost:3000/api/v1/books/7/reading-info/cas-v1',
 			expect.objectContaining({
 				headers: {
 					'Content-Type': 'application/json',
@@ -410,6 +410,41 @@ describe('reading-info API client', () => {
 			}),
 		);
 		expectVersionedRequestBody({ currentPosition: cfi, readStatus: 'reading', progressPercentage: 30 });
+	});
+
+	test('new GET followed by an old-backend 404 on the CAS path never retries the mutating legacy path', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		const requests: string[] = [];
+		let legacyMutation = false;
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+			const path = String(url).replace('http://localhost:3000', '');
+			requests.push(`${options?.method ?? 'GET'} ${path}`);
+			if (options?.method === 'PATCH' && path.endsWith('/cas-v1')) {
+				return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
+			}
+			if (options?.method === 'PATCH') {
+				legacyMutation = true;
+				return new Response(JSON.stringify({ bookId: 77, currentPosition: '9', currentPage: 9, readStatus: 'reading', saveSequence: '1' }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+			return new Response(JSON.stringify({
+				bookId: 77,
+				currentPosition: '1',
+				currentPage: 1,
+				progressPercentage: 10,
+				readStatus: 'reading',
+				saveSequence: '0',
+				readingSaveProtocol: 'cas-v1',
+			}), { headers: { 'Content-Type': 'application/json' } });
+		});
+
+		await expect(saveReadingInfo(77, 9, 'reading', 90, 7)).rejects.toMatchObject({ status: 404 });
+		expect(requests).toEqual([
+			'GET /api/v1/books/77/reading-info',
+			'PATCH /api/v1/books/77/reading-info/cas-v1',
+		]);
+		expect(legacyMutation).toBe(false);
 	});
 
 	test('standalone readerはユーザーヒントなしでGET/PATCHを実際に送信する', async () => {

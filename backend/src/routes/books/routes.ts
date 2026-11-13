@@ -5,7 +5,7 @@ import { Readable } from 'node:stream';
 import { auth } from '../../lib/auth.js';
 import { BookStorageNotFoundError, getBookFileAccess } from '../../lib/bookStorage.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
-import { hasReadingSessionUserMismatch, MAX_CURRENT_POSITION_LENGTH, normalizeProgressPercentage, normalizeReadStatus, parseReadingSaveSequence, persistReadingInfo, READING_SESSION_USER_HEADER, StaleReadingInfoError, toReadingInfoResponse, toReadingProgress, type ReadingProgressRecord } from './readingProgress.js';
+import { handleVersionedReadingInfoPatch, hasReadingSessionUserMismatch, MAX_CURRENT_POSITION_LENGTH, normalizeProgressPercentage, normalizeReadStatus, parseReadingSaveSequence, persistReadingInfo, READING_SESSION_USER_HEADER, StaleReadingInfoError, toReadingInfoResponse, toReadingProgress, type ReadingProgressRecord } from './readingProgress.js';
 
 const app = new Hono<PrismaVariables>();
 
@@ -220,6 +220,19 @@ app.get('/:bookId/reading-info', async (c) => {
 	} catch (error) {
 		console.error(error);
 		return c.json({ error: 'Failed to fetch reading info' }, 500);
+	}
+});
+
+app.patch('/:bookId/reading-info/cas-v1', async (c) => {
+	try {
+		const bookId = parseBookId(c.req.param('bookId'));
+		if (!bookId) return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
+		const result = await getAuthorizedBook(c, bookId, true);
+		if ('response' in result) return result.response;
+		return await handleVersionedReadingInfoPatch(c, { bookId, userId: result.userId });
+	} catch (error) {
+		console.error(error);
+		return c.json({ error: 'Failed to save reading info' }, 500);
 	}
 });
 

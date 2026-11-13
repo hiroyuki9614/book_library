@@ -1,6 +1,6 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-11-13
+- Updated: 2026-11-14
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
 - Current main checkpoint for the scoped frontend release candidate: `f8d69c7f1f9a6676ff268ef3da7d815232a779d2`
 - The prior 2026-10-27 implementation snapshot remains historical; this scoped update does not refresh unrelated R2 or portfolio branch state.
@@ -44,6 +44,16 @@ is therefore backend (marker plus enforced expected-base CAS) first, then the
 frontend. This worktree has not changed deployment or production state, and
 the current production runtime has not been independently verified against
 this marker.
+
+The authenticated frontend now sends saves to the distinct
+`PATCH /api/v1/books/:bookId/reading-info/cas-v1` path. Both mounted book
+route modules authorize this path and use one shared strict handler that
+requires both sequence fields. Older backend instances do not register this
+path, so a mixed new-GET/old-PATCH request receives a 404 before the legacy
+sequence-zero handler can mutate progress. The frontend does not retry the
+legacy path after that response. The existing `PATCH .../reading-info` remains
+for older callers under its existing compatibility behavior. This is a local
+candidate change only; it has not been independently reviewed or deployed.
 
 ## 2026-11-07 authenticated-route revalidation candidate
 
@@ -178,6 +188,7 @@ GET   /api/v1/books/:bookId
 GET   /api/v1/books/:bookId/file
 GET   /api/v1/books/:bookId/reading-info
 PATCH /api/v1/books/:bookId/reading-info
+PATCH /api/v1/books/:bookId/reading-info/cas-v1
 ```
 
 Current behavior:
@@ -188,6 +199,7 @@ Current behavior:
 - list joins only the current user's `ReadingInfo` and returns the persisted `readStatus`.
 - the authenticated route boundary refreshes the current session when the tab regains focus or returns visible, and hides account-scoped route content while that refresh is pending.
 - book-list and reading-info requests that provide an expected user ID reject a mismatch with the cookie session; legacy reading-info callers may omit the hint.
+- authenticated frontend saves use the CAS-only path, which requires an observed expected sequence and an increasing save sequence; authenticated GET capability checks remain required. A 404 on the CAS path is terminal for that request and never falls back to the legacy mutating endpoint.
 - list supports `page`, `limit`, `q`, and `categoryId`; the Home client retrieves all authorized pages in batches capped at 100 records so its summary is not limited to the first page.
 - `q` searches title and author name case-insensitively and is limited to 100 characters.
 - `categoryId` must be a positive integer.

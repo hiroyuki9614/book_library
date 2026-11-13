@@ -73,6 +73,44 @@ const READING_HEADERS = { 'X-BeLib-User-Id': '7' };
 const JSON_READING_HEADERS = { ...READING_HEADERS, 'Content-Type': 'application/json' };
 
 describe('book state routes', () => {
+	test('state route mounts the same strict CAS handler for a permitted authenticated user', async () => {
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '7', progressPercentage: 70, readStatus: 'reading', saveSequence: 3n });
+		const response = await app.request('/1/reading-info/cas-v1', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPage: 7, progressPercentage: 70, saveSequence: '3', expectedSaveSequence: '2' }),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ currentPosition: '7', progressPercentage: 70, saveSequence: '3' });
+		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+			where: expect.objectContaining({ saveSequence: { equals: 2n } }),
+			data: expect.objectContaining({ currentPosition: '7', progressPercentage: 70, saveSequence: 3n }),
+		}));
+	});
+
+	test('strict CAS route rejects unauthenticated, forbidden, and account-switched callers before writes', async () => {
+		const request = () => app.request('/1/reading-info/cas-v1', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPage: 7, saveSequence: '1', expectedSaveSequence: '0' }),
+		});
+
+		mocks.getSession.mockResolvedValueOnce(null);
+		expect((await request()).status).toBe(401);
+		mocks.permissionFindUnique.mockResolvedValueOnce(null);
+		expect((await request()).status).toBe(403);
+		const switched = await app.request('/1/reading-info/cas-v1', {
+			method: 'PATCH',
+			headers: { ...JSON_READING_HEADERS, 'X-BeLib-User-Id': '8' },
+			body: JSON.stringify({ currentPage: 7, saveSequence: '1', expectedSaveSequence: '0' }),
+		});
+		expect(switched.status).toBe(409);
+		expect(await switched.json()).toMatchObject({ code: 'READING_SESSION_MISMATCH' });
+		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
+		expect(mocks.readingInfoCreate).not.toHaveBeenCalled();
+	});
+
 	test('一覧は現在ユーザーのReadingInfoをreadStatusへ反映する', async () => {
 		mocks.bookCount.mockResolvedValue(1);
 		mocks.bookFindMany.mockResolvedValue([book]);

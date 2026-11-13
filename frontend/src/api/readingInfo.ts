@@ -682,7 +682,10 @@ export function saveReadingInfo(
 			const controller = new AbortController();
 			inFlightReadingSaves.add(controller);
 			try {
-				const result = await requestReadingInfo<ReadingInfo>(`/api/v1/books/${bookId}/reading-info`, {
+				const savePath = sessionUserId !== null
+					? `/api/v1/books/${bookId}/reading-info/cas-v1`
+					: `/api/v1/books/${bookId}/reading-info`;
+				const result = await requestReadingInfo<ReadingInfo>(savePath, {
 					method: 'PATCH',
 					headers,
 					body: serializedBody,

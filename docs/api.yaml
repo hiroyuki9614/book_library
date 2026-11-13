@@ -157,7 +157,8 @@ paths:
         numeric currentPositionの場合は互換用currentPageにも復元する。
         saveSequenceは現在ユーザー・書籍行のサーバー管理CAS版であり、JSON numberの丸めを避けるため10進文字列で返す。
         readingSaveProtocolはCASを強制するbackendのGETプロトコルマーカーで、現在値はcas-v1。
-        新しいfrontendはこのマーカーを検証できないbackendへPATCHを送信しない。
+        新しいfrontendはこのマーカーを検証できないbackendへPATCHを送信しない。CAS PATCHは別の
+        /books/{bookId}/reading-info/cas-v1 へ送り、旧backendは未知のパスとして更新前に拒否する。
         progressPercentageはIssue #90のowner-requested exceptionとして、現在ユーザーの
         ReadingInfoに保存したreader計測スナップショットから返す。未読は0、読了は100、
         読書中で有効なreader計測値がない場合はnull。X-BeLib-User-Idは互換用の任意の
@@ -191,7 +192,13 @@ paths:
         現在のCookie sessionと一致しない保存は拒否する。hintの照合は書籍の存在と
         RoleBookPermissionの確認後に行い、hintを省略した既存callerも受け入れる。
         readStatusを省略した場合はreading。明示値はreadingまたはcompleted。
-        新しい認証済みcallerはsaveSequenceとexpectedSaveSequenceを一緒に送り、expectedSaveSequenceは意図作成時に観測したサーバー版とする。サーバーはこの版との完全一致をPATCHで原子的に確認し、saveSequenceはbaseより大きく、baseからの増分は最大1,000,000とする。ReadingInfoの作成にはbase 0が必要。古いoutboxのpayloadを409後に再採番して再送してはならない。STALE_READING_SAVEではAPIが最新GETでserver baseを更新し、hookは古いintentを破棄してstale conflict statusにする。現在のreader表示位置はこのPATCH error handlingでは置き換えない。Retryはそのintentを予約・再送しない。明示的な新しいreader操作が更新済みbaseで新intentを作る。saveSequenceとexpectedSaveSequenceの両方がない旧callerはserver版0に限り互換動作する。
+        このlegacy pathは旧caller互換用であり、CAS fieldsの省略をserver版0に限り許容する。新しい認証済みcallerは
+        /books/{bookId}/reading-info/cas-v1 を使い、saveSequenceとexpectedSaveSequenceを必須で送る。
+        expectedSaveSequenceは意図作成時に観測したサーバー版とする。サーバーはこの版との完全一致を原子的に確認し、
+        saveSequenceはbaseより大きく、baseからの増分は最大1,000,000とする。ReadingInfoの作成にはbase 0が必要。
+        古いoutboxのpayloadを409後に再採番して再送してはならない。STALE_READING_SAVEではAPIが最新GETでserver baseを
+        更新し、hookは古いintentを破棄してstale conflict statusにする。現在のreader表示位置はこのPATCH error handlingでは
+        置き換えない。Retryはそのintentを予約・再送しない。明示的な新しいreader操作が更新済みbaseで新intentを作る。
       requestBody:
         required: true
         content:
@@ -203,6 +210,49 @@ paths:
       responses:
         '200':
           description: Saved reading info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadingInfo'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/BookNotFound'
+        '409':
+          $ref: '#/components/responses/ReadingSaveConflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /books/{bookId}/reading-info/cas-v1:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+      - $ref: '#/components/parameters/ReadingSessionUserId'
+    patch:
+      summary: CAS版を必須とする読書情報保存
+      description: |
+        認証・RoleBookPermission・任意のX-BeLib-User-Id照合を行い、readStatus、progressPercentage、
+        currentPositionの意味はlegacy reading-info PATCHと同じ。saveSequenceとexpectedSaveSequenceは
+        必須で、expectedSaveSequenceは意図作成時に観測したサーバー版、saveSequenceはそれより大きい値とする。
+        DB上の版がexpectedSaveSequenceと一致しない場合は409 STALE_READING_SAVEを返し、位置や進捗を変更しない。
+        この固有パスにより、cas-v1対応前のbackendはPATCHをmutateせず404で拒否する。frontendは404時にlegacy pathへfallbackしない。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - oneOf:
+                    - $ref: '#/components/schemas/PdfReadingInfoUpdateRequest'
+                    - $ref: '#/components/schemas/EpubReadingInfoUpdateRequest'
+                - type: object
+                  required: [saveSequence, expectedSaveSequence]
+      responses:
+        '200':
+          description: Saved reading info with acknowledged saveSequence
           content:
             application/json:
               schema:

@@ -1,4 +1,6 @@
 import type { PrismaClient } from '../../../prisma/generated/prisma/client.js';
+import type { Context } from 'hono';
+import type { PrismaVariables } from '../../lib/prisma.js';
 
 export type ReadStatus = 'unread' | 'reading' | 'completed';
 
@@ -230,4 +232,83 @@ export function toReadingInfoResponse(
 		saveSequence: getRecordSequence(readingInfo).toString(),
 		...(includeReadingSaveProtocol ? { readingSaveProtocol: READING_SAVE_PROTOCOL } : {}),
 	};
+}
+
+/**
+ * Strict CAS endpoint shared by both book route modules. Authentication,
+ * role-based book permission, and the optional account-binding header must be
+ * checked by the route before calling this handler.
+ */
+export async function handleVersionedReadingInfoPatch(
+	c: Context<PrismaVariables>,
+	input: { bookId: number; userId: number },
+) {
+	const jsonError = (status: 400 | 409 | 500, message: string, code: string) => c.json({ message, code }, status);
+	let body: unknown;
+	try {
+		body = await c.req.json();
+	} catch {
+		return jsonError(400, 'Request body must be valid JSON', 'INVALID_REQUEST');
+	}
+	if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+		return jsonError(400, 'Request body must be a JSON object', 'INVALID_REQUEST');
+	}
+
+	const value = body as { currentPage?: unknown; currentPosition?: unknown; progressPercentage?: unknown; readStatus?: unknown; saveSequence?: unknown; expectedSaveSequence?: unknown };
+	const hasPage = value.currentPage !== undefined;
+	const hasPosition = value.currentPosition !== undefined;
+	if (hasPage === hasPosition) return jsonError(400, 'Exactly one reading position is required', 'INVALID_CURRENT_POSITION');
+
+	let currentPosition: string;
+	if (hasPage) {
+		if (typeof value.currentPage !== 'number' || !Number.isSafeInteger(value.currentPage) || value.currentPage < 1) {
+			return jsonError(400, 'currentPage must be a positive integer', 'INVALID_CURRENT_PAGE');
+		}
+		currentPosition = String(value.currentPage);
+	} else {
+		if (typeof value.currentPosition !== 'string' || !value.currentPosition.trim() || value.currentPosition.length > MAX_CURRENT_POSITION_LENGTH) {
+			return jsonError(400, `currentPosition must be a non-empty string of ${MAX_CURRENT_POSITION_LENGTH} characters or fewer`, 'INVALID_CURRENT_POSITION');
+		}
+		currentPosition = value.currentPosition;
+	}
+
+	const requestedReadStatus = value.readStatus === undefined ? 'reading' : value.readStatus;
+	if (requestedReadStatus !== 'reading' && requestedReadStatus !== 'completed') {
+		return jsonError(400, 'readStatus must be reading or completed', 'INVALID_READ_STATUS');
+	}
+	const hasProgressPercentage = value.progressPercentage !== undefined;
+	if (hasProgressPercentage && value.progressPercentage !== null && normalizeProgressPercentage(value.progressPercentage) === null) {
+		return jsonError(400, 'progressPercentage must be an integer between 0 and 100 or null', 'INVALID_PROGRESS_PERCENTAGE');
+	}
+
+	const saveSequence = parseReadingSaveSequence(value.saveSequence);
+	const expectedSaveSequence = parseReadingSaveSequence(value.expectedSaveSequence);
+	if (saveSequence === null) return jsonError(400, 'saveSequence must be a safe non-negative integer', 'INVALID_SAVE_SEQUENCE');
+	if (expectedSaveSequence === null) return jsonError(400, 'expectedSaveSequence must be a safe non-negative integer', 'INVALID_EXPECTED_SAVE_SEQUENCE');
+	if (saveSequence === undefined) return jsonError(400, 'Versioned saves require saveSequence', 'INVALID_SAVE_SEQUENCE');
+	if (expectedSaveSequence === undefined) return jsonError(400, 'Versioned saves require expectedSaveSequence', 'EXPECTED_SAVE_SEQUENCE_REQUIRED');
+	if (saveSequence <= expectedSaveSequence) return jsonError(400, 'saveSequence must be greater than expectedSaveSequence', 'INVALID_SAVE_SEQUENCE');
+
+	const readStatus = requestedReadStatus;
+	const persistedProgress = readStatus === 'completed'
+		? 100
+		: hasProgressPercentage
+			? normalizeProgressPercentage(value.progressPercentage)
+			: undefined;
+	try {
+		const readingInfo = await persistReadingInfo(c.get('prisma'), {
+			userId: input.userId,
+			bookId: input.bookId,
+			currentPosition,
+			readStatus,
+			progressPercentage: persistedProgress,
+			saveSequence,
+			expectedSaveSequence,
+		});
+		return c.json(toReadingInfoResponse(input.bookId, readingInfo, true));
+	} catch (error) {
+		if (error instanceof StaleReadingInfoError) return jsonError(409, error.message, error.code);
+		console.error(error);
+		return c.json({ error: 'Failed to save reading info' }, 500);
+	}
 }
