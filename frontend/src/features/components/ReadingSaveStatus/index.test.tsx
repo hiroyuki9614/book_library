@@ -49,4 +49,15 @@ describe('ReadingSaveStatus compact reader header status', () => {
 		button?.click();
 		expect(retry).toHaveBeenCalledTimes(1);
 	});
+	test('initial conflict announces that the latest server position loaded without offering a no-op retry', async () => {
+		const retry = vi.fn();
+		const { container } = await render(<ReadingSaveStatus status='conflict' retry={retry} />);
+		const element = container.querySelector('[role="status"]');
+		expect(element?.querySelector('[aria-hidden="true"]')?.textContent).toBe('最新の保存位置を読み込み済み');
+		expect(element?.querySelector('[aria-hidden="true"]')?.getAttribute('title')).toBe('最新の保存位置を読み込みました。ページを移動すると保存できます。');
+		expect(element?.querySelector('.sr-only')?.textContent).toBe('最新の保存位置を読み込みました。ページを移動すると保存できます。');
+		expect(element?.querySelector('button')).toBeNull();
+		expect(element?.textContent).not.toContain('再試行');
+		expect(retry).not.toHaveBeenCalled();
+	});
 });
