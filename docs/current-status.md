@@ -128,25 +128,29 @@ CI; they do not approve or deploy staging.
 
 - Scoped update (2026-11-07): authenticated-route session revalidation and stale Admin view masking candidate below; this is not a production acceptance.
 
-## 2026-11-12 cross-device reading-save reconciliation candidate
+## 2026-11-12 cross-device reading-save behavior (superseded note)
 
-`ReadingInfo.saveSequence` is now exposed by the authenticated reading-info
-GET as an authoritative decimal string, so clients do not round PostgreSQL
-`BIGINT` versions through JavaScript numbers. A stale sequence 409 is retried
-only for the current authenticated identity: the client reads the current
-server version, replaces the matching durable outbox entry with a strictly
-higher version, and retries the still-current payload. Concurrent writers may
-advance the version again; retries are bounded and the durable outbox remains
-for a later replay when the bound is reached. This version is a CAS order, not
-a guarantee of wall-clock chronology across devices.
+The earlier note's instruction to assign a higher sequence to a stale payload
+and retry it is superseded. Authenticated GET returns `saveSequence` as a
+decimal string. PATCH compares `expectedSaveSequence` exactly with the stored
+row version; a versioned `saveSequence` must be greater than that base and may
+advance by at most 1,000,000 to accommodate local reservations. Creating a row
+requires base zero. A request without either sequence field remains on the
+version-zero compatibility path.
 
-Generation checks and account/book-scoped outboxes prevent logout or account
-switch invalidation from performing a read-back/retry or re-inserting an old
-record. Focused backend/frontend regression tests cover the fresh-device
-sequence gap, identity-mismatch non-retry, generation invalidation, and
-decimal-string versioning above JavaScript's safe-integer range. This is a
-source candidate only; no production database or deployment action was
-performed.
+When a PATCH receives `STALE_READING_SAVE`, the API refreshes the authoritative
+server version and the hook drops its held intent and sets stale conflict
+status. The hook's Retry action cannot reserve or resend that old payload, and
+the reader does not switch its displayed position during this error handling.
+A later distinct reader action creates a new intent from the refreshed base. An exact
+successful acknowledgement may advance a newer queued intent's base. A lost
+acknowledgement can still lead to a stale conflict; that old intent is not
+rebased automatically. On initial load or reload, `fetchReadingInfo` returns
+the authoritative position and clears a mismatched stale outbox entry.
+
+Generation checks and account/book-scoped outboxes continue to prevent
+cross-account replay. This is source behavior only; no production database or
+deployment action is established by this candidate.
 
 ## 2026-11-07 authenticated-route revalidation candidate
 
@@ -333,7 +337,7 @@ Rules:
 - omitted `readStatus` defaults to `reading` for backward compatibility.
 - explicit status may be `reading` or `completed`.
 - GET returns both `currentPosition` and a numeric compatibility `currentPage`.
-- authenticated GET also returns the authoritative `saveSequence` decimal string. A `STALE_READING_SAVE` response may be reconciled by reading that version and retrying a still-current payload with a higher version; identity-mismatch 409 responses are not retried.
+- authenticated GET returns the authoritative `saveSequence` decimal string. A stale PATCH refreshes the base, drops the hook-held intent, and sets stale conflict status; it does not replace the current reader's displayed position. Retry does not reserve or resend that intent. On initial load or reload, `fetchReadingInfo` returns the authoritative position and clears a mismatched stale outbox entry. A later distinct reader action uses the refreshed base; a lost acknowledgement may still lead to a stale conflict.
 - a numeric position restores the PDF page.
 - an EPUB CFI restores through `currentPosition`; `currentPage` remains the compatibility value `1` for non-numeric positions.
 - EpubReader reads the DB CFI first and keeps `reader-location:<bookId>` localStorage only as a fallback/cache.
@@ -555,6 +559,9 @@ reader repair record; implementation alone is not final production acceptance.
 PDF restoration waits for the real document layout and runs once per document,
 independently of subsequent saves and zoom/layout changes. Reading-info writes
 are ordered per book in a browser tab, and immediate reentry waits for pending
-writes. Failures are visible and retryable. Cross-device conflict resolution is
-not implemented. See [reader acceptance](runbooks/reader-acceptance.md) for the
-production GUI and real rendering gates.
+writes. Transient failures are visible and retryable with the same intent. A
+stale cross-device CAS conflict is visible as stale conflict status and drops
+that intent; Retry does not re-reserve it. A later distinct reader action can
+create a new intent from the refreshed server base. See
+[reader acceptance](runbooks/reader-acceptance.md) for the production GUI and
+real rendering gates.

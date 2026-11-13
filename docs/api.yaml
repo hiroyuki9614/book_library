@@ -189,7 +189,7 @@ paths:
         現在のCookie sessionと一致しない保存は拒否する。hintの照合は書籍の存在と
         RoleBookPermissionの確認後に行い、hintを省略した既存callerも受け入れる。
         readStatusを省略した場合はreading。明示値はreadingまたはcompleted。
-        新しい認証済みcallerはsaveSequenceとexpectedSaveSequenceを一緒に送り、expectedSaveSequenceは直前にGETで確認したサーバー版でなければならない。サーバーはこの版との完全一致をPATCHで原子的に確認する。古いoutboxのpayloadを409後に再採番して再送してはならない。STALE_READING_SAVEでは最新GETを表示し、古いpendingを破棄して競合を示す。次の明示的なユーザー操作は新しいGET済みbaseで予約する。saveSequenceとexpectedSaveSequenceがない旧callerはサーバー版0の間だけ互換扱いとする。
+        新しい認証済みcallerはsaveSequenceとexpectedSaveSequenceを一緒に送り、expectedSaveSequenceは意図作成時に観測したサーバー版とする。サーバーはこの版との完全一致をPATCHで原子的に確認し、saveSequenceはbaseより大きく、baseからの増分は最大1,000,000とする。ReadingInfoの作成にはbase 0が必要。古いoutboxのpayloadを409後に再採番して再送してはならない。STALE_READING_SAVEではAPIが最新GETでserver baseを更新し、hookは古いintentを破棄してstale conflict statusにする。現在のreader表示位置はこのPATCH error handlingでは置き換えない。Retryはそのintentを予約・再送しない。明示的な新しいreader操作が更新済みbaseで新intentを作る。saveSequenceとexpectedSaveSequenceの両方がない旧callerはserver版0に限り互換動作する。
       requestBody:
         required: true
         content:
@@ -472,7 +472,7 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     ReadingSaveConflict:
-      description: The request's expected authenticated user does not match the Cookie session, or the supplied reading save sequence is stale. For STALE_READING_SAVE, read the authenticated reading-info GET, discard the matching stale outbox entry, and surface the authoritative position as a conflict. Do not automatically retry or rebase that payload; a later explicit user action may save against a newly observed base.
+      description: The request's expected authenticated user does not match the Cookie session, or expectedSaveSequence no longer matches the stored row. For STALE_READING_SAVE, the API refreshes the authoritative server base and the hook discards its held intent and sets stale conflict status; PATCH error handling does not replace the displayed reader position. Do not automatically retry or rebase the stale payload. An initial load or reload through fetchReadingInfo returns the authoritative position and clears a mismatched stale outbox entry; a later distinct reader action may save against the refreshed base. A lost acknowledgement may still result in a conflict.
       content:
         application/json:
           schema:
@@ -582,7 +582,7 @@ components:
 
     ReadingInfo:
       type: object
-      required: [bookId, currentPosition, currentPage, progressPercentage, readStatus]
+      required: [bookId, currentPosition, currentPage, progressPercentage, readStatus, saveSequence]
       properties:
         bookId:
           type: integer
