@@ -156,7 +156,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.scrollState.currentPage = 11;
 		mocks.viewportScrollState.currentPage = 11;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92, undefined, undefined, false, undefined), { timeout: 1_500 });
 	});
 
 	test('復元先未到着でホイール移動するとページ保存が再開し古い復元エコーを無視する', async () => {
@@ -175,22 +175,22 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.scrollState.currentPage = 2;
 		mocks.viewportScrollState.currentPage = 2;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 2, 'reading', 17), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 2, 'reading', 17, undefined, undefined, false, undefined), { timeout: 1_500 });
 
 		// The interrupted restore can still emit page 10, but must not save it.
 		mocks.scrollState.currentPage = 10;
 		mocks.viewportScrollState.currentPage = 10;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		window.dispatchEvent(new Event('pagehide'));
-		expect(mocks.saveReadingInfo).not.toHaveBeenCalledWith(7, 10, 'reading', 83);
+		expect(mocks.saveReadingInfo.mock.calls.some(([bookId, position, status, progress]) => bookId === 7 && position === 10 && status === 'reading' && progress === 83)).toBe(false);
 
 		// A later native observation should save again rather than stay blocked.
 		mocks.scrollState.currentPage = 3;
 		mocks.viewportScrollState.currentPage = 3;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 3, 'reading', 25), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 3, 'reading', 25, undefined, undefined, false, undefined), { timeout: 1_500 });
 		expect(mocks.scrollToPage).toHaveBeenCalledTimes(1);
-		expect(mocks.saveReadingInfo).not.toHaveBeenCalledWith(7, 10, 'reading', 83);
+		expect(mocks.saveReadingInfo.mock.calls.some(([bookId, position, status, progress]) => bookId === 7 && position === 10 && status === 'reading' && progress === 83)).toBe(false);
 	});
 
 	test('移動先のページが先に描画された直後のホイール操作でも保存を落とさない', async () => {
@@ -217,12 +217,12 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.viewportScrollState.currentPage = 11;
 		view.getByTestId('pdf-viewport').element().dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 120 }));
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92, undefined, undefined, false, undefined), { timeout: 1_500 });
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
 		mocks.scrollState.currentPage = 12;
 		mocks.viewportScrollState.currentPage = 12;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100, undefined, undefined, false, undefined), { timeout: 1_500 });
 	});
 
 	test('遅い復元エコーを保留したまま明示移動後のホイールでも新しい位置を守る', async () => {
@@ -249,19 +249,19 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.viewportScrollState.currentPage = 11;
 		view.getByTestId('pdf-viewport').element().dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 120 }));
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92, undefined, undefined, false, undefined), { timeout: 1_500 });
 
 		// The earlier, superseded restore echo arrives AFTER the wheel.
 		mocks.scrollState.currentPage = 10;
 		mocks.viewportScrollState.currentPage = 10;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		window.dispatchEvent(new Event('pagehide'));
-		expect(mocks.saveReadingInfo).not.toHaveBeenCalledWith(7, 10, 'reading', 83);
+		expect(mocks.saveReadingInfo.mock.calls.some(([bookId, position, status, progress]) => bookId === 7 && position === 10 && status === 'reading' && progress === 83)).toBe(false);
 
 		mocks.scrollState.currentPage = 12;
 		mocks.viewportScrollState.currentPage = 12;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100, undefined, undefined, false, undefined), { timeout: 1_500 });
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(2);
 	});
 
@@ -293,7 +293,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.scrollState.currentPage = 11;
 		mocks.viewportScrollState.currentPage = 11;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92, undefined, undefined, false, undefined), { timeout: 1_500 });
 	});
 
 
@@ -322,21 +322,21 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.scrollState.currentPage = 11;
 		mocks.viewportScrollState.currentPage = 11;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92, undefined, undefined, false, undefined), { timeout: 1_500 });
 		// A late restoration echo must not override the acknowledged page input.
 		mocks.scrollState.currentPage = 10;
 		mocks.viewportScrollState.currentPage = 10;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		// If the late restored page queued a stale save, pagehide would flush it now.
 		window.dispatchEvent(new Event('pagehide'));
-		expect(mocks.saveReadingInfo).not.toHaveBeenCalledWith(7, 10, 'reading', 83);
+		expect(mocks.saveReadingInfo.mock.calls.some(([bookId, position, status, progress]) => bookId === 7 && position === 10 && status === 'reading' && progress === 83)).toBe(false);
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
 
 		// Ignoring the restore echo must still allow subsequent native scrolling.
 		mocks.scrollState.currentPage = 12;
 		mocks.viewportScrollState.currentPage = 12;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100, undefined, undefined, false, undefined), { timeout: 1_500 });
 		expect(mocks.scrollToPage).not.toHaveBeenCalledWith(expect.objectContaining({ pageNumber: 12 }));
 	});
 
@@ -366,14 +366,14 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.scrollState.currentPage = 1;
 		mocks.viewportScrollState.currentPage = 1;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 1, 'reading', 8), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 1, 'reading', 8, undefined, undefined, false, undefined), { timeout: 1_500 });
 
 		mocks.scrollState.currentPage = 10;
 		mocks.viewportScrollState.currentPage = 10;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		// If the late restored page queued a stale save, pagehide would flush it now.
 		window.dispatchEvent(new Event('pagehide'));
-		expect(mocks.saveReadingInfo).not.toHaveBeenCalledWith(7, 10, 'reading', 83);
+		expect(mocks.saveReadingInfo.mock.calls.some(([bookId, position, status, progress]) => bookId === 7 && position === 10 && status === 'reading' && progress === 83)).toBe(false);
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
 	});
 
@@ -429,7 +429,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.scrollState.currentPage = 12;
 		mocks.viewportScrollState.currentPage = 12;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100));
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100, undefined, undefined, false, undefined));
 		// Page 12 has been requested through the real API but cannot overtake page 11.
 		expect(requests).toEqual(['PATCH 11']);
 		releaseOldSave();
@@ -458,7 +458,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.scrollState.currentPage = 11;
 		mocks.viewportScrollState.currentPage = 11;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92, undefined, undefined, false, undefined), { timeout: 1_500 });
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
 
 		mocks.scrollToPage.mockClear();
@@ -474,7 +474,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.scrollState.currentPage = 10;
 		mocks.viewportScrollState.currentPage = 10;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 10, 'reading', 83), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 10, 'reading', 83, undefined, undefined, false, undefined), { timeout: 1_500 });
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(2);
 	});
 
@@ -530,7 +530,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 		mocks.viewportScrollState.currentPage = 3;
 		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 3, 'reading', 60), { timeout: 1_500 });
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 3, 'reading', 60, undefined, undefined, false, undefined), { timeout: 1_500 });
 		expect(mocks.scrollToPage).not.toHaveBeenCalledWith(expect.objectContaining({ pageNumber: 3 }));
 	});
 

@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { auth } from '../../lib/auth.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
-import { hasReadingSessionUserMismatch, MAX_CURRENT_POSITION_LENGTH, normalizeProgressPercentage, normalizeReadStatus, persistReadingInfo, READING_SESSION_USER_HEADER, toReadingInfoResponse, toReadingProgress } from './readingProgress.js';
+import { hasReadingSessionUserMismatch, MAX_CURRENT_POSITION_LENGTH, normalizeProgressPercentage, normalizeReadStatus, parseReadingSaveSequence, persistReadingInfo, READING_SESSION_USER_HEADER, StaleReadingInfoError, toReadingInfoResponse, toReadingProgress } from './readingProgress.js';
 
 const app = new Hono<PrismaVariables>();
 type BooksContext = Context<PrismaVariables>;
@@ -180,7 +180,7 @@ app.get('/:bookId/reading-info', async (c) => {
 		const readingInfo = await result.prisma.readingInfo.findUnique({
 			where: { userId_bookId: { userId: result.userId, bookId } },
 		});
-		return c.json(toReadingInfoResponse(bookId, readingInfo));
+		return c.json(toReadingInfoResponse(bookId, readingInfo, true));
 	} catch (error) {
 		console.error(error);
 		return c.json({ error: 'Failed to fetch reading info' }, 500);
@@ -204,7 +204,7 @@ app.patch('/:bookId/reading-info', async (c) => {
 			return jsonError(c, 400, 'Request body must be a JSON object', 'INVALID_REQUEST');
 		}
 
-		const input = body as { currentPage?: unknown; currentPosition?: unknown; progressPercentage?: unknown; readStatus?: unknown };
+		const input = body as { currentPage?: unknown; currentPosition?: unknown; progressPercentage?: unknown; readStatus?: unknown; saveSequence?: unknown };
 		const hasPage = input.currentPage !== undefined;
 		const hasPosition = input.currentPosition !== undefined;
 		if (hasPage === hasPosition) {
@@ -234,6 +234,10 @@ app.patch('/:bookId/reading-info', async (c) => {
 		}
 
 		const readStatus: 'reading' | 'completed' = requestedReadStatus;
+		const saveSequence = parseReadingSaveSequence(input.saveSequence);
+		if (saveSequence === null) {
+			return jsonError(c, 400, 'saveSequence must be a safe non-negative integer', 'INVALID_SAVE_SEQUENCE');
+		}
 		const persistedProgress = readStatus === 'completed'
 			? 100
 			: hasProgressPercentage
@@ -246,9 +250,13 @@ app.patch('/:bookId/reading-info', async (c) => {
 			currentPosition,
 			readStatus,
 			progressPercentage: persistedProgress,
+			saveSequence,
 		});
 		return c.json(toReadingInfoResponse(bookId, readingInfo));
 	} catch (error) {
+		if (error instanceof StaleReadingInfoError) {
+			return jsonError(c, 409, error.message, error.code);
+		}
 		console.error(error);
 		return c.json({ error: 'Failed to save reading info' }, 500);
 	}

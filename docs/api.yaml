@@ -155,6 +155,7 @@ paths:
       description: |
         currentPositionはPDFではページ番号文字列、EPUBではCFIを保持できる。
         numeric currentPositionの場合は互換用currentPageにも復元する。
+        saveSequenceは現在ユーザー・書籍行のサーバー管理CAS版であり、JSON numberの丸めを避けるため10進文字列で返す。
         progressPercentageはIssue #90のowner-requested exceptionとして、現在ユーザーの
         ReadingInfoに保存したreader計測スナップショットから返す。未読は0、読了は100、
         読書中で有効なreader計測値がない場合はnull。X-BeLib-User-Idは互換用の任意の
@@ -166,7 +167,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ReadingInfo'
+                $ref: '#/components/schemas/ReadingInfoGet'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -188,6 +189,7 @@ paths:
         現在のCookie sessionと一致しない保存は拒否する。hintの照合は書籍の存在と
         RoleBookPermissionの確認後に行い、hintを省略した既存callerも受け入れる。
         readStatusを省略した場合はreading。明示値はreadingまたはcompleted。
+        saveSequenceを指定した保存がSTALE_READING_SAVEで409になった場合、現在ユーザーのGETを読み直し、返された版より1つ大きい版で同じ最新保留payloadを再送できる。これはサーバー版のCAS順序を示すが、複数端末の実時間順序を保証しない。
       requestBody:
         required: true
         content:
@@ -212,7 +214,7 @@ paths:
         '404':
           $ref: '#/components/responses/BookNotFound'
         '409':
-          $ref: '#/components/responses/ReadingSessionMismatch'
+          $ref: '#/components/responses/ReadingSaveConflict'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -469,6 +471,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    ReadingSaveConflict:
+      description: The request's expected authenticated user does not match the Cookie session, or the supplied reading save sequence is stale. For STALE_READING_SAVE, read the authenticated reading-info GET and retry the still-current payload with a strictly higher decimal-string sequence; an identity mismatch must not be retried.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
     FileTooLarge:
       description: File exceeds the 200MB limit
       content:
@@ -596,6 +604,16 @@ components:
         readStatus:
           type: string
           enum: [unread, reading, completed]
+        saveSequence:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)$'
+          description: Authoritative per-user/book CAS version as a decimal string. It fits PostgreSQL BIGINT; clients must not coerce it to a JavaScript number.
+
+    ReadingInfoGet:
+      allOf:
+        - $ref: '#/components/schemas/ReadingInfo'
+        - type: object
+          required: [saveSequence]
 
     PdfReadingInfoUpdateRequest:
       type: object
@@ -614,6 +632,15 @@ components:
           type: string
           enum: [reading, completed]
           default: reading
+        saveSequence:
+          description: Optional client CAS version. The server accepts legacy safe JSON integers, but new clients should send the decimal-string form.
+          oneOf:
+            - type: string
+              pattern: '^[0-9]+$'
+              description: Decimal string from 0 through 9223372036854775807 inclusive; leading zeroes are accepted.
+            - type: integer
+              minimum: 0
+              maximum: 9007199254740991
 
     EpubReadingInfoUpdateRequest:
       type: object
@@ -634,6 +661,15 @@ components:
           type: string
           enum: [reading, completed]
           default: reading
+        saveSequence:
+          description: Optional client CAS version. The server accepts legacy safe JSON integers, but new clients should send the decimal-string form.
+          oneOf:
+            - type: string
+              pattern: '^[0-9]+$'
+              description: Decimal string from 0 through 9223372036854775807 inclusive; leading zeroes are accepted.
+            - type: integer
+              minimum: 0
+              maximum: 9007199254740991
 
     AdminBookCreateRequest:
       type: object

@@ -321,7 +321,12 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	await expect(pdfFooter.getByRole('button', { name: '前のページへ', exact: true })).toBeEnabled();
 	await expect(pdfFooter.getByRole('button', { name: '次のページへ', exact: true })).toBeDisabled();
 	const savedResponse = await saveResponse;
-	expect(savedResponse.request().postDataJSON()).toEqual({ currentPage: 2, readStatus: 'completed', progressPercentage: 100 });
+	expect(savedResponse.request().postDataJSON()).toEqual({
+		currentPage: 2,
+		readStatus: 'completed',
+		progressPercentage: 100,
+		saveSequence: expect.stringMatching(/^[1-9]\d*$/),
+	});
 	expect(savedResponse.status()).toBe(200);
 	expect(await savedResponse.json()).toMatchObject({
 		bookId: metadata.pdfBookId,

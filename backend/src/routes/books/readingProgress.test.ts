@@ -1,5 +1,10 @@
 import { describe, expect, test, vi } from 'vitest';
-import { MAX_CURRENT_POSITION_LENGTH, persistReadingInfo, toReadingProgress } from './readingProgress.js';
+import {
+	MAX_CURRENT_POSITION_LENGTH,
+	persistReadingInfo,
+	StaleReadingInfoError,
+	toReadingProgress,
+} from './readingProgress.js';
 
 function createPersistence() {
 	return {
@@ -53,7 +58,7 @@ describe('persistReadingInfo', () => {
 
 		expect(cfi).toHaveLength(333);
 		expect(prisma.readingInfo.create).toHaveBeenCalledWith({
-			data: { userId: 7, bookId: 1, currentPosition: cfi, readStatus: 'reading' },
+			data: { userId: 7, bookId: 1, currentPosition: cfi, readStatus: 'reading', saveSequence: 0n },
 		});
 		expect(saved.currentPosition).toBe(cfi);
 	});
@@ -84,12 +89,12 @@ describe('persistReadingInfo', () => {
 		})).resolves.toEqual({ currentPosition: '3', progressPercentage: 100, readStatus: 'completed' });
 
 		expect(persistence.readingInfo.updateMany).toHaveBeenNthCalledWith(1, {
-			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' } },
-			data: { currentPosition: '3', readStatus: 'reading', progressPercentage: 25 },
+			where: { userId: 7, bookId: 1, readStatus: { not: 'completed' }, saveSequence: { equals: 0n } },
+			data: { currentPosition: '3', readStatus: 'reading', progressPercentage: 25, saveSequence: 0n },
 		});
 		expect(persistence.readingInfo.updateMany).toHaveBeenNthCalledWith(2, {
-			where: { userId: 7, bookId: 1, readStatus: 'completed' },
-			data: { currentPosition: '3', readStatus: 'completed', progressPercentage: 100 },
+			where: { userId: 7, bookId: 1, readStatus: 'completed', saveSequence: { equals: 0n } },
+			data: { currentPosition: '3', readStatus: 'completed', progressPercentage: 100, saveSequence: 0n },
 		});
 		expect(persistence.readingInfo.updateMany).toHaveBeenCalledTimes(2);
 		expect(persistence.readingInfo.update).not.toHaveBeenCalled();
@@ -116,5 +121,122 @@ describe('persistReadingInfo', () => {
 
 		expect(persistence.readingInfo.updateMany).toHaveBeenCalledTimes(2);
 		expect(persistence.readingInfo.create).toHaveBeenCalledTimes(1);
+	});
+
+	test('rejects a maximum sequence on an empty record without creating a poisoned row', async () => {
+		const persistence = createPersistence();
+		persistence.readingInfo.updateMany.mockResolvedValue({ count: 0 });
+		persistence.readingInfo.findUnique.mockResolvedValue(null);
+
+		await expect(persistReadingInfo(persistence as never, {
+			userId: 7,
+			bookId: 1,
+			currentPosition: '1',
+			readStatus: 'reading',
+			progressPercentage: 1,
+			saveSequence: 9223372036854775807n,
+		})).rejects.toBeInstanceOf(StaleReadingInfoError);
+
+		expect(persistence.readingInfo.create).not.toHaveBeenCalled();
+	});
+
+	test('rejects a maximum sequence against a low-sequence row without changing it', async () => {
+		const persistence = createPersistence();
+		persistence.readingInfo.updateMany.mockResolvedValue({ count: 0 });
+		persistence.readingInfo.findUnique.mockResolvedValue({
+			currentPosition: '1',
+			progressPercentage: 1,
+			readStatus: 'reading',
+			saveSequence: 0n,
+		});
+
+		await expect(persistReadingInfo(persistence as never, {
+			userId: 7,
+			bookId: 1,
+			currentPosition: '2',
+			readStatus: 'reading',
+			progressPercentage: 2,
+			saveSequence: 9223372036854775807n,
+		})).rejects.toBeInstanceOf(StaleReadingInfoError);
+
+		expect(persistence.readingInfo.create).not.toHaveBeenCalled();
+	});
+
+	test('accepts incremental versions and rejects a concurrent stale retry', async () => {
+		const persistence = createPersistence();
+		const firstSaved = { currentPosition: '1', progressPercentage: 1, readStatus: 'reading', saveSequence: 1n };
+		const secondSaved = { currentPosition: '2', progressPercentage: 2, readStatus: 'reading', saveSequence: 2n };
+		persistence.readingInfo.updateMany
+			.mockResolvedValueOnce({ count: 0 })
+			.mockResolvedValueOnce({ count: 1 })
+			.mockResolvedValueOnce({ count: 0 });
+		persistence.readingInfo.findUnique
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(secondSaved)
+			.mockResolvedValueOnce(secondSaved);
+		persistence.readingInfo.create.mockResolvedValue(firstSaved);
+
+		await expect(persistReadingInfo(persistence as never, {
+			userId: 7,
+			bookId: 1,
+			currentPosition: '1',
+			readStatus: 'reading',
+			progressPercentage: 1,
+			saveSequence: 1n,
+		})).resolves.toEqual(firstSaved);
+
+		await expect(persistReadingInfo(persistence as never, {
+			userId: 7,
+			bookId: 1,
+			currentPosition: '2',
+			readStatus: 'reading',
+			progressPercentage: 2,
+			saveSequence: 2n,
+		})).resolves.toEqual(secondSaved);
+
+		await expect(persistReadingInfo(persistence as never, {
+			userId: 7,
+			bookId: 1,
+			currentPosition: '2',
+			readStatus: 'reading',
+			progressPercentage: 2,
+			saveSequence: 2n,
+		})).rejects.toBeInstanceOf(StaleReadingInfoError);
+
+		expect(persistence.readingInfo.updateMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
+			where: expect.objectContaining({ saveSequence: { gte: 0n, lt: 1n } }),
+		}));
+		expect(persistence.readingInfo.updateMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+			where: expect.objectContaining({ saveSequence: { gte: 0n, lt: 2n } }),
+		}));
+		expect(persistence.readingInfo.updateMany).toHaveBeenNthCalledWith(3, expect.objectContaining({
+			where: expect.objectContaining({ saveSequence: { gte: 0n, lt: 2n } }),
+		}));
+	});
+
+	test('allows a newer reserved version to advance a sequence-zero row', async () => {
+		const persistence = createPersistence();
+		const saved = { currentPosition: '9', progressPercentage: 80, readStatus: 'reading', saveSequence: 2n };
+		persistence.readingInfo.updateMany.mockResolvedValue({ count: 1 });
+		persistence.readingInfo.findUnique.mockResolvedValue(saved);
+
+		await expect(persistReadingInfo(persistence as never, {
+			userId: 7,
+			bookId: 1,
+			currentPosition: '9',
+			readStatus: 'reading',
+			progressPercentage: 80,
+			saveSequence: 2n,
+		})).resolves.toEqual(saved);
+
+		expect(persistence.readingInfo.updateMany).toHaveBeenCalledWith({
+			where: {
+				userId: 7,
+				bookId: 1,
+				readStatus: { not: 'completed' },
+				saveSequence: { gte: 0n, lt: 2n },
+			},
+			data: { currentPosition: '9', readStatus: 'reading', progressPercentage: 80, saveSequence: 2n },
+		});
 	});
 });
