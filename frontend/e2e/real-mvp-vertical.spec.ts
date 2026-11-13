@@ -71,73 +71,99 @@ async function assertHomeProgress(page: Page, bookId: number, title: string, exp
 		page: number;
 		books: Array<{ id: number; title: string; progressPercentage: number | null }>;
 	};
-	const responses = new Map<number, Response>();
+	type CapturedListPage = {
+		requestedPage: number;
+		response: Response;
+		body?: ListPage;
+		bodyError?: unknown;
+	};
+	const responses = new Map<number, Array<Promise<CapturedListPage>>>();
 	const onResponse = (response: Response) => {
 		const url = new URL(response.url());
 		if (response.request().method() !== 'GET' || url.pathname !== '/api/v1/books') return;
 		if (url.searchParams.get('limit') !== '100' || !/^\d+$/.test(url.searchParams.get('page') ?? '')) return;
 		const requestedPage = Number(url.searchParams.get('page'));
-		responses.set(requestedPage, response);
+		const captured = response.json().then(
+			(body: unknown) => ({ requestedPage, response, body: body as ListPage }),
+			(bodyError: unknown) => ({ requestedPage, response, bodyError }),
+		);
+		const pageResponses = responses.get(requestedPage) ?? [];
+		pageResponses.push(captured);
+		responses.set(requestedPage, pageResponses);
 	};
 	page.on('response', onResponse);
-	if (navigation === 'reload') await page.reload();
-	else await page.goto('/');
-	await expect.poll(() => responses.has(1), { timeout: 30_000 }).toBe(true);
-	const firstUrl = new URL(responses.get(1)!.url());
-	expect(firstUrl.origin, 'Home shelf list must come from the configured local backend').toBe('http://localhost:3000');
-	expect(responses.get(1)!.status(), 'Books page 1 must return HTTP 200').toBe(200);
-	const firstBody = await responses.get(1)!.json() as ListPage;
-	expect(firstBody.page, 'Books response page must match its request').toBe(1);
-	const total = firstBody.total;
-	expect(total).toBeGreaterThan(0);
-	const expectedPages = Math.ceil(total / 100);
-	await expect.poll(() => responses.size, { timeout: 30_000 }).toBe(expectedPages);
-	page.off('response', onResponse);
-	const listPages = await Promise.all([...responses.entries()]
-		.sort(([a], [b]) => a - b)
-		.map(async ([requestedPage, response]) => {
-			const url = new URL(response.url());
-			expect(url.origin, `Books page ${requestedPage} must come from the configured local backend`).toBe('http://localhost:3000');
-			expect(response.status(), `Books page ${requestedPage} must return HTTP 200`).toBe(200);
-			if (requestedPage === 1) return firstBody;
-			const body = await response.json() as ListPage;
-			expect(body.page, 'Books response page must match its request').toBe(requestedPage);
-			return body;
-		}));
+	try {
+		if (navigation === 'reload') await page.reload();
+		else await page.goto('/');
+		await expect.poll(() => responses.has(1), { timeout: 30_000 }).toBe(true);
+		const firstPageResponses = responses.get(1)!;
+		const firstResponse = await firstPageResponses[0];
+		const firstUrl = new URL(firstResponse.response.url());
+		expect(firstUrl.origin, 'Home shelf list must come from the configured local backend').toBe('http://localhost:3000');
+		expect(firstResponse.response.status(), 'Books page 1 must return HTTP 200').toBe(200);
+		expect(firstResponse.bodyError, 'Books page 1 response must contain valid JSON').toBeUndefined();
+		expect(firstResponse.body, 'Books page 1 response body must be captured').toBeDefined();
+		const firstBody = firstResponse.body!;
+		expect(firstBody.page, 'Books response page must match its request').toBe(1);
+		const total = firstBody.total;
+		expect(total).toBeGreaterThan(0);
+		const expectedPages = Math.ceil(total / 100);
+		await expect.poll(() => responses.size, { timeout: 30_000 }).toBe(expectedPages);
+		page.off('response', onResponse);
 
-	listPages.sort((a, b) => a.page - b.page);
-	expect(listPages.map((result) => result.page)).toEqual(Array.from({ length: expectedPages }, (_, index) => index + 1));
-	expect(listPages.every((result) => result.total === total)).toBe(true);
-	const books = listPages.flatMap((result) => result.books);
-	expect(books).toHaveLength(total);
-	expect(new Set(books.map((book) => book.id)).size, 'Books list must not contain duplicate IDs across API pages').toBe(total);
-	const savedBook = books.find((book) => book.id === bookId);
-	expect(savedBook, `${title} must be present in the authenticated Home list`).toBeDefined();
-	expect(savedBook!.title).toBe(title);
-	if (expected === 'unmeasured') {
-		expect(savedBook!.progressPercentage, `${title} must remain server-reported as unmeasured`).toBeNull();
-	} else {
-		expect(typeof savedBook!.progressPercentage).toBe('number');
-		expect(Number.isFinite(savedBook!.progressPercentage)).toBe(true);
-	}
-	const measured = books
-		.map((book) => book.progressPercentage)
-		.filter((progress): progress is number => typeof progress === 'number' && Number.isFinite(progress));
-	const averageLabel = measured.length === 0
-		? `未計測（計測済み0/${total}冊）`
-		: `${Math.round(measured.reduce((sum, progress) => sum + progress, 0) / measured.length)}%（計測済み${measured.length}/${total}冊）`;
+		const capturedPages = await Promise.all([...responses.entries()]
+			.flatMap(([requestedPage, captures]) => captures.map(async (capture) => {
+				const result = await capture;
+				const url = new URL(result.response.url());
+				expect(url.origin, `Books page ${requestedPage} must come from the configured local backend`).toBe('http://localhost:3000');
+				expect(result.response.status(), `Books page ${requestedPage} must return HTTP 200`).toBe(200);
+				expect(result.bodyError, `Books page ${requestedPage} response must contain valid JSON`).toBeUndefined();
+				expect(result.body, `Books page ${requestedPage} response body must be captured`).toBeDefined();
+				expect(result.body!.page, 'Books response page must match its request').toBe(requestedPage);
+				expect(result.body!.total, `Books page ${requestedPage} must report the same total`).toBe(firstBody.total);
+				return result;
+			})));
+		const latestResponseByPage = new Map<number, CapturedListPage>();
+		for (const captured of capturedPages) latestResponseByPage.set(captured.requestedPage, captured);
+		const listPages = [...latestResponseByPage.entries()]
+			.sort(([a], [b]) => a - b)
+			.map(([, result]) => result.body!);
 
-	await expect(page.getByText(averageLabel, { exact: true }).first()).toBeVisible();
-	await page.getByRole('textbox', { name: '書籍を検索' }).fill(title);
-	const row = page.getByRole('link', { name: `${title}を読む` });
-	if (expected === 'unmeasured') {
-		await expect(row.getByText('未計測', { exact: true })).toBeVisible();
-		await expect(row.getByRole('progressbar')).toHaveCount(0);
-	} else {
-		const savedProgress = savedBook!.progressPercentage as number;
-		await expect(row.getByText(`${Math.round(savedProgress)}%`, { exact: true })).toBeVisible();
-		await expect(row.getByRole('progressbar', { name: `${title} の読書進捗` }))
-			.toHaveAttribute('aria-valuenow', String(Math.round(savedProgress)));
+		expect(listPages.map((result) => result.page)).toEqual(Array.from({ length: expectedPages }, (_, index) => index + 1));
+		expect(listPages.every((result) => result.total === total)).toBe(true);
+		const books = listPages.flatMap((result) => result.books);
+		expect(books).toHaveLength(total);
+		expect(new Set(books.map((book) => book.id)).size, 'Books list must not contain duplicate IDs across API pages').toBe(total);
+		const savedBook = books.find((book) => book.id === bookId);
+		expect(savedBook, `${title} must be present in the authenticated Home list`).toBeDefined();
+		expect(savedBook!.title).toBe(title);
+		if (expected === 'unmeasured') {
+			expect(savedBook!.progressPercentage, `${title} must remain server-reported as unmeasured`).toBeNull();
+		} else {
+			expect(typeof savedBook!.progressPercentage).toBe('number');
+			expect(Number.isFinite(savedBook!.progressPercentage)).toBe(true);
+		}
+		const measured = books
+			.map((book) => book.progressPercentage)
+			.filter((progress): progress is number => typeof progress === 'number' && Number.isFinite(progress));
+		const averageLabel = measured.length === 0
+			? `未計測（計測済み0/${total}冊）`
+			: `${Math.round(measured.reduce((sum, progress) => sum + progress, 0) / measured.length)}%（計測済み${measured.length}/${total}冊）`;
+
+		await expect(page.getByText(averageLabel, { exact: true }).first()).toBeVisible();
+		await page.getByRole('textbox', { name: '書籍を検索' }).fill(title);
+		const row = page.getByRole('link', { name: `${title}を読む` });
+		if (expected === 'unmeasured') {
+			await expect(row.getByText('未計測', { exact: true })).toBeVisible();
+			await expect(row.getByRole('progressbar')).toHaveCount(0);
+		} else {
+			const savedProgress = savedBook!.progressPercentage as number;
+			await expect(row.getByText(`${Math.round(savedProgress)}%`, { exact: true })).toBeVisible();
+			await expect(row.getByRole('progressbar', { name: `${title} の読書進捗` }))
+				.toHaveAttribute('aria-valuenow', String(Math.round(savedProgress)));
+		}
+	} finally {
+		page.off('response', onResponse);
 	}
 }
 
@@ -183,6 +209,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	await page.setViewportSize({ width: 393, height: 851 });
 	await login(page, metadata.demoEmail);
 	const readingInfoPath = `/api/v1/books/${metadata.pdfBookId}/reading-info`;
+	const casReadingInfoPath = `${readingInfoPath}/cas-v1`;
 	const prepared = await patchReadingInfo(page, metadata.pdfBookId, { currentPage: 2, readStatus: 'completed' });
 	expect(prepared.status).toBe(200);
 	expect(prepared.body).toMatchObject({
@@ -233,7 +260,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	});
 	await expect.poll(shown).toBe(2);
 	await expect(page.locator('[data-pdf-page="2"] img')).toBeVisible();
-	const pageOneSaveResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
+	const pageOneSaveResponse = page.waitForResponse((response) => new URL(response.url()).pathname === casReadingInfoPath
 		&& response.request().method() === 'PATCH'
 		&& response.request().postDataJSON()?.currentPage === 1
 		&& response.request().postDataJSON()?.readStatus === 'reading');
@@ -291,7 +318,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	}
 	await expect(page.getByRole('dialog')).toBeHidden();
 
-	const saveResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
+	const saveResponse = page.waitForResponse((response) => new URL(response.url()).pathname === casReadingInfoPath
 		&& response.request().method() === 'PATCH'
 		&& response.request().postDataJSON()?.currentPage === 2
 		&& response.request().postDataJSON()?.readStatus === 'completed');
@@ -355,7 +382,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	}> = [];
 	let monitorResizePatches = false;
 	const monitorLatePatches = (request: Request) => {
-		if (!monitorResizePatches || request.method() !== 'PATCH' || !request.url().endsWith(readingInfoPath)) return;
+		if (!monitorResizePatches || request.method() !== 'PATCH' || new URL(request.url()).pathname !== casReadingInfoPath) return;
 		const body = request.postDataJSON() as { currentPage?: unknown; progressPercentage?: unknown; readStatus?: unknown };
 		latePatchRequests.push({ request, currentPage: body.currentPage, progressPercentage: body.progressPercentage, readStatus: body.readStatus });
 	};
@@ -460,6 +487,7 @@ test('demo user opens protected EPUB and persists/restores a CFI', async ({ page
 	});
 	await assertHomeProgress(page, metadata.epubBookId, metadata.epubTitle, 'unmeasured');
 	const readingInfoPath = `/api/v1/books/${metadata.epubBookId}/reading-info`;
+	const casReadingInfoPath = `${readingInfoPath}/cas-v1`;
 	const openReadingInfoResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
 		&& response.request().method() === 'GET');
 	const fileResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.epubBookId}/file`));
@@ -489,7 +517,7 @@ test('demo user opens protected EPUB and persists/restores a CFI', async ({ page
 	const epubBody = page.frameLocator('[data-publication-pane="primary"] iframe').first().locator('body');
 	const epubBounds = await epubBody.boundingBox();
 	expect(epubBounds).not.toBeNull();
-	const saveResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.epubBookId}/reading-info`)
+	const saveResponse = page.waitForResponse((response) => new URL(response.url()).pathname === casReadingInfoPath
 		&& response.request().method() === 'PATCH'
 		&& response.request().postDataJSON()?.readStatus === 'completed');
 	await epubBody.click({ position: { x: epubBounds!.width - 5, y: epubBounds!.height / 2 } });
