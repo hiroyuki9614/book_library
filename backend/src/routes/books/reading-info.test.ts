@@ -80,7 +80,7 @@ describe('reading-info API', () => {
 		const response = await app.request('/1/reading-info');
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 25, readStatus: 'reading', saveSequence: '0' });
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition: '3', currentPage: 3, progressPercentage: 25, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' });
 		expect(mocks.readingInfoFindUnique).toHaveBeenCalledWith({
 			where: { userId_bookId: { userId: 7, bookId: 1 } },
 		});
@@ -99,6 +99,7 @@ describe('reading-info API', () => {
 			progressPercentage: 50,
 			readStatus: 'reading',
 			saveSequence: '50',
+			readingSaveProtocol: 'cas-v1',
 		});
 	});
 
@@ -158,7 +159,7 @@ describe('reading-info API', () => {
 		const response = await app.request('/1/reading-info', { headers: READING_HEADERS });
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({ bookId: 1, currentPosition: null, currentPage: 1, progressPercentage: 0, readStatus: 'unread', saveSequence: '0' });
+		expect(await response.json()).toEqual({ bookId: 1, currentPosition: null, currentPage: 1, progressPercentage: 0, readStatus: 'unread', saveSequence: '0', readingSaveProtocol: 'cas-v1' });
 	});
 
 	test('PATCHはユーザーと書籍単位でcompletedを降格させずに更新する', async () => {

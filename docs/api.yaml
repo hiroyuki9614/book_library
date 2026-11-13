@@ -156,6 +156,8 @@ paths:
         currentPositionはPDFではページ番号文字列、EPUBではCFIを保持できる。
         numeric currentPositionの場合は互換用currentPageにも復元する。
         saveSequenceは現在ユーザー・書籍行のサーバー管理CAS版であり、JSON numberの丸めを避けるため10進文字列で返す。
+        readingSaveProtocolはCASを強制するbackendのGETプロトコルマーカーで、現在値はcas-v1。
+        新しいfrontendはこのマーカーを検証できないbackendへPATCHを送信しない。
         progressPercentageはIssue #90のowner-requested exceptionとして、現在ユーザーの
         ReadingInfoに保存したreader計測スナップショットから返す。未読は0、読了は100、
         読書中で有効なreader計測値がない場合はnull。X-BeLib-User-Idは互換用の任意の
@@ -472,7 +474,7 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     ReadingSaveConflict:
-      description: The request's expected authenticated user does not match the Cookie session, or expectedSaveSequence no longer matches the stored row. For STALE_READING_SAVE, the API refreshes the authoritative server base and the hook discards its held intent and sets stale conflict status; PATCH error handling does not replace the displayed reader position. Do not automatically retry or rebase the stale payload. An initial load or reload through fetchReadingInfo returns the authoritative position and clears a mismatched stale outbox entry; a later distinct reader action may save against the refreshed base. A lost acknowledgement may still result in a conflict.
+      description: The request's expected authenticated user does not match the Cookie session, or expectedSaveSequence no longer matches the stored row. READING_SESSION_MISMATCH is a terminal session-boundary result for the held intent; the frontend clears it and does not offer a retry. For STALE_READING_SAVE, the API refreshes the authoritative server base and the hook discards its held intent and sets stale conflict status; PATCH error handling does not replace the displayed reader position. Do not automatically retry or rebase the stale payload. An initial load or reload through fetchReadingInfo returns the authoritative position and clears a mismatched stale outbox entry; a later distinct reader action may save against the refreshed base. A lost acknowledgement may still result in a conflict.
       content:
         application/json:
           schema:
@@ -613,7 +615,12 @@ components:
       allOf:
         - $ref: '#/components/schemas/ReadingInfo'
         - type: object
-          required: [saveSequence]
+          required: [saveSequence, readingSaveProtocol]
+          properties:
+            readingSaveProtocol:
+              type: string
+              enum: [cas-v1]
+              description: Backend-first rollout marker. A client must verify this marker before sending a versioned PATCH.
 
     PdfReadingInfoUpdateRequest:
       type: object

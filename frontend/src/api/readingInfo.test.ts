@@ -90,7 +90,7 @@ describe('reading-info API client', () => {
 	});
 
 	function expectVersionedRequestBody(expected: Record<string, unknown>) {
-		const request = vi.mocked(fetch).mock.calls[0]?.[1];
+		const request = vi.mocked(fetch).mock.calls.find(([, options]) => options?.method === 'PATCH')?.[1];
 		const body = JSON.parse(String(request?.body)) as Record<string, unknown>;
 		expect(body).toEqual({ ...expected, saveSequence: expect.any(String), expectedSaveSequence: expect.any(String) });
 		expect(BigInt(String(body.saveSequence))).toBeGreaterThan(BigInt(String(body.expectedSaveSequence)));
@@ -111,19 +111,26 @@ describe('reading-info API client', () => {
 			},
 		} as IDBOpenDBRequest;
 		const openSpy = vi.spyOn(indexedDB, 'open').mockReturnValueOnce(failedRequest);
-		const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-			new Response(JSON.stringify({ bookId, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading', saveSequence: '1' }), {
+		const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => new Response(JSON.stringify({
+			bookId,
+			currentPosition: '2',
+			currentPage: 2,
+			progressPercentage: 20,
+			readStatus: 'reading',
+			saveSequence: '1',
+			...(options?.method === 'PATCH' ? {} : { readingSaveProtocol: 'cas-v1' }),
+		}), {
 				headers: { 'Content-Type': 'application/json' },
-			}),
-		);
+		}));
 
 		await expect(saveReadingInfo(bookId, 2, 'reading', 20, userId)).rejects.toThrow('Temporary IndexedDB failure');
 		expect(fetchMock).not.toHaveBeenCalled();
 
 		openSpy.mockRestore();
 		await expect(saveReadingInfo(bookId, 2, 'reading', 20, userId)).resolves.toMatchObject({ currentPage: 2 });
-		expect(fetchMock).toHaveBeenCalledTimes(1);
-		expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ saveSequence: '1' });
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		const patchRequest = fetchMock.mock.calls.find(([, options]) => options?.method === 'PATCH')?.[1];
+		expect(JSON.parse(String(patchRequest?.body))).toMatchObject({ saveSequence: '1' });
 		await expect(reserveReadingSave(bookId, 3, 'reading', 30, userId)).resolves.toBe('2');
 		await expect(reserveReadingSave(bookId, 3, 'reading', 30, userId + 1)).resolves.toBe('1');
 		await expect(reserveReadingSave(bookId + 1, 3, 'reading', 30, userId)).resolves.toBe('1');
@@ -145,13 +152,13 @@ describe('reading-info API client', () => {
 	test('保存済みの読書位置を取得する', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-			new Response(JSON.stringify({ bookId: 7, currentPosition: '3', currentPage: 3, progressPercentage: 30, readStatus: 'reading' }), {
+			new Response(JSON.stringify({ bookId: 7, currentPosition: '3', currentPage: 3, progressPercentage: 30, readStatus: 'reading', readingSaveProtocol: 'cas-v1' }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' },
 			}),
 		);
 
-		await expect(fetchReadingInfo(7, 7)).resolves.toEqual({ bookId: 7, currentPosition: '3', currentPage: 3, progressPercentage: 30, readStatus: 'reading', saveSequence: '0' });
+		await expect(fetchReadingInfo(7, 7)).resolves.toEqual({ bookId: 7, currentPosition: '3', currentPage: 3, progressPercentage: 30, readStatus: 'reading', readingSaveProtocol: 'cas-v1', saveSequence: '0' });
 		expect(fetch).toHaveBeenCalledWith(
 			'http://localhost:3000/api/v1/books/7/reading-info',
 			expect.objectContaining({
@@ -161,15 +168,132 @@ describe('reading-info API client', () => {
 		);
 	});
 
+	test('CAS対応マーカーのない旧backendではoutbox replayとアカウント切替後の保存をPATCHしない', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		const bookId = 9410;
+		const oldUserId = 9411;
+		const newUserId = 9412;
+		await seedReadingSaveBaseline(bookId, oldUserId, '4');
+		await seedReadingSaveBaseline(bookId, newUserId, '4');
+		await reserveReadingSave(bookId, 8, 'reading', 80, oldUserId);
+
+		const methods: string[] = [];
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			methods.push(options?.method ?? 'GET');
+			return new Response(JSON.stringify({ bookId, currentPosition: '4', currentPage: 4, progressPercentage: 40, readStatus: 'reading', saveSequence: '4' }), {
+				headers: { 'Content-Type': 'application/json' },
+			});
+		});
+
+		await expect(fetchReadingInfo(bookId, oldUserId)).rejects.toMatchObject({ code: 'READING_SAVE_PROTOCOL_UNSUPPORTED' });
+		await expect(readReadingSaveRecord('outbox', `user:${oldUserId}:book:${bookId}`)).resolves.toMatchObject({ position: 8 });
+
+		await invalidateReadingSaves();
+		await expect(saveReadingInfo(bookId, 9, 'reading', 90, newUserId)).rejects.toMatchObject({ code: 'READING_SAVE_PROTOCOL_UNSUPPORTED' });
+		expect(methods).toEqual(['GET', 'GET']);
+		expect(methods.filter((method) => method === 'PATCH')).toEqual([]);
+		await expect(readReadingSaveRecord('outbox', `user:${oldUserId}:book:${bookId}`)).resolves.toMatchObject({ position: 8 });
+	});
+
+	test('不正なversion-3 outboxは競合時に消去され、旧payloadを送らず新しい保存から復旧する', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		const bookId = 9413;
+		const userId = 9414;
+		const scopeKey = `user:${userId}:book:${bookId}`;
+		await seedReadingSaveBaseline(bookId, userId, '0');
+		await writeReadingSaveRecord('outbox', {
+			scopeKey,
+			bookId,
+			userId,
+			position: 8,
+			readStatus: 'reading',
+			progressPercentage: 80,
+			hasProgressPercentage: true,
+			saveSequence: 'not-a-sequence',
+			sequenceVersion: 3,
+			expectedSaveSequence: '0',
+		});
+
+		const requests: Array<{ method: string; page?: number }> = [];
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			const method = options?.method ?? 'GET';
+			if (method === 'PATCH') {
+				const body = JSON.parse(String(options?.body)) as { currentPage: number; saveSequence: string };
+				requests.push({ method, page: body.currentPage });
+				return new Response(JSON.stringify({ bookId, currentPosition: String(body.currentPage), currentPage: body.currentPage, progressPercentage: body.currentPage * 10, readStatus: 'reading', saveSequence: body.saveSequence }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+			requests.push({ method });
+			return new Response(JSON.stringify({ bookId, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
+				headers: { 'Content-Type': 'application/json' },
+			});
+		});
+
+		await expect(fetchReadingInfo(bookId, userId)).resolves.toMatchObject({ currentPage: 1, saveConflict: true });
+		await expect(readReadingSaveRecord('outbox', scopeKey)).resolves.toBeUndefined();
+		await expect(saveReadingInfo(bookId, 9, 'reading', 90, userId)).resolves.toMatchObject({ currentPage: 9 });
+		expect(requests).toEqual([{ method: 'GET' }, { method: 'PATCH', page: 9 }]);
+		await expect(readReadingSaveRecord('outbox', scopeKey)).resolves.toBeUndefined();
+	});
+
+	test('malformed outboxは別アカウントへ流れず、元アカウントの新しい操作だけが復旧する', async () => {
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		const bookId = 9415;
+		const oldUserId = 9416;
+		const newUserId = 9417;
+		const oldScopeKey = `user:${oldUserId}:book:${bookId}`;
+		await seedReadingSaveBaseline(bookId, oldUserId, '0');
+		await seedReadingSaveBaseline(bookId, newUserId, '0');
+		await writeReadingSaveRecord('outbox', {
+			scopeKey: oldScopeKey,
+			bookId,
+			userId: oldUserId,
+			position: 7,
+			readStatus: 'reading',
+			progressPercentage: 70,
+			hasProgressPercentage: true,
+			saveSequence: 'invalid',
+			sequenceVersion: 3,
+			expectedSaveSequence: '0',
+		});
+
+		const patches: Array<{ userId: string | null; page: number }> = [];
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			if (options?.method === 'PATCH') {
+				const body = JSON.parse(String(options.body)) as { currentPage: number; saveSequence: string };
+				patches.push({ userId: new Headers(options.headers).get('X-BeLib-User-Id'), page: body.currentPage });
+				return new Response(JSON.stringify({ bookId, currentPosition: String(body.currentPage), currentPage: body.currentPage, progressPercentage: 90, readStatus: 'reading', saveSequence: body.saveSequence }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+			return new Response(JSON.stringify({ bookId, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
+				headers: { 'Content-Type': 'application/json' },
+			});
+		});
+
+		await expect(fetchReadingInfo(bookId, newUserId)).resolves.toMatchObject({ currentPage: 1 });
+		await expect(readReadingSaveRecord('outbox', oldScopeKey)).resolves.toMatchObject({ position: 7 });
+		await expect(fetchReadingInfo(bookId, oldUserId)).resolves.toMatchObject({ currentPage: 1, saveConflict: true });
+		await expect(readReadingSaveRecord('outbox', oldScopeKey)).resolves.toBeUndefined();
+		await expect(saveReadingInfo(bookId, 9, 'reading', 90, oldUserId)).resolves.toMatchObject({ currentPage: 9 });
+		expect(patches).toEqual([{ userId: String(oldUserId), page: 9 }]);
+	});
+
 	test('PDF現在ページとcompleted状態をPATCHで保存する', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		await seedReadingSaveBaseline(7, 7);
-		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+		vi.spyOn(globalThis, 'fetch')
+			.mockResolvedValueOnce(new Response(JSON.stringify({ bookId: 7, currentPosition: '3', currentPage: 3, progressPercentage: 0, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
+				status: 200,
+				headers: { 'Content-Type': 'application/json' },
+			}))
+			.mockResolvedValueOnce(
 			new Response(JSON.stringify({ bookId: 7, currentPosition: '4', currentPage: 4, progressPercentage: 100, readStatus: 'completed', saveSequence: '1' }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' },
 			}),
-		);
+			);
 
 		await expect(saveReadingInfo(7, 4, 'completed', undefined, 7)).resolves.toEqual({
 			bookId: 7,
@@ -197,12 +321,17 @@ describe('reading-info API client', () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		await seedReadingSaveBaseline(7, 7);
 		const cfi = 'epubcfi(/6/2!/4/1:0)';
-		vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-			new Response(JSON.stringify({ bookId: 7, currentPosition: cfi, currentPage: 1, progressPercentage: 30, readStatus: 'reading', saveSequence: '1' }), {
+		vi.spyOn(globalThis, 'fetch')
+			.mockResolvedValueOnce(new Response(JSON.stringify({ bookId: 7, currentPosition: cfi, currentPage: 1, progressPercentage: 30, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' },
-			}),
-		);
+			}))
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ bookId: 7, currentPosition: cfi, currentPage: 1, progressPercentage: 30, readStatus: 'reading', saveSequence: '1' }), {
+					status: 200,
+					headers: { 'Content-Type': 'application/json' },
+				}),
+			);
 
 		await saveReadingInfo(7, cfi, 'reading', 30, 7);
 		expect(fetch).toHaveBeenCalledWith(
@@ -246,6 +375,11 @@ describe('reading-info API client', () => {
 		const firstFinished = new Promise<void>((resolve) => { release = resolve; });
 		const calls: string[] = [];
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			if (options?.method !== 'PATCH') {
+				return new Response(JSON.stringify({ bookId: 99, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
 			const body = JSON.parse(String(options?.body)) as { currentPage: number };
 			calls.push(`PATCH ${body.currentPage}`);
 			if (body.currentPage === 2) await firstFinished;
@@ -321,6 +455,10 @@ describe('reading-info API client', () => {
 		const secondMayConflict = new Promise<void>((resolve) => { releaseSecondConflict = resolve; });
 		const bodies: Array<Record<string, unknown>> = [];
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			if (options?.method !== 'PATCH') {
+				const acknowledged = bodies.length > 0;
+				return new Response(JSON.stringify({ bookId, currentPosition: acknowledged ? '2' : '1', currentPage: acknowledged ? 2 : 1, progressPercentage: acknowledged ? 20 : 0, readStatus: 'reading', saveSequence: acknowledged ? '1' : '0', readingSaveProtocol: 'cas-v1' }), { headers: { 'Content-Type': 'application/json' } });
+			}
 			if (options?.method === 'PATCH') {
 				const body = JSON.parse(String(options.body)) as Record<string, unknown>;
 				bodies.push(body);
@@ -371,6 +509,10 @@ describe('reading-info API client', () => {
 		const bodies: Array<Record<string, unknown>> = [];
 		const requestMethods: string[] = [];
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			if (options?.method !== 'PATCH') {
+				requestMethods.push('GET');
+				return new Response(JSON.stringify({ bookId, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), { headers: { 'Content-Type': 'application/json' } });
+			}
 			if (options?.method === 'PATCH') {
 				const body = JSON.parse(String(options.body)) as Record<string, unknown>;
 				bodies.push(body);
@@ -383,8 +525,7 @@ describe('reading-info API client', () => {
 				await secondMayConflict;
 				return new Response(JSON.stringify({ code: 'STALE_READING_SAVE' }), { status: 409 });
 			}
-			requestMethods.push('GET');
-			return new Response(JSON.stringify({ bookId, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading', saveSequence: '1' }), { headers: { 'Content-Type': 'application/json' } });
+			return new Response(JSON.stringify({ bookId, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading', saveSequence: '1', readingSaveProtocol: 'cas-v1' }), { headers: { 'Content-Type': 'application/json' } });
 		});
 
 		const first = saveReadingInfo(bookId, 2, 'reading', 20, userId);
@@ -399,7 +540,7 @@ describe('reading-info API client', () => {
 		expect(bodies).toHaveLength(2);
 		expect(bodies[0]).toMatchObject({ saveSequence: '1', expectedSaveSequence: '0' });
 		expect(bodies[1]).toMatchObject({ saveSequence: '2', expectedSaveSequence: '0' });
-		expect(requestMethods).toEqual(['GET']);
+		expect(requestMethods).toEqual(['GET', 'GET']);
 		await expect(readReadingSaveRecord('outbox', `user:${userId}:book:${bookId}`)).resolves.toBeUndefined();
 	});
 
@@ -433,7 +574,7 @@ describe('reading-info API client', () => {
 				});
 			}
 			calls.push('GET');
-			return new Response(JSON.stringify({ bookId: 9307, currentPosition: '1', currentPage: 1, progressPercentage: 10, readStatus: 'reading', saveSequence: '0' }), {
+			return new Response(JSON.stringify({ bookId: 9307, currentPosition: '1', currentPage: 1, progressPercentage: 10, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		});
@@ -467,7 +608,7 @@ describe('reading-info API client', () => {
 					headers: { 'Content-Type': 'application/json' },
 				});
 			}
-			return new Response(JSON.stringify({ bookId, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'unread', saveSequence: '0' }), {
+			return new Response(JSON.stringify({ bookId, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'unread', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		});
@@ -488,6 +629,11 @@ describe('reading-info API client', () => {
 		const patchStarted = new Promise<void>((resolve) => { markPatchStarted = resolve; });
 		let patchSignal: AbortSignal | undefined;
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			if (options?.method !== 'PATCH') {
+				return new Response(JSON.stringify({ bookId: 99, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
 			patchSignal = options?.signal ?? undefined;
 			markPatchStarted();
 			return new Promise<Response>((_resolve, reject) => {
@@ -532,6 +678,11 @@ describe('reading-info API client', () => {
 		const firstFinished = new Promise<void>((resolve) => { release = resolve; });
 		const requests: Array<{ page: number; expectedUserId: string | null; activeUserId: number }> = [];
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			if (options?.method !== 'PATCH') {
+				return new Response(JSON.stringify({ bookId: 99, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
 			const body = JSON.parse(String(options?.body)) as { currentPage: number };
 			const headers = new Headers(options?.headers);
 			const requestSessionUserId = activeSessionUserId;
@@ -578,18 +729,19 @@ describe('reading-info API client', () => {
 				position = page;
 				serverSequence = body.saveSequence;
 			} else calls.push(`GET ${position}`);
-			return new Response(JSON.stringify({ bookId: 99, currentPosition: position, currentPage: Number(position), readStatus: 'reading', saveSequence: serverSequence }), {
+			return new Response(JSON.stringify({ bookId: 99, currentPosition: position, currentPage: Number(position), readStatus: 'reading', saveSequence: serverSequence, readingSaveProtocol: 'cas-v1' }), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		});
 		const older = saveReadingInfo(99, 2, 'reading', undefined, 7);
 		const newer = saveReadingInfo(99, 9, 'reading', undefined, 7);
 		const reopened = fetchReadingInfo(99, 7);
-		await vi.waitFor(() => expect(calls).toEqual(['PATCH 2']));
+		await vi.waitFor(() => expect(calls.filter((call) => call.startsWith('PATCH'))).toEqual(['PATCH 2']));
 		release();
 		await Promise.all([older, newer]);
 		await expect(reopened).resolves.toMatchObject({ currentPosition: '9' });
-		expect(calls).toEqual(['PATCH 2', 'PATCH 9', 'GET 9']);
+		expect(calls.filter((call) => call.startsWith('PATCH'))).toEqual(['PATCH 2', 'PATCH 9']);
+		expect(calls.at(-1)).toBe('GET 9');
 	});
 
 	test('新しいブラウザはserver baselineをGETしてからexpected-base付きで1回だけ保存する', async () => {
@@ -615,6 +767,7 @@ describe('reading-info API client', () => {
 				progressPercentage: 50,
 				readStatus: 'reading',
 				saveSequence: '50',
+				readingSaveProtocol: 'cas-v1',
 			}), { headers: { 'Content-Type': 'application/json' } });
 		});
 
@@ -644,6 +797,7 @@ describe('reading-info API client', () => {
 				progressPercentage: 50,
 				readStatus: 'reading',
 				saveSequence: '50',
+				readingSaveProtocol: 'cas-v1',
 			}), { headers: { 'Content-Type': 'application/json' } });
 		});
 
@@ -660,6 +814,7 @@ describe('reading-info API client', () => {
 		const userId = 905;
 		await seedReadingSaveBaseline(bookId, userId, '0');
 		const fetchMock = vi.spyOn(globalThis, 'fetch')
+			.mockResolvedValueOnce(new Response(JSON.stringify({ bookId, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), { headers: { 'Content-Type': 'application/json' } }))
 			.mockRejectedValueOnce(new TypeError('Connection lost after request may have reached server'))
 			.mockResolvedValueOnce(new Response(JSON.stringify({
 				bookId,
@@ -668,6 +823,7 @@ describe('reading-info API client', () => {
 				progressPercentage: 90,
 				readStatus: 'reading',
 				saveSequence: '1',
+				readingSaveProtocol: 'cas-v1',
 			}), { headers: { 'Content-Type': 'application/json' } }));
 
 		await expect(saveReadingInfo(bookId, 5, 'reading', 50, userId)).rejects.toThrow('Connection lost');
@@ -677,8 +833,8 @@ describe('reading-info API client', () => {
 		});
 
 		await expect(fetchReadingInfo(bookId, userId)).resolves.toMatchObject({ currentPage: 9, saveConflict: true });
-		expect(fetchMock).toHaveBeenCalledTimes(2);
-		expect(fetchMock.mock.calls.map(([, options]) => options?.method ?? 'GET')).toEqual(['PATCH', 'GET']);
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+		expect(fetchMock.mock.calls.map(([, options]) => options?.method ?? 'GET')).toEqual(['GET', 'PATCH', 'GET']);
 		await expect(readReadingSaveRecord('outbox', `user:${userId}:book:${bookId}`)).resolves.toBeUndefined();
 	});
 
@@ -704,7 +860,7 @@ describe('reading-info API client', () => {
 				const body = JSON.parse(String(options.body)) as { saveSequence: string };
 				patchSequences.push(body.saveSequence);
 			}
-			return new Response(JSON.stringify({ bookId, currentPosition: '8', currentPage: 8, progressPercentage: 80, readStatus: 'reading', saveSequence: '0' }), {
+			return new Response(JSON.stringify({ bookId, currentPosition: '8', currentPage: 8, progressPercentage: 80, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		});
@@ -723,14 +879,19 @@ describe('reading-info API client', () => {
 		const firstPatchMayFinish = new Promise<void>((resolve) => { releaseFirstPatch = resolve; });
 		const requests: string[] = [];
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			if (options?.method !== 'PATCH') {
+				requests.push('GET');
+				return new Response(JSON.stringify({ bookId: 99, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
 			if (options?.method === 'PATCH') {
 				requests.push('PATCH');
 				markFirstPatch();
 				await firstPatchMayFinish;
 				return new Response(JSON.stringify({ code: 'STALE_READING_SAVE' }), { status: 409 });
 			}
-			requests.push('GET');
-			return new Response(JSON.stringify({ bookId: 99, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'reading', saveSequence: '0' }), {
+			return new Response(JSON.stringify({ bookId: 99, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		});
@@ -760,7 +921,7 @@ describe('reading-info API client', () => {
 					headers: { 'Content-Type': 'application/json' },
 				});
 			}
-			return new Response(JSON.stringify({ bookId: 99, currentPosition: '9007199254740993', currentPage: 1, progressPercentage: 50, readStatus: 'reading', saveSequence: '9007199254740993' }), {
+			return new Response(JSON.stringify({ bookId: 99, currentPosition: '9007199254740993', currentPage: 1, progressPercentage: 50, readStatus: 'reading', saveSequence: '9007199254740993', readingSaveProtocol: 'cas-v1' }), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		});

@@ -180,7 +180,7 @@ app.get('/:bookId/reading-info', async (c) => {
 		const readingInfo = await result.prisma.readingInfo.findUnique({
 			where: { userId_bookId: { userId: result.userId, bookId } },
 		});
-		return c.json(toReadingInfoResponse(bookId, readingInfo, true));
+		return c.json(toReadingInfoResponse(bookId, readingInfo, true, true));
 	} catch (error) {
 		console.error(error);
 		return c.json({ error: 'Failed to fetch reading info' }, 500);

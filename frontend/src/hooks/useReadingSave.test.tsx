@@ -184,6 +184,30 @@ describe('useReadingSave', () => {
 		unmount();
 	});
 
+	test('READING_SESSION_MISMATCHは旧セッションのintentを破棄し、retryで再送しない', async () => {
+		mocks.saveReadingInfo.mockRejectedValueOnce(Object.assign(
+			new Error('reading session mismatch'),
+			{ code: 'READING_SESSION_MISMATCH' },
+		));
+		const { result, unmount, act } = await renderHook(() => useReadingSave(99, 7));
+
+		await act(async () => {
+			result.current.save(2, 'reading', 20);
+			await Promise.resolve();
+			window.dispatchEvent(new Event('pagehide'));
+		});
+		expect(result.current.status).toBe('conflict');
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+
+		await act(async () => {
+			result.current.retry();
+		});
+		expect(mocks.reserveReadingSave).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+		expect(result.current.status).toBe('conflict');
+		unmount();
+	});
+
 	test('pagehide中の遅延予約をretryのシーケンスとして再利用しない', async () => {
 		const oldReservation = deferred<string>();
 		const secondReservation = deferred<string>();

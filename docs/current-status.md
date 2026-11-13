@@ -34,6 +34,17 @@ acknowledgement race remain covered by focused backend/frontend tests. This is
 a source candidate only; no production database or deployment action was
 performed.
 
+The CAS repair now also uses an explicit backend-first rollout marker:
+authenticated reading-info GET responses from the repaired backend include
+`readingSaveProtocol: "cas-v1"`. The repaired frontend validates that marker
+for the current account/auth generation before the first PATCH, on account
+revalidation, and before durable outbox replay; a missing or different marker
+fails closed and leaves the intent durable without a PATCH. The rollout order
+is therefore backend (marker plus enforced expected-base CAS) first, then the
+frontend. This worktree has not changed deployment or production state, and
+the current production runtime has not been independently verified against
+this marker.
+
 ## 2026-11-07 authenticated-route revalidation candidate
 
 The `RequireAuth` boundary now owns focus, visibility-return and `pageshow`

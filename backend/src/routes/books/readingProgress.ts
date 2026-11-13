@@ -10,6 +10,7 @@ export type ReadingProgressRecord = {
 };
 
 export const READING_SESSION_USER_HEADER = 'X-BeLib-User-Id';
+export const READING_SAVE_PROTOCOL = 'cas-v1';
 export const MAX_CURRENT_POSITION_LENGTH = 16_384;
 const MAX_READING_SAVE_SEQUENCE = 9_223_372_036_854_775_807n;
 const MAX_FORWARD_SAVE_SEQUENCE_GAP = 1_000_000n;
@@ -206,7 +207,12 @@ export async function persistReadingInfo(
 	throw new Error('ReadingInfo changed during save');
 }
 
-export function toReadingInfoResponse(bookId: number, readingInfo: ReadingProgressRecord | null | undefined, includeSaveSequence = false) {
+export function toReadingInfoResponse(
+	bookId: number,
+	readingInfo: ReadingProgressRecord | null | undefined,
+	includeSaveSequence = false,
+	includeReadingSaveProtocol = false,
+) {
 	const currentPosition = readingInfo?.currentPosition ?? null;
 	const parsedPage = currentPosition !== null && /^\d+$/.test(currentPosition) ? Number(currentPosition) : Number.NaN;
 	const currentPage = Number.isSafeInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
@@ -218,5 +224,10 @@ export function toReadingInfoResponse(bookId: number, readingInfo: ReadingProgre
 		progressPercentage: toReadingProgress(readingInfo),
 		readStatus: normalizeReadStatus(readingInfo?.readStatus),
 	};
-	return includeSaveSequence ? { ...response, saveSequence: getRecordSequence(readingInfo).toString() } : response;
+	if (!includeSaveSequence) return response;
+	return {
+		...response,
+		saveSequence: getRecordSequence(readingInfo).toString(),
+		...(includeReadingSaveProtocol ? { readingSaveProtocol: READING_SAVE_PROTOCOL } : {}),
+	};
 }

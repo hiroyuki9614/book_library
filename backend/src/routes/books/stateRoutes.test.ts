@@ -198,7 +198,7 @@ describe('book state routes', () => {
 
 		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: cfi, progressPercentage: 42, readStatus: 'reading' });
 		const get = await app.request('/1/reading-info', { headers: READING_HEADERS });
-		expect(await get.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading', saveSequence: '0' });
+		expect(await get.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' });
 	});
 
 	test('高いsaveSequenceでもexpectedSaveSequenceが古ければ409で位置を上書きしない', async () => {

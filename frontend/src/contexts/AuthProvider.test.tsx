@@ -166,7 +166,7 @@ describe('AuthProvider session loading', () => {
 			const headers = new Headers(init?.headers);
 			requests.push({ method: init?.method ?? 'GET', body: String(init?.body ?? ''), userId: headers.get('X-BeLib-User-Id') });
 			const patchBody = init?.method === 'PATCH' ? JSON.parse(String(init.body)) as { saveSequence?: string } : undefined;
-			return new Response(JSON.stringify({ bookId: 99, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading', saveSequence: patchBody?.saveSequence ?? '0' }), {
+			return new Response(JSON.stringify({ bookId: 99, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading', saveSequence: patchBody?.saveSequence ?? '0', readingSaveProtocol: 'cas-v1' }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' },
 			});
@@ -229,7 +229,7 @@ describe('AuthProvider session loading', () => {
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
 			const headers = new Headers(init?.headers);
 			requests.push({ method: init?.method ?? 'GET', body: String(init?.body ?? ''), userId: headers.get('X-BeLib-User-Id') });
-			return new Response(JSON.stringify({ bookId: 99, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading' }), {
+			return new Response(JSON.stringify({ bookId: 99, currentPosition: '2', currentPage: 2, progressPercentage: 20, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' },
 			});
@@ -436,7 +436,10 @@ describe('AuthProvider session loading', () => {
 					else request.signal?.addEventListener('abort', abort, { once: true });
 				});
 			}
-			return new Response(null, { status: 204 });
+			return new Response(JSON.stringify({ bookId: 99, currentPosition: '1', currentPage: 1, progressPercentage: 0, readStatus: 'unread', saveSequence: '0', readingSaveProtocol: 'cas-v1' }), {
+				status: 200,
+				headers: { 'Content-Type': 'application/json' },
+			});
 		});
 
 		const { getByRole, getByTestId } = await render(

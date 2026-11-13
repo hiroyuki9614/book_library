@@ -9,6 +9,7 @@ export type ReadingInfo = {
 	progressPercentage: number | null;
 	readStatus: ReadStatus;
 	saveSequence?: string;
+	readingSaveProtocol?: string;
 	saveConflict?: boolean;
 };
 
@@ -19,6 +20,7 @@ const READING_SAVE_SEQUENCE_STORE = 'sequence';
 const READING_SAVE_SCOPED_SEQUENCE_STORE = 'sequence-by-scope';
 const READING_SAVE_OUTBOX_STORE = 'outbox';
 const READING_SAVE_SEQUENCE_VERSION = 3;
+const READING_SAVE_PROTOCOL = 'cas-v1';
 const KEEPALIVE_BODY_LIMIT_BYTES = 64 * 1024;
 const MAX_READING_SAVE_SEQUENCE = 9_223_372_036_854_775_807n;
 
@@ -50,12 +52,30 @@ type ScopedReadingSaveSequence = {
 
 let readingSaveDbPromise: Promise<IDBDatabase> | undefined;
 const reservedReadingSaveBases = new Map<string, string>();
+const verifiedReadingSaveCapabilities = new Set<string>();
 
 function readingSaveReservationKey(scopeKey: string, sequence: string) {
 	return `${scopeKey}\u0000${sequence}`;
 }
 
 type ReadingSaveSequence = string | number;
+
+function isPendingReadingSaveForScope(pending: PendingReadingSave, scopeKey: string, bookId: number, userId: number) {
+	return pending.scopeKey === scopeKey && pending.bookId === bookId && pending.userId === userId;
+}
+
+function isSamePendingReadingSave(left: PendingReadingSave, right: PendingReadingSave) {
+	return left.scopeKey === right.scopeKey
+		&& left.bookId === right.bookId
+		&& left.userId === right.userId
+		&& left.position === right.position
+		&& left.readStatus === right.readStatus
+		&& left.progressPercentage === right.progressPercentage
+		&& left.saveSequence === right.saveSequence
+		&& left.sequenceVersion === right.sequenceVersion
+		&& left.expectedSaveSequence === right.expectedSaveSequence
+		&& left.hasProgressPercentage === right.hasProgressPercentage;
+}
 
 function normalizeReadingSaveSequence(value: unknown) {
 	if (typeof value === 'number') {
@@ -162,6 +182,14 @@ function reserveReadingSaveSequence(payload: ReadingSavePayload, bookId: number,
 				return;
 			}
 			try {
+				if (pendingSave && (!isPendingReadingSaveForScope(pendingSave, scopeKey, bookId, userId)
+					|| (pendingSave.sequenceVersion === READING_SAVE_SEQUENCE_VERSION
+						&& normalizeReadingSaveSequence(pendingSave.saveSequence) === undefined))) {
+					const pendingSequence = normalizeReadingSaveSequence(pendingSave.saveSequence);
+					if (pendingSequence !== undefined) reservedReadingSaveBases.delete(readingSaveReservationKey(scopeKey, pendingSequence));
+					outboxStore.delete(scopeKey);
+					pendingSave = undefined;
+				}
 				const server = storedSequence?.serverSequence === undefined ? undefined : normalizeReadingSaveSequence(storedSequence.serverSequence);
 				if (server === undefined) throw new Error('Reading save baseline must be synchronized from the server before reserving');
 				const pending = pendingSave?.sequenceVersion === READING_SAVE_SEQUENCE_VERSION
@@ -222,6 +250,25 @@ function readPendingReadingSave(scopeKey: string) {
 		const request = transaction.objectStore(READING_SAVE_OUTBOX_STORE).get(scopeKey);
 		request.onsuccess = () => resolve((request.result as PendingReadingSave | undefined) ?? null);
 		request.onerror = () => reject(request.error ?? new Error('Could not read pending reading save'));
+	}));
+}
+
+function removePendingReadingSaveIf(scopeKey: string, predicate: (pending: PendingReadingSave) => boolean) {
+	return openReadingSaveDatabase().then((database) => new Promise<void>((resolve, reject) => {
+		const transaction = database.transaction(READING_SAVE_OUTBOX_STORE, 'readwrite');
+		const store = transaction.objectStore(READING_SAVE_OUTBOX_STORE);
+		const request = store.get(scopeKey);
+		request.onsuccess = () => {
+			const current = request.result as PendingReadingSave | undefined;
+			if (!current || !predicate(current)) return;
+			const currentSequence = normalizeReadingSaveSequence(current.saveSequence);
+			if (currentSequence !== undefined) reservedReadingSaveBases.delete(readingSaveReservationKey(scopeKey, currentSequence));
+			store.delete(scopeKey);
+		};
+		request.onerror = () => reject(request.error ?? new Error('Could not read pending reading save'));
+		transaction.oncomplete = () => resolve();
+		transaction.onerror = () => reject(transaction.error ?? new Error('Could not quarantine pending reading save'));
+		transaction.onabort = () => reject(transaction.error ?? new Error('Could not quarantine pending reading save'));
 	}));
 }
 
@@ -339,6 +386,17 @@ async function getExpectedReadingSaveSequence(scopeKey: string, sequence: string
 
 type ReadingApiError = Error & { status?: number; code?: string; saveSequence?: string; authoritativeReadingInfo?: ReadingInfo };
 
+function assertReadingSaveProtocol(readingInfo: ReadingInfo) {
+	if (readingInfo.readingSaveProtocol === READING_SAVE_PROTOCOL) return;
+	const error = new Error('Reading save protocol is not supported by this backend') as ReadingApiError;
+	error.code = 'READING_SAVE_PROTOCOL_UNSUPPORTED';
+	throw error;
+}
+
+function readingSaveCapabilityKey(bookId: number, userId: number, generation: number) {
+	return `${getApiBaseUrl() ?? ''}\u0000${generation}\u0000${getReadingScopeKey(bookId, userId)}`;
+}
+
 async function patchReadingInfo(path: string, options: RequestInit) {
 	const baseUrl = getApiBaseUrl();
 	if (!baseUrl) throw new Error('VITE_API_BASE_URL is not configured');
@@ -412,9 +470,17 @@ async function fetchAuthoritativeReadingInfo(bookId: number, userId: number, gen
 		headers: { [READING_SESSION_USER_HEADER]: String(userId) },
 	});
 	assertReadingSaveGeneration(generation);
+	assertReadingSaveProtocol(result);
 	const serverSequence = normalizeReadingSaveSequence(result.saveSequence) ?? '0';
 	await observeServerReadingSaveSequence(getReadingScopeKey(bookId, userId), serverSequence, generation);
+	verifiedReadingSaveCapabilities.add(readingSaveCapabilityKey(bookId, userId, generation));
 	return { ...result, saveSequence: serverSequence };
+}
+
+async function ensureReadingSaveCapability(bookId: number, userId: number, generation: number) {
+	const key = readingSaveCapabilityKey(bookId, userId, generation);
+	if (verifiedReadingSaveCapabilities.has(key)) return;
+	await fetchAuthoritativeReadingInfo(bookId, userId, generation);
 }
 
 export async function fetchReadingInfo(bookId: number, userId?: number): Promise<ReadingInfo> {
@@ -434,13 +500,25 @@ export async function fetchReadingInfo(bookId: number, userId?: number): Promise
 	let readingInfo: ReadingInfo = await fetchAuthoritativeReadingInfo(bookId, sessionUserId, requestGeneration);
 	const pending = await readPendingReadingSave(scopeKey).catch(() => null);
 	if (!pending) return readingInfo;
+	if (!isPendingReadingSaveForScope(pending, scopeKey, bookId, sessionUserId)) {
+		await removePendingReadingSaveIf(scopeKey, (current) => isSamePendingReadingSave(current, pending)).catch(() => undefined);
+		return { ...readingInfo, saveConflict: true };
+	}
 
 	const pendingSequence = normalizeReadingSaveSequence(pending.saveSequence);
 	const expectedBase = normalizeReadingSaveSequence(pending.expectedSaveSequence);
 	const serverSequence = normalizeReadingSaveSequence(readingInfo.saveSequence);
 	if (pending.sequenceVersion !== READING_SAVE_SEQUENCE_VERSION || pendingSequence === undefined
 		|| expectedBase === undefined || serverSequence !== expectedBase) {
-		if (pendingSequence !== undefined) await clearPendingReadingSave(scopeKey, pendingSequence).catch(() => undefined);
+		if (pendingSequence !== undefined) {
+			await clearPendingReadingSave(scopeKey, pendingSequence).catch(() => undefined);
+		} else if (pending.sequenceVersion === READING_SAVE_SEQUENCE_VERSION) {
+			await removePendingReadingSaveIf(
+				scopeKey,
+				(current) => isSamePendingReadingSave(current, pending)
+					&& normalizeReadingSaveSequence(current.saveSequence) === undefined,
+			).catch(() => undefined);
+		}
 		return { ...readingInfo, saveConflict: true };
 	}
 
@@ -488,6 +566,7 @@ export function getReadingSaveGeneration() {
 export function invalidateReadingSaves() {
 	readingSaveGeneration += 1;
 	reservedReadingSaveBases.clear();
+	verifiedReadingSaveCapabilities.clear();
 	pendingSaves.clear();
 	pendingReadingSaveSubmissions.clear();
 	readingFlushes.clear();
@@ -562,6 +641,7 @@ export function saveReadingInfo(
 	const next = start.then(async () => {
 		assertReadingSaveGeneration(requestGeneration);
 		effectiveSequence = await sequencePromise;
+		if (sessionUserId !== null) await ensureReadingSaveCapability(bookId, sessionUserId, requestGeneration);
 		effectiveExpectedSequence = sessionUserId !== null && effectiveSequence !== undefined
 			? await getExpectedReadingSaveSequence(scopeKey, effectiveSequence)
 			: undefined;
