@@ -203,12 +203,15 @@ def _run_systemctl(args):
 def _inspect_service(service):
     container = CONTAINERS[service]
     # The template emits only fixed state enums, restart policy, approved
-    # volume bits, and allowlisted storage-mode labels. It never emits env values.
+    # network and volume bits, and allowlisted storage-mode labels. It never
+    # emits env values or arbitrary network names.
     template = (
         "{{.State.Status}}|"
         '{{if index .State "Health"}}{{index (index .State "Health") "Status"}}'
         "{{else}}not_configured{{end}}|"
         "{{.HostConfig.RestartPolicy.Name}}|"
+        '{{if index .NetworkSettings.Networks "belib-production_default"}}'
+        "network=attached{{else}}network=missing{{end}}|"
         '{{range .Mounts}}{{if eq (index . "Name") "belib-production_postgres-data"}}'
         "postgres={{.RW}}{{end}}{{end}}|"
         '{{range .Mounts}}{{if and (eq (index . "Name") "belib-production_book-files") '
@@ -239,14 +242,16 @@ def _inspect_service(service):
     if result.stderr:
         raise WatchError("docker_output_invalid")
     fields = result.stdout.strip().split("|")
-    if len(fields) != 6:
+    if len(fields) != 7:
         raise WatchError("docker_output_invalid")
-    state, health, restart, postgres_mount, book_files_mount, storage_mode = fields
+    state, health, restart, network, postgres_mount, book_files_mount, storage_mode = fields
     if state not in {"created", "running", "paused", "restarting", "removing", "exited", "dead"}:
         raise WatchError("docker_output_invalid")
     if health not in {"healthy", "unhealthy", "starting", "not_configured"}:
         raise WatchError("docker_output_invalid")
     if restart not in {"no", "always", "on-failure", "unless-stopped"}:
+        raise WatchError("docker_output_invalid")
+    if network not in {"network=attached", "network=missing"}:
         raise WatchError("docker_output_invalid")
     if postgres_mount not in {"", "postgres=true", "postgres=false"}:
         raise WatchError("docker_output_invalid")
@@ -259,6 +264,7 @@ def _inspect_service(service):
         "running": state == "running",
         "health": health,
         "restart": restart,
+        "production_network_attached": network == "network=attached",
         "postgres_rw_attached": postgres_mount == "postgres=true",
         "book_files_rw_attached": book_files_mount == "book_files=true",
         "storage_mode": storage_mode.removeprefix("mode=").removesuffix(";") or None,
@@ -382,6 +388,8 @@ def collect(minutes, *, uid=None, http_get=None):
             failures.append(f"service_{name}_not_running")
         if status["restart"] != "unless-stopped":
             failures.append(f"service_{name}_restart_policy")
+        if not status.get("production_network_attached", False):
+            failures.append(f"service_{name}_network_not_attached")
     for name in ("db", "backend"):
         if services[name]["health"] != "healthy":
             failures.append(f"service_{name}_unhealthy")

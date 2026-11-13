@@ -38,7 +38,7 @@ class RuntimeWatchTests(unittest.TestCase):
             storage_mode = "mode=local;" if service == "backend" else ""
             return subprocess.CompletedProcess(
                 args, 0,
-                f"running|{health}|unless-stopped|{mount}|{book_files}|{storage_mode}\n", ""
+                f"running|{health}|unless-stopped|network=attached|{mount}|{book_files}|{storage_mode}\n", ""
             )
         if args[0] == "docker" and "volume" in args and "inspect" in args:
             return subprocess.CompletedProcess(args, 0, args[-1] + "\n", "")
@@ -69,6 +69,10 @@ class RuntimeWatchTests(unittest.TestCase):
     def test_healthy_status_and_frontend_without_healthcheck(self):
         report = self.collect()
         self.assertEqual(report["status"], "HEALTHY")
+        self.assertTrue(all(
+            service["production_network_attached"]
+            for service in report["services"].values()
+        ))
         self.assertEqual(report["services"]["frontend"]["health"], "not_configured")
         self.assertEqual(report["services"]["nginx"]["health"], "not_configured")
         self.assertTrue(report["services"]["db"]["postgres_rw_attached"])
@@ -80,15 +84,73 @@ class RuntimeWatchTests(unittest.TestCase):
         self.assertTrue(all(args[0] == "docker" or args[0] in {"systemctl", "loginctl", "journalctl"} for args in self.calls))
         self.assertTrue(all(watch.DOCKER_SOCKET in args for args in self.calls if args[0] == "docker"))
 
+    def test_missing_required_network_is_alerted_for_each_service(self):
+        for service in watch.SERVICES:
+            for attachment in ("zero networks", "wrong network"):
+                with self.subTest(service=service, attachment=attachment):
+                    def inspect_without_required_network(args, **kwargs):
+                        if args[0] == "docker" and "inspect" in args and args[-1] == watch.CONTAINERS[service]:
+                            health = "not_configured" if service in {"frontend", "nginx"} else "healthy"
+                            mount = "postgres=true" if service == "db" else ""
+                            book_files = "book_files=true" if service == "backend" else ""
+                            storage_mode = "mode=local;" if service == "backend" else ""
+                            # The fixed inspect template maps both an empty network map and
+                            # a map containing only another network to this safe enum.
+                            return subprocess.CompletedProcess(
+                                args, 0,
+                                f"running|{health}|unless-stopped|network=missing|{mount}|{book_files}|{storage_mode}\n",
+                                "",
+                            )
+                        return self.command(args, **kwargs)
+
+                    with patch.object(watch.subprocess, "run", side_effect=inspect_without_required_network), \
+                            patch.object(watch, "_run_journal", return_value=subprocess.CompletedProcess(
+                                ["journalctl"], 0, "", ""
+                            )):
+                        report = watch.collect(10, uid=watch.APPROVED_UID, http_get=lambda path: (
+                            401 if path == "/api/v1/books" else 200
+                        ))
+
+                    self.assertEqual(report["status"], "ALERT")
+                    self.assertFalse(report["services"][service]["production_network_attached"])
+                    self.assertIn(f"service_{service}_network_not_attached", report["failures"])
+                    self.assertNotIn("another-network", json.dumps(report))
+
+    def test_malformed_network_metadata_fails_closed_without_leakage(self):
+        cases = (
+            "network=other-network",
+            "network=SECRET=never-print-this",
+            "",
+        )
+        for network_field in cases:
+            with self.subTest(network_field=network_field):
+                output = io.StringIO()
+                with patch.object(watch.os, "getuid", return_value=watch.APPROVED_UID), \
+                        patch.object(watch, "_run", return_value=subprocess.CompletedProcess(
+                            ["docker"], 0,
+                            f"running|healthy|unless-stopped|{network_field}|||mode=local;\n", ""
+                        )), contextlib.redirect_stdout(output):
+                    code = watch.main(["--window-minutes", "5"])
+
+                self.assertEqual(code, 2)
+                report = json.loads(output.getvalue())
+                self.assertEqual(report, {"status": "ALERT", "failures": ["collection_failed"]})
+                self.assertNotIn("network", output.getvalue())
+                self.assertNotIn("SECRET", output.getvalue())
+                self.assertNotIn("never-print-this", output.getvalue())
+
     def test_backend_inspect_template_checks_exact_book_files_mount(self):
         with patch.object(watch, "_run", return_value=subprocess.CompletedProcess(
-            ["docker"], 0, "running|healthy|unless-stopped||book_files=true|mode=local;\n", ""
+            ["docker"], 0, "running|healthy|unless-stopped|network=attached||book_files=true|mode=local;\n", ""
         )) as run:
             result = watch._inspect_service("backend")
 
         template = run.call_args.args[0][5]
         self.assertIn('eq (index . "Name") "belib-production_postgres-data"', template)
         self.assertIn('eq (index . "Name") "belib-production_book-files"', template)
+        self.assertIn('index .NetworkSettings.Networks "belib-production_default"', template)
+        self.assertIn("network=attached", template)
+        self.assertIn("network=missing", template)
         self.assertIn('eq (index . "Destination") "/var/lib/belib/books"', template)
         self.assertIn("book_files={{.RW}}", template)
         self.assertIn('split . "="', template)
@@ -98,11 +160,12 @@ class RuntimeWatchTests(unittest.TestCase):
         self.assertIn("mode=invalid;", template)
         self.assertNotIn("{{.Config.Env}}", template)
         self.assertTrue(result["book_files_rw_attached"])
+        self.assertTrue(result["production_network_attached"])
         self.assertEqual(result["storage_mode"], "local")
 
     def test_nginx_bind_mount_without_name_does_not_mark_container_missing(self):
         with patch.object(watch, "_run", return_value=subprocess.CompletedProcess(
-            ["docker"], 0, "running|not_configured|unless-stopped|||\n", ""
+            ["docker"], 0, "running|not_configured|unless-stopped|network=attached|||\n", ""
         )) as run:
             result = watch._inspect_service("nginx")
 
@@ -114,7 +177,7 @@ class RuntimeWatchTests(unittest.TestCase):
 
     def test_optional_health_lookup_handles_services_without_healthcheck(self):
         with patch.object(watch, "_run", return_value=subprocess.CompletedProcess(
-            ["docker"], 0, "running|not_configured|unless-stopped|||\n", ""
+            ["docker"], 0, "running|not_configured|unless-stopped|network=attached|||\n", ""
         )) as run:
             result = watch._inspect_service("frontend")
 
@@ -158,7 +221,7 @@ class RuntimeWatchTests(unittest.TestCase):
             subprocess.CompletedProcess(["docker"], 0, "secret host path|running", ""),
             subprocess.CompletedProcess(
                 ["docker"], 0,
-                "running|healthy|unless-stopped|||mode=local;\n", "private warning\n",
+                "running|healthy|unless-stopped|network=attached|||mode=local;\n", "private warning\n",
             ),
         )
         for result in cases:
@@ -478,7 +541,7 @@ class RuntimeWatchTests(unittest.TestCase):
                     if args[0] == "docker" and "inspect" in args and args[-1] == watch.CONTAINERS["backend"]:
                         return subprocess.CompletedProcess(
                             args, 0,
-                            f"running|healthy|unless-stopped||{mount}|mode=local;\n", ""
+                            f"running|healthy|unless-stopped|network=attached||{mount}|mode=local;\n", ""
                         )
                     return self.command(args, **kwargs)
 
@@ -496,7 +559,7 @@ class RuntimeWatchTests(unittest.TestCase):
         def r2_without_mount(args, **kwargs):
             if args[0] == "docker" and "inspect" in args and args[-1] == watch.CONTAINERS["backend"]:
                 return subprocess.CompletedProcess(
-                    args, 0, "running|healthy|unless-stopped|||mode=r2;\n", ""
+                    args, 0, "running|healthy|unless-stopped|network=attached|||mode=r2;\n", ""
                 )
             return self.command(args, **kwargs)
 
@@ -517,7 +580,7 @@ class RuntimeWatchTests(unittest.TestCase):
         def r2_without_volume(args, **kwargs):
             if args[0] == "docker" and "inspect" in args and args[-1] == watch.CONTAINERS["backend"]:
                 return subprocess.CompletedProcess(
-                    args, 0, "running|healthy|unless-stopped|||mode=r2;\n", ""
+                    args, 0, "running|healthy|unless-stopped|network=attached|||mode=r2;\n", ""
                 )
             if args[0] == "docker" and "volume" in args and args[-1] == watch.VOLUMES["book_files"]:
                 return subprocess.CompletedProcess(
@@ -542,7 +605,7 @@ class RuntimeWatchTests(unittest.TestCase):
         def r2_without_postgres_volume(args, **kwargs):
             if args[0] == "docker" and "inspect" in args and args[-1] == watch.CONTAINERS["backend"]:
                 return subprocess.CompletedProcess(
-                    args, 0, "running|healthy|unless-stopped|||mode=r2;\n", ""
+                    args, 0, "running|healthy|unless-stopped|network=attached|||mode=r2;\n", ""
                 )
             if args[0] == "docker" and "volume" in args and args[-1] == watch.VOLUMES["postgres"]:
                 return subprocess.CompletedProcess(
@@ -617,7 +680,7 @@ class RuntimeWatchTests(unittest.TestCase):
                     if args[0] == "docker" and "inspect" in args and args[-1] == watch.CONTAINERS["backend"]:
                         return subprocess.CompletedProcess(
                             args, 0,
-                            f"running|healthy|unless-stopped||book_files=true|{storage_mode}\n", ""
+                            f"running|healthy|unless-stopped|network=attached||book_files=true|{storage_mode}\n", ""
                         )
                     return self.command(args, **kwargs)
 
