@@ -329,4 +329,27 @@ describe('useReadingSave', () => {
 		hook.unmount();
 	});
 
+	test('initial save conflict is distinct from a retryable save failure', async () => {
+		const hook = await renderHook(() => useReadingSave(7, 11));
+
+		await hook.act(async () => {
+			hook.result.current.confirmInitialStatus({
+				bookId: 7,
+				currentPosition: 'epubcfi(/6/2!/4/1:0)',
+				currentPage: 9,
+				progressPercentage: 40,
+				readStatus: 'reading',
+				saveConflict: true,
+			});
+		});
+
+		expect(hook.result.current.status).toBe('conflict');
+		await hook.act(async () => {
+			hook.result.current.retry();
+		});
+		expect(mocks.reserveReadingSave).not.toHaveBeenCalled();
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+		hook.unmount();
+	});
+
 });

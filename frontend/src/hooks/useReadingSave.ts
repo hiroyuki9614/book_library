@@ -12,7 +12,7 @@ type LatestReadingSave = {
 };
 
 export function useReadingSave(bookId: number, userId?: number) {
-	const [status, setStatus] = useState<'unknown' | 'saved' | 'saving' | 'error'>('unknown');
+	const [status, setStatus] = useState<'unknown' | 'saved' | 'saving' | 'error' | 'conflict'>('unknown');
 	const latest = useRef<LatestReadingSave | null>(null);
 	const version = useRef(0);
 	const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -21,7 +21,7 @@ export function useReadingSave(bookId: number, userId?: number) {
 
 	const confirmInitialStatus = useCallback((info: ReadingInfo) => {
 		if (version.current > 0) return;
-		if (info.saveConflict) { setStatus('error'); return; }
+		if (info.saveConflict) { setStatus('conflict'); return; }
 		const hasSavedPosition = (typeof info.currentPosition === 'string' && info.currentPosition.length > 0)
 			|| info.readStatus !== 'unread'
 			|| info.currentPage > 1;
