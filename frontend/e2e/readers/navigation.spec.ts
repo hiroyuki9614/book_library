@@ -148,7 +148,10 @@ for (const config of [
 		for (const mode of ['常に単ページ', '常に見開き', '自動']) {
 			await page.getByRole('combobox').click();
 			await page.getByRole('option', { name: mode, exact: true }).click();
-			await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy','false');
+			// Accumulating turns across modes exhausts the finite vertical fixture.
+			await page.getByRole('button', { name: '目次', exact: true }).click();
+			await page.getByRole('button', { name: '第一章', exact: true }).click();
+			await ready(page);
 			if (!config.vertical && mode === '常に見開き') {
 				const geometry = await page.locator('[data-publication-pane="primary"] iframe').first().evaluate((frame) => {
 					const viewer = frame.closest('[data-reader-viewport]') as HTMLElement;
@@ -163,6 +166,8 @@ for (const config of [
 				expect(geometry.columnWidth, 'native horizontal spread must render two columns').toBeLessThan(geometry.viewerWidth * 0.75);
 			}
 			const position = await progress(page);
+			expect(position).toEqual({ page: 1, section: 1, location: 1 });
+			await expect.poll(() => visibleText(page)).toContain('第1章');
 			for (let i = 0; i < 10; i++) await move(page);
 			expect((await progress(page)).location, 'character location cannot stay fixed across ten actual page turns').toBeGreaterThan(position.location);
 			for (let i = 0; i < 3; i++) await move(page, '前のページへ');
@@ -237,12 +242,14 @@ test('Book RTL overrides opposing LTR EPUB metadata for native spread order and 
 		return {
 			stageDirection: getComputedStyle(stage).direction,
 			rootDirection: frame.contentWindow!.getComputedStyle(frame.contentDocument!.documentElement).direction,
+			textDirection: frame.contentWindow!.getComputedStyle(frame.contentDocument!.querySelector('p')!).direction,
 			columnWidth: Number.parseFloat(frame.contentWindow!.getComputedStyle(frame.contentDocument!.body).columnWidth),
 			viewerWidth: viewer.clientWidth,
 		};
 	});
 	expect(layout.stageDirection).toBe('rtl');
-	expect(layout.rootDirection).toBe('ltr');
+	expect(layout.rootDirection).toBe('rtl');
+	expect(layout.textDirection).toBe('ltr');
 	expect(layout.columnWidth).toBeLessThan(layout.viewerWidth * 0.75);
 	const first = await cfi(page);
 	const firstProgress = await progress(page);
