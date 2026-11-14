@@ -68,10 +68,17 @@ export function useReadingSave(bookId: number, userId?: number) {
 			() => { if (isCurrent()) setStatus('saved'); },
 			(error: unknown) => {
 				if (!isCurrent()) return;
-				if (error instanceof Error && (error as Error & { code?: string }).code === 'STALE_READING_SAVE') {
+				const errorCode = error instanceof Error ? (error as Error & { code?: string }).code : undefined;
+				if (errorCode === 'STALE_READING_SAVE') {
 					latest.current = null;
 					pending.current = false;
 					setStatus('stale');
+					return;
+				}
+				if (errorCode === 'READING_SESSION_MISMATCH') {
+					latest.current = null;
+					pending.current = false;
+					setStatus('conflict');
 					return;
 				}
 				const retrySequence = error instanceof Error

@@ -281,7 +281,7 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	}
 	await expect(page.getByRole('dialog')).toBeHidden();
 
-	const saveResponse = page.waitForResponse((response) => response.url().endsWith(readingInfoPath)
+	const saveResponse = page.waitForResponse((response) => response.url().endsWith(`${readingInfoPath}/cas-v1`)
 		&& response.request().method() === 'PATCH'
 		&& response.request().postDataJSON()?.currentPage === 2
 		&& response.request().postDataJSON()?.readStatus === 'completed');
@@ -479,7 +479,7 @@ test('demo user opens protected EPUB and persists/restores a CFI', async ({ page
 	const epubBody = page.frameLocator('[data-publication-pane="primary"] iframe').first().locator('body');
 	const epubBounds = await epubBody.boundingBox();
 	expect(epubBounds).not.toBeNull();
-	const saveResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.epubBookId}/reading-info`)
+	const saveResponse = page.waitForResponse((response) => response.url().endsWith(`/api/v1/books/${metadata.epubBookId}/reading-info/cas-v1`)
 		&& response.request().method() === 'PATCH'
 		&& response.request().postDataJSON()?.readStatus === 'completed');
 	await epubBody.click({ position: { x: epubBounds!.width - 5, y: epubBounds!.height / 2 } });

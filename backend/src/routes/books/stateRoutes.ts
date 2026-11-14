@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { auth } from '../../lib/auth.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
-import { hasReadingSessionUserMismatch, MAX_CURRENT_POSITION_LENGTH, normalizeProgressPercentage, normalizeReadStatus, parseReadingSaveSequence, persistReadingInfo, READING_SESSION_USER_HEADER, StaleReadingInfoError, toReadingInfoResponse, toReadingProgress } from './readingProgress.js';
+import { handleVersionedReadingInfoPatch, hasReadingSessionUserMismatch, MAX_CURRENT_POSITION_LENGTH, normalizeProgressPercentage, normalizeReadStatus, parseReadingSaveSequence, persistReadingInfo, READING_SESSION_USER_HEADER, StaleReadingInfoError, toReadingInfoResponse, toReadingProgress } from './readingProgress.js';
 
 const app = new Hono<PrismaVariables>();
 type BooksContext = Context<PrismaVariables>;
@@ -180,10 +180,23 @@ app.get('/:bookId/reading-info', async (c) => {
 		const readingInfo = await result.prisma.readingInfo.findUnique({
 			where: { userId_bookId: { userId: result.userId, bookId } },
 		});
-		return c.json(toReadingInfoResponse(bookId, readingInfo, true));
+		return c.json(toReadingInfoResponse(bookId, readingInfo, true, true));
 	} catch (error) {
 		console.error(error);
 		return c.json({ error: 'Failed to fetch reading info' }, 500);
+	}
+});
+
+app.patch('/:bookId/reading-info/cas-v1', async (c) => {
+	try {
+		const bookId = parseBookId(c.req.param('bookId'));
+		if (!bookId) return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
+		const result = await getAuthorizedReadingContext(c, bookId, true);
+		if ('response' in result) return result.response;
+		return await handleVersionedReadingInfoPatch(c, { bookId, userId: result.userId });
+	} catch (error) {
+		console.error(error);
+		return c.json({ error: 'Failed to save reading info' }, 500);
 	}
 });
 

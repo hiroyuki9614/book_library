@@ -73,6 +73,44 @@ const READING_HEADERS = { 'X-BeLib-User-Id': '7' };
 const JSON_READING_HEADERS = { ...READING_HEADERS, 'Content-Type': 'application/json' };
 
 describe('book state routes', () => {
+	test('state route mounts the same strict CAS handler for a permitted authenticated user', async () => {
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '7', progressPercentage: 70, readStatus: 'reading', saveSequence: 3n });
+		const response = await app.request('/1/reading-info/cas-v1', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPage: 7, progressPercentage: 70, saveSequence: '3', expectedSaveSequence: '2' }),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ currentPosition: '7', progressPercentage: 70, saveSequence: '3' });
+		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+			where: expect.objectContaining({ saveSequence: { equals: 2n } }),
+			data: expect.objectContaining({ currentPosition: '7', progressPercentage: 70, saveSequence: 3n }),
+		}));
+	});
+
+	test('strict CAS route rejects unauthenticated, forbidden, and account-switched callers before writes', async () => {
+		const request = () => app.request('/1/reading-info/cas-v1', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPage: 7, saveSequence: '1', expectedSaveSequence: '0' }),
+		});
+
+		mocks.getSession.mockResolvedValueOnce(null);
+		expect((await request()).status).toBe(401);
+		mocks.permissionFindUnique.mockResolvedValueOnce(null);
+		expect((await request()).status).toBe(403);
+		const switched = await app.request('/1/reading-info/cas-v1', {
+			method: 'PATCH',
+			headers: { ...JSON_READING_HEADERS, 'X-BeLib-User-Id': '8' },
+			body: JSON.stringify({ currentPage: 7, saveSequence: '1', expectedSaveSequence: '0' }),
+		});
+		expect(switched.status).toBe(409);
+		expect(await switched.json()).toMatchObject({ code: 'READING_SESSION_MISMATCH' });
+		expect(mocks.readingInfoUpdateMany).not.toHaveBeenCalled();
+		expect(mocks.readingInfoCreate).not.toHaveBeenCalled();
+	});
+
 	test('一覧は現在ユーザーのReadingInfoをreadStatusへ反映する', async () => {
 		mocks.bookCount.mockResolvedValue(1);
 		mocks.bookFindMany.mockResolvedValue([book]);
@@ -198,7 +236,25 @@ describe('book state routes', () => {
 
 		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: cfi, progressPercentage: 42, readStatus: 'reading' });
 		const get = await app.request('/1/reading-info', { headers: READING_HEADERS });
-		expect(await get.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading', saveSequence: '0' });
+		expect(await get.json()).toEqual({ bookId: 1, currentPosition: cfi, currentPage: 1, progressPercentage: 42, readStatus: 'reading', saveSequence: '0', readingSaveProtocol: 'cas-v1' });
+	});
+
+	test('高いsaveSequenceでもexpectedSaveSequenceが古ければ409で位置を上書きしない', async () => {
+		mocks.readingInfoUpdateMany.mockResolvedValue({ count: 0 });
+		mocks.readingInfoFindUnique.mockResolvedValue({ currentPosition: '9', progressPercentage: 90, readStatus: 'reading', saveSequence: 1n });
+
+		const response = await app.request('/1/reading-info', {
+			method: 'PATCH',
+			headers: JSON_READING_HEADERS,
+			body: JSON.stringify({ currentPage: 5, progressPercentage: 50, saveSequence: '101', expectedSaveSequence: '0' }),
+		});
+
+		expect(response.status).toBe(409);
+		expect(await response.json()).toMatchObject({ code: 'STALE_READING_SAVE' });
+		expect(mocks.readingInfoUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+			where: expect.objectContaining({ saveSequence: { equals: 0n } }),
+		}));
+		expect(mocks.readingInfoCreate).not.toHaveBeenCalled();
 	});
 
 	test('currentPositionの上限値を受け入れ、上限超過と非文字列をDB更新前に拒否する', async () => {
