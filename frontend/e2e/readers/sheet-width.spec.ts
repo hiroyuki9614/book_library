@@ -191,7 +191,7 @@ test('PDF mobile reader chrome keeps its header, reading surface and footer with
 });
 
 /** Full desktop reading-area geometry, complementing the narrow Sheet tests. */
-async function checkDesktopChrome(page: Page, kind: 'epub' | 'pdf', width: number) {
+async function checkReaderChrome(page: Page, kind: 'epub' | 'pdf', width: number) {
 	const footer = page.getByTestId(kind === 'epub' ? 'epub-reader-footer' : 'pdf-reader-footer');
 	await expect(footer).toBeVisible();
 	await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -227,7 +227,7 @@ for (const width of [1280, 1440, 1663]) {
 		await page.setViewportSize({ width, height: 851 });
 		await page.goto('/e2e/readers/harness.html');
 		await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
-		await checkDesktopChrome(page, 'epub', width);
+		await checkReaderChrome(page, 'epub', width);
 	});
 	test(`PDF desktop B chrome ${width}px`, async ({ page, browser }) => {
 		test.setTimeout(90_000);
@@ -240,6 +240,17 @@ for (const width of [1280, 1440, 1663]) {
 		await page.goto('/e2e/readers/harness.html?kind=pdf');
 		await expect(page.locator('[data-pdf-page="1"] img')).toBeVisible({ timeout: 45_000 });
 		await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45_000 });
-		await checkDesktopChrome(page, 'pdf', width);
+		await checkReaderChrome(page, 'pdf', width);
+	});
+}
+
+for (const [width, height] of [[320, 640], [393, 851]] as const) {
+	test(`EPUB mobile B chrome at ${width}px keeps header, text and footer readable`, async ({ page }) => {
+		test.setTimeout(90_000);
+		await useProtectedBook(page, epubFixture({ vertical: true, rtl: true }), 'epub');
+		await page.setViewportSize({ width, height });
+		await page.goto('/e2e/readers/harness.html');
+		await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
+		await checkReaderChrome(page, 'epub', width);
 	});
 }
