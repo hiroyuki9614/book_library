@@ -121,6 +121,103 @@ class LaunchEnvironmentTests(unittest.TestCase):
         )
 
 
+class LaunchPrivateDockerContextTests(unittest.TestCase):
+    """Exercise the *private* Docker context path without a daemon or credentials."""
+
+    def setUp(self) -> None:
+        self.uid = launch.EXPECTED_UID
+        self.home = launch.EXPECTED_HOME
+        self.config = Path("/tmp/belib-private-docker-config-test")
+        self.endpoint = Path("/run/user/1000/docker.sock")
+        self.socket_url = f"unix://{self.endpoint}"
+        self.environment = launch._docker_environment(self.home, self.config)
+        self.seed = SimpleNamespace(
+            SeedWrapperError=ValueError,
+            verify_trusted_docker_plugins=Mock(),
+            expected_docker_socket=Mock(return_value=self.endpoint),
+            validate_rootless_socket=Mock(),
+            verify_private_docker_config=Mock(),
+        )
+
+    def responses(self) -> list[tuple[int, str]]:
+        return [
+            (0, "created"),
+            (0, self.socket_url + "\n"),
+            (0, f'{launch.EXPECTED_HOST}|["name=rootless"]\n'),
+            (0, "Docker Compose version v2"),
+            (0, f"Name: belib\nDriver: docker\nEndpoint: {self.socket_url}\n"),
+        ]
+
+    def run_mock_context(self, responses: list[tuple[int, str]]):
+        commands = []
+
+        def mocked_run(command, *, environment):
+            self.assertEqual(environment, self.environment)
+            self.assertEqual(command[0], launch.DOCKER_CLI)
+            self.assertLess(len(commands), len(responses), "unexpected Docker operation")
+            commands.append(command)
+            exit_code, output = responses[len(commands) - 1]
+            return SimpleNamespace(returncode=exit_code, stdout=output)
+
+        with patch.object(launch, "_run", side_effect=mocked_run):
+            result = launch._trusted_rootless_context(
+                self.seed, self.uid, self.home, self.config
+            )
+        return result, commands
+
+    def test_private_context_creation_inspection_and_rootless_buildx_identity(self) -> None:
+        (environment, endpoint), commands = self.run_mock_context(self.responses())
+        self.assertEqual(environment, self.environment)
+        self.assertEqual(endpoint, self.endpoint)
+        self.assertEqual(
+            commands[0],
+            [
+                launch.DOCKER_CLI, "context", "create", launch.CONTEXT_NAME,
+                "--docker", f"host={self.socket_url}",
+            ],
+        )
+        self.assertEqual(commands[1][1:4], ["context", "inspect", launch.CONTEXT_NAME])
+        for command in commands[2:]:
+            self.assertEqual(command[1:3], ["--context", launch.CONTEXT_NAME])
+        self.assertEqual(len(commands), 5)
+        self.seed.verify_trusted_docker_plugins.assert_called_once_with()
+        self.seed.expected_docker_socket.assert_called_once_with(self.uid)
+        self.seed.validate_rootless_socket.assert_called_once_with(self.endpoint, self.uid)
+        self.seed.verify_private_docker_config.assert_called_once_with(self.config, self.uid)
+        self.assertEqual(environment["DOCKER_CONFIG"], str(self.config))
+        self.assertNotIn("DOCKER_HOST", environment)
+        self.assertNotIn("DOCKER_CONTEXT", environment)
+
+    def test_context_creation_failure_is_fail_closed_before_inspection(self) -> None:
+        with self.assertRaisesRegex(launch.LaunchBlocked, "create the private rootless"):
+            self.run_mock_context([(1, "")])
+
+    def test_context_endpoint_mismatch_is_fail_closed(self) -> None:
+        responses = self.responses()
+        responses[1] = (0, "tcp://builder.invalid:2375")
+        with self.assertRaisesRegex(launch.LaunchBlocked, "validated rootless socket"):
+            self.run_mock_context(responses[:2])
+
+    def test_nonrootless_daemon_identity_is_rejected(self) -> None:
+        responses = self.responses()
+        responses[2] = (0, f'{launch.EXPECTED_HOST}|["name=seccomp"]')
+        with self.assertRaisesRegex(launch.LaunchBlocked, "rootless daemon"):
+            self.run_mock_context(responses[:3])
+
+    def test_remote_buildx_endpoint_is_rejected(self) -> None:
+        responses = self.responses()
+        responses[4] = (0, "Name: remote\nDriver: docker\nEndpoint: tcp://builder.invalid:2375\n")
+        with self.assertRaisesRegex(launch.LaunchBlocked, "not bound to this user"):
+            self.run_mock_context(responses)
+
+    def test_unsupported_buildx_driver_is_rejected(self) -> None:
+        responses = self.responses()
+        responses[4] = (0, "Name: remote\nDriver: remote\nEndpoint: tcp://builder.invalid:2375\n")
+        with self.assertRaisesRegex(launch.LaunchBlocked, "local i5 Docker driver"):
+            self.run_mock_context(responses)
+
+
+
 class LaunchReceiptTests(unittest.TestCase):
     def test_fully_forged_local_receipt_cannot_authorize_staging(self) -> None:
         with self.assertRaisesRegex(launch.LaunchBlocked, "No trusted independent staging supervisor verifier"):
