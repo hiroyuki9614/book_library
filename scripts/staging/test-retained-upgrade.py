@@ -10,7 +10,7 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -203,6 +203,36 @@ class RetainedUpgradeTests(unittest.TestCase):
         self.assertEqual(result["manifest_sha256"], self.manifest_sha)
         self.assertEqual(len(result["blockers"]), 3)
         self.assertIn("Independent PostgreSQL restore verification", result["blockers"][0])
+
+    def rehearsal(self, operations):
+        return upgrade._rehearse_transaction_with_test_fixtures(
+            journal_root=self.root, operation_id="1" * 32, operations=operations,
+            operation="upgrade-retained", source_sha=self.source_sha, manifest=self.manifest,
+            attestation=self.envelope, backup_path=self.backup_path, uid=os.getuid(),
+            **self.preflight_args(), query_report=self.query_report, trusted_issuer=self.issuer,
+            verifier_public_key_pem=self.public_pem, trusted_verifier_fingerprint=self.fingerprint)
+
+    def test_fixture_evidence_enters_transaction_without_claiming_live_admission(self):
+        operations = Mock()
+        operations.backup.return_value = self.backup_sha
+        result = self.rehearsal(operations)
+        self.assertEqual(result["transaction_rehearsal"]["phase"], "completed")
+        self.assertEqual(result["status"], "NOT_DEPLOYABLE_SOURCE_ONLY")
+        self.assertFalse(result["deployable"])
+        operations.migrate.assert_called_once_with()
+        operations.restore_backup.assert_not_called()
+
+    def test_rehearsal_rejects_unverified_or_changed_backup_before_migration(self):
+        operations = Mock()
+        self.backup_path.write_bytes(b"tampered")
+        with self.assertRaises(upgrade.UpgradePreflightError):
+            self.rehearsal(operations)
+        self.assertEqual(operations.mock_calls, [])
+        self.backup_path.write_bytes(b"synthetic backup bytes, not database data")
+        operations.backup.return_value = "f" * 64
+        with self.assertRaises(RuntimeError):
+            self.rehearsal(operations)
+        operations.migrate.assert_not_called()
 
     def test_preflight_hashes_actual_backup_and_rejects_insecure_or_in_repo_artifact(self):
         self.backup_path.write_bytes(b"tampered synthetic backup")
@@ -421,3 +451,4 @@ class RetainedUpgradeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

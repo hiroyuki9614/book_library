@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -503,6 +504,41 @@ def _preflight_with_test_fixtures(*, operation: str, source_sha: str, manifest: 
     }
 
 
+def _rehearse_transaction_with_test_fixtures(*, journal_root: Path, operation_id: str,
+                                           operations: Any, **evidence: Any) -> dict[str, Any]:
+    """Exercise the transaction after synthetic evidence checks, never live admission.
+
+    This is the source-only fixture route. The public preflight remains separate
+    until independently installed trust pins and the fixed live adapter exist.
+    ``operations`` must refer only to test-owned disposable resources.
+    """
+    checked = _preflight_with_test_fixtures(**evidence)
+    path = Path(__file__).with_name("retained-db-transaction.py")
+    spec = importlib.util.spec_from_file_location("belib_retained_db_transaction", path)
+    if spec is None or spec.loader is None:
+        raise UpgradePreflightError("Retained transaction implementation is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class BoundFixtureOperations:
+        def __getattr__(self, name):
+            return getattr(operations, name)
+
+        def backup(self):
+            digest = operations.backup()
+            if digest != checked["backup_sha256"]:
+                raise UpgradePreflightError("Transaction backup differs from verified fixture evidence")
+            return digest
+
+    journal = module.Journal(journal_root, {
+        "operation_id": operation_id,
+        "source_sha": checked["source_sha"],
+        "retained_state_sha256": checked["manifest_sha256"],
+    })
+    receipt = module.run_admitted_transaction(journal, BoundFixtureOperations())
+    return {**checked, "transaction_rehearsal": receipt, "deployable": False}
+
+
 def preflight(*, operation: str, source_sha: str, manifest: Any,
               network_inventory: Any, backup_root_contract: Any,
               attestation: Any, backup_path: str | os.PathLike[str], uid: int,
@@ -531,3 +567,4 @@ def preflight(*, operation: str, source_sha: str, manifest: Any,
         "BLOCKED: external independent pin provision is not configured; caller-supplied "
         "issuer, key, and fingerprint values do not establish trust"
     )
+

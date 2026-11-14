@@ -309,6 +309,38 @@ Offline checks for this step are `bash scripts/staging/test-compose-isolation.sh
 
 ## Acceptance after actual i5 deployment
 
+### Retained database transaction implementation
+
+`scripts/staging/retained-db-transaction.py` implements the bounded transaction
+order for the independently admitted staging executor: quiesce writes, durable
+backup, actual isolated restore verification, forward migration, schema/data/
+authorization/progress checks, read-only application activation, then active-state readback.
+Only after the commit decision is durably journaled does the executor release
+the application write barrier. A failed or interrupted release never restores an
+old backup: retry reconciles the committed application and idempotent write release.
+It uses one private fsynced journal per admitted operation identity. A retry of a
+completed operation only checks active state. An interruption before the commit decision, after migration
+starts restores the same backup and prior application instead of re-running the
+migration. Recovery failure keeps the operation blocked and preserves its backup;
+the caller must keep application writes quiesced and reconcile that exact journal.
+
+The caller must hold the existing project lock, authenticate fresh independent
+admission and bind the source, host/principal, resources and immutable backup. The
+module does not provide that authority, discover Docker resources, expose a CLI,
+or replace the pending installed bootstrap and CD integration. Its `Operations`
+adapter must perform actual PostgreSQL restore and integrity checks; matching
+supplied hashes alone is insufficient. The current production staging launcher
+does not yet invoke this engine.
+
+Run `python3 -B scripts/staging/test-retained-db-transaction.py` for offline
+transaction/recovery tests. Explicitly setting `BELIB_DISPOSABLE_POSTGRES_TEST=1`
+also runs actual PostgreSQL dump/restore/migration tests on two fresh rootless
+containers per test. They use the existing pinned PostgreSQL image, tmpfs data,
+no ports, no network and no retained volumes. Only those uniquely named test
+containers are removed. These synthetic DB tests simulate application activation;
+they are not BeLib application deployment, a signature, or physical Chrome acceptance.
+
 The first transaction showed that nginx had the expected loopback HostConfig but no published port while attached only to the internal isolated network. The source correction adds a project bridge ingress network to nginx alone; db, migrate, backend, and frontend remain on the internal network, and the loopback port binding is unchanged. This source change is not evidence that runtime publication now works. After a separately reviewed resume operation, verify the configured loopback port at `http://127.0.0.1:<verified-port>/health`; treat failure as a deployment blocker. Then, only after the owner-approved Tailnet-only custom HTTPS ingress and certificate gates above are met, use the physical i5 Google Chrome GUI, not a headless substitute, at `https://stg-bl.hiroyuki9614.com` to check anonymous protected API 401, separate staging admin/general identities, general-user denial of admin-only books and management API, synthetic EPUB and PDF body/page displays, reading-position save and restore after reload and new login, and Shelf/Reader UI. Read the real `frontend/package.json` scripts before executing tests; the current reader script is `npm --prefix frontend run test:readers`. Confirm test fixtures reference only the isolated staging DB/storage and never delete real users/books.
 
 Report separately: candidate code, fixed HEAD, current CI, independent review, i5 preflight, real Compose services/volume identities, HTTP smoke, Playwright, physical i5 Chrome, and final acceptance. Only observed results count. If the stage is running, persist the observed loopback and verified Tailnet HTTPS URLs with an evidence pointer in the original PV3 Work Prompt/owner PR. Do not commit confidential browser traces or uploaded books.
+
