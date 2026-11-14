@@ -118,6 +118,25 @@ The generated config-template.json is disabled; editing enabled is not approval.
 No grant is packaged. After adoption use the existing external signer and the
 operator's --grant PATH / --receipt NONCE entry points with current approval.
 
+For a retained upgrade, source adoption alone does not authorize host preparation.
+The separately authorized root operator may invoke this installed entry with
+`--prepare-retained OPERATION_ID` (32 lowercase hex characters). It drops to
+hiroyuki, keeps the original database/application unchanged, and prepares only
+the separate candidate project and unsigned backup/restore/resource evidence in
+`/home/hiroyuki/.local/state/belib-staging/retained-upgrades/OPERATION_ID`.
+Candidate application containers remain stopped. A retry must use that same
+operation identity and reconcile its journal; never remove a retained volume.
+
+Review the resulting resource plan and independently verified public-key pins
+before issuing short-lived evidence and the final one-use upgrade grant. The
+fixed-source `prepare-retained.py --finalize-candidate OPERATION_ID
+--public-pins-file PATH` entry validates external signatures but leaves the
+configuration candidate disabled. It does not adopt caller-supplied public pins.
+The existing independent operator must explicitly adopt the reviewed retained
+configuration; complete expensive builds/restores before signing. Follow this
+source revision's `docs/runbooks/belib-staging.md` for exact stages, recovery,
+separate protected-workflow registration and runtime acceptance boundaries.
+
 Before using the commands: the authorized operator must first copy the fixed
 packet files into a root-owned, non-writable-by-others directory. Pin that absolute
 directory in PACKET and verify its externally reviewed SHA256SUMS digest (the

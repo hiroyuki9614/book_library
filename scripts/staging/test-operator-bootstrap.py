@@ -195,6 +195,66 @@ class OperatorBootstrapTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True), self.assertRaises(launch.LaunchBlocked):
             launch._require_operator_bootstrap_admission()
 
+    def test_preparation_child_is_sealed_fixed_source_and_does_not_receive_a_grant(self):
+        source = self.root / ("a" * 40)
+        helper = source / "scripts/staging/prepare-retained.py"
+        helper.parent.mkdir(parents=True)
+        marker = self.root / "prepared-child.json"
+        helper.write_text("""import os,json,fcntl,sys
+fd=int(os.environ['BELIB_PREPARATION_FD'])
+value=json.loads(os.read(fd,16384))
+if value['pid']!=os.getpid() or len(sys.argv)!=1: raise SystemExit(3)
+seals=fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL
+if fcntl.fcntl(fd,fcntl.F_GET_SEALS)&seals!=seals: raise SystemExit(4)
+with open(%r,'w') as out: json.dump(value,out)
+""" % str(marker))
+        with patch.object(bootstrap.os, "setgroups"), patch.object(bootstrap.os, "setgid"), patch.object(bootstrap.os, "setuid"):
+            self.assertEqual(bootstrap.spawn_preparation(source, "d" * 32), 0)
+        result = json.loads(marker.read_text())
+        self.assertEqual(result["source_sha"], "a" * 40)
+        self.assertEqual(result["prepared_directory"], str(bootstrap.PREPARATIONS / ("d" * 32)))
+        self.assertEqual(result["env_file"], "/home/hiroyuki/.config/belib-staging/i5.env")
+        self.assertNotIn("grant", result)
+        with patch.object(bootstrap.os, "fork") as fork, self.assertRaises(bootstrap.Blocked):
+            bootstrap.spawn_preparation(source, "../other")
+        fork.assert_not_called()
+
+    def test_explicit_preparation_entry_checks_operator_source_and_never_consumes_grant(self):
+        config_path = self.root / "config.json"
+        config_path.write_bytes(bootstrap.canonical({"source_sha": "a" * 40}))
+        with ExitStack() as stack:
+            for target, name, value in (
+                (bootstrap, "CONFIG", config_path), (bootstrap, "INSTALL", Path(bootstrap.__file__).resolve()),
+                (bootstrap.os, "getuid", Mock(return_value=0)), (bootstrap.os, "geteuid", Mock(return_value=0)),
+                (bootstrap.socket, "gethostname", Mock(return_value="ubuntu-worker")),
+                (bootstrap.pwd, "getpwnam", Mock(return_value=SimpleNamespace(pw_uid=1000, pw_gid=1000))),
+                (bootstrap.sys, "executable", "/usr/bin/python3"),
+                (bootstrap.sys, "flags", SimpleNamespace(**{**{name: getattr(sys.flags, name) for name in dir(sys.flags)
+                    if isinstance(getattr(sys.flags, name), (int, bool))}, "isolated": True, "dont_write_bytecode": True})),
+                (bootstrap.sys, "argv", ["operator-bootstrap.py", "--prepare-retained", "d" * 32]),
+                (bootstrap, "trusted_path", Mock()), (bootstrap, "verify_source", Mock(return_value=self.root / ("a" * 40))),
+                (bootstrap, "spawn_preparation", Mock(return_value=0)),
+                (bootstrap, "consume_nonce", Mock()), (bootstrap, "spawn_admitted", Mock()),
+                (bootstrap, "validate_grant", Mock()),
+            ):
+                stack.enter_context(patch.object(target, name, value))
+            with redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(bootstrap.main(), 0)
+            receipt = json.loads(output.getvalue())
+            self.assertFalse(receipt["activated"])
+            self.assertFalse(receipt["trust_adopted"])
+            bootstrap.spawn_preparation.assert_called_once_with(self.root / ("a" * 40), "d" * 32)
+            bootstrap.consume_nonce.assert_not_called()
+            bootstrap.validate_grant.assert_not_called()
+            bootstrap.spawn_admitted.assert_not_called()
+            bootstrap.spawn_preparation.reset_mock()
+            with patch.object(bootstrap.os, "getuid", return_value=1000), redirect_stderr(io.StringIO()):
+                self.assertEqual(bootstrap.main(), 1)
+            bootstrap.spawn_preparation.assert_not_called()
+            with patch.object(bootstrap, "verify_source", side_effect=bootstrap.Blocked("disabled")), redirect_stderr(io.StringIO()):
+                self.assertEqual(bootstrap.main(), 1)
+            bootstrap.spawn_preparation.assert_not_called()
+
     def test_real_launcher_main_reaches_deploy_from_installed_source(self):
         # Real main/source admission/Git/operation binding; only the already-tested
         # root descriptor boundary, host ownership and external effects are fakes.

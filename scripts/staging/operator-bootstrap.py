@@ -29,6 +29,7 @@ RETAINED_CONFIG = Path("/etc/belib-staging/retained-upgrade.json")
 INSTALL = Path("/usr/local/libexec/belib-staging/operator-bootstrap.py")
 SOURCES = Path("/opt/belib-staging/sources")
 STATE = Path("/var/lib/belib-staging/operator")
+PREPARATIONS = Path("/home/hiroyuki/.local/state/belib-staging/retained-upgrades")
 PUBLIC_KEY = b"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAw1k8oqGkMOUb8KJb6thJY5GUtENwWuLGvWrKi6oBXaA=\n-----END PUBLIC KEY-----\n"
 PUBLIC_FINGERPRINT = "8f49fad277be0d1c05bf0b75246a5895a8b3489ddaaeef4f43a3e8b90e25e629"
 TARGET = {"repository": "hiroyuki9614/book_library", "pull_request": 103,
@@ -359,11 +360,53 @@ def spawn_admitted(root, grant, retained_config=None):
     return 124
 
 
+def spawn_preparation(root, operation_id):
+    """An explicit root operator prepares candidates; this never authorizes cutover."""
+    if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+        raise Blocked("Preparation requires one lowercase 32-hex operation identity")
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setsid()
+            admission = {"schema": "belib-retained-preparation-admission/v1",
+                         "source_root": str(root), "source_sha": root.name,
+                         "operation_id": operation_id,
+                         "prepared_directory": str(PREPARATIONS / operation_id),
+                         "env_file": "/home/hiroyuki/.config/belib-staging/i5.env",
+                         "pid": os.getpid()}
+            fd = os.memfd_create("belib-preparation-admission", os.MFD_ALLOW_SEALING)
+            os.fchmod(fd, 0o400)
+            os.write(fd, canonical(admission))
+            fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.set_inheritable(fd, True)
+            os.setgroups([])
+            os.setgid(1000)
+            os.setuid(1000)
+            os.umask(0o077)
+            os.execve("/usr/bin/python3", ["/usr/bin/python3", "-I", "-B",
+                      str(root / "scripts/staging/prepare-retained.py")],
+                      {**SAFE_ENV, "BELIB_PREPARATION_FD": str(fd)})
+        except BaseException:
+            os._exit(125)
+    deadline = time.monotonic() + 1800
+    while time.monotonic() < deadline:
+        finished, status = os.waitpid(pid, os.WNOHANG)
+        if finished:
+            return os.waitstatus_to_exitcode(status)
+        time.sleep(0.2)
+    os.killpg(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    return 124
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     request = parser.add_mutually_exclusive_group(required=True)
     request.add_argument("--grant", type=Path)
     request.add_argument("--receipt")
+    request.add_argument("--prepare-retained", metavar="OPERATION_ID",
+                         help="explicit operator preparation only; does not sign, adopt or activate an upgrade")
     args = parser.parse_args()
     try:
         if not hasattr(os, "memfd_create") or not hasattr(fcntl, "F_ADD_SEALS"):
@@ -380,6 +423,22 @@ def main():
             return 0
         config = parse(read_regular(CONFIG, MAX_CONFIG, trusted=True), MAX_CONFIG)
         root = verify_source(config)
+        if args.prepare_retained is not None:
+            if not re.fullmatch(r"[0-9a-f]{32}", args.prepare_retained):
+                raise Blocked("Preparation operation identity is invalid")
+            trusted_path(STATE, directory=True)
+            lock_fd = os.open(STATE / "project.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                code = spawn_preparation(root, args.prepare_retained)
+            finally:
+                os.close(lock_fd)
+            print(canonical({"schema": "belib-retained-preparation-result/v1",
+                             "operation_id": args.prepare_retained,
+                             "source_sha": config["source_sha"], "host": TARGET["host"],
+                             "principal": TARGET["principal"], "exit_code": code,
+                             "activated": False, "trust_adopted": False}).decode())
+            return code if code >= 0 else 1
         grant = validate_grant(read_regular(args.grant, MAX_GRANT), config["source_sha"])
         retained_config = load_retained_config(grant) if grant["operation"] == "upgrade-retained" else None
         trusted_path(STATE, directory=True)

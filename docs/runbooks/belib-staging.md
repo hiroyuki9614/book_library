@@ -450,3 +450,90 @@ write across completed retry, and interrupted precommit recovery. It is not
 actual BeLib application, real signer, HTTPS or physical-browser acceptance.
 
 Report separately: candidate code, fixed HEAD, current CI, independent review, i5 preflight, real Compose services/volume identities, HTTP smoke, Playwright, physical i5 Chrome, and final acceptance. Only observed results count. If the stage is running, persist the observed loopback and verified Tailnet HTTPS URLs with an evidence pointer in the original PV3 Work Prompt/owner PR. Do not commit confidential browser traces or uploaded books.
+
+### Preparing a retained upgrade before signing
+
+The installed operator's `--prepare-retained <32-lowercase-hex-operation-id>` is an
+explicit root-operator action, not an implicit consequence of source adoption or
+of a later upgrade grant. The same source/host/principal checks and operator lock
+apply; the helper runs only after dropping to UID/GID 1000 and validating a
+root-owned, sealed, PID-bound preparation descriptor. It also holds the existing
+launcher project lock. It does not stop the original application, mutate the
+original DB, start candidate application services, sign evidence or install trust.
+Only an operator already authorized for these staging effects may invoke it.
+
+After adoption of the exact reviewed source, the staging environment's existing
+nonsecret `BELIB_STAGE_VCS_REF` must match that source. Preserve its existing six
+keys and private ownership/mode; never print or copy its passwords into a packet.
+As that authorized root operator, use the fixed installed entry:
+
+```sh
+/usr/bin/python3 -I -B /usr/local/libexec/belib-staging/operator-bootstrap.py --prepare-retained <operation-id>
+```
+
+The normal-user helper prepares the private operation directory under
+`/home/hiroyuki/.local/state/belib-staging/retained-upgrades/`, builds fixed-source
+images, creates only the separate operation project and starts its DB. Candidate
+application containers remain stopped. It produces the real archive, restore and
+query reports, a v2 resource manifest, unsigned evidence requests and a disabled
+configuration candidate. The operation journal must be reconciled on retry;
+unknown or changed resources are not adopted or force-recreated. Preparation
+does not freeze application writes. If the original data changes after the
+archive was made, the final executor refuses migration and a newly prepared
+operation/archive is needed; it never silently replaces approved backup bytes.
+An interrupted dump can leave `backup.incomplete`. Preserve it for diagnosis and
+start a new preparation operation after resolving the failure; it is not an
+approved archive and is never silently reused or deleted. This is a new attempt
+within the same staging issue/claim, not a new controller or database reset.
+
+Complete expensive builds, restores and independent review of the resource plan
+and public-key pins before issuing short-lived evidence. Root adoption can bind
+the stable source/resource identities and verified public pins before fresh
+signatures: the config contains paths and pins, not issuance timestamps. The
+existing independent issuer then fills and signs the exact network, backup-root
+and restore-attestation payload templates after checking the underlying evidence.
+The candidate never holds an issuer private key. Do not extend a five-minute TTL
+to hide an ordering problem, or issue evidence before the expensive preparation.
+
+As `hiroyuki`, the fixed-source helper's candidate-only finalize entry validates
+the externally supplied envelopes and public-pin input:
+
+```sh
+/usr/bin/python3 -I -B /opt/belib-staging/sources/<source-sha>/scripts/staging/prepare-retained.py --finalize-candidate <operation-id> --public-pins-file <private-public-pin-json>
+```
+
+That input file is validation material, not a trust root. The resulting config
+remains disabled. The authorized independent operator must compare it with the
+reviewed plan/pins before enabling/adopting the root-owned retained configuration.
+After that preparation, issue the fresh final `upgrade-retained` grant with its
+existing four evidence pins and one-use nonce, execute the existing operator/CD
+entry, and verify its durable result and actual runtime. A signature alone is
+not runtime acceptance. Preserve the operation journal and original DB for
+recovery; never delete or reseed a retained database to report success.
+
+If the original external signing environment cannot be recovered, a concrete
+alternative for owner decision is a manual issuer on the already identified,
+separate KAGOYA host `v133-18-43-217-vir`. An authorized human root operator would
+generate and retain keys in a root-only directory such as
+`/var/lib/belib-staging-issuer/`, independently verify source/evidence and issue
+one operation at a time. The normal `ubuntu` MCP process must not read those keys
+or invoke signing unattended. No daemon, scheduler, new controller or shared
+private key is proposed. Only public keys/fingerprints would reach i5; adopting
+replacement bootstrap/evidence pins is a separate explicit trust change and is
+not authorized or performed by this candidate. Recovery would use an
+owner-controlled encrypted offline backup or a reviewed key rotation; revocation
+disables the i5 source/retained config, preserves nonce journals, removes the old
+public pins through the same reviewed adoption path and verifies old grants fail.
+The actual authorized root actor, issuer identities and public fingerprints must
+be established before this alternative can be selected. Never guess them or
+generate/adopt replacement keys merely because the proposal exists.
+
+Verify the preparation module with
+`/usr/bin/python3 -I -B scripts/staging/test-prepare-retained.py`. The opt-in
+`BELIB_DISPOSABLE_PREPARE_TEST=1 /usr/bin/python3 -I -B scripts/staging/test-prepare-retained-integration.py`
+uses real disposable rootless Docker/Compose and PostgreSQL for preparation,
+backup/restore, signed finalization and the existing execution entry. Image-build
+bodies, application HTTP, SQL migration and root/physical identity are fixtures;
+the test does not install trust or run the real BeLib application. Record the
+tested source hashes and cleanup read-back, rather than treating skipped opt-in
+cases in ordinary CI as an actual Docker success.
