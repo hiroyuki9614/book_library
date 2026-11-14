@@ -52,6 +52,7 @@ jobs:
           INPUT_REQUEST_SUPERVISOR_REVIEW: ${{ inputs.request_supervisor_review }}
         run: |
           python3 -B scripts/staging/test-cd-handoff.py
+          python3 -B scripts/staging/test-cd-handoff-executor.py
           python3 -B scripts/staging/cd-handoff.py \
             --receipt-path "$RUNNER_TEMP/belib-staging-handoff.json"
 
@@ -63,12 +64,18 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Record handoff status
+      - name: Record handoff status and local operator entry
         run: |
           {
             echo "Candidate CI and workflow provenance checks passed for the exact source SHA."
             echo "Candidate source CI is not trusted staging admission."
             echo "Independent existing-supervisor provenance verification: pending."
+            echo "The uploaded handoff remains pending until the existing supervisor independently verifies provenance and issues its existing one-use grant."
+            echo "After that separate review, the existing i5 operator may call the fixed local executor with the downloaded handoff and signed grant."
+            echo "The local executor calls only the installed operator bootstrap, reads its durable source/operation receipt, and checks loopback health plus the running OCI revision through read-only rootless Docker inspection."
+            echo "For an admitted retained upgrade, the executor verifies the root-receipted isolated-copy plan, candidate and retained container IDs, stopped old application services, pinned images, volumes, networks, and exact loopback binding before reporting local deployment confirmation."
+            echo "This GitHub runner does not contact the staging host or execute the local adapter."
+            echo "Owner-side command after independent review and existing-grant issuance: /usr/bin/python3 -I -B /opt/belib-staging/sources/<source-sha>/scripts/staging/cd-handoff-executor.py --handoff <downloaded-handoff.json> --grant <signed-one-use-grant.json> --result <new-local-result.json>"
             echo "Deployment authorized: false"
             echo "Deployment started: false"
             echo "Deployment asserted: false"

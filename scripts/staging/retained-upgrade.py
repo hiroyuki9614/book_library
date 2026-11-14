@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import fcntl
+import subprocess
 import importlib.util
 import json
 import os
@@ -382,22 +384,53 @@ def validate_manifest(
 
 
 def _trusted_ed25519_key(public_key_pem: bytes, trusted_fingerprint: str):
-    """Load a fixture Ed25519 key; matching its fingerprint does not establish authority."""
-    _sha(trusted_fingerprint, "Fixture verifier fingerprint")
+    """Verify an independently supplied pin using the installed OpenSSL runtime.
+
+    The pin's authority is established by the installed caller, not this parser.
+    Sealed anonymous inputs keep OpenSSL independent of caller-controlled TMPDIR.
+    """
+    _sha(trusted_fingerprint, "Verifier fingerprint")
     if not isinstance(public_key_pem, bytes) or len(public_key_pem) > 16 * 1024:
-        raise UpgradePreflightError("Fixture verifier key is missing or malformed")
+        raise UpgradePreflightError("Verifier key is missing or malformed")
     try:
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-        loaded = serialization.load_pem_public_key(public_key_pem)
-        if not isinstance(loaded, Ed25519PublicKey):
-            raise ValueError("not Ed25519")
-        raw = loaded.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-    except (ImportError, ValueError, TypeError) as error:
-        raise UpgradePreflightError("Fixture verifier key is missing or malformed") from error
-    if hashlib.sha256(raw).hexdigest() != trusted_fingerprint:
-        raise UpgradePreflightError("Fixture verifier key does not match its supplied fingerprint")
-    return loaded
+        lines=public_key_pem.strip().splitlines()
+        if lines[0]!=b"-----BEGIN PUBLIC KEY-----" or lines[-1]!=b"-----END PUBLIC KEY-----":
+            raise ValueError()
+        der=base64.b64decode(b"".join(lines[1:-1]),validate=True)
+        # RFC 8410 Ed25519 SubjectPublicKeyInfo: absent parameters, 32 raw bytes.
+        if len(der)!=44 or der[:12]!=bytes.fromhex("302a300506032b6570032100"):
+            raise ValueError()
+        raw=der[12:]
+    except (IndexError,ValueError,TypeError) as error:
+        raise UpgradePreflightError("Verifier key is missing or malformed") from error
+    if hashlib.sha256(raw).hexdigest()!=trusted_fingerprint:
+        raise UpgradePreflightError("Verifier key does not match its supplied fingerprint")
+
+    class PinnedKey:
+        def verify(self,signature,message):
+            for path in (Path('/'),Path('/usr'),Path('/usr/bin'),Path('/usr/bin/openssl')):
+                info=path.lstat()
+                if info.st_uid!=0 or stat.S_ISLNK(info.st_mode) or stat.S_IMODE(info.st_mode)&0o022:
+                    raise UpgradePreflightError("Trusted OpenSSL path is unavailable")
+            descriptors=[]
+            try:
+                for content in (public_key_pem,message,signature):
+                    fd=os.memfd_create('belib-retained-evidence',os.MFD_ALLOW_SEALING)
+                    descriptors.append(fd)
+                    os.write(fd,content)
+                    fcntl.fcntl(fd,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL)
+                    os.lseek(fd,0,os.SEEK_SET)
+                key,payload,sig=(f'/proc/self/fd/{fd}' for fd in descriptors)
+                checked=subprocess.run(['/usr/bin/openssl','pkeyutl','-verify','-pubin','-inkey',key,
+                    '-rawin','-in',payload,'-sigfile',sig],pass_fds=tuple(descriptors),
+                    env={'PATH':'/usr/bin:/bin','HOME':'/nonexistent'},stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5,check=False)
+                if checked.returncode:
+                    raise UpgradePreflightError("Independent evidence signature is invalid")
+            finally:
+                for fd in descriptors:
+                    os.close(fd)
+    return PinnedKey()
 
 
 def validate_restore_attestation(

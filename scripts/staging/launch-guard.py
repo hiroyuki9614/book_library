@@ -37,6 +37,7 @@ SAFE_PATH = "/usr/bin:/bin"
 CONTEXT_NAME = "belib-i5-staging-rootless"
 LOCK_PATH = Path("/tmp/belib-staging-cd-belib-isolated-i5.lock")
 ADMISSION_WORKTREE_PREFIX = Path("/home/hiroyuki/workspaces/belib-i5-admission-")
+OPERATOR_SOURCES = Path("/opt/belib-staging/sources")
 SOURCE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 EVIDENCE_SHA_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 ADMITTED_SOURCE_ROOT: Path | None = None
@@ -84,10 +85,10 @@ def _require_operator_bootstrap_admission() -> None:
         info = os.fstat(fd)
         seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
         if (info.st_uid != 0 or not stat.S_ISREG(info.st_mode) or info.st_nlink != 0
-                or info.st_size > 16384 or fcntl.fcntl(fd, fcntl.F_GET_SEALS) & seals != seals):
+                or info.st_size > 65536 or fcntl.fcntl(fd, fcntl.F_GET_SEALS) & seals != seals):
             raise LaunchBlocked("Operator admission descriptor is not root-owned and immutable")
         os.lseek(fd, 0, os.SEEK_SET)
-        raw = os.read(fd, 16385)
+        raw = os.read(fd, 65537)
         def unique(pairs):
             result = {}
             for key, item in pairs:
@@ -96,7 +97,10 @@ def _require_operator_bootstrap_admission() -> None:
                 result[key] = item
             return result
         admission = json.loads(raw, object_pairs_hook=unique)
-        if (not isinstance(admission, dict) or set(admission) != {"schema", "grant", "source_root", "pid", "argv_sha256"}
+        expected_fields = {"schema", "grant", "source_root", "pid", "argv_sha256"}
+        if isinstance(admission, dict) and isinstance(admission.get("grant"), dict) and admission["grant"].get("operation") == "upgrade-retained":
+            expected_fields.add("retained_config")
+        if (not isinstance(admission, dict) or set(admission) != expected_fields
                 or admission["schema"] != "belib-staging-operator-admission/v1"
                 or type(admission["pid"]) is not int or admission["pid"] != os.getpid()
                 or admission["argv_sha256"] != hashlib.sha256(json.dumps(sys.argv[1:], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()):
@@ -104,7 +108,7 @@ def _require_operator_bootstrap_admission() -> None:
         grant = admission["grant"]
         if (not isinstance(grant, dict) or not isinstance(grant.get("source_sha"), str)
                 or not SOURCE_SHA_PATTERN.fullmatch(grant["source_sha"])
-                or admission["source_root"] != "/opt/belib-staging/sources/" + grant["source_sha"]
+                or admission["source_root"] != str(OPERATOR_SOURCES / grant["source_sha"])
                 or grant.get("host") != socket.gethostname() or grant.get("uid") != os.getuid()
                 or type(grant.get("expires_at")) is not int or int(time.time()) >= grant["expires_at"]):
             raise LaunchBlocked("Operator admission target/source/expiry mismatch")
@@ -123,6 +127,9 @@ def _require_operation_approval(args) -> None:
                 "evidence_sha256": args.evidence_sha256}
     if args.operation == "resume-ingress":
         expected.update(prior_source_sha=args.prior_source_sha, retained_state_sha256=args.retained_state_sha256)
+    if args.operation == "upgrade-retained":
+        expected.update({name: getattr(args, name) for name in
+                         ("prior_application_sha", "retained_state_sha256", "backup_sha256", "restore_attestation_sha256")})
     if any(grant.get(name) != value for name, value in expected.items()) or int(time.time()) >= grant["expires_at"]:
         raise LaunchBlocked("Admitted operation differs from the one-use root-verified grant")
 
@@ -137,6 +144,15 @@ def load_approval_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_retained_executor(source_root):
+    spec = importlib.util.spec_from_file_location("belib_retained_executor", source_root / "scripts/staging/retained-executor.py")
+    if spec is None or spec.loader is None:
+        raise LaunchBlocked("The fixed retained executor is unavailable")
+    executor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(executor)
+    return executor
 
 
 def load_seed_module():
@@ -1082,8 +1098,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument("--evidence-sha256")
         parser.add_argument("--prior-source-sha")
         parser.add_argument("--retained-state-sha256")
+        parser.add_argument("--prior-application-sha")
+        parser.add_argument("--backup-sha256")
+        parser.add_argument("--restore-attestation-sha256")
         parser.add_argument("--env-file", type=Path, required=True)
-        parser.add_argument("operation", choices=("deploy", "resume-ingress", "manifest-ingress"))
+        parser.add_argument("operation", choices=("deploy", "resume-ingress", "manifest-ingress", "upgrade-retained"))
         args = parser.parse_args(argv)
 
         account = pwd.getpwuid(os.getuid())
@@ -1109,6 +1128,17 @@ def main(argv: list[str] | None = None) -> int:
         seed = load_seed_module()
 
         with project_lock():
+            if args.operation == "upgrade-retained":
+                _require_operation_approval(args)
+                if ROOT_ADMISSION.get("retained_config") is None:
+                    raise LaunchBlocked("Retained topology and independent evidence authorities are not adopted")
+                executor = load_retained_executor(source_root)
+                try:
+                    result = executor.execute_admitted(ROOT_ADMISSION, source_root, args.env_file)
+                except Exception as error:
+                    raise LaunchBlocked("Retained upgrade admission, execution or recovery failed; preserve its operation journal") from error
+                print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+                return 0
             if args.operation == "manifest-ingress":
                 try:
                     source_guard = load_source_tree_guard(source_root)

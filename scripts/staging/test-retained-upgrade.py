@@ -8,13 +8,11 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 from pathlib import Path
-
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 MODULE_PATH = Path(__file__).with_name("retained-upgrade.py")
 SPEC = importlib.util.spec_from_file_location("retained_upgrade", MODULE_PATH)
@@ -54,8 +52,7 @@ class RetainedUpgradeTests(unittest.TestCase):
             "project": upgrade.EXPECTED_PROJECT,
         }
         self.network_issuer = "independent-network-inventory-test"
-        self.network_private_key = Ed25519PrivateKey.generate()
-        self.network_public_pem, self.network_fingerprint = self.pin(self.network_private_key)
+        self.network_private_key, self.network_public_pem, self.network_fingerprint = self.new_key("network")
         self.network_inventory = self.sign_with(self.network_private_key, {
             "schema": "belib-retained-upgrade-network-inventory/v1",
             "evidence_issuer": self.network_issuer,
@@ -66,8 +63,7 @@ class RetainedUpgradeTests(unittest.TestCase):
             "expires_at": 1200,
         })
         self.root_issuer = "independent-backup-roots-test"
-        self.root_private_key = Ed25519PrivateKey.generate()
-        self.root_public_pem, self.root_fingerprint = self.pin(self.root_private_key)
+        self.root_private_key, self.root_public_pem, self.root_fingerprint = self.new_key("roots")
         self.root_contract = self.sign_with(self.root_private_key, {
             "schema": "belib-retained-upgrade-backup-roots/v1",
             "evidence_issuer": self.root_issuer,
@@ -79,13 +75,7 @@ class RetainedUpgradeTests(unittest.TestCase):
             "expires_at": 1200,
         })
         self.issuer = "independent-restore-verifier-test"
-        self.private_key = Ed25519PrivateKey.generate()
-        self.public_key = self.private_key.public_key()
-        self.public_pem = self.public_key.public_bytes(
-            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
-        raw_public = self.public_key.public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-        self.fingerprint = hashlib.sha256(raw_public).hexdigest()
+        self.private_key, self.public_pem, self.fingerprint = self.new_key("restore")
         self.manifest = {
             "schema": "belib-retained-upgrade-manifest/v2",
             "repository": upgrade.EXPECTED_REPOSITORY,
@@ -131,22 +121,30 @@ class RetainedUpgradeTests(unittest.TestCase):
         self.temp.cleanup()
         self.clock.stop()
 
+    def new_key(self, name):
+        private_path = self.root / f"{name}.private.pem"
+        public_path = self.root / f"{name}.public.pem"
+        subprocess.run(["/usr/bin/openssl", "genpkey", "-algorithm", "ED25519", "-out", str(private_path)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["/usr/bin/openssl", "pkey", "-in", str(private_path), "-pubout", "-out", str(public_path)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        der = subprocess.check_output(["/usr/bin/openssl", "pkey", "-pubin", "-in", str(public_path), "-outform", "DER"])
+        if len(der) != 44 or der[:12] != bytes.fromhex("302a300506032b6570032100"):
+            raise AssertionError("OpenSSL produced an unexpected Ed25519 public key encoding")
+        return private_path, public_path.read_bytes(), hashlib.sha256(der[12:]).hexdigest()
+
+    def sign_with(self, private_key, payload):
+        payload_path = private_key.with_suffix(".payload")
+        signature_path = private_key.with_suffix(".signature")
+        payload_path.write_bytes(upgrade.canonical_json(payload))
+        subprocess.run(["/usr/bin/openssl", "pkeyutl", "-sign", "-inkey", str(private_key),
+                        "-rawin", "-in", str(payload_path), "-out", str(signature_path)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        signature = signature_path.read_bytes()
+        return {"payload": payload, "signature": base64.b64encode(signature).decode("ascii")}
+
     def sign(self, payload):
-        signature = self.private_key.sign(upgrade.canonical_json(payload))
-        return {"payload": payload, "signature": base64.b64encode(signature).decode("ascii")}
-
-    @staticmethod
-    def sign_with(private_key, payload):
-        signature = private_key.sign(upgrade.canonical_json(payload))
-        return {"payload": payload, "signature": base64.b64encode(signature).decode("ascii")}
-
-    @staticmethod
-    def pin(private_key):
-        public_key = private_key.public_key()
-        pem = public_key.public_bytes(
-            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
-        raw = public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-        return pem, hashlib.sha256(raw).hexdigest()
+        return self.sign_with(self.private_key, payload)
 
     def manifest_digest(self, manifest):
         return upgrade.validate_manifest(

@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 CONFIG = Path("/etc/belib-staging/operator-bootstrap.json")
+RETAINED_CONFIG = Path("/etc/belib-staging/retained-upgrade.json")
 INSTALL = Path("/usr/local/libexec/belib-staging/operator-bootstrap.py")
 SOURCES = Path("/opt/belib-staging/sources")
 STATE = Path("/var/lib/belib-staging/operator")
@@ -35,6 +36,7 @@ TARGET = {"repository": "hiroyuki9614/book_library", "pull_request": 103,
           "project": "belib-isolated-i5", "branch": "codex/belib-i5-isolated-staging-20261107"}
 SAFE_ENV = {"PATH": "/usr/bin:/bin", "HOME": "/home/hiroyuki", "LANG": "C"}
 PRIOR_SOURCE = "6963103fd6bec332b4057457d07b890fe5c11e73"
+RETAINED_DB_ID = "9ab9d141599e8b33f51a1e4e9bcd16d66e92b9d134889014d9d9bd618b42f73d"
 MAX_GRANT = 16384
 MAX_CONFIG = 4 * 1024 * 1024
 
@@ -120,8 +122,10 @@ def validate_grant(envelope_raw, source_sha):
         raise Blocked("Grant payload must be an object")
     if grant.get("operation") == "resume-ingress":
         fields |= {"prior_source_sha", "retained_state_sha256"}
+    if grant.get("operation") == "upgrade-retained":
+        fields |= {"prior_application_sha", "retained_state_sha256", "backup_sha256", "restore_attestation_sha256"}
     if (not isinstance(grant, dict) or set(grant) != fields
-            or grant.get("operation") not in {"deploy", "resume-ingress"}
+            or grant.get("operation") not in {"deploy", "resume-ingress", "upgrade-retained"}
             or grant.get("schema") != "belib-staging-bootstrap-approval/v1"
             or grant.get("source_sha") != source_sha
             or any(grant.get(k) != v for k, v in TARGET.items())
@@ -135,6 +139,11 @@ def validate_grant(envelope_raw, source_sha):
             grant["prior_source_sha"] != PRIOR_SOURCE or not isinstance(grant["retained_state_sha256"], str)
             or not re.fullmatch(r"[0-9a-f]{64}", grant["retained_state_sha256"])):
         raise Blocked("Retained-state binding is invalid")
+    if grant["operation"] == "upgrade-retained" and (
+            grant["prior_application_sha"] != "81256268276d7ead95029849037f69ec6beec202"
+            or any(not isinstance(grant[name], str) or not re.fullmatch(r"[0-9a-f]{64}", grant[name])
+                   for name in ("retained_state_sha256", "backup_sha256", "restore_attestation_sha256"))):
+        raise Blocked("Retained upgrade prior state or evidence binding is invalid")
     if len(signature) != 64 or hashlib.sha256(PUBLIC_KEY).hexdigest() != PUBLIC_FINGERPRINT:
         raise Blocked("Signature or adopted public-key pin is invalid")
     trusted_path(Path("/usr/bin/openssl"))
@@ -202,7 +211,23 @@ def launcher_arguments(grant):
                  "--env-file", "/home/hiroyuki/.config/belib-staging/i5.env"]
     if grant["operation"] == "resume-ingress":
         arguments += ["--prior-source-sha", grant["prior_source_sha"], "--retained-state-sha256", grant["retained_state_sha256"]]
+    if grant["operation"] == "upgrade-retained":
+        for name in ("prior_application_sha", "retained_state_sha256", "backup_sha256", "restore_attestation_sha256"):
+            arguments += ["--" + name.replace("_", "-"), grant[name]]
     return [*arguments, grant["operation"]]
+
+
+def load_retained_config(grant):
+    """Only a separate root-adopted topology and evidence trust store can enable upgrade."""
+    path = RETAINED_CONFIG
+    if not path.exists():
+        raise Blocked("Retained topology and independent evidence authorities are not adopted")
+    value = parse(read_regular(path, 65536, trusted=True), 65536)
+    if (not isinstance(value, dict) or value.get("schema") != "belib-retained-operator/v1"
+            or value.get("source_sha") != grant["source_sha"] or value.get("topology") != "isolated-copy"
+            or value.get("enabled") is not True):
+        raise Blocked("Retained operator configuration does not enable this exact source/topology")
+    return value
 
 
 def consume_nonce(grant):
@@ -231,13 +256,35 @@ def _result_path(nonce):
     return STATE / (nonce + ".result.json")
 
 
-def write_result(grant, code):
+def expected_retained_runtime(config):
+    plan = config["cutover_plan"]
+    public_plan = {"cutover_plan": plan, "candidate_database": config["candidate_database"],
+                   "source_database": config["source_database"]}
+    value = {"project": TARGET["project"] + "-upgrade-" + plan["operation_id"],
+             "operation_id": plan["operation_id"], "plan": public_plan,
+             "services": {"db": config["candidate_database"]["id"],
+                          **{service: plan["new"][service]["id"] for service in ("backend", "frontend", "nginx")}},
+             "retained": {"project": TARGET["project"],
+                          "db": RETAINED_DB_ID,
+                          "volumes": {"database": TARGET["project"] + "_staging-postgres-data",
+                                      "books": TARGET["project"] + "_staging-book-files"},
+                          "stopped_application_ids": [plan["old"][service]["id"] for service in ("backend", "frontend", "nginx")]},
+             "port": plan["port"],
+             "plan_sha256": hashlib.sha256(canonical(public_plan)).hexdigest()}
+    return value
+
+
+def write_result(grant, code, retained_config=None):
     if type(code) is not int or not -128 <= code <= 255:
         raise Blocked("Executor exit status is invalid")
     result = {"schema": "belib-staging-operation-result/v1", "nonce": grant["nonce"],
               "grant_sha256": hashlib.sha256(canonical(grant)).hexdigest(),
               **{name: grant[name] for name in ("source_sha", "operation", "host", "principal", "uid", "project")},
               "exit_code": code, "completed_at": int(time.time()), "nonce_consumed": True}
+    if code == 0 and grant["operation"] == "upgrade-retained" and retained_config is not None:
+        # This is an expected adopted topology, NOT an observation of Docker.
+        # The nonroot CD adapter independently inspects these IDs and revisions.
+        result["expected_runtime"] = expected_retained_runtime(retained_config)
     path = _result_path(grant["nonce"])
     # A result is immutable. Duplicate execution is already denied by the nonce
     # journal; never replace a completed result with a second claimant's result.
@@ -259,6 +306,8 @@ def read_result(nonce):
     result = parse(read_regular(path, MAX_GRANT, trusted=True), MAX_GRANT)
     fields = {"schema", "nonce", "grant_sha256", "source_sha", "operation", "host", "principal", "uid", "project",
               "exit_code", "completed_at", "nonce_consumed"}
+    if isinstance(result, dict) and result.get("operation") == "upgrade-retained" and result.get("exit_code") == 0:
+        fields.add("expected_runtime")
     if (not isinstance(result, dict) or set(result) != fields
             or result.get("schema") != "belib-staging-operation-result/v1" or result.get("nonce") != nonce
             or result.get("nonce_consumed") is not True
@@ -267,12 +316,12 @@ def read_result(nonce):
             or not -128 <= result["exit_code"] <= 255 or type(result.get("completed_at")) is not int
             or not isinstance(result.get("source_sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", result["source_sha"])
             or not isinstance(result.get("grant_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", result["grant_sha256"])
-            or result.get("operation") not in {"deploy", "resume-ingress"}):
+            or result.get("operation") not in {"deploy", "resume-ingress", "upgrade-retained"}):
         raise Blocked("Stored operation result is invalid")
     return result
 
 
-def spawn_admitted(root, grant):
+def spawn_admitted(root, grant, retained_config=None):
     arguments = launcher_arguments(grant)
     pid = os.fork()
     if pid == 0:
@@ -283,6 +332,8 @@ def spawn_admitted(root, grant):
             admission = {"schema": "belib-staging-operator-admission/v1", "grant": grant,
                          "source_root": str(root), "pid": os.getpid(),
                          "argv_sha256": hashlib.sha256(canonical(arguments)).hexdigest()}
+            if retained_config is not None:
+                admission["retained_config"] = retained_config
             fd = os.memfd_create("belib-operator-admission", os.MFD_ALLOW_SEALING)
             os.fchmod(fd, 0o400)
             os.write(fd, canonical(admission))
@@ -330,13 +381,14 @@ def main():
         config = parse(read_regular(CONFIG, MAX_CONFIG, trusted=True), MAX_CONFIG)
         root = verify_source(config)
         grant = validate_grant(read_regular(args.grant, MAX_GRANT), config["source_sha"])
+        retained_config = load_retained_config(grant) if grant["operation"] == "upgrade-retained" else None
         trusted_path(STATE, directory=True)
         lock_fd = os.open(STATE / "project.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             consume_nonce(grant)
-            code = spawn_admitted(root, grant)
-            result = write_result(grant, code)
+            code = spawn_admitted(root, grant, retained_config) if retained_config is not None else spawn_admitted(root, grant)
+            result = write_result(grant, code, retained_config)
         finally:
             os.close(lock_fd)
         print(canonical(result).decode())

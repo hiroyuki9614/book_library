@@ -357,10 +357,12 @@ descriptor bound to its PID and exact argv, validates that descriptor before
 candidate helper imports and rechecks the admitted operation before effects.
 The same grant is not requested a second time by the candidate launcher.
 
-This first bootstrap candidate admits only existing `deploy` and `resume-ingress`.
-It does not claim retained-DB upgrade, TLS root operations, CD workflow trust or
-physical GUI acceptance. Those require their own fixed executable integration;
-the source-only retained transaction rehearsal below is not sufficient.
+The candidate bootstrap admits `deploy`, `resume-ingress`, and `upgrade-retained`.
+The last operation additionally requires the independently adopted, root-owned
+`/etc/belib-staging/retained-upgrade.json`, exact source/topology/resource pins,
+prepared archive and independently signed restore/network/root evidence. Missing
+configuration fails before consuming a nonce. No source test installs that config
+or establishes TLS, CD workflow trust, or physical GUI acceptance.
 
 Revoke by atomically installing an `enabled:false` config; keep consumed nonce
 files. Restore a prior reviewed config/source only while the project is idle,
@@ -392,10 +394,10 @@ the caller must keep application writes quiesced and reconcile that exact journa
 The caller must hold the existing project lock, authenticate fresh independent
 admission and bind the source, host/principal, resources and immutable backup. The
 module does not provide that authority, discover Docker resources, expose a CLI,
-or replace the pending installed bootstrap and CD integration. Its `Operations`
-adapter must perform actual PostgreSQL restore and integrity checks; matching
-supplied hashes alone is insufficient. The current production staging launcher
-does not yet invoke this engine.
+or replace the installed bootstrap. The candidate `retained-executor.py` now binds
+this engine to actual PostgreSQL restore/integrity checks and `retained-cutover.py`.
+Matching supplied hashes alone is insufficient. The live host must still adopt
+the independently reviewed bootstrap/source and obtain a valid external grant.
 
 Run `python3 -B scripts/staging/test-retained-db-transaction.py` for offline
 transaction/recovery tests. Explicitly setting `BELIB_DISPOSABLE_POSTGRES_TEST=1`
@@ -406,5 +408,45 @@ containers are removed. These synthetic DB tests simulate application activation
 they are not BeLib application deployment, a signature, or physical Chrome acceptance.
 
 The first transaction showed that nginx had the expected loopback HostConfig but no published port while attached only to the internal isolated network. The source correction adds a project bridge ingress network to nginx alone; db, migrate, backend, and frontend remain on the internal network, and the loopback port binding is unchanged. This source change is not evidence that runtime publication now works. After a separately reviewed resume operation, verify the configured loopback port at `http://127.0.0.1:<verified-port>/health`; treat failure as a deployment blocker. Then, only after the owner-approved Tailnet-only custom HTTPS ingress and certificate gates above are met, use the physical i5 Google Chrome GUI, not a headless substitute, at `https://stg-bl.hiroyuki9614.com` to check anonymous protected API 401, separate staging admin/general identities, general-user denial of admin-only books and management API, synthetic EPUB and PDF body/page displays, reading-position save and restore after reload and new login, and Shelf/Reader UI. Read the real `frontend/package.json` scripts before executing tests; the current reader script is `npm --prefix frontend run test:readers`. Confirm test fixtures reference only the isolated staging DB/storage and never delete real users/books.
+
+### Admitted isolated-copy execution and CD readback
+
+`upgrade-retained` keeps the original retained database/container/volume unchanged.
+Its independent plan pins a separate `belib-isolated-i5-upgrade-<operation_id>`
+database and three candidate application containers. After stopping the old
+application writers, it compares a real restore of the approved archive with the
+current original database; intervening data changes abort before migration. Only
+the separate copy is restored/migrated. Before the durable commit decision,
+recovery restores the old application binding; after that decision, recovery
+moves forward and preserves acknowledged new writes. A completed retry verifies
+the current candidate without restoring an older archive over it.
+
+Docker resolves `OomScoreAdj`/`OomKillDisable` on container start. Both execution
+and CD compare a configuration digest that excludes only those two runtime
+values; IDs, image, environment, mounts, remaining HostConfig and network names
+remain pinned. Actual network IDs and loopback bindings are checked separately.
+
+The root bootstrap writes an immutable nonce/grant-bound result. Its successful
+upgrade result contains expected runtime identities from the adopted plan; that
+is not an observation. `cd-handoff-executor.py` invokes the fixed installed
+operator, reads the durable result, then independently reads Docker and HTTP.
+It requires the old DB unchanged, old application containers stopped, exact new
+container/image/volume/network identities, and only the new nginx publishing the
+fixed loopback endpoint. HTTP 200 without verified revision is not deployment
+success. TLS and physical Chrome acceptance remain separate, unperformed checks.
+The GitHub workflow remains a read-only evidence handoff; it does not create a
+privileged runner, install trust or grant sudo. Its initial protected registration
+must be handled separately from application promotion to production main.
+
+Focused offline checks are `test-retained-cutover.py` and
+`test-cd-handoff-executor.py`. Opt-in
+`BELIB_DISPOSABLE_ENTRYPOINT_TEST=1 /usr/bin/python3 -I -B scripts/staging/test-retained-entrypoint.py`
+exercises real bootstrap/launcher/executor orchestration with real rootless Docker,
+PostgreSQL dump/restore, fixed-image SQL migration, cutover and HTTP. It uses
+synthetic keys, substituted host/root ownership and disposable resource identities,
+mock application HTTP services and a SQL fixture in place of the Prisma image.
+It checks wrong-signature no effects, successful publication, preservation of a
+write across completed retry, and interrupted precommit recovery. It is not
+actual BeLib application, real signer, HTTPS or physical-browser acceptance.
 
 Report separately: candidate code, fixed HEAD, current CI, independent review, i5 preflight, real Compose services/volume identities, HTTP smoke, Playwright, physical i5 Chrome, and final acceptance. Only observed results count. If the stage is running, persist the observed loopback and verified Tailnet HTTPS URLs with an evidence pointer in the original PV3 Work Prompt/owner PR. Do not commit confidential browser traces or uploaded books.
