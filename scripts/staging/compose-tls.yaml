@@ -1,0 +1,37 @@
+# Optional ingress-only overlay for the existing rootless nginx service.
+# Combine only with compose.staging.yaml and the existing isolated env file.
+services:
+  nginx:
+    ports:
+      - "127.0.0.1:18443:8443"
+    volumes:
+      - type: bind
+        source: ./scripts/staging/nginx-tls.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./scripts/staging/nginx-tls-default.conf
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./scripts/staging/nginx-tls-locations.conf
+        target: /etc/nginx/conf.d/belib-proxy-locations.conf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /home/hiroyuki/.config/belib-staging/letsencrypt/config/live/stg-bl.hiroyuki9614.com/fullchain.pem
+        target: /run/belib-tls/fullchain.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /home/hiroyuki/.config/belib-staging/letsencrypt/config/live/stg-bl.hiroyuki9614.com/privkey.pem
+        target: /run/belib-tls/privkey.pem
+        read_only: true
+        bind:
+          create_host_path: false
