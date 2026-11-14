@@ -169,6 +169,7 @@ jobs:
           /usr/bin/python3 -I -B scripts/staging/test-ci-isolation-guard.py
           /usr/bin/python3 -I -B scripts/staging/test-launch-guard.py
           /usr/bin/python3 -I -B scripts/staging/test-operator-bootstrap.py
+          /usr/bin/python3 -I -B scripts/staging/test-package-operator-adoption.py
           /usr/bin/python3 -I -B -m unittest discover -s scripts/staging/tests -p 'test_operator_bootstrap_reference.py' -v
           /usr/bin/python3 -I -B scripts/staging/test-seed-wrapper.py
           /usr/bin/python3 -I -B scripts/staging/test-source-tree-guard.py
