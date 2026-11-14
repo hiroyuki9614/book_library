@@ -117,3 +117,194 @@ for (const width of [320, 393, 1280, 1440, 1663]) {
 		}
 	});
 }
+
+test('PDF mobile reader chrome keeps its header, reading surface and footer within 320/393px viewports', async ({ page, browser }) => {
+	test.setTimeout(150_000);
+	const pdfSource = await browser.newPage();
+	await pdfSource.setContent('<h1>Mobile reader chrome</h1><p>Synthetic PDF page.</p>');
+	const pdf = await pdfSource.pdf();
+	await pdfSource.close();
+	await useProtectedBook(page, pdf, 'pdf');
+
+	for (const [width, height] of [[320, 640], [393, 851]] as const) {
+		await page.setViewportSize({ width, height });
+		await page.goto('/e2e/readers/harness.html?kind=pdf');
+		await expect(page.getByTestId('pdf-viewport')).toBeVisible({ timeout: 45_000 });
+		await expect(page.locator('[data-pdf-page="1"] img')).toBeVisible({ timeout: 45_000 });
+		await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45_000 });
+
+		const footer = page.getByTestId('pdf-reader-footer');
+		await expect(footer).toBeVisible();
+		await expect(page.getByRole('button', { name: '操作メニューを開く' })).toBeVisible();
+		await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+		const geometry = await footer.evaluate((footerElement) => {
+			const root = footerElement.parentElement!;
+			const header = root.querySelector('header');
+			const main = root.querySelector('main');
+			if (!header || !main) throw new Error('PDF reader chrome is missing its header or main');
+			const rect = (element: Element) => {
+				const box = element.getBoundingClientRect();
+				return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, height: box.height };
+			};
+			const controls = [...header.querySelectorAll<HTMLElement>('a, button')]
+				.map((element) => ({ name: element.getAttribute('aria-label') || element.textContent?.trim() || element.tagName, box: rect(element) }))
+				.filter(({ box }) => box.right > box.left && box.bottom > box.top);
+			const collisions: string[] = [];
+			for (let i = 0; i < controls.length; i++) {
+				for (let j = i + 1; j < controls.length; j++) {
+					const a = controls[i], b = controls[j];
+					if (Math.min(a.box.right, b.box.right) - Math.max(a.box.left, b.box.left) > 1
+						&& Math.min(a.box.bottom, b.box.bottom) - Math.max(a.box.top, b.box.top) > 1) {
+						collisions.push(`${a.name} / ${b.name}`);
+					}
+				}
+			}
+			return {
+				viewportHeight: window.innerHeight,
+				documentScrollWidth: document.documentElement.scrollWidth,
+				headerScrollWidth: header.scrollWidth,
+				headerClientWidth: header.clientWidth,
+				footerScrollWidth: footerElement.scrollWidth,
+				footerClientWidth: footerElement.clientWidth,
+				header: rect(header),
+				main: rect(main),
+				footer: rect(footerElement),
+				collisions,
+			};
+		});
+		expect(geometry.documentScrollWidth, `PDF ${width}px horizontal document overflow`).toBeLessThanOrEqual(width + 2);
+		expect(geometry.headerScrollWidth, `PDF ${width}px header overflow`).toBeLessThanOrEqual(geometry.headerClientWidth + 2);
+		expect(geometry.footerScrollWidth, `PDF ${width}px footer overflow`).toBeLessThanOrEqual(geometry.footerClientWidth + 2);
+		expect(geometry.collisions, `PDF ${width}px header controls collide`).toEqual([]);
+		expect(geometry.main.top, `PDF ${width}px main overlaps header`).toBeGreaterThanOrEqual(geometry.header.bottom - 2);
+		expect(geometry.footer.top, `PDF ${width}px footer overlaps main`).toBeGreaterThanOrEqual(geometry.main.bottom - 2);
+		expect(geometry.main.height, `PDF ${width}px body too small`).toBeGreaterThanOrEqual(geometry.viewportHeight * 0.6);
+		expect(geometry.footer.bottom, `PDF ${width}px footer outside viewport`).toBeLessThanOrEqual(geometry.viewportHeight + 2);
+
+		await page.getByRole('button', { name: '操作メニューを開く' }).click();
+		await expect(footer).toHaveAttribute('aria-hidden', 'true');
+		await expect(footer).toHaveAttribute('inert');
+		await page.getByRole('button', { name: '閉じる', exact: true }).click();
+		await expect(footer).not.toHaveAttribute('aria-hidden');
+		await expect(footer).not.toHaveAttribute('inert');
+	}
+});
+
+/** Full desktop reading-area geometry, complementing the narrow Sheet tests. */
+async function checkReaderChrome(page: Page, kind: 'epub' | 'pdf', width: number) {
+	const footer = page.getByTestId(kind === 'epub' ? 'epub-reader-footer' : 'pdf-reader-footer');
+	await expect(footer).toBeVisible();
+	await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+	const data = await footer.evaluate((element) => {
+		const header = element.parentElement?.querySelector(':scope > header');
+		const main = element.parentElement?.querySelector(':scope > main');
+		if (!header || !main) throw new Error('B reader header/main/footer are not siblings');
+		const box = (node: Element) => {
+			const r = node.getBoundingClientRect();
+			return { top: r.top, bottom: r.bottom, height: r.height };
+		};
+		return {
+			header: box(header), main: box(main), footer: box(element),
+			viewHeight: window.innerHeight, documentWidth: document.documentElement.scrollWidth,
+			headerScroll: header.scrollWidth, headerWidth: header.clientWidth,
+			footerScroll: element.scrollWidth, footerWidth: element.clientWidth,
+		};
+	});
+	const label = `${kind} ${width}px`;
+	expect(data.documentWidth, `${label} document overflow`).toBeLessThanOrEqual(width + 2);
+	expect(data.headerScroll, `${label} header overflow`).toBeLessThanOrEqual(data.headerWidth + 2);
+	expect(data.footerScroll, `${label} footer overflow`).toBeLessThanOrEqual(data.footerWidth + 2);
+	expect(data.main.top, `${label} header/main overlap`).toBeGreaterThanOrEqual(data.header.bottom - 2);
+	expect(data.footer.top, `${label} main/footer overlap`).toBeGreaterThanOrEqual(data.main.bottom - 2);
+	expect(data.main.height, `${label} reading area height`).toBeGreaterThanOrEqual(data.viewHeight * 0.6);
+	expect(data.footer.bottom, `${label} footer offscreen`).toBeLessThanOrEqual(data.viewHeight + 2);
+}
+
+
+/**
+ * The B layout may optically adjust only the chevron glyph, never its round
+ * hit target. Assert real Chromium geometry before/after an actual EPUB turn.
+ */
+async function checkEpubNavigationButtonGeometry(page: Page, width: number) {
+	const footer = page.getByTestId('epub-reader-footer');
+	const previous = footer.getByRole('button', { name: '前のページへ', exact: true });
+	const next = footer.getByRole('button', { name: '次のページへ', exact: true });
+	const viewport = page.locator('[data-reader-viewport]');
+	await expect(previous).toBeVisible();
+	await expect(next).toBeEnabled();
+	await expect(viewport).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
+	const readCfi = () => page.evaluate(() => localStorage.getItem('reader-location:1'));
+	await expect.poll(readCfi, { timeout: 45_000 }).toMatch(/^epubcfi\(/);
+	const beforeCfi = await readCfi();
+	const measure = () => footer.evaluate((element) => {
+		return ['前のページへ', '次のページへ'].map((name) => {
+			const button = [...element.querySelectorAll<HTMLButtonElement>('button')]
+				.find((candidate) => candidate.getAttribute('aria-label') === name);
+			if (!button) throw new Error(`Missing EPUB turn button: ${name}`);
+			const bounds = button.getBoundingClientRect();
+			const glyph = button.querySelector<HTMLElement>('span[aria-hidden="true"]');
+			if (!glyph) throw new Error(`Missing EPUB turn glyph: ${name}`);
+			const glyphBounds = glyph.getBoundingClientRect();
+			return {
+				name,
+				x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height,
+				glyphCenterOffsetY: (glyphBounds.top + glyphBounds.height / 2) - (bounds.top + bounds.height / 2),
+				buttonTransform: getComputedStyle(button).transform,
+			};
+		});
+	});
+	const before = await measure();
+	for (const button of before) {
+		expect(button.width, `EPUB ${width}px ${button.name} button width`).toBeCloseTo(44, 0);
+		expect(button.height, `EPUB ${width}px ${button.name} button height`).toBeCloseTo(44, 0);
+		expect(button.buttonTransform, `EPUB ${width}px ${button.name} outer button is not translated`).toBe('none');
+		expect(Math.abs(button.glyphCenterOffsetY), `EPUB ${width}px ${button.name} glyph vertically centered`).toBeLessThanOrEqual(3);
+	}
+	await next.click();
+	await expect.poll(readCfi, { timeout: 45_000 }).not.toBe(beforeCfi);
+	await expect(viewport).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
+	const afterCfi = await readCfi();
+	expect(afterCfi, `EPUB ${width}px page turn must leave a changed current CFI after becoming idle`).not.toBe(beforeCfi);
+	const after = await measure();
+	for (let index = 0; index < before.length; index++) {
+		for (const property of ['x', 'y', 'width', 'height'] as const) {
+			expect(Math.abs(after[index][property] - before[index][property]), `EPUB ${width}px ${before[index].name} ${property} must not shift after page turn`).toBeLessThanOrEqual(0.75);
+		}
+	}
+}
+
+for (const width of [1280, 1440, 1663]) {
+	test(`EPUB desktop B chrome ${width}px`, async ({ page }) => {
+		test.setTimeout(90_000);
+		await useProtectedBook(page, epubFixture({ vertical: true, rtl: true }), 'epub');
+		await page.setViewportSize({ width, height: 851 });
+		await page.goto('/e2e/readers/harness.html');
+		await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
+		await checkReaderChrome(page, 'epub', width);
+		await checkEpubNavigationButtonGeometry(page, width);
+	});
+	test(`PDF desktop B chrome ${width}px`, async ({ page, browser }) => {
+		test.setTimeout(90_000);
+		const pdfSource = await browser.newPage();
+		await pdfSource.setContent('<h1>Desktop reader B chrome</h1><p>Synthetic PDF page.</p>');
+		const pdf = await pdfSource.pdf();
+		await pdfSource.close();
+		await useProtectedBook(page, pdf, 'pdf');
+		await page.setViewportSize({ width, height: 851 });
+		await page.goto('/e2e/readers/harness.html?kind=pdf');
+		await expect(page.locator('[data-pdf-page="1"] img')).toBeVisible({ timeout: 45_000 });
+		await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45_000 });
+		await checkReaderChrome(page, 'pdf', width);
+	});
+}
+
+for (const [width, height] of [[320, 640], [393, 851]] as const) {
+	test(`EPUB mobile B chrome at ${width}px keeps header, text and footer readable`, async ({ page }) => {
+		test.setTimeout(90_000);
+		await useProtectedBook(page, epubFixture({ vertical: true, rtl: true }), 'epub');
+		await page.setViewportSize({ width, height });
+		await page.goto('/e2e/readers/harness.html');
+		await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
+		await checkReaderChrome(page, 'epub', width);
+	});
+}

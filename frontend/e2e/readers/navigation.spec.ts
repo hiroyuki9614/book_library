@@ -389,6 +389,13 @@ test('real PDF moves images and page numbers, restores only once, zoom, scroll, 
 		});
 	const image = async () => page.locator(`[data-pdf-page="${await shown()}"] img`).screenshot();
 	await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45000 });
+	// Paper & Navy: the rendered PDF page itself must stay flat, without mock paper shadows.
+	const shadowedPdfElements = await page.locator('[data-pdf-page="1"]').evaluate((surface) =>
+		[surface, ...surface.querySelectorAll('*')]
+			.filter((element) => getComputedStyle(element).boxShadow !== 'none')
+			.map((element) => element.tagName.toLowerCase()),
+	);
+	expect(shadowedPdfElements, 'rendered PDF page descendants must have no paper box-shadow').toEqual([]);
 	await closeControls();
 	const pdfViewportBox = (await page.getByTestId('pdf-viewport').boundingBox())!;
 	const firstPageBox = (await page.locator('[data-pdf-page="1"]').boundingBox())!;
