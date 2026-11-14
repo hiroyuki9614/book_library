@@ -230,7 +230,7 @@ def tls_config_digest(source_root: Path) -> str:
 
 
 def validate_tls_compose_overlay(base: dict[str, Any], combined: dict[str, Any], source_root: Path,
-                                 loopback_port: int) -> None:
+                                 loopback_port: int, tls_port: int = 18443) -> None:
     """Allow the overlay to change nginx only, on exact loopback binds and readonly cert mounts."""
     if not isinstance(base, dict) or not isinstance(combined, dict):
         raise TlsIngressError("Compose model must be an object")
@@ -250,7 +250,7 @@ def validate_tls_compose_overlay(base: dict[str, Any], combined: dict[str, Any],
         raise TlsIngressError("TLS overlay changed nginx behavior outside its ports and readonly config mounts")
     expected_ports = {
         ("127.0.0.1", str(loopback_port), 8080, "tcp", "ingress"),
-        ("127.0.0.1", "18443", 8443, "tcp", "ingress"),
+        ("127.0.0.1", str(tls_port), 8443, "tcp", "ingress"),
     }
     ports = actual.get("ports")
     if not isinstance(ports, list) or len(ports) != 2:
@@ -311,6 +311,67 @@ def tls_state_sha256(state: dict[str, Any]) -> str:
 def signed_tls_binding(binding: dict[str, str], source_sha: str) -> dict[str, str]:
     state = make_tls_state(binding, source_sha)
     return {**binding, "tls_state_sha256": tls_state_sha256(state)}
+
+
+TLS_V2_STATE_FIELDS = {
+    "schema", "source_sha", "prior_application_sha", "host", "principal", "uid", "project",
+    "retained_state_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256",
+    "tls_config_sha256", "funnel_enabled", "unknown_sni", "owner_plan_sha256",
+    "upgrade_receipt_nonce", "upgrade_receipt_sha256", "operation_id",
+}
+
+
+def make_tls_state_v2(binding: dict[str, str], source_sha: str, *, project: str,
+                      upgrade_receipt_nonce: str, upgrade_receipt_sha256: str,
+                      operation_id: str) -> dict[str, Any]:
+    """Construct the same signed eight-field tuple for an isolated retained upgrade."""
+    if (not re.fullmatch(r"[0-9a-f]{40}", source_sha)
+            or not re.fullmatch(re.escape(PROJECT) + r"-upgrade-[0-9a-f]{32}", project)
+            or not re.fullmatch(r"[0-9a-f]{64}", upgrade_receipt_nonce)
+            or not re.fullmatch(r"[0-9a-f]{64}", upgrade_receipt_sha256)
+            or not re.fullmatch(r"[0-9a-f]{32}", operation_id)
+            or project != PROJECT + "-upgrade-" + operation_id
+            or set(binding) != {"prior_application_sha", "retained_state_sha256", "serve_config_sha256",
+                                "serve_etag", "certificate_sha256", "tls_config_sha256", "owner_plan_sha256"}
+            or binding["prior_application_sha"] != source_sha
+            or binding["serve_etag"] != EXPECTED_SERVE_ETAG
+            or any(not re.fullmatch(r"[0-9a-f]{64}", binding[k]) for k in (
+                "retained_state_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256",
+                "tls_config_sha256", "owner_plan_sha256"))):
+        raise TlsIngressError("Upgrade TLS state tuple is malformed")
+    return {"schema": "belib-staging-tls-state/v2", "source_sha": source_sha, **binding,
+            "host": HOST, "principal": PRINCIPAL, "uid": UID, "project": project,
+            "funnel_enabled": False, "unknown_sni": "reject",
+            "upgrade_receipt_nonce": upgrade_receipt_nonce,
+            "upgrade_receipt_sha256": upgrade_receipt_sha256, "operation_id": operation_id}
+
+
+def tls_state_sha256_v2(state: dict[str, Any]) -> str:
+    if (not isinstance(state, dict) or set(state) != TLS_V2_STATE_FIELDS
+            or state.get("schema") != "belib-staging-tls-state/v2"
+            or state.get("prior_application_sha") != state.get("source_sha")
+            or state.get("funnel_enabled") is not False or state.get("unknown_sni") != "reject"
+            or state.get("host") != HOST or state.get("principal") != PRINCIPAL or state.get("uid") != UID
+            or state.get("project") != PROJECT + "-upgrade-" + str(state.get("operation_id"))
+            or not re.fullmatch(r"[0-9a-f]{40}", state.get("source_sha", ""))
+            or any(not re.fullmatch(r"[0-9a-f]{64}", state.get(k, "")) for k in (
+                "retained_state_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256",
+                "tls_config_sha256", "owner_plan_sha256", "upgrade_receipt_nonce", "upgrade_receipt_sha256"))
+            or not re.fullmatch(r"[0-9a-f]{32}", state.get("operation_id", ""))
+            or state.get("certificate_sha256") != EXPECTED_CERT_SHA256):
+        raise TlsIngressError("Upgrade TLS state does not match the fixed v2 contract")
+    return sha256(canonical_json(state))
+
+
+def signed_tls_binding_v2(binding: dict[str, str], source_sha: str, *, project: str,
+                          upgrade_receipt_nonce: str, upgrade_receipt_sha256: str,
+                          operation_id: str) -> dict[str, str]:
+    state = make_tls_state_v2(binding, source_sha, project=project,
+        upgrade_receipt_nonce=upgrade_receipt_nonce,
+        upgrade_receipt_sha256=upgrade_receipt_sha256, operation_id=operation_id)
+    # The existing approval verifier signs precisely this established tuple;
+    # the v2 state digest binds the additional context without changing grant fields.
+    return {**binding, "tls_state_sha256": tls_state_sha256_v2(state)}
 
 
 class LocalApiError(TlsIngressError):

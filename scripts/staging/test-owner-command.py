@@ -56,6 +56,56 @@ class OwnerCommandTests(unittest.TestCase):
     def command(self):
         return packager.make_loader_command(self.source_sha, self.helper_sha, self.plan_sha)
 
+    def test_v2_loader_pins_nonce_scoped_plan_and_receipt_and_uses_root_helper_owner(self):
+        owner_nonce, operation = "1" * 64, "2" * 32
+        project = "belib-isolated-i5-upgrade-" + operation
+        context = self.home / ".local/state/belib-staging/tls-work-context" / owner_nonce
+        context.mkdir(parents=True)
+        plan = {"schema": "belib-tls-owner-retirement-plan/v2",
+            "disposition": "retire-old-fedora-bri-image-publication-handler-only",
+            "source_sha": self.source_sha, "prior_application_sha": self.source_sha,
+            "retained_state_sha256": "3" * 64, "serve_config_sha256": "4" * 64,
+            "serve_etag": "5" * 64, "certificate_sha256": "6" * 64,
+            "tls_config_sha256": "7" * 64, "nonce": owner_nonce, "expires_at": 1900000000,
+            "upgrade_receipt_nonce": "8" * 64, "upgrade_receipt_sha256": "9" * 64,
+            "operation_id": operation, "project": project}
+        receipt = {"schema": "belib-staging-tls-prepare-receipt/v2", "plan_sha256": "0" * 64,
+            "retained_state_sha256": plan["retained_state_sha256"], "nginx_id": "a" * 64,
+            "source_sha": self.source_sha, "tls_config_sha256": plan["tls_config_sha256"],
+            "certificate_sha256": plan["certificate_sha256"], "approval_nonce": "b" * 64,
+            "evidence_sha256": "c" * 64, "prepared": True, "owner_nonce": owner_nonce,
+            "upgrade_receipt_nonce": plan["upgrade_receipt_nonce"],
+            "upgrade_receipt_sha256": plan["upgrade_receipt_sha256"], "operation_id": operation,
+            "project": project, "previous_nginx_id": "d" * 64,
+            "nginx_configuration_sha256": "e" * 64, "nginx_image_id": "sha256:" + "f" * 64,
+            "nginx_network_ids": {project + "_isolated": "1" * 64, project + "_ingress": "2" * 64},
+            "unchanged_runtime_sha256": "3" * 64}
+        plan_raw = json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+        plan_sha = hashlib.sha256(plan_raw).hexdigest()
+        receipt["plan_sha256"] = plan_sha
+        receipt_raw = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+        (context / "owner-plan.json").write_bytes(plan_raw); (context / "owner-plan.json").chmod(0o600)
+        (context / "prepare-receipt.json").write_bytes(receipt_raw); (context / "prepare-receipt.json").chmod(0o600)
+        receipt_sha = hashlib.sha256(receipt_raw).hexdigest()
+        real_read = packager.read_verified
+        def fixture_read(path, *, limit, expected_sha, uid, mode):
+            if path == self.helper:
+                self.assertEqual(uid, 0)
+            return real_read(path, limit=limit, expected_sha=expected_sha, uid=1000,
+                             mode=mode if uid == 1000 else 0o644)
+        with patch.object(packager, "read_verified", side_effect=fixture_read):
+            command = packager.make_loader_command_v2(self.source_sha, self.helper_sha, plan_sha,
+                                                       owner_nonce, receipt_sha)
+        loader = shlex.split(command)[shlex.split(command).index("-c") + 1]
+        compile(loader, "<v2-owner-loader>", "exec")
+        self.assertIn("ns['run'](plan,PH,receipt,RH)", loader)
+        self.assertIn("HH,0,0o644", loader)
+        self.assertIn(owner_nonce, command)
+        self.assertIn(receipt_sha, loader)
+        with self.assertRaises(packager.PackageError):
+            packager.make_loader_command_v2(self.source_sha, self.helper_sha, plan_sha,
+                                              "../" + owner_nonce[3:], receipt_sha)
+
     def test_generates_one_reviewable_clean_environment_loader_command(self):
         command = self.command()
         argv = shlex.split(command)

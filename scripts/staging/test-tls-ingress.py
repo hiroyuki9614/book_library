@@ -70,10 +70,33 @@ class FakeServeClient:
 
 
 class TlsIngressTests(unittest.TestCase):
+    def test_v2_tls_state_binds_root_upgrade_case_without_weakening_legacy_tuple(self):
+        source = "a" * 40
+        binding = {"prior_application_sha": source, "retained_state_sha256": "b" * 64,
+            "serve_config_sha256": "c" * 64, "serve_etag": tls.EXPECTED_SERVE_ETAG,
+            "certificate_sha256": tls.EXPECTED_CERT_SHA256, "tls_config_sha256": "d" * 64,
+            "owner_plan_sha256": "e" * 64}
+        operation = "f" * 32
+        project = "belib-isolated-i5-upgrade-" + operation
+        signed = tls.signed_tls_binding_v2(binding, source, project=project,
+            upgrade_receipt_nonce="1" * 64, upgrade_receipt_sha256="2" * 64, operation_id=operation)
+        self.assertEqual(set(signed), {"prior_application_sha", "retained_state_sha256", "serve_config_sha256",
+            "serve_etag", "certificate_sha256", "tls_config_sha256", "owner_plan_sha256", "tls_state_sha256"})
+        state = tls.make_tls_state_v2(binding, source, project=project,
+            upgrade_receipt_nonce="1" * 64, upgrade_receipt_sha256="2" * 64, operation_id=operation)
+        self.assertEqual(state["prior_application_sha"], source)
+        self.assertEqual(tls.tls_state_sha256_v2(state), signed["tls_state_sha256"])
+        with self.assertRaises(tls.TlsIngressError):
+            tls.make_tls_state_v2(binding, source, project="belib-isolated-i5",
+                upgrade_receipt_nonce="1" * 64, upgrade_receipt_sha256="2" * 64, operation_id=operation)
+
     def test_nginx_sni_allowlist_contains_only_custom_host_and_rejects_default(self):
         config = Path(__file__).with_name("nginx-tls.conf").read_text(encoding="utf-8")
         self.assertIn("stg-bl.hiroyuki9614.com belib_custom_tls;", config)
         self.assertIn("default reject_unknown_sni;", config)
+        self.assertIn("server 127.0.0.1:8445;", config)
+        self.assertIn("listen 8445 ssl;", config)
+        self.assertIn("ssl_reject_handshake on;", config)
         self.assertNotIn("fedora-worker.tail63cd2d.ts.net", config)
         self.assertNotIn("ubuntu-worker.tail63cd2d.ts.net", config)
         self.assertNotIn("tailscale_serve_tls", config)

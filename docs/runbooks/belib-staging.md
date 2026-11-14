@@ -2,36 +2,44 @@
 
 This is a **non-production candidate**, not evidence that the i5 environment is running. Read current `AGENTS.md` and the PV3 Work Prompt `agents/prompts/2026-11-07/belib-isolated-test-environment.md` on its approved branch before each operation. Confirm i5 host/principal and the existing start gate independently. Never deploy this on KAGOYA.
 
-## Current status: launcher blocked pending an independent bootstrap
+## Current status: executable candidates implemented; live adoption pending
 
-The previously reported i5 state is application SHA `81256268276d7ead95029849037f69ec6beec202`; HTTPS acceptance is unavailable. This is historical operator-reported state, not a fresh runtime check. The starting PR source was clean at `cb13bf038354ad6e2540bd0bcc4c328374ef5b8a`, with 4/4 staging and 4/4 release CI reported passing. This patch changes that source, so those checks do not attest the resulting worktree; rerun CI at its eventual reviewed HEAD. The source-only change was made in the KAGOYA editing worktree and did not inspect or alter i5. The `launch-guard.py` command now returns `BLOCKED` for `deploy`, `resume-ingress`, and `manifest-ingress` before parsing arguments, importing candidate helpers, sourcing a shell file, or invoking Docker. No runtime approval is implied.
+The candidate includes the one-shot `operator-bootstrap.py`, retained-copy
+preparation, restore verification, migration/cutover/recovery, receipt-bound TLS
+continuation and final read-only CD verification. These implementations do not
+establish an installed operator, an available signer or an accepted deployment.
+Use the current implementation sections below; do not reimplement them because an
+older checkpoint described an unconditional launcher block or a missing executor.
 
-### P1 bootstrap trust boundary — BLOCKED
+Direct unadmitted `launch-guard.py` invocation remains blocked. Its candidate-owned
+hash checks cannot create an independent trust root. The supported mutation path
+starts at the independently reviewed, root-owned operator, which validates the
+immutable source and one-use grant before invoking candidate code through its
+sealed descriptor. `operator_bootstrap_reference.py` remains a synthetic reference,
+not the deployment entrypoint. Root source/config adoption and independent issuer
+pins are still required before actual protected operations.
 
-A **source-only, untrusted reference** verifier is proposed in
-`scripts/staging/operator_bootstrap_reference.py`, with offline adversarial tests in
-`scripts/staging/tests/test_operator_bootstrap_reference.py`. Its code and test
-success do **not** install an external trust root, verify the operational signer,
-approve an i5 deployment, or lift the unconditional `launch-guard.py` block.
-The reference consumes only ephemeral test grants. A separately reviewed,
-operator-owned immutable installation and independent digest/key/manifest
-pinning outside the candidate principal, including an immutable expected
-operation/evidence SHA256 digest (currently unmet), protected nonce state, a
-real signed one-use grant and TOCTOU-safe execution snapshot are still
-prerequisites.
-Do not run the reference file as a deployment entrypoint or supply real grants
-to a candidate-controlled checkout.
+The dated i5 observation on 2026-11-14 23:25 JST found four old application/DB
+services running, frontend/backend revision `81256268276d7ead95029849037f69ec6beec202`,
+loopback HTTP 200 and CA-verifying HTTPS failure (curl 35/HTTP 000). A separate
+read-back confirmed the fixed operator bootstrap and its config were absent.
+These are observations, not fresh results for a later execution. Recheck the live
+OCI revision, retained DB identities, HTTPS and physical Chrome at acceptance.
+The previous signed 6963103 initialization and 8125626 resume establish historical
+lineage only; their consumed grants cannot authorize an upgrade.
 
+The original Work signer was reported unavailable on November 10 and recovered
+with the same pinned public-key fingerprint later that day and on November 11.
+Those reports do not identify a currently connected signing environment. A public
+pin alone does not prove current private-key availability. Recover only the
+established environment using nonsecret metadata; if its route cannot be
+identified, use the unadopted manual-issuer proposal below for an explicit owner
+decision. Never generate or adopt a replacement key as a diagnostic shortcut.
 
-The reported defect is real: the candidate-controlled `launch-guard.py` imported candidate-controlled `seed.py` before requesting approval through candidate-controlled `approval.py`. Its own path/SHA self-check and the admitted tree cannot authenticate the launcher that performs those checks. Moving those imports or adding a digest check inside the same candidate tree would not create an independent trust root.
-
-This patch preserves the existing deploy, resume-ingress, and manifest-ingress transaction implementations and their safety tests, but blocks entry to all three operations before candidate helper imports. The refusal is a fail-closed stop for this checkout, not proof that candidate code has independent provenance, and not an operator-installed bootstrap artifact. Until a separately trusted bootstrap exists, do not run any old command example in this runbook.
-
-The minimum external operation needed before a later runtime integration is considered is separate owner and signer review of an operator-owned launcher/verifier, followed by its installation and independent digest pinning outside the repository. That bootstrap must start from the pinned immutable bytes and trusted system runtime; before any candidate Python import, shell source, Docker CLI/action, or DB operation, it must independently verify the exact candidate tree and verify and consume a fresh one-use grant bound to the source SHA, operation, fixed staging target, nonce, and expiry. Candidate-controlled `approval.py`, candidate hashes, or self-reported approvals cannot supply that root. Tests for a source implementation cannot replace this external installation and review. The bootstrap installation, external pin, key/trust provisioning, and integration are NOT DONE here.
-
-The signed 6963103fd6bec332b4057457d07b890fe5c11e73 bootstrap initialized the isolated DB and synthetic seed, including nonroot book-volume and runtime DB-role checks. Its HTTP failure rolled back services while retaining volumes. A subsequent signed resume reached application revision 81256268276d7ead95029849037f69ec6beec202. On 2026-11-11 00:06 JST, the Work supervisor validated all four running container identities, both retained volumes, isolated/ingress networks, and application OCI revisions against that lineage. Loopback HTTP /health returned 200 on 2026-11-10 23:47 JST; custom HTTPS still failed TLS. These are dated observations, not permission to reuse an old approval.
-
-Any post-fix source must pass fixed-SHA CI and independent review before a separately trusted bootstrap could authorize rootless nginx preparation. The existing application, DB, credentials, and volumes were not inspected or changed by this source-only work. The owner certificate was issued, but certificate issuance and nginx syntax validation alone do not establish HTTPS or browser acceptance. Preserve all prior worktrees; use a clean detached admission checkout for any separately reviewed source.
+Source tests and prior CI are not deployment evidence. Fix the final source SHA,
+complete its independent review and CI, then regenerate the disabled operator
+packet from that source. Preserve original worktrees, previous packets, grants
+and journals. Use a clean source for each authorized operation.
 
 - **Database privilege boundary:** the source candidate initializes the isolated `belib_staging` database with `belib_staging_bootstrap` as the official image's one-time superuser. A non-executable init hook requires a fresh data directory, checks the database and public schema are empty, creates distinct `belib_staging_app` and `belib_staging_migrate` login roles, and records a role-bootstrap marker. The migration role owns `public`, receives schema DDL only, and has no final database `CREATE` or `TEMPORARY` privilege. The app/seed role receives database `CONNECT`, schema `USAGE`, table `SELECT/INSERT/UPDATE/DELETE`, and sequence `USAGE/SELECT/UPDATE`; it has no schema `CREATE`, database `CREATE/TEMPORARY`, or grant options. Future migration-created tables and sequences receive the same runtime grants by default. The seed also checks its live connection is `belib_staging_app` and not a superuser. The app, migration, and bootstrap passwords use separate host-only keys and must all differ from each other and the auth secret.
 - **Fresh-volume guard:** the official PostgreSQL entrypoint runs this `.sh` hook only while initializing an empty data directory. The hook additionally requires `DATABASE_ALREADY_EXISTS` to be empty, the exact bootstrap/database identity, no prior marker/runtime roles, and no objects or unexpected schemas in `public`. Existing data directories skip initialization; the app-role database healthcheck requires the marker and expected non-superuser roles, so an old or partial volume stays unhealthy and dependent services do not start. No bootstrap DDL is run against an existing database.
@@ -167,7 +175,7 @@ The database healthcheck connects locally as `belib_staging_app` and requires th
 
 The operational descriptions and command examples in this historical section are disabled by the current launcher block above. No `manifest-ingress`, `resume-ingress`, or `deploy` command can be used until an external immutable bootstrap is independently reviewed, pinned, installed, and integrated in a separately reviewed change.
 
-## Retained application/schema upgrade preflight (not deployable)
+## Offline retained preflight and historical trust rationale
 
 `scripts/staging/retained-upgrade.py` is an offline source-side evidence checker only and cannot authorize an operation. External independent provision of trusted issuer/key/fingerprint pins is **BLOCKED** in this source-only scope. Public `preflight` accepts no signer pins or clock override, checks evidence issue/expiry windows against system time, and then fails closed because no external trust source is configured. Caller-supplied issuer names, public keys, and fingerprints—even matching signatures—are not independent authority and must not be treated as security assurance. The private fixture helper exists for synthetic unit tests only. No deployment permission follows from any result; synthetic evidence remains `NOT_DEPLOYABLE_SOURCE_ONLY`.
 
@@ -179,9 +187,9 @@ The attestation binds exact backup and manifest digests, PostgreSQL major versio
 
 Do not pass this preflight as authorization to `resume-ingress` or to the existing `deploy` operation. `resume-ingress` intentionally starts the prior database and current application without running migrations. The staging Compose migration service runs `prisma migrate deploy`, including `20261105120000_add_reading_progress_percentage`; the migration adds a check constraint and this source does not establish a safe schema rollback or failure recovery transaction. No retained application/schema upgrade operation is admitted by the launch guard.
 
-### Required design and owner decisions before runtime code
+### Historical design requirements retained by the executable candidate
 
-This source-only continuation stops before adding an upgrade operation to `launch-guard.py` or widening `approval.py`. The available Ed25519 key is the staging deployment approver key; no independently pinned backup/restore verifier issuer, public key, or raw-key fingerprint is present. No live backup or isolated restore evidence was collected. Also, a migration changes the retained database volume, so “rollback” cannot honestly mean both restoring the prior database bytes and preserving that same volume's identity and contents. The existing resume operation remains unchanged and cannot authorize a migration.
+The current candidate implements `upgrade-retained` through the independently installed operator described below. The following requirements remain trust and data-preservation constraints, not a request to recreate the runtime. The existing Ed25519 pin is for the staging deployment approver; no independently pinned backup/restore verifier issuer, public key, or raw-key fingerprint is present. No live backup or isolated restore evidence was collected. Also, a migration changes the retained database volume, so “rollback” cannot honestly mean both restoring the prior database bytes and preserving that same volume's identity and contents. The existing resume operation remains unchanged and cannot authorize a migration.
 
 Before runtime implementation, the staging owner and independent reviewer must approve this exact contract:
 
@@ -191,9 +199,9 @@ Before runtime implementation, the staging owner and independent reviewer must a
 4. **Bounded phases and receipts:** under that same lock, re-read and compare the fixed-SHA source, Compose project inventory, image digests, manifest, and approval tuple before mutation. Emit sanitized phase receipts for `preflight`, `backup-restore-proof`, `migration`, `backend-frontend-start`, `health-readback`, and terminal `PASS`/`FAILED`/`ROLLBACK_CONFIRMED`/`ROLLBACK_UNCONFIRMED`. Run migration as its own bounded phase; then start only the backend and frontend images built from the authorized SHA. Read back DB/container/volume/image identity and require database health, backend health, frontend health, and HTTP health before `PASS`. No production DB/R2/environment lookup, remote executor, SSH, new runner, or automated scheduler is permitted.
 5. **Rollback choice (must be explicit before implementation):** owner must choose and review either (a) an atomic cutover to a separately restored/migrated staging DB volume while retaining the original DB container and volume untouched until health acceptance, or (b) a separately authorized in-place restore procedure with explicit approval to replace/mutate the retained DB state. Specify how the prior app images are restored by immutable digest and how the post-failure DB identity, volume identity, contents, and book volume are verified. Until one choice is approved and its failure cases are testable, any migration or health failure must stop further phases and report `ROLLBACK_UNCONFIRMED`; the code must never claim rollback success from a successful `compose stop` alone.
 
-Only after those owner decisions, independent design review, and availability of pinned verifier/approver trust material may runtime source changes be proposed. Actual backup consistency and isolated restore remain live evidence gates and are `NOT_RUN` in this source-only work. The owner must authorize any later runtime action separately, review the exact candidate and tests, rerun CI at its final HEAD, and provide fresh runtime approval. No i5 runtime action is authorized here.
+The executable candidate below supplies the isolated-copy transaction and bounded phases. Independently adopted topology and verifier/approver pins, actual retained-DB backup/restore evidence and fresh operation approval remain live gates. Disposable fixture results do not satisfy those real-data gates. This runbook supplies no additional execution authority.
 
-The existing launcher still contains its guarded signed transaction implementations for future independently reviewed integration, but the operator bootstrap gate currently blocks every invocation before reaching them. The following details are historical procedure, not usable deployment authority. Do not treat the candidate-controlled approval verifier as independent trust.
+The existing launcher admits those transactions only through the installed operator boundary. The following direct-launch examples are historical procedure and must not be used as an alternative entrypoint. Do not treat the candidate-controlled approval verifier as independent trust.
 
 For the retained deployment after the recorded HTTP failure, first generate a read-only inventory from the exact admitted current source. This prints canonical JSON containing the manifest and `retained_state_sha256`; the output is evidence to the external Work supervisor, never an approval by itself:
 
@@ -528,6 +536,49 @@ The actual authorized root actor, issuer identities and public fingerprints must
 be established before this alternative can be selected. Never guess them or
 generate/adopt replacement keys merely because the proposal exists.
 
+#### Manual issuer adoption proposal (not authorized or installed)
+
+The decision is limited to a human-operated issuer on existing KAGOYA
+`v133-18-43-217-vir`; ordinary MCP principal `ubuntu` gains no key access or signing
+permission. The owner must identify the existing human root operator and approve
+replacement trust explicitly. No such actor or new fingerprint is inferred here.
+
+1. **Establish trust:** the human operator checks the final fixed GitHub source,
+   review, CI and packet digests independently. After explicit owner adoption,
+   generate purpose-labelled Ed25519 material only in root-owned mode-0700
+   `/var/lib/belib-staging-issuer/`, with private files mode 0600. Record public
+   issuer identities and fingerprints for deployment approval and the separate
+   network, backup-roots and restore-evidence purposes. A restored old signer
+   must match the existing pin; a replacement requires a reviewed source-pin and
+   retained-config change, fresh CI and a regenerated packet before use.
+2. **Prepare first:** use the independently installed i5 operator to perform the
+   allowed expensive image/DB-copy preparation. The human verifier independently
+   checks real backup identity, isolated restore and integrity results, source,
+   resource plan and rollback conditions. Merely signing candidate reports does
+   not establish restore success. Keep private database data on its authorized
+   host; transfer only required nonsecret evidence and public pins.
+3. **Issue last:** only after those checks, sign the exact canonical payloads
+   required by the existing schemas and the fresh single-operation challenge.
+   Preserve operation/source/host/principal/resource bindings and existing maximum
+   validity; do not extend TTLs to cover preparation. Deliver only public keys
+   and detached signed envelopes to i5. Never transfer issuer private keys or
+   permit an unattended MCP signing call.
+4. **Accept:** the independent i5 root operator adopts only the reviewed public
+   pins/config and source packet, then executes the bounded operation. Read back
+   exact source and runtime receipts; verify expired/wrong-key/replayed grants
+   fail, real retained-DB rollback is available, candidate TLS is CA-valid, final
+   CD queries cause no new mutation, and physical Chrome acceptance passes.
+5. **Revoke and recover:** disable i5 operator/retained configs first, retain
+   consumed-nonce and transaction journals, and remove the revoked pins through
+   the same reviewed adoption path. A normal rollback restores the prior reviewed
+   disabled source/config; it does not undo database effects. Recover issuer
+   material only from owner-controlled encrypted offline backup, or approve a
+   reviewed rotation and verify old signatures fail. Never reset nonce state.
+
+This proposal does not authorize main registration, production deployment,
+privileged installation or key replacement. These remain separate owner decisions;
+all code verification and disabled packet preparation can finish beforehand.
+
 Verify the preparation module with
 `/usr/bin/python3 -I -B scripts/staging/test-prepare-retained.py`. The opt-in
 `BELIB_DISPOSABLE_PREPARE_TEST=1 /usr/bin/python3 -I -B scripts/staging/test-prepare-retained-integration.py`
@@ -537,3 +588,126 @@ bodies, application HTTP, SQL migration and root/physical identity are fixtures;
 the test does not install trust or run the real BeLib application. Record the
 tested source hashes and cleanup read-back, rather than treating skipped opt-in
 cases in ordinary CI as an actual Docker success.
+
+
+### TLS continuation after a retained upgrade
+
+After a successful `upgrade-retained`, the active application belongs to
+`belib-isolated-i5-upgrade-<operation_id>`. The original project's three application
+containers are intentionally stopped. The legacy TLS path still applies only to
+its original retained application; it must not be used to recreate that stopped
+project after an upgrade.
+
+The v2 continuation selects the successful upgrade by its exact 64-hex bootstrap
+receipt nonce. It independently queries the installed bootstrap's fixed `--receipt`
+entry and validates the source, operation, host/principal and full runtime plan.
+It does not accept a caller-supplied receipt or choose the most recent operation.
+The TLS source and `prior_application_sha` both identify the application that is
+running immediately before TLS: the admitted upgrade source. The old application's
+812 revision remains pinned only in the nested retained/cutover checks.
+
+Retained finalization leaves `candidate-config.json` disabled but fills its three
+authority pins (`restore`, `network`, `roots`). The separately adopted root config
+binds their canonical JSON SHA-256 into the durable result as
+`expected_runtime.authority_pins_sha256`. TLS requires that exact digest in the
+finalized candidate; it must not strip the pins or require an empty trust object.
+This binding is separate from the existing `plan_sha256`. A legacy result without
+the binding cannot authorize TLS continuation: stop for operator review without
+rewriting the immutable result, replaying cutover, or issuing another grant merely
+to make a receipt query pass.
+
+From the exact admitted source checkout, first produce the candidate plan:
+
+```sh
+/usr/bin/python3 -I -B scripts/staging/tls-prepare.py plan --upgrade-receipt <upgrade-grant-nonce>
+```
+
+Review the emitted plan. The preparation entry requests and waits for the existing
+independent TLS approval for its exact bindings before any nginx mutation:
+
+```sh
+/usr/bin/python3 -I -B scripts/staging/tls-prepare.py prepare --upgrade-receipt <upgrade-grant-nonce> --owner-nonce <owner-plan-nonce> --owner-ready --plan-sha256 <reviewed-plan-sha256> --evidence-sha256 <reviewed-evidence-sha256>
+```
+
+`--owner-ready` records the required coordination; it supplies neither a grant nor
+root authority. Source identity is derived from the admitted checkout, not a
+caller `--source-sha` argument. Preserve the exact plan and prepared receipt bytes.
+`owner-command.py` accepts their pinned hashes with `--source-sha`,
+`--helper-sha256`, `--plan-sha256`, `--owner-nonce` and
+`--prepare-receipt-sha256` to generate the existing bounded owner command. Review
+that command and run it only in the independently authorized root context.
+
+Only the upgraded nginx container may change. The candidate DB, backend, frontend,
+retained DB and book volumes, network IDs and all other resource/configuration pins
+remain bound to the authenticated upgrade result. Preparation validates the full
+rendered Compose model and actual Docker state. It publishes only loopback HTTP
+18083 and TLS 18443, uses the existing certificate read-only, and performs no
+image build/pull, database restore, application recreation or volume deletion.
+
+The external TLS approval still binds the exact source, current runtime manifest,
+Serve configuration/ETag, certificate and TLS configuration digests, one-use nonce
+and expiry. A local plan or matching hash does not grant permission. Private
+contexts under `~/.local/state/belib-staging/tls-work-context/<owner_nonce>/` retain
+the immutable intent, progress and preparation receipt. Never delete those records
+to retry. A same-input retry may inspect and re-probe an already completed,
+exactly owned nginx transition. Any new mutation after interruption requires a
+fresh TLS grant and a plan for the observed recovery state; an expired or consumed
+grant is not reused for another recreate or rollback.
+
+If an interrupted attempt or its owned HTTP rollback changed the nginx identity,
+prepare a new recovery plan using the previous owner context explicitly:
+
+```sh
+/usr/bin/python3 -I -B scripts/staging/tls-prepare.py plan --upgrade-receipt <upgrade-grant-nonce> --recovery-owner-nonce <previous-owner-plan-nonce>
+```
+
+This command has no Docker mutation. It reconciles the previous immutable intent
+with the exact owned TLS/HTTP model and all unchanged runtime pins, then binds
+that current state into a new manifest/owner plan. Use the new owner nonce and a
+fresh independent TLS approval for the next preparation attempt. Preserve the
+previous context; a new plan does not adopt unknown resources or authorize replay.
+
+The separately invoked owner helper verifies the pinned plan and preparation
+bytes, independently reads the root upgrade result, and performs the existing
+owner-approved Serve CAS transaction. It writes an immutable completion record
+under `/var/lib/belib-staging/tls-serve/<owner_nonce>.complete.json`. This record
+adopts the exact nginx transition; it is not a Docker observation. A response-loss
+retry must reconcile the existing journal and final Serve state before producing
+the missing completion, without repeating a successful CAS mutation.
+
+The installed bootstrap's fixed `--tls-receipt <owner_nonce>` query reads that
+root-owned completion. CD independently queries both root records and checks the
+actual Docker identities, HTTP and certificate-pinned HTTPS. It accepts only the
+recorded nginx transition and retains every non-nginx check. The original upgrade
+result is immutable. Successful source tests, preparation or a root completion
+alone are not live deployment or physical Chrome acceptance.
+
+Final CD readback must use the explicit receipt-query mode without `--grant`;
+the already consumed upgrade grant must not be executed or validated as a new
+operation. Never substitute a local JSON file for the installed root receipt query.
+
+```sh
+/usr/bin/python3 -I -B scripts/staging/cd-handoff-executor.py --handoff <downloaded-handoff-json> --upgrade-receipt <upgrade-grant-nonce> --owner-nonce <owner-plan-nonce> --result <new-absolute-result-path>
+```
+
+The handoff source/provenance must match both root records. This mode reads and
+validates the existing operation; it does not call the operator's `--grant` entry
+or require the historical grant to become fresh again. Its receipt records TLS
+runtime verification separately from a new deployment operation.
+
+Offline verification includes the existing TLS, owner helper, bootstrap and CD
+executor tests plus `test-tls-retained-continuation.py`. The latter requires
+`BELIB_DISPOSABLE_TLS_RETAINED_CONTINUATION_TEST=1` for its Docker scenario;
+ordinary CI importing/skipping it is not a Docker success. The opt-in uses only
+uniquely named disposable resources and a synthetic certificate. Root ownership,
+the original issuer and real BeLib application/browser acceptance remain outside
+that fixture.
+
+The native MCP execution channel was observed with `NoNewPrivileges` on i5 and
+KAGOYA: even `sudo -n -l` is refused before acquiring root. Membership in a sudo
+group does not make that channel root-capable. Installation/adoption and the
+owner Serve transaction require an already authorized operator context, such as
+the owner's normal terminal, plus the independently established signing identity.
+Do not disable that process restriction, add a broker/sudoers rule or switch to
+another privilege mechanism to bypass it. All source preparation, isolated tests,
+review and packet verification can proceed without that host effect.

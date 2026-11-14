@@ -225,6 +225,10 @@ def upgrade_runtime_fixture(source_sha: str = SOURCE_SHA) -> tuple[dict, dict, d
                         "Destination": "/home/node"}] if service == "backend" else [])
         labels = {"com.docker.compose.project": project, "com.docker.compose.service": service,
                   "com.docker.compose.oneoff": "False"}
+        if not old:
+            labels["belib.retained-prepare-intent"] = "e" * 64
+        if service == "nginx":
+            labels["maintainer"] = "NGINX Docker Maintainers <docker-maint@nginx.com>"
         host = {"PortBindings": ({"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18083"}]}
                                   if service == "nginx" else {})}
         container = {
@@ -247,7 +251,7 @@ def upgrade_runtime_fixture(source_sha: str = SOURCE_SHA) -> tuple[dict, dict, d
         else:
             image = {"Id": image_id,
                      "RepoDigests": ["nginx@" + executor.NGINX_IMAGE.split("@", 1)[1]],
-                     "Config": {"Labels": {}}}
+                     "Config": {"Labels": {"maintainer": "NGINX Docker Maintainers <docker-maint@nginx.com>"}}}
         containers[container_id] = container
         images[image_id] = image
         return container
@@ -275,7 +279,10 @@ def upgrade_runtime_fixture(source_sha: str = SOURCE_SHA) -> tuple[dict, dict, d
     source_db = {"id": old_db["Id"], "configuration_sha256": executor._configuration_digest(old_db),
                  "volume_name": old_project + "_staging-postgres-data",
                  "network_ids": {old_project + "_isolated": old_network_id}}
-    config = {"cutover_plan": cutover, "candidate_database": candidate, "source_database": source_db}
+    config = {"cutover_plan": cutover, "candidate_database": candidate, "source_database": source_db,
+              "authorities": {name: {"issuer": name + ".example", "public_key_pem": "test-key-" + name,
+                  "fingerprint": (str(index) * 64)}
+                  for index, name in enumerate(("restore", "network", "roots"), start=1)}}
     bootstrap_spec = importlib.util.spec_from_file_location(
         "operator_bootstrap_fixture", Path(__file__).with_name("operator-bootstrap.py"))
     assert bootstrap_spec is not None and bootstrap_spec.loader is not None
@@ -395,6 +402,16 @@ class CDHandoffExecutorTests(unittest.TestCase):
         self.now = NOW
         self.docker_ids, self.docker_containers, self.docker_images = runtime_snapshot()
 
+    def test_expected_runtime_requires_authority_binding(self):
+        expected, _, _, _ = upgrade_runtime_fixture()
+        with self.assertRaisesRegex(executor.ExecutorError, "legacy receipt is unsupported"):
+            executor.validate_expected_runtime({key: value for key, value in expected.items()
+                                                if key != "authority_pins_sha256"})
+        for malformed in ("not-a-sha", "A" * 64):
+            with self.subTest(malformed=malformed), self.assertRaisesRegex(
+                    executor.ExecutorError, "Expected retained runtime pins are malformed"):
+                executor.validate_expected_runtime({**expected, "authority_pins_sha256": malformed})
+
     def signed_grant(self, payload: dict) -> None:
         payload_raw = canonical(payload)
         payload_path = self.root / "payload"
@@ -418,6 +435,206 @@ class CDHandoffExecutorTests(unittest.TestCase):
             now=self.now, hostname=executor.HOST, uid=executor.UID, username=executor.PRINCIPAL,
             file_owner_uid=os.getuid(), env_file_path=self.env_path,
         )
+
+    def test_readonly_tls_handoff_queries_both_root_records_without_grant_effect(self):
+        expected, containers, images, inventory = upgrade_runtime_fixture()
+        operation_id = expected["operation_id"]
+        upgrade_nonce, owner_nonce = "a" * 64, "b" * 64
+        root_upgrade = {
+            "schema": "belib-staging-operation-result/v1", "nonce": upgrade_nonce,
+            "grant_sha256": "c" * 64, "source_sha": SOURCE_SHA, "operation": "upgrade-retained",
+            "host": executor.HOST, "principal": executor.PRINCIPAL, "uid": executor.UID,
+            "project": executor.PROJECT, "exit_code": 0, "completed_at": NOW,
+            "nonce_consumed": True, "expected_runtime": expected,
+        }
+        stable_sha = executor._unchanged_runtime_digest(expected)
+        cutover = expected["plan"]["cutover_plan"]
+        completion = {
+            "schema": executor.TLS_COMPLETION_SCHEMA, "owner_nonce": owner_nonce,
+            "plan_sha256": "d" * 64, "prepare_receipt_sha256": "e" * 64,
+            "upgrade_receipt_nonce": upgrade_nonce,
+            "upgrade_receipt_sha256": hashlib.sha256(canonical(root_upgrade)).hexdigest(),
+            "source_sha": SOURCE_SHA, "operation_id": operation_id, "project": expected["project"],
+            "previous_nginx_id": expected["services"]["nginx"], "nginx_id": "f" * 64,
+            "nginx_configuration_sha256": "1" * 64,
+            "nginx_image_id": executor.NGINX_IMAGE.split("@", 1)[1],
+            "nginx_network_ids": cutover["new"]["nginx"]["network_ids"],
+            "tls_config_sha256": "2" * 64, "certificate_sha256": "3" * 64,
+            "unchanged_runtime_sha256": stable_sha, "approval_nonce": "4" * 64,
+            "evidence_sha256": "5" * 64, "serve_config_sha256": "6" * 64,
+            "serve_etag": "opaque-etag", "completed_at": NOW, "status": "complete",
+        }
+        calls = []
+        def root_query(command, **kwargs):
+            calls.append(command)
+            if "--receipt" in command:
+                value = root_upgrade
+            elif "--tls-receipt" in command:
+                value = completion
+            else:
+                raise AssertionError("read-only TLS mode attempted a non-receipt bootstrap command")
+            return subprocess.CompletedProcess(command, 0, json.dumps(value, sort_keys=True), "")
+        observed = {"status": "verified", "source_sha": SOURCE_SHA,
+                    "operation_id": operation_id, "project": expected["project"]}
+        result = executor.readback_tls_handoff(
+            self.handoff_path, upgrade_nonce, owner_nonce, runner=root_query,
+            health_probe=lambda port: {"url": f"http://127.0.0.1:{port}{executor.HEALTH_PATH}",
+                                       "http_status": 200},
+            runtime_readback=lambda upgrade, adopted, port, **kwargs: observed,
+            ingress_probe=lambda fingerprint: {"status": 200, "certificate_sha256": fingerprint},
+            readback_lock=contextlib.nullcontext, env_file_path=self.env_path,
+            hostname=executor.HOST, uid=executor.UID, username=executor.PRINCIPAL,
+            file_owner_uid=os.getuid(),
+        )
+        self.assertEqual(result["schema"], "belib-staging-cd-tls-readback/v1")
+        self.assertEqual(result["status"], "LOCAL_TLS_DEPLOYMENT_CONFIRMED")
+        self.assertEqual(result["operation"], "tls-readback")
+        self.assertEqual(result["https_ingress_acceptance"], "verified")
+        self.assertEqual(set(result), {"schema", "handoff_receipt_id", "admitted_source_sha", "operation",
+                                      "host", "principal", "project", "status", "operator_receipt",
+                                      "tls_completion", "loopback_health", "running_revision_readback",
+                                      "browser_acceptance", "https_ingress_acceptance"})
+        self.assertEqual([command[7] for command in calls], ["--receipt", "--tls-receipt"])
+        self.assertFalse(any("--grant" in command for command in calls))
+        original_env = self.env_path.read_bytes()
+        self.env_path.write_bytes(original_env.replace(SOURCE_SHA.encode(), b"d" * 40))
+        self.env_path.chmod(0o600)
+        with self.assertRaisesRegex(executor.ExecutorError, "source differs"):
+            executor.readback_tls_handoff(
+                self.handoff_path, upgrade_nonce, owner_nonce, runner=root_query,
+                health_probe=lambda port: {"url": f"http://127.0.0.1:{port}{executor.HEALTH_PATH}",
+                                           "http_status": 200},
+                runtime_readback=lambda *args, **kwargs: observed,
+                ingress_probe=lambda fingerprint: {"status": 200, "certificate_sha256": fingerprint},
+                readback_lock=contextlib.nullcontext, env_file_path=self.env_path,
+                hostname=executor.HOST, uid=executor.UID, username=executor.PRINCIPAL,
+                file_owner_uid=os.getuid(),
+            )
+        self.env_path.write_bytes(original_env)
+        self.env_path.chmod(0o600)
+        def change_env_mid_probe(fingerprint):
+            changed = original_env.replace(b"BELIB_STAGE_PORT=18083", b"BELIB_STAGE_PORT=18084")
+            self.env_path.write_bytes(changed)
+            self.env_path.chmod(0o600)
+            return {"status": 200, "certificate_sha256": fingerprint}
+        with self.assertRaisesRegex(executor.ExecutorError, "changed during TLS probes"):
+            executor.readback_tls_handoff(
+                self.handoff_path, upgrade_nonce, owner_nonce, runner=root_query,
+                health_probe=lambda port: {"url": f"http://127.0.0.1:{port}{executor.HEALTH_PATH}",
+                                           "http_status": 200},
+                runtime_readback=lambda *args, **kwargs: observed,
+                ingress_probe=change_env_mid_probe,
+                readback_lock=contextlib.nullcontext, env_file_path=self.env_path,
+                hostname=executor.HOST, uid=executor.UID, username=executor.PRINCIPAL,
+                file_owner_uid=os.getuid(),
+            )
+        self.env_path.write_bytes(original_env)
+        self.env_path.chmod(0o600)
+
+    def test_tls_ingress_rejects_a_successful_disallowed_sni(self):
+        class FakeConnection:
+            def __init__(self, *args, **kwargs): pass
+            def request(self, *args, **kwargs): pass
+            def getresponse(self): return type("Response", (), {"status": 200, "read": lambda self, *_: b""})()
+            def close(self): pass
+        with patch.object(executor.http.client, "HTTPSConnection", FakeConnection), \
+                patch.object(executor, "_negative_tls_sni_rejected",
+                             side_effect=executor.ExecutorError("disallowed SNI unexpectedly succeeded")), \
+                self.assertRaisesRegex(executor.ExecutorError, "unexpectedly succeeded"):
+            executor.verify_tls_ingress("a" * 64)
+
+    def test_tls_ingress_negative_sni_probe_fails_when_listener_refuses_or_times_out(self):
+        class FakeConnection:
+            def __init__(self, *args, **kwargs): pass
+            def request(self, *args, **kwargs): pass
+            def getresponse(self): return type("Response", (), {"status": 200, "read": lambda self, *_: b""})()
+            def close(self): pass
+        for failure in (ConnectionRefusedError("listener refused"), TimeoutError("listener timed out")):
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.object(executor.http.client, "HTTPSConnection", FakeConnection), \
+                    patch.object(executor.socket, "create_connection", side_effect=failure), \
+                    self.assertRaisesRegex(executor.ExecutorError, "TLS ingress health probe failed"):
+                # The positive health request succeeds above; an unavailable
+                # endpoint during the subsequent negative probe must still fail.
+                executor.verify_tls_ingress("a" * 64)
+
+    def test_tls_ingress_negative_sni_probe_accepts_only_the_expected_alert(self):
+        class ExpectedAlert(executor.ssl.SSLError):
+            def __init__(self, reason): self.expected_reason = reason
+            @property
+            def reason(self): return self.expected_reason
+        class UnexpectedAlert(executor.ssl.SSLError):
+            @property
+            def reason(self): return "SSL_ERROR_SSL"
+        class FakeSocket:
+            def __init__(self): self.closed = False
+            def close(self): self.closed = True
+        class FakeContext:
+            check_hostname = True
+            verify_mode = executor.ssl.CERT_REQUIRED
+            def __init__(self, error): self.error = error
+            def wrap_socket(self, raw, *, server_hostname): raise self.error
+        for reason in ("TLSV1_ALERT_UNRECOGNIZED_NAME", "TLSV1_UNRECOGNIZED_NAME"):
+            raw = FakeSocket()
+            with self.subTest(reason=reason), \
+                    patch.object(executor.socket, "create_connection", return_value=raw), \
+                    patch.object(executor.ssl, "create_default_context", return_value=FakeContext(ExpectedAlert(reason))):
+                executor._negative_tls_sni_rejected("unknown.invalid")
+            self.assertTrue(raw.closed)
+        raw = FakeSocket()
+        with patch.object(executor.socket, "create_connection", return_value=raw), \
+                patch.object(executor.ssl, "create_default_context", return_value=FakeContext(UnexpectedAlert())):
+            with self.assertRaisesRegex(executor.ExecutorError, "expected rejection alert"):
+                executor._negative_tls_sni_rejected("unknown.invalid")
+        self.assertTrue(raw.closed)
+
+    def test_readonly_tls_cli_never_accepts_or_executes_a_grant(self):
+        result = {"schema": "belib-staging-cd-tls-readback/v1",
+                  "status": "LOCAL_TLS_DEPLOYMENT_CONFIRMED"}
+        argv = ["--handoff", str(self.handoff_path), "--upgrade-receipt", "a" * 64,
+                "--owner-nonce", "b" * 64, "--result", str(self.root / "result.json")]
+        with patch.object(executor, "readback_tls_handoff", return_value=result) as readback, \
+                patch.object(executor, "write_result") as writer:
+            self.assertEqual(executor.main(argv), 0)
+        self.assertEqual(readback.call_args.args, (self.handoff_path, "a" * 64, "b" * 64))
+        writer.assert_called_once_with(Path(str(self.root / "result.json")), result)
+        with patch.object(executor, "readback_tls_handoff",
+                          side_effect=executor.ExecutorError("root receipt query unavailable")), \
+                patch.object(executor, "write_result") as failed_writer, \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(executor.main(argv), 1)
+        failed_writer.assert_not_called()
+        with patch.object(executor, "readback_tls_handoff") as readback, \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            executor.main(["--handoff", str(self.handoff_path), "--grant", str(self.grant_path),
+                           "--upgrade-receipt", "a" * 64, "--owner-nonce", "b" * 64,
+                           "--result", str(self.root / "second.json")])
+        readback.assert_not_called()
+
+    def test_tls_completion_chain_rejects_changed_original_nginx_or_stable_runtime(self):
+        expected, _, _, _ = upgrade_runtime_fixture()
+        cutover = expected["plan"]["cutover_plan"]
+        root_upgrade = {
+            "schema": "belib-staging-operation-result/v1", "nonce": "a" * 64,
+            "grant_sha256": "c" * 64, "source_sha": SOURCE_SHA, "operation": "upgrade-retained",
+            "host": executor.HOST, "principal": executor.PRINCIPAL, "uid": executor.UID,
+            "project": executor.PROJECT, "exit_code": 0, "completed_at": NOW,
+            "nonce_consumed": True, "expected_runtime": expected,
+        }
+        completion = {"owner_nonce": "b" * 64,
+                      "upgrade_receipt_nonce": "a" * 64,
+                      "upgrade_receipt_sha256": hashlib.sha256(canonical(root_upgrade)).hexdigest(),
+                      "source_sha": SOURCE_SHA, "operation_id": expected["operation_id"],
+                      "project": expected["project"], "previous_nginx_id": expected["services"]["nginx"],
+                      "nginx_network_ids": cutover["new"]["nginx"]["network_ids"],
+                      "nginx_id": "f" * 64,
+                      "unchanged_runtime_sha256": executor._unchanged_runtime_digest(expected)}
+        executor.validate_tls_completion_links(completion, root_upgrade, "b" * 64)
+        for field, value in (("previous_nginx_id", "0" * 64),
+                             ("unchanged_runtime_sha256", "0" * 64),
+                             ("nginx_network_ids", {})):
+            with self.subTest(field=field), self.assertRaises(executor.ExecutorError):
+                executor.validate_tls_completion_links({**completion, field: value}, root_upgrade, "b" * 64)
 
     def test_valid_signed_fixture_traverses_fixed_bootstrap_and_checks_receipts_health(self):
         self.signed_grant(make_grant())
@@ -650,6 +867,105 @@ class CDHandoffExecutorTests(unittest.TestCase):
         self.assertEqual(observed["container_ids"]["candidate"], expected_runtime["services"])
         self.assertEqual(observed["app_image_revisions"], {"backend": SOURCE_SHA, "frontend": SOURCE_SHA})
         self.assertEqual(observed["retained_app_states"], {name: "exited" for name in ("backend", "frontend", "nginx")})
+
+    def test_tls_candidate_readback_allows_only_pinned_nginx_transition(self):
+        expected, containers, images, inventory = upgrade_runtime_fixture()
+        old_id = expected["services"]["nginx"]
+        candidate_id = "f" * 64
+        candidate = json.loads(json.dumps(containers[old_id]))
+        candidate["Id"] = candidate_id
+        candidate["Config"]["Labels"]["belib.tls-owner-nonce"] = "a" * 64
+        candidate["HostConfig"]["PortBindings"]["8443/tcp"] = [
+            {"HostIp": "127.0.0.1", "HostPort": str(executor.TLS_LOOPBACK_PORT)}]
+        del containers[old_id]
+        containers[candidate_id] = candidate
+        project = expected["project"]
+        inventory["ids"][project] = [candidate_id if value == old_id else value
+                                      for value in inventory["ids"][project]]
+        config_sha = executor._configuration_digest(candidate)
+        transition = {
+            "previous_nginx_id": old_id, "nginx_id": candidate_id,
+            "nginx_configuration_sha256": config_sha,
+            "nginx_image_id": candidate["Image"],
+            "nginx_network_ids": expected["plan"]["cutover_plan"]["new"]["nginx"]["network_ids"],
+        }
+
+        def fake_runner(command, **kwargs):
+            if command[3] == "ps" and "publish=18083" in command:
+                return subprocess.CompletedProcess(command, 0, candidate_id, "")
+            if command[3] == "ps" and f"publish={executor.TLS_LOOPBACK_PORT}" in command:
+                return subprocess.CompletedProcess(command, 0, candidate_id, "")
+            if command[3] == "ps":
+                name = command[command.index("--filter") + 1].rsplit("=", 1)[1]
+                return subprocess.CompletedProcess(command, 0, "\n".join(inventory["ids"][name]), "")
+            if command[1:4] == ["inspect", "--format", "{{json .}}"]:
+                return subprocess.CompletedProcess(command, 0, json.dumps(containers[command[-1]]), "")
+            if command[1:5] == ["image", "inspect", "--format", "{{json .}}"]:
+                return subprocess.CompletedProcess(command, 0, json.dumps(images[command[-1]]), "")
+            if command[1:5] == ["network", "inspect", "--format", "{{json .}}"]:
+                return subprocess.CompletedProcess(command, 0, json.dumps(inventory["networks"][command[-1]]), "")
+            self.fail(f"Unexpected Docker command: {command}")
+
+        result = executor.collect_tls_candidate_readback(
+            SOURCE_SHA, 18083, expected_runtime=expected, nginx_transition=transition,
+            runner=fake_runner, endpoint_check=lambda: None, mode="tls", owner_nonce="a" * 64,
+        )
+        self.assertEqual(result["status"], "candidate-verified")
+        self.assertEqual(result["observed_runtime"]["container_ids"]["candidate"]["nginx"], candidate_id)
+        del candidate["HostConfig"]["PortBindings"]["8443/tcp"]
+        transition["nginx_configuration_sha256"] = executor._configuration_digest(candidate)
+        http_rollback = executor.collect_tls_candidate_readback(
+            SOURCE_SHA, 18083, expected_runtime=expected, nginx_transition=transition,
+            runner=fake_runner, endpoint_check=lambda: None, mode="http", owner_nonce="a" * 64,
+        )
+        self.assertEqual(http_rollback["status"], "candidate-verified")
+        candidate["Config"]["Labels"]["belib.retained-prepare-intent"] = "f" * 64
+        transition["nginx_configuration_sha256"] = executor._configuration_digest(candidate)
+        with self.assertRaisesRegex(executor.ExecutorError, "do not share the adopted preparation intent"):
+            executor.collect_tls_candidate_readback(
+                SOURCE_SHA, 18083, expected_runtime=expected, nginx_transition=transition,
+                runner=fake_runner, endpoint_check=lambda: None, mode="tls", owner_nonce="a" * 64,
+            )
+        candidate["Config"]["Labels"]["belib.retained-prepare-intent"] = "e" * 64
+        candidate["HostConfig"]["PortBindings"]["8443/tcp"] = [
+            {"HostIp": "127.0.0.1", "HostPort": str(executor.TLS_LOOPBACK_PORT)}]
+        transition["nginx_configuration_sha256"] = executor._configuration_digest(candidate)
+        changed_networks = {**transition, "nginx_network_ids": {project + "_isolated": "0" * 64,
+                                                                  project + "_ingress": "1" * 64}}
+        with self.assertRaisesRegex(executor.ExecutorError, "changed the adopted network"):
+            executor.collect_tls_candidate_readback(
+                SOURCE_SHA, 18083, expected_runtime=expected, nginx_transition=changed_networks,
+                runner=fake_runner, endpoint_check=lambda: None, mode="tls", owner_nonce="a" * 64,
+            )
+        with self.assertRaisesRegex(executor.ExecutorError, "owner label"):
+            executor.collect_tls_candidate_readback(
+                SOURCE_SHA, 18083, expected_runtime=expected, nginx_transition=transition,
+                runner=fake_runner, endpoint_check=lambda: None, mode="tls", owner_nonce="b" * 64,
+            )
+        candidate["Config"]["Labels"]["unexpected.extra"] = "denied"
+        transition["nginx_configuration_sha256"] = executor._configuration_digest(candidate)
+        with self.assertRaisesRegex(executor.ExecutorError, "unexpected"):
+            executor.collect_tls_candidate_readback(
+                SOURCE_SHA, 18083, expected_runtime=expected, nginx_transition=transition,
+                runner=fake_runner, endpoint_check=lambda: None, mode="tls", owner_nonce="a" * 64,
+            )
+        candidate["Config"]["Labels"].pop("unexpected.extra")
+        candidate["Config"]["Labels"]["maintainer"] = "overwritten image label"
+        transition["nginx_configuration_sha256"] = executor._configuration_digest(candidate)
+        with self.assertRaisesRegex(executor.ExecutorError, "changed_image_labels"):
+            executor.collect_tls_candidate_readback(
+                SOURCE_SHA, 18083, expected_runtime=expected, nginx_transition=transition,
+                runner=fake_runner, endpoint_check=lambda: None, mode="tls", owner_nonce="a" * 64,
+            )
+        candidate["Config"]["Labels"]["maintainer"] = "NGINX Docker Maintainers <docker-maint@nginx.com>"
+        candidate["HostConfig"]["PortBindings"]["9999/tcp"] = [
+            {"HostIp": "127.0.0.1", "HostPort": "19999"}]
+        transition["nginx_configuration_sha256"] = executor._configuration_digest(candidate)
+        with self.assertRaisesRegex(executor.ExecutorError, "exact loopback endpoints"):
+            executor.collect_tls_candidate_readback(
+                SOURCE_SHA, 18083, expected_runtime=expected, nginx_transition=transition,
+                runner=fake_runner, endpoint_check=lambda: None, mode="tls", owner_nonce="a" * 64,
+            )
 
     def test_signed_upgrade_uses_root_receipt_topology_before_local_confirmation(self):
         expected_runtime, _, _, _ = upgrade_runtime_fixture()

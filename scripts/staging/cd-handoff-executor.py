@@ -20,6 +20,7 @@ import os
 import pwd
 import re
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -57,6 +58,7 @@ HEALTH_PATH = "/health"
 MAX_HANDOFF_BYTES = 2 * 1024 * 1024
 MAX_GRANT_BYTES = 16 * 1024
 MAX_ENV_BYTES = 16 * 1024
+TLS_LOOPBACK_PORT = 18443
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 SHA64 = re.compile(r"[0-9a-f]{64}\Z")
 OPERATIONS = {"deploy", "resume-ingress", "upgrade-retained"}
@@ -313,8 +315,10 @@ RESULT_FIELDS = {
 
 
 def validate_expected_runtime(value: Any) -> dict:
+    if isinstance(value, dict) and "authority_pins_sha256" not in value:
+        raise ExecutorError("Expected retained runtime lacks authority pin binding; legacy receipt is unsupported")
     expected = _require_fields(value, {"project", "services", "retained", "port", "plan_sha256",
-                                       "operation_id", "plan"},
+                                       "operation_id", "plan", "authority_pins_sha256"},
                                "Expected retained runtime")
     project = expected.get("project")
     operation_id = expected.get("operation_id")
@@ -342,11 +346,12 @@ def validate_expected_runtime(value: Any) -> dict:
             or len(set(retained["stopped_application_ids"])) != 3
             or type(expected.get("port")) is not int or not 1024 <= expected["port"] <= 65535
             or not _is_sha(expected.get("plan_sha256"))
+            or not _is_sha(expected.get("authority_pins_sha256"))
             or cutover.get("schema") != "belib-isolated-copy-cutover/v1"
             or cutover.get("operation_id") != operation_id or cutover.get("port") != expected["port"]
             or not isinstance(retained.get("volumes"), dict)
-            or retained["volumes"] != {"database": "belib-isolated-i5_staging-postgres-data",
-                                        "books": "belib-isolated-i5_staging-book-files"}
+            or retained["volumes"] != {"database": PROJECT + "_staging-postgres-data",
+                                        "books": PROJECT + "_staging-book-files"}
             or candidate_db.get("id") != services.get("db")
             or candidate_db.get("volume_name") != project + "_staging-postgres-data"
             or not _is_sha(candidate_db.get("configuration_sha256"))
@@ -665,7 +670,9 @@ def collect_runtime_readback(
 
 
 def _collect_upgrade_runtime_readback(expected: dict, source_sha: str, port: int, *,
-                                      runner: Callable[..., Any], endpoint_check: Callable[[], None]) -> dict:
+                                      runner: Callable[..., Any], endpoint_check: Callable[[], None],
+                                      tls_owner_nonce: str | None = None,
+                                      nginx_mode: str = "http") -> dict:
     endpoint_check()
     plan = expected["plan"]
     cutover = plan["cutover_plan"]
@@ -716,6 +723,7 @@ def _collect_upgrade_runtime_readback(expected: dict, source_sha: str, port: int
         return value
 
     network_cache: dict[tuple[str, str], dict] = {}
+    candidate_prepare_intent: str | None = None
 
     def verify_network(project: str, name: str, expected_id: str, container_network_id: str) -> None:
         if container_network_id != expected_id:
@@ -761,6 +769,10 @@ def _collect_upgrade_runtime_readback(expected: dict, source_sha: str, port: int
                     or labels.get("com.docker.compose.service") != service
                     or str(labels.get("com.docker.compose.oneoff", "false")).lower() != "false"):
                 raise ExecutorError("Retained/candidate container project or service labels are invalid")
+            if side == "new" and service == "nginx" and tls_owner_nonce is not None:
+                if (not _is_sha(tls_owner_nonce)
+                        or labels.get("belib.tls-owner-nonce") != tls_owner_nonce):
+                    raise ExecutorError("TLS candidate owner label is absent or mismatched")
             state = container.get("State")
             if not isinstance(state, dict):
                 raise ExecutorError("Retained/candidate container state is missing")
@@ -777,6 +789,14 @@ def _collect_upgrade_runtime_readback(expected: dict, source_sha: str, port: int
                 raise ExecutorError("Retained/candidate container image reference is unavailable")
             if pin["configuration_sha256"] is not None and _configuration_digest(container) != pin["configuration_sha256"]:
                 raise ExecutorError("Retained/candidate container configuration differs from the adopted plan")
+            if side == "new":
+                prepare_intent = labels.get("belib.retained-prepare-intent")
+                if service == "db":
+                    if not _is_sha(prepare_intent):
+                        raise ExecutorError("Candidate preparation intent label is malformed")
+                    candidate_prepare_intent = prepare_intent
+                elif prepare_intent != candidate_prepare_intent:
+                    raise ExecutorError("Candidate services do not share the adopted preparation intent")
             image_id = container.get("Image")
             if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
                 raise ExecutorError("Retained/candidate image ID is malformed")
@@ -798,6 +818,21 @@ def _collect_upgrade_runtime_readback(expected: dict, source_sha: str, port: int
                     for digest in image.get("RepoDigests", [])
                 )):
                     raise ExecutorError("Retained/candidate nginx image digest is not the fixed pin")
+                if side == "new" and tls_owner_nonce is not None:
+                    image_labels = image.get("Config", {}).get("Labels") or {}
+                    if (not isinstance(image_labels, dict)
+                            or any(not isinstance(key, str) or not isinstance(value, str)
+                                   for key, value in image_labels.items())):
+                        raise ExecutorError("Pinned nginx image labels are malformed")
+                    changed_image_labels = sorted(key for key, value in image_labels.items()
+                                                  if labels.get(key) != value)
+                    unexpected_labels = sorted(key for key in labels
+                        if not (key.startswith("com.docker.compose.")
+                                or key in {"belib.retained-prepare-intent", "belib.tls-owner-nonce"}
+                                or key in image_labels))
+                    if changed_image_labels or unexpected_labels:
+                        raise ExecutorError(f"TLS candidate label set differs from pinned nginx image and owner pins: "
+                            f"changed_image_labels={changed_image_labels!r}, unexpected_labels={unexpected_labels!r}")
             network_map = container.get("NetworkSettings", {}).get("Networks")
             expected_networks = pin["network_ids"]
             if (not isinstance(network_map, dict) or set(network_map) != set(expected_networks)
@@ -825,10 +860,20 @@ def _collect_upgrade_runtime_readback(expected: dict, source_sha: str, port: int
                 raise ExecutorError("Retained/candidate frontend or nginx has unexpected named volumes")
             if service == "nginx":
                 bindings = container.get("HostConfig", {}).get("PortBindings", {})
-                if bindings.get("8080/tcp") != [{"HostIp": "127.0.0.1", "HostPort": str(port)}]:
-                    raise ExecutorError("Retained/candidate nginx port binding is not the exact loopback endpoint")
+                expected_bindings = {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(port)}]}
+                if side == "new" and nginx_mode == "tls":
+                    expected_bindings["8443/tcp"] = [
+                        {"HostIp": "127.0.0.1", "HostPort": str(TLS_LOOPBACK_PORT)}]
+                if bindings != expected_bindings:
+                    raise ExecutorError("Retained/candidate nginx port bindings are not the exact loopback endpoints")
             containers[project][service] = container
             images[project][service] = image
+
+    nginx_id = containers[new_project]["nginx"]["Id"]
+    if _published_container_ids(port, runner=runner) != {nginx_id}:
+        raise ExecutorError("Unexpected containers publish the candidate HTTP loopback port")
+    if nginx_mode == "tls" and _published_container_ids(TLS_LOOPBACK_PORT, runner=runner) != {nginx_id}:
+        raise ExecutorError("Unexpected containers publish the candidate TLS loopback port")
 
     return {
         "status": "verified",
@@ -849,6 +894,263 @@ def _collect_upgrade_runtime_readback(expected: dict, source_sha: str, port: int
                                  for name in ("backend", "frontend", "nginx")},
         "nginx_loopback_binding": {"host_ip": "127.0.0.1", "host_port": port, "container_port": "8080/tcp"},
     }
+
+
+def read_upgrade_receipt(nonce: str, source_sha: str, *, runner: Callable[..., Any] = subprocess.run) -> dict:
+    """Read and validate one fixed root upgrade receipt; no caller path is accepted."""
+    if not _is_sha(nonce) or not _is_sha(source_sha, SHA40):
+        raise ExecutorError("Upgrade receipt nonce or source identity is malformed")
+    result = runner(_bootstrap_command(["--receipt", nonce]),
+                    env={"PATH": "/usr/bin:/bin", "HOME": "/home/hiroyuki", "LANG": "C"},
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=10, check=False)
+    if result.returncode != 0:
+        raise ExecutorError("The installed root bootstrap has no requested upgrade receipt")
+    receipt = _last_json_line(result.stdout)
+    if (not isinstance(receipt, dict) or receipt.get("schema") != "belib-staging-operation-result/v1"
+            or receipt.get("nonce") != nonce or receipt.get("operation") != "upgrade-retained"
+            or receipt.get("source_sha") != source_sha or receipt.get("host") != HOST
+            or receipt.get("principal") != PRINCIPAL or type(receipt.get("uid")) is not int
+            or receipt.get("uid") != UID or receipt.get("project") != PROJECT
+            or receipt.get("exit_code") != 0 or type(receipt.get("exit_code")) is not int
+            or receipt.get("nonce_consumed") is not True
+            or type(receipt.get("completed_at")) is not int or receipt["completed_at"] <= 0
+            or not _is_sha(receipt.get("grant_sha256"))):
+        raise ExecutorError("Root upgrade receipt does not bind the requested fixed operation")
+    expected = validate_expected_runtime(receipt.get("expected_runtime"))
+    if expected["plan"]["cutover_plan"]["source_sha"] != source_sha:
+        raise ExecutorError("Root upgrade runtime pins differ from the requested source")
+    return receipt
+
+
+def _unchanged_runtime_digest(expected_runtime: dict) -> str:
+    stable = json.loads(json.dumps(expected_runtime, sort_keys=True, separators=(",", ":"),
+                                  ensure_ascii=False, allow_nan=False))
+    try:
+        del stable["services"]["nginx"]
+        del stable["plan"]["cutover_plan"]["new"]["nginx"]["id"]
+        del stable["plan"]["cutover_plan"]["new"]["nginx"]["configuration_sha256"]
+        del stable["plan_sha256"]
+    except (KeyError, TypeError) as error:
+        raise ExecutorError("Expected runtime cannot produce a stable TLS continuation digest") from error
+    encoded = json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                         allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def verify_tls_ingress(certificate_sha256: str) -> dict:
+    if not _is_sha(certificate_sha256):
+        raise ExecutorError("TLS completion certificate digest is malformed")
+    class PinnedHTTPSConnection(http.client.HTTPSConnection):
+        def connect(self):
+            raw = socket.create_connection(("100.109.171.70", 443), timeout=5)
+            context = ssl.create_default_context()
+            self.sock = context.wrap_socket(raw, server_hostname="stg-bl.hiroyuki9614.com")
+            actual = hashlib.sha256(self.sock.getpeercert(binary_form=True)).hexdigest()
+            if actual != certificate_sha256:
+                self.close()
+                raise ExecutorError("TLS ingress certificate differs from the adopted root pin")
+    connection = PinnedHTTPSConnection("stg-bl.hiroyuki9614.com", timeout=5)
+    try:
+        connection.request("GET", "/health", headers={"Host": "stg-bl.hiroyuki9614.com"})
+        response = connection.getresponse()
+        response.read(65536)
+        if response.status != 200:
+            raise ExecutorError("TLS ingress health endpoint did not return HTTP 200")
+        for name in ("unknown.invalid", "fedora-worker.tail63cd2d.ts.net", "ubuntu-worker.tail63cd2d.ts.net"):
+            _negative_tls_sni_rejected(name)
+        _negative_tls_sni_rejected(None)
+        return {"status": response.status, "certificate_sha256": certificate_sha256}
+    except (OSError, ssl.SSLError, http.client.HTTPException) as error:
+        if isinstance(error, ExecutorError):
+            raise
+        raise ExecutorError("TLS ingress health probe failed") from error
+    finally:
+        connection.close()
+
+
+def _negative_tls_sni_rejected(server_name: str | None) -> None:
+    # A TCP refusal or timeout means the listener was unavailable, not that it
+    # rejected the requested SNI. Establish the connection before interpreting
+    # an explicit TLS alert as a successful negative probe.
+    raw = socket.create_connection(("100.109.171.70", 443), timeout=5)
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        try:
+            wrapped = context.wrap_socket(raw, server_hostname=server_name)
+        except ssl.SSLError as error:
+            if error.reason not in {"TLSV1_ALERT_UNRECOGNIZED_NAME", "TLSV1_UNRECOGNIZED_NAME"}:
+                raise ExecutorError("TLS ingress negative SNI probe did not receive the expected rejection alert") from error
+            return
+        try:
+            raise ExecutorError("TLS ingress accepted a disallowed SNI or no-SNI request")
+        finally:
+            wrapped.close()
+    finally:
+        raw.close()
+
+
+TLS_COMPLETION_SCHEMA = "belib-tls-owner-completion/v1"
+TLS_COMPLETION_FIELDS = {"schema", "owner_nonce", "plan_sha256", "prepare_receipt_sha256",
+                         "upgrade_receipt_nonce", "upgrade_receipt_sha256", "source_sha", "operation_id",
+                         "project", "previous_nginx_id", "nginx_id", "nginx_configuration_sha256",
+                         "nginx_image_id", "nginx_network_ids", "tls_config_sha256", "certificate_sha256",
+                         "unchanged_runtime_sha256", "approval_nonce", "evidence_sha256",
+                         "serve_config_sha256", "serve_etag", "completed_at", "status"}
+
+
+def read_tls_completion(owner_nonce: str, *, runner: Callable[..., Any] = subprocess.run) -> dict:
+    if not _is_sha(owner_nonce):
+        raise ExecutorError("TLS owner nonce is malformed")
+    result = runner(_bootstrap_command(["--tls-receipt", owner_nonce]),
+                    env={"PATH": "/usr/bin:/bin", "HOME": "/home/hiroyuki", "LANG": "C"},
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=10, check=False)
+    if result.returncode != 0:
+        raise ExecutorError("The installed root bootstrap has no requested TLS completion")
+    completion = _last_json_line(result.stdout)
+    if (not isinstance(completion, dict) or set(completion) != TLS_COMPLETION_FIELDS
+            or completion.get("schema") != TLS_COMPLETION_SCHEMA or completion.get("owner_nonce") != owner_nonce
+            or completion.get("status") != "complete" or type(completion.get("completed_at")) is not int
+            or completion["completed_at"] <= 0):
+        raise ExecutorError("Root TLS completion does not match the fixed immutable schema")
+    for field in ("plan_sha256", "prepare_receipt_sha256", "upgrade_receipt_sha256",
+                  "nginx_configuration_sha256", "tls_config_sha256", "certificate_sha256",
+                  "unchanged_runtime_sha256", "approval_nonce", "evidence_sha256", "serve_config_sha256"):
+        if not _is_sha(completion.get(field)):
+            raise ExecutorError("Root TLS completion contains a malformed digest")
+    for field in ("upgrade_receipt_nonce", "previous_nginx_id", "nginx_id"):
+        if not _is_sha(completion.get(field)):
+            raise ExecutorError("Root TLS completion contains a malformed ID")
+    if completion["previous_nginx_id"] == completion["nginx_id"]:
+        raise ExecutorError("Root TLS completion has no nginx transition")
+    if (not _is_sha(completion.get("source_sha"), SHA40)
+            or not isinstance(completion.get("operation_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", completion["operation_id"])
+            or completion.get("project") != PROJECT + "-upgrade-" + completion["operation_id"]
+            or not isinstance(completion.get("nginx_image_id"), str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", completion["nginx_image_id"])):
+        raise ExecutorError("Root TLS completion target or fixed nginx image is invalid")
+    networks = completion.get("nginx_network_ids")
+    expected_network_names = {completion["project"] + "_isolated", completion["project"] + "_ingress"}
+    if (not isinstance(networks, dict) or set(networks) != expected_network_names
+            or any(not _is_sha(value) for value in networks.values())):
+        raise ExecutorError("Root TLS completion network pins are malformed")
+    if (not isinstance(completion.get("serve_etag"), str) or not completion["serve_etag"]
+            or len(completion["serve_etag"]) > 256
+            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in completion["serve_etag"])):
+        raise ExecutorError("Root TLS completion Serve ETag is malformed")
+    return completion
+
+
+def validate_tls_completion_links(completion: dict, upgrade_receipt: dict, owner_nonce: str) -> dict:
+    if not isinstance(completion, dict) or not isinstance(upgrade_receipt, dict):
+        raise ExecutorError("TLS completion chain records are not objects")
+    expected_runtime = validate_expected_runtime(upgrade_receipt.get("expected_runtime"))
+    cutover = expected_runtime["plan"]["cutover_plan"]
+    if (completion.get("owner_nonce") != owner_nonce
+            or completion.get("upgrade_receipt_nonce") != upgrade_receipt.get("nonce")
+            or completion.get("upgrade_receipt_sha256") != hashlib.sha256(
+                json.dumps(upgrade_receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                           allow_nan=False).encode("utf-8")).hexdigest()
+            or completion.get("source_sha") != upgrade_receipt.get("source_sha")
+            or completion.get("operation_id") != expected_runtime["operation_id"]
+            or completion.get("project") != expected_runtime["project"]
+            or completion.get("previous_nginx_id") != expected_runtime["services"]["nginx"]
+            or completion.get("nginx_network_ids") != cutover["new"]["nginx"]["network_ids"]
+            or completion.get("nginx_id") == expected_runtime["services"]["nginx"]):
+        raise ExecutorError("Root TLS completion does not chain to the exact original upgrade receipt")
+    stable = json.loads(json.dumps(expected_runtime, sort_keys=True, separators=(",", ":"),
+                                   ensure_ascii=False, allow_nan=False))
+    del stable["services"]["nginx"]
+    del stable["plan"]["cutover_plan"]["new"]["nginx"]["id"]
+    del stable["plan"]["cutover_plan"]["new"]["nginx"]["configuration_sha256"]
+    del stable["plan_sha256"]
+    stable_sha = hashlib.sha256(json.dumps(stable, sort_keys=True, separators=(",", ":"),
+                                           ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+    if completion.get("unchanged_runtime_sha256") != stable_sha:
+        raise ExecutorError("TLS completion stable-runtime digest differs from the original root pins")
+    return expected_runtime
+
+
+def collect_tls_final_readback(upgrade_receipt: dict, completion: dict, port: int, *,
+                               runner: Callable[..., Any] = subprocess.run,
+                               endpoint_check: Callable[[], None] = _verify_local_docker_endpoint) -> dict:
+    expected_runtime = validate_tls_completion_links(
+        completion, upgrade_receipt, completion.get("owner_nonce"))
+    transition = {key: completion[key] for key in (
+        "previous_nginx_id", "nginx_id", "nginx_configuration_sha256", "nginx_image_id", "nginx_network_ids")}
+    result = collect_tls_candidate_readback(upgrade_receipt["source_sha"], port,
+                                            expected_runtime=expected_runtime,
+                                            nginx_transition=transition, runner=runner,
+                                            endpoint_check=endpoint_check, mode="tls",
+                                            owner_nonce=completion["owner_nonce"])
+    observed = result["observed_runtime"]
+    # Verify the operation-owned Docker label separately; the candidate helper
+    # is also used by preparation before root adoption and has no owner nonce.
+    container = _docker_json(["inspect", "--format", "{{json .}}", completion["nginx_id"]], runner=runner)
+    labels = container.get("Config", {}).get("Labels") if isinstance(container, dict) else None
+    if (not isinstance(labels, dict)
+            or labels.get("belib.tls-owner-nonce") != completion["owner_nonce"]):
+        raise ExecutorError("Candidate nginx does not carry the exact adopted TLS owner label")
+    return {"status": "verified", "source_sha": upgrade_receipt["source_sha"],
+            "operation_id": expected_runtime["operation_id"], "project": expected_runtime["project"],
+            "completion": completion, "observed_runtime": observed}
+
+
+def _staging_source(path: Path, *, owner_uid: int) -> tuple[str, str]:
+    raw = _read_regular(path, MAX_ENV_BYTES, owner_uid=owner_uid, modes={0o400, 0o600})
+    try:
+        values = [line.split("=", 1)[1] for line in raw.decode("utf-8", "strict").splitlines()
+                  if line.startswith("BELIB_STAGE_VCS_REF=") and line.count("=") == 1]
+    except UnicodeError as error:
+        raise ExecutorError("The fixed staging environment source is malformed") from error
+    if len(values) != 1 or not _is_sha(values[0], SHA40):
+        raise ExecutorError("The fixed staging environment source is missing or malformed")
+    return values[0], hashlib.sha256(raw).hexdigest()
+
+
+def collect_tls_candidate_readback(source_sha: str, port: int, *, expected_runtime: dict,
+                                   nginx_transition: dict, runner: Callable[..., Any] = subprocess.run,
+                                   endpoint_check: Callable[[], None] = _verify_local_docker_endpoint,
+                                   mode: str, owner_nonce: str | None = None) -> dict:
+    """Read back a candidate nginx-only transition; this is not an accepted CD receipt."""
+    expected = validate_expected_runtime(expected_runtime)
+    if mode not in {"tls", "http"}:
+        raise ExecutorError("TLS candidate readback mode must be exactly tls or http")
+    fields = {"previous_nginx_id", "nginx_id", "nginx_configuration_sha256",
+              "nginx_image_id", "nginx_network_ids"}
+    transition = _require_fields(nginx_transition, fields, "TLS nginx transition")
+    if (source_sha != expected["plan"]["cutover_plan"]["source_sha"]
+            or expected["services"]["nginx"] != transition["previous_nginx_id"]
+            or not _is_sha(transition["previous_nginx_id"])
+            or not _is_sha(transition["nginx_id"]) or transition["nginx_id"] == transition["previous_nginx_id"]
+            or not _is_sha(transition["nginx_configuration_sha256"])
+            or not isinstance(transition["nginx_image_id"], str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", transition["nginx_image_id"])):
+        raise ExecutorError("TLS nginx transition identity or fixed image pin is invalid")
+    candidate_project = expected["project"]
+    expected_networks = expected["plan"]["cutover_plan"]["new"]["nginx"]["network_ids"]
+    if transition["nginx_network_ids"] != expected_networks:
+        raise ExecutorError("TLS nginx transition changed the adopted network identities")
+    changed = json.loads(json.dumps(expected, sort_keys=True, separators=(",", ":")))
+    changed["services"]["nginx"] = transition["nginx_id"]
+    changed["plan"]["cutover_plan"]["new"]["nginx"]["id"] = transition["nginx_id"]
+    changed["plan"]["cutover_plan"]["new"]["nginx"]["configuration_sha256"] = transition["nginx_configuration_sha256"]
+    observed = _collect_upgrade_runtime_readback(changed, source_sha, port, runner=runner,
+                                                  endpoint_check=endpoint_check,
+                                                  tls_owner_nonce=owner_nonce,
+                                                  nginx_mode=mode)
+    if observed["container_ids"]["candidate"]["nginx"] != transition["nginx_id"]:
+        raise ExecutorError("TLS nginx candidate readback differs from the requested transition")
+    if observed["image_digests"]["candidate"]["nginx"] != transition["nginx_image_id"]:
+        raise ExecutorError("TLS nginx candidate image differs from the fixed image pin")
+    return {"status": "candidate-verified", "source_sha": source_sha,
+            "project": candidate_project, "operation_id": expected["operation_id"],
+            "plan_sha256": expected["plan_sha256"], "unchanged_runtime_sha256": _unchanged_runtime_digest(expected),
+            "nginx_transition": transition, "observed_runtime": observed}
 
 
 def _configuration_digest(container: dict) -> str:
@@ -1016,6 +1318,83 @@ def execute_handoff(
     }
 
 
+def readback_tls_handoff(
+    handoff_path: Path,
+    upgrade_nonce: str,
+    owner_nonce: str,
+    *,
+    runner: Callable[..., Any] = subprocess.run,
+    health_probe: Callable[[int], dict] = loopback_health_probe,
+    runtime_readback: Callable[..., dict] = collect_tls_final_readback,
+    ingress_probe: Callable[[str], dict] = verify_tls_ingress,
+    readback_lock: Callable[[], Any] = existing_project_readback_lock,
+    env_file_path: Path = ENV_FILE,
+    hostname: str | None = None,
+    uid: int | None = None,
+    username: str | None = None,
+    file_owner_uid: int | None = None,
+) -> dict:
+    """Read back an already adopted TLS continuation; never invokes --grant."""
+    actual_host = socket.gethostname() if hostname is None else hostname
+    actual_uid = os.getuid() if uid is None else uid
+    if username is None:
+        try:
+            actual_user = pwd.getpwuid(actual_uid).pw_name
+        except KeyError as error:
+            raise ExecutorError("Local operator identity is unavailable") from error
+    else:
+        actual_user = username
+    if actual_host != HOST or actual_uid != UID or actual_user != PRINCIPAL:
+        raise ExecutorError("Run only as the fixed owner on the staging host")
+    if not _is_sha(upgrade_nonce) or not _is_sha(owner_nonce):
+        raise ExecutorError("Read-only TLS receipt selectors are malformed")
+    owner_uid = UID if file_owner_uid is None else file_owner_uid
+    handoff_raw = _read_regular(handoff_path, MAX_HANDOFF_BYTES, owner_uid=owner_uid,
+                                modes={0o400, 0o600, 0o644})
+    source_sha, handoff_id = validate_handoff(_parse_json(handoff_raw, MAX_HANDOFF_BYTES))
+    upgrade_receipt = read_upgrade_receipt(upgrade_nonce, source_sha, runner=runner)
+    if upgrade_receipt["nonce"] != upgrade_nonce or upgrade_receipt["source_sha"] != source_sha:
+        raise ExecutorError("Root upgrade receipt differs from the selected handoff source")
+    completion = read_tls_completion(owner_nonce, runner=runner)
+    expected_runtime = validate_tls_completion_links(completion, upgrade_receipt, owner_nonce)
+    stage_port, env_digest = _staging_port(env_file_path, owner_uid=owner_uid)
+    stage_source, stage_source_digest = _staging_source(env_file_path, owner_uid=owner_uid)
+    if stage_source != source_sha or stage_source_digest != env_digest:
+        raise ExecutorError("Fixed staging environment source differs from the handoff and root receipt")
+    with readback_lock():
+        final_port, final_env_digest = _staging_port(env_file_path, owner_uid=owner_uid)
+        final_source, final_source_digest = _staging_source(env_file_path, owner_uid=owner_uid)
+        if (final_port != stage_port or final_env_digest != env_digest
+                or final_source != source_sha or final_source_digest != env_digest):
+            raise ExecutorError("Staging environment changed during TLS readback")
+        local_health = health_probe(stage_port)
+        if local_health != {"url": f"http://127.0.0.1:{stage_port}{HEALTH_PATH}", "http_status": 200}:
+            raise ExecutorError("Loopback health probe returned an unexpected result")
+        observed = runtime_readback(upgrade_receipt, completion, stage_port, runner=runner)
+        if (not isinstance(observed, dict) or observed.get("status") != "verified"
+                or observed.get("source_sha") != source_sha
+                or observed.get("operation_id") != expected_runtime["operation_id"]
+                or observed.get("project") != expected_runtime["project"]):
+            raise ExecutorError("Docker readback did not prove the adopted TLS runtime")
+        ingress = ingress_probe(completion["certificate_sha256"])
+        if ingress != {"status": 200, "certificate_sha256": completion["certificate_sha256"]}:
+            raise ExecutorError("TLS ingress probe did not match the root completion certificate pin")
+        last_port, last_digest = _staging_port(env_file_path, owner_uid=owner_uid)
+        last_source, last_source_digest = _staging_source(env_file_path, owner_uid=owner_uid)
+        if (last_port != stage_port or last_digest != env_digest
+                or last_source != source_sha or last_source_digest != env_digest):
+            raise ExecutorError("Staging environment changed during TLS probes")
+    return {
+        "schema": "belib-staging-cd-tls-readback/v1", "handoff_receipt_id": handoff_id,
+        "admitted_source_sha": source_sha, "operation": "tls-readback", "host": HOST, "principal": PRINCIPAL,
+        "project": expected_runtime["project"], "status": "LOCAL_TLS_DEPLOYMENT_CONFIRMED",
+        "operator_receipt": upgrade_receipt, "tls_completion": completion,
+        "loopback_health": local_health,
+        "running_revision_readback": observed, "browser_acceptance": "not-performed",
+        "https_ingress_acceptance": "verified",
+    }
+
+
 def write_result(path: Path, result: dict) -> None:
     if not path.is_absolute():
         raise ExecutorError("Result path must be absolute")
@@ -1039,13 +1418,22 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--handoff", required=True, type=Path,
                         help="Downloaded belib-staging-handoff/v1 JSON from the existing supervisor workflow")
-    parser.add_argument("--grant", required=True, type=Path,
-                        help="Existing supervisor's signed one-use operator grant")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--grant", type=Path, help="Existing supervisor's signed one-use operator grant")
+    mode.add_argument("--upgrade-receipt", help="Read-only original root upgrade receipt nonce")
+    parser.add_argument("--owner-nonce", help="Read-only adopted TLS completion nonce; required with --upgrade-receipt")
     parser.add_argument("--result", required=True, type=Path,
                         help="New absolute path for this adapter's local execution receipt")
     args = parser.parse_args(argv)
     try:
-        result = execute_handoff(args.handoff, args.grant)
+        if args.upgrade_receipt is not None:
+            if args.owner_nonce is None:
+                raise ExecutorError("--owner-nonce is required with --upgrade-receipt")
+            result = readback_tls_handoff(args.handoff, args.upgrade_receipt, args.owner_nonce)
+        else:
+            if args.owner_nonce is not None:
+                raise ExecutorError("--owner-nonce is read-only and requires --upgrade-receipt")
+            result = execute_handoff(args.handoff, args.grant)
         write_result(args.result, result)
     except (ExecutorError, OSError, subprocess.SubprocessError, ValueError) as error:
         print(f"Staging local execution blocked: {error}", file=sys.stderr)
@@ -1056,7 +1444,11 @@ def main(argv: list[str] | None = None) -> int:
 
 def execution_exit_code(result: dict) -> int:
     """Only an observed runtime revision and exact local health are a pass."""
-    return 0 if result.get("status") == "LOCAL_DEPLOYMENT_CONFIRMED" else 1
+    if result.get("schema") == "belib-staging-cd-execution/v1":
+        return 0 if result.get("status") == "LOCAL_DEPLOYMENT_CONFIRMED" else 1
+    if result.get("schema") == "belib-staging-cd-tls-readback/v1":
+        return 0 if result.get("status") == "LOCAL_TLS_DEPLOYMENT_CONFIRMED" else 1
+    return 1
 
 
 if __name__ == "__main__":

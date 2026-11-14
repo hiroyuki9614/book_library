@@ -169,6 +169,7 @@ jobs:
           /usr/bin/python3 -I -B scripts/staging/test-retained-entrypoint.py
           /usr/bin/python3 -I -B scripts/staging/test-prepare-retained.py
           /usr/bin/python3 -I -B scripts/staging/test-prepare-retained-integration.py
+          /usr/bin/python3 -I -B scripts/staging/test-tls-retained-continuation.py
           /usr/bin/python3 -I -B scripts/staging/test-cd-handoff.py
           /usr/bin/python3 -I -B scripts/staging/test-cd-handoff-executor.py
           /usr/bin/python3 -I -B scripts/staging/test-ci-isolation-guard.py
@@ -219,3 +220,4 @@ jobs:
             --compose-source compose.staging.yaml \
             --compose-json "$RUNNER_TEMP/staging-compose.json" \
             --port 49199
+

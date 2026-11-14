@@ -126,6 +126,215 @@ class FakeEffects:
 
 
 class TlsPrepareTests(unittest.TestCase):
+    def test_v2_plan_is_bound_to_exact_root_receipt_and_nonce_scoped_manifest(self):
+        source_sha, operation, owner_nonce, receipt_nonce = "a" * 40, "b" * 32, "c" * 64, "d" * 64
+        project = "belib-isolated-i5-upgrade-" + operation
+        expected = {"project": project, "operation_id": operation, "port": 18371,
+            "services": {name: (name[0] * 64) for name in ("db", "backend", "frontend", "nginx")},
+            "retained": {"project": "belib-isolated-i5", "db": "e" * 64,
+                "stopped_application_ids": ["f" * 64, "1" * 64, "2" * 64], "volumes": {}},
+            "plan_sha256": "3" * 64,
+            "plan": {"cutover_plan": {"schema": "belib-isolated-copy-cutover/v1", "source_sha": source_sha,
+                "operation_id": operation, "port": 18371, "old": {},
+                "new": {"nginx": {"id": "4" * 64, "configuration_sha256": "5" * 64}}}}}
+        root_result = {"schema": "belib-staging-operation-result/v1", "nonce": receipt_nonce,
+            "source_sha": source_sha, "expected_runtime": expected, "exit_code": 0, "nonce_consumed": True}
+        observed = {"status": "verified", "source_sha": source_sha, "container_ids": expected["services"]}
+        fake_executor = types.SimpleNamespace(validate_expected_runtime=lambda value: value,
+            collect_runtime_readback=lambda *_args, **_kwargs: observed)
+        with tempfile.TemporaryDirectory(prefix="tls-v2-plan-", dir=Path.home()) as temporary:
+            root = Path(temporary)
+            state = root / "state"; state.mkdir(mode=0o700)
+            with patch.object(cli, "STATE", state), patch.object(cli, "TLS_CONTEXT", state / "tls-work-context"), \
+                 patch.object(cli, "_v2_source_sha", return_value=source_sha), \
+                 patch.object(cli, "_v2_read_upgrade_receipt", return_value=(root_result, cli._v2_digest(root_result))), \
+                 patch.object(cli, "_v2_load_executor", return_value=fake_executor), \
+                 patch.object(tls, "TailscaleServeClient", return_value=types.SimpleNamespace(
+                     get=lambda: (serve(), tls.EXPECTED_SERVE_ETAG))), \
+                 patch.object(tls, "inspect_certificate", return_value=tls.EXPECTED_CERT_SHA256), \
+                 patch.object(cli, "bundle_digest", return_value="6" * 64):
+                plan_raw, context = cli.v2_create_plan(root, receipt_nonce, observed_runtime=observed,
+                    owner_nonce=owner_nonce)
+            plan = cli._v2_json(plan_raw)
+            manifest_raw = (context / "before-manifest.json").read_bytes()
+            manifest = cli._v2_json(manifest_raw)
+            self.assertEqual(set(plan), cli.V2_PLAN_FIELDS)
+            self.assertEqual(plan["source_sha"], plan["prior_application_sha"])
+            self.assertEqual(plan["upgrade_receipt_sha256"], cli._v2_digest(root_result))
+            self.assertEqual(set(manifest), cli.V2_MANIFEST_FIELDS)
+            self.assertEqual(manifest["expected_runtime"], expected)
+            self.assertEqual(manifest["observed_runtime"], observed)
+            self.assertEqual(cli._v2_validate_plan(plan_raw, cli.digest(plan_raw), source_sha,
+                receipt_nonce, cli._v2_digest(root_result), expected)["nonce"], owner_nonce)
+            projection = copy.deepcopy(expected)
+            projection["services"].pop("nginx")
+            projection["plan"]["cutover_plan"]["new"]["nginx"].pop("id")
+            projection["plan"]["cutover_plan"]["new"]["nginx"].pop("configuration_sha256")
+            projection.pop("plan_sha256")
+            self.assertEqual(cli._v2_unchanged_runtime_sha256(expected), cli._v2_digest(projection))
+            altered = dict(plan, project="belib-isolated-i5")
+            altered_raw = cli.canonical(altered)
+            with self.assertRaises(cli.PrepareError):
+                cli._v2_validate_plan(altered_raw, cli.digest(altered_raw), source_sha,
+                    receipt_nonce, cli._v2_digest(root_result), expected)
+            expiring_plan = dict(plan, expires_at=1010)
+            expiring_raw = cli.canonical(expiring_plan)
+            clock = [1009]
+            def approval_wait():
+                clock[0] = 1010
+                return "f" * 64
+            with patch.object(cli.time, "time", side_effect=lambda: clock[0]):
+                cli._v2_validate_plan(expiring_raw, cli.digest(expiring_raw), source_sha,
+                    receipt_nonce, cli._v2_digest(root_result), expected)
+                with self.assertRaisesRegex(cli.PrepareError, "fresh root receipt"):
+                    cli._v2_request_fresh_approval(approval_wait, plan_raw=expiring_raw,
+                        plan_sha=cli.digest(expiring_raw), source_sha=source_sha,
+                        receipt=root_result, receipt_sha=cli._v2_digest(root_result))
+            with patch.object(cli.time, "time", return_value=1010):
+                cli._v2_validate_plan(expiring_raw, cli.digest(expiring_raw), source_sha,
+                    receipt_nonce, cli._v2_digest(root_result), expected, allow_expired_readonly=True)
+
+    def test_v2_pre_effect_revalidation_rejects_nginx_drift_after_model_render(self):
+        source_sha, project = "a" * 40, "belib-isolated-i5-upgrade-" + "b" * 32
+        expected = {"project": project, "services": {"nginx": "c" * 64}}
+        executor = types.SimpleNamespace(
+            collect_runtime_readback=unittest.mock.Mock(return_value={"status": "verified"}),
+            _verify_local_docker_endpoint=lambda: None,
+            _configuration_digest=lambda info: info["configuration_sha256"],
+        )
+        changed = {"Id": "d" * 64, "configuration_sha256": "e" * 64}
+        with patch.object(cli, "_v2_nginx_info", return_value=changed):
+            with self.assertRaisesRegex(cli.PrepareError, "changed after model rendering"):
+                cli._v2_revalidate_pre_effect_runtime(source_sha, 18083, expected, executor,
+                    attempt_before="c" * 64, initial_configuration="f" * 64, recovery=None)
+        executor.collect_runtime_readback.assert_called_once()
+
+    def test_v2_published_receipt_is_no_replace_and_idempotent(self):
+        with tempfile.TemporaryDirectory(prefix="tls-v2-receipt-", dir=Path.home()) as temporary:
+            directory = Path(temporary)
+            raw = b'{"candidate":true}'
+            cli._v2_publish_once(directory, "prepare-receipt.json", raw)
+            cli._v2_publish_once(directory, "prepare-receipt.json", raw)
+            self.assertEqual((directory / "prepare-receipt.json").read_bytes(), raw)
+            self.assertEqual((directory / "prepare-receipt.json").stat().st_nlink, 1)
+            self.assertEqual(list(directory.glob("*.tmp")), [])
+            with self.assertRaisesRegex(cli.PrepareError, "conflicting"):
+                cli._v2_publish_once(directory, "prepare-receipt.json", b'{"candidate":false}')
+
+    def test_v2_prepared_compose_override_is_deterministic_and_mutation_is_rejected(self):
+        operation, source_sha = "b" * 32, "a" * 40
+        project = "belib-isolated-i5-upgrade-" + operation
+        service_ids = {name: (name[0] * 64) for name in ("db", "backend", "frontend", "nginx")}
+        cutover = {"schema": "belib-isolated-copy-cutover/v1", "source_sha": source_sha,
+            "operation_id": operation, "port": 18083, "old": {}, "new": {
+                service: {"id": service_ids[service], "configuration_sha256": str(index) * 64,
+                          "network_ids": {project + "_isolated": "5" * 64,
+                              **({project + "_ingress": "6" * 64} if service == "nginx" else {})}}
+                for index, service in enumerate(("backend", "frontend", "nginx"), start=1)}}
+        db = {"id": service_ids["db"], "configuration_sha256": "1" * 64,
+            "volume_name": project + "_staging-postgres-data", "network_id": "2" * 64}
+        source_db = {"id": "3" * 64, "configuration_sha256": "4" * 64,
+            "network_ids": {"belib-isolated-i5_isolated": "5" * 64},
+            "volume_name": "belib-isolated-i5_staging-postgres-data"}
+        authorities = {name: {"issuer": name + ".example", "public_key_pem": "test-key-" + name,
+                              "fingerprint": str(index) * 64}
+                       for index, name in enumerate(("restore", "network", "roots"), start=1)}
+        expected = {"project": project, "operation_id": operation, "services": service_ids,
+            "authority_pins_sha256": cli._v2_digest(authorities),
+            "plan": {"cutover_plan": cutover, "candidate_database": db, "source_database": source_db}}
+        with tempfile.TemporaryDirectory(prefix="tls-v2-prepared-", dir=Path.home()) as temporary:
+            root = Path(temporary); prepared = root / operation; prepared.mkdir(mode=0o700)
+            intent = "6" * 64
+            image_ids = {"backend": "sha256:" + "7" * 64, "frontend": "sha256:" + "8" * 64,
+                         "migrate": "sha256:" + "9" * 64}
+            build_inputs = ("compose.staging.yaml", "scripts/staging/Dockerfile.backend.staging",
+                "scripts/staging/Dockerfile.frontend.staging", "backend/.dockerignore", "frontend/.dockerignore")
+            build_inputs_sha256 = {}
+            for name in build_inputs:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture " + name + "\n")
+                build_inputs_sha256[name] = cli.digest(path.read_bytes())
+            config = {"schema": "belib-retained-operator/v1", "enabled": False, "source_sha": source_sha,
+                "topology": "isolated-copy", "prepared_directory": str(prepared), "authorities": authorities,
+                "cutover_plan": cutover, "candidate_database": db, "source_database": source_db,
+                "migration_image": image_ids["migrate"]}
+            tags = {name: "belib-retained:" + operation + "-" + name for name in ("backend", "frontend", "migrate")}
+            container_pins = {service: pin["configuration_sha256"]
+                              for service, pin in cutover["new"].items()}
+            container_pins["db"] = db["configuration_sha256"]
+            journal = {"schema": "belib-retained-preparation-journal/v1", "source_sha": source_sha,
+                "operation_id": operation, "phase": "prepared", "image_ids": image_ids,
+                "container_ids": service_ids, "container_pins": container_pins, "intent": intent}
+            receipt = {"schema": "belib-retained-preparation-receipt/v1", "source_sha": source_sha,
+                "operation_id": operation, "image_tags": tags, "image_ids": image_ids,
+                "build_inputs_sha256": build_inputs_sha256, "candidate_container_ids": service_ids,
+                "old_container_pins": {},
+                "old_container_oci": {name: {"image_id": "sha256:" + str(index) * 64,
+                    "image_ref": name + ":fixture"} for index, name in enumerate(("db", "backend", "frontend", "nginx"), start=1)},
+                "old_database_pin": source_db,
+                "old_volume_sha256": {"belib-isolated-i5_staging-book-files": "a" * 64,
+                    "belib-isolated-i5_staging-postgres-data": "b" * 64},
+                "manifest_sha256": "c" * 64, "backup_sha256": "d" * 64,
+                "candidate_apps_stopped": True,
+                "candidate_database_started": True, "original_database_mutated": False}
+            override = {"name": project, "services": {
+                "backend": {"build": {"tags": [tags["backend"]],
+                    "labels": {"belib.retained-prepare-intent": intent, "belib.retained-prepare-source": source_sha},
+                    "context": "./backend", "dockerfile": "../scripts/staging/Dockerfile.backend.staging",
+                    "target": "runtime", "args": {"VCS_REF": source_sha}}},
+                "frontend": {"build": {"tags": [tags["frontend"]],
+                    "labels": {"belib.retained-prepare-intent": intent, "belib.retained-prepare-source": source_sha}}},
+                "migrate": {"build": {"tags": [tags["migrate"]],
+                    "labels": {"belib.retained-prepare-intent": intent, "belib.retained-prepare-source": source_sha}}},
+                "db": {"volumes": [{"type": "bind", "source": str(root / "scripts/staging/10-belib-staging-roles.sh"),
+                    "target": "/docker-entrypoint-initdb.d/10-belib-staging-roles.sh", "read_only": True,
+                    "bind": {"create_host_path": False}}]}},
+                "volumes": {"staging-postgres-data": {"name": project + "_staging-postgres-data"},
+                    "staging-book-files": {"external": True, "name": "belib-isolated-i5_staging-book-files"}},
+                "networks": {"isolated": {"name": project + "_isolated", "internal": True},
+                    "ingress": {"name": project + "_ingress", "driver": "bridge"}}}
+            for service, tag in tags.items():
+                override["services"].setdefault(service, {})["image"] = tag
+            for service in ("db", "backend", "frontend", "nginx"):
+                override["services"].setdefault(service, {}).setdefault("labels", {})[
+                    "belib.retained-prepare-intent"] = intent
+            override["volumes"]["staging-postgres-data"]["labels"] = {
+                "belib.retained-prepare-intent": intent}
+            for network in ("isolated", "ingress"):
+                override["networks"][network].setdefault("labels", {})[
+                    "belib.retained-prepare-intent"] = intent
+            self.assertTrue(prepared.is_dir(), f"prepared fixture vanished: {list(root.iterdir())!r}")
+            for name, value in (("candidate-config.json", config), ("preparation-receipt.json", receipt),
+                                ("preparation-journal.json", journal), ("compose.override.json", override)):
+                (prepared / name).write_bytes(cli.canonical(value)); (prepared / name).chmod(0o600)
+            with patch.object(cli, "PREPARED_ROOT", root):
+                self.assertEqual(cli._v2_validate_prepared_inputs(root, prepared, expected), config)
+                changed_authorities = json.loads(json.dumps(authorities))
+                changed_authorities["roots"]["issuer"] = "different-root.example"
+                config["authorities"] = changed_authorities
+                (prepared / "candidate-config.json").write_bytes(cli.canonical(config))
+                with self.assertRaisesRegex(cli.PrepareError, "authority pins differ"):
+                    cli._v2_validate_prepared_inputs(root, prepared, expected)
+                config["authorities"] = authorities
+                (prepared / "candidate-config.json").write_bytes(cli.canonical(config))
+                receipt["unexpected"] = True
+                (prepared / "preparation-receipt.json").write_bytes(cli.canonical(receipt))
+                with self.assertRaisesRegex(cli.PrepareError, "preparation receipt differs"):
+                    cli._v2_validate_prepared_inputs(root, prepared, expected)
+                del receipt["unexpected"]
+                (prepared / "preparation-receipt.json").write_bytes(cli.canonical(receipt))
+                journal["container_pins"]["backend"] = "f" * 64
+                (prepared / "preparation-journal.json").write_bytes(cli.canonical(journal))
+                with self.assertRaisesRegex(cli.PrepareError, "journal is not the exact completed build record"):
+                    cli._v2_validate_prepared_inputs(root, prepared, expected)
+                journal["container_pins"]["backend"] = cutover["new"]["backend"]["configuration_sha256"]
+                (prepared / "preparation-journal.json").write_bytes(cli.canonical(journal))
+                override["services"]["nginx"] = {"privileged": True}
+                (prepared / "compose.override.json").write_bytes(cli.canonical(override))
+                with self.assertRaisesRegex(cli.PrepareError, "deterministic admitted operation model"):
+                    cli._v2_validate_prepared_inputs(root, prepared, expected)
+
     @staticmethod
     def _manifest_tls(baseline, build_root, state):
         observed = copy.deepcopy(baseline)

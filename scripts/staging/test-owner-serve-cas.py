@@ -113,10 +113,11 @@ class OwnerServeTests(unittest.TestCase):
         self.probes = []
         self.counter = 0
 
-        def journal_start(plan, original, etag, plan_sha):
+        def journal_start(plan, original, etag, plan_sha, adoption=None):
             if plan["nonce"] in self.used_nonces:
                 raise owner.Stop("nonce replay")
             self.used_nonces.add(plan["nonce"])
+            self.adoption = adoption
             return (os.open(os.devnull, os.O_RDONLY), Path("/offline/journal"))
 
         def event(journal, event, **fields):
@@ -165,6 +166,183 @@ class OwnerServeTests(unittest.TestCase):
         self.api.events = self.probes
         raw = owner.canonical(plan)
         return owner.run(raw, owner.digest(raw))
+
+    def v2_inputs(self):
+        source = "a" * 40
+        operation_id = "1" * 32
+        project = "belib-isolated-i5-upgrade-" + operation_id
+        old_nginx, initial_nginx, tls_nginx = "2" * 64, "3" * 64, "4" * 64
+        new_ids = {"db": "8" * 64, "backend": "9" * 64, "frontend": "a" * 64, "nginx": initial_nginx}
+        old_ids = {"backend": "b" * 64, "frontend": "c" * 64, "nginx": old_nginx}
+        old_isolated, old_ingress = "d" * 64, "e" * 64
+        new_isolated, new_ingress = "f" * 64, "1" * 64
+        old_networks = {"belib-isolated-i5_isolated": old_isolated,
+                        "belib-isolated-i5_ingress": old_ingress}
+        new_nginx_networks = {project + "_isolated": new_isolated,
+                              project + "_ingress": new_ingress}
+        def pin(container_id, networks):
+            return {"id": container_id, "configuration_sha256": hashlib.sha256(container_id.encode()).hexdigest(),
+                    "network_ids": networks}
+        runtime_plan = {
+            "cutover_plan": {"schema": "belib-isolated-copy-cutover/v1", "source_sha": source,
+                             "operation_id": operation_id, "port": 18083,
+                             "old": {"backend": pin(old_ids["backend"], {"belib-isolated-i5_isolated": old_isolated}),
+                                     "frontend": pin(old_ids["frontend"], {"belib-isolated-i5_isolated": old_isolated}),
+                                     "nginx": pin(old_nginx, old_networks)},
+                             "new": {"backend": pin(new_ids["backend"], {project + "_isolated": new_isolated}),
+                                     "frontend": pin(new_ids["frontend"], {project + "_isolated": new_isolated}),
+                                     "nginx": pin(initial_nginx, new_nginx_networks)}},
+            "candidate_database": {"id": new_ids["db"], "configuration_sha256": "a" * 64,
+                                   "volume_name": project + "_staging-postgres-data", "network_id": new_isolated},
+            "source_database": {"id": owner.UPGRADE_RETAINED_DATABASE_ID,
+                                "configuration_sha256": "b" * 64,
+                                "network_ids": {"belib-isolated-i5_isolated": old_isolated},
+                                "volume_name": "belib-isolated-i5_staging-postgres-data"},
+        }
+        runtime = {"project": project, "operation_id": operation_id,
+                   "services": new_ids,
+                   "retained": {"project": "belib-isolated-i5", "db": owner.UPGRADE_RETAINED_DATABASE_ID,
+                                "stopped_application_ids": list(old_ids.values()),
+                                "volumes": {"database": "belib-isolated-i5_staging-postgres-data",
+                                            "books": "belib-isolated-i5_staging-book-files"}},
+                   "port": 18083, "plan": runtime_plan,
+                   "plan_sha256": hashlib.sha256(owner.canonical(runtime_plan)).hexdigest()}
+        stable = json.loads(json.dumps(runtime))
+        del stable["services"]["nginx"]
+        del stable["plan"]["cutover_plan"]["new"]["nginx"]["id"]
+        del stable["plan"]["cutover_plan"]["new"]["nginx"]["configuration_sha256"]
+        del stable["plan_sha256"]
+        unchanged = owner.digest(owner.canonical(stable))
+        upgrade_nonce = "b" * 64
+        root_result = {
+            "schema": "belib-staging-operation-result/v1", "nonce": upgrade_nonce,
+            "grant_sha256": "c" * 64, "source_sha": source, "operation": "upgrade-retained",
+            "host": "ubuntu-worker", "principal": "hiroyuki", "uid": 1000,
+            "project": "belib-isolated-i5", "exit_code": 0, "completed_at": 100,
+            "nonce_consumed": True, "expected_runtime": runtime,
+        }
+        plan = new_plan()
+        plan.update({"schema": owner.PLAN_SCHEMA_V2, "source_sha": source,
+                     "prior_application_sha": source, "nonce": "d" * 64,
+                     "upgrade_receipt_nonce": upgrade_nonce,
+                     "upgrade_receipt_sha256": owner.digest(owner.canonical(root_result)),
+                     "operation_id": operation_id, "project": project})
+        plan_raw = owner.canonical(plan)
+        plan_sha = owner.digest(plan_raw)
+        prepared = {
+            "schema": owner.PREPARE_SCHEMA_V2, "plan_sha256": plan_sha,
+            "retained_state_sha256": plan["retained_state_sha256"], "nginx_id": tls_nginx,
+            "source_sha": source, "tls_config_sha256": plan["tls_config_sha256"],
+            "certificate_sha256": plan["certificate_sha256"], "approval_nonce": "e" * 64,
+            "evidence_sha256": "f" * 64, "prepared": True, "owner_nonce": plan["nonce"],
+            "upgrade_receipt_nonce": upgrade_nonce, "upgrade_receipt_sha256": plan["upgrade_receipt_sha256"],
+            "operation_id": operation_id, "project": project, "previous_nginx_id": initial_nginx,
+            "nginx_configuration_sha256": "a" * 64,
+            "nginx_image_id": "sha256:" + "8" * 64,
+            "nginx_network_ids": new_nginx_networks, "unchanged_runtime_sha256": unchanged,
+        }
+        prepared_raw = owner.canonical(prepared)
+        return plan, plan_raw, prepared, prepared_raw, root_result
+
+    def test_v2_adopts_exact_root_receipt_and_publishes_linked_completion(self):
+        plan, plan_raw, prepared, prepared_raw, root_result = self.v2_inputs()
+        with patch.object(owner, "UPGRADE_RESULTS", Path("/offline/operator")), \
+                patch.object(owner, "_safe_root_path"), \
+                patch.object(owner, "_read_root_regular", return_value=owner.canonical(root_result)), \
+                patch.object(owner, "_publish_completion", side_effect=lambda value: value) as publish:
+            result = owner.run(plan_raw, owner.digest(plan_raw), prepared_raw, owner.digest(prepared_raw))
+        self.assertEqual(result["schema"], owner.COMPLETION_SCHEMA)
+        self.assertEqual(result["owner_nonce"], plan["nonce"])
+        self.assertEqual(result["nginx_id"], prepared["nginx_id"])
+        self.assertEqual(result["previous_nginx_id"], "3" * 64)
+        self.assertEqual(self.api.posts, 2)
+        self.assertEqual(self.adoption["prepare_receipt_sha256"], owner.digest(prepared_raw))
+        publish.assert_called_once()
+
+    def test_v2_rejects_wrong_source_and_prepare_link_before_serve_effect(self):
+        plan, plan_raw, prepared, prepared_raw, root_result = self.v2_inputs()
+        for mutate in (lambda p: p.update(prior_application_sha="9" * 40),
+                       lambda p: p.update(upgrade_receipt_sha256="0" * 64)):
+            with self.subTest(mutate=mutate):
+                changed = dict(plan)
+                mutate(changed)
+                raw = owner.canonical(changed)
+                with patch.object(owner, "UPGRADE_RESULTS", Path("/offline/operator")), \
+                        patch.object(owner, "_safe_root_path"), \
+                        patch.object(owner, "_read_root_regular", return_value=owner.canonical(root_result)), \
+                        self.assertRaises(owner.Stop):
+                    owner.run(raw, owner.digest(raw), prepared_raw, owner.digest(prepared_raw))
+        self.assertEqual(self.api.posts, 0)
+
+    def test_completion_publication_uses_no_replace_and_leaves_complete_nlink_one_on_response_loss(self):
+        plan, plan_raw, prepared, prepared_raw, _ = self.v2_inputs()
+        serve_result = {"serve_config_sha256": "a" * 64, "serve_etag": "opaque-etag"}
+        completion = owner._completion_value(plan, owner.digest(plan_raw), owner.digest(prepared_raw),
+                                             prepared, serve_result)
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory)
+            journal.chmod(0o700)
+            path = journal / (plan["nonce"] + ".complete.json")
+            real_open, real_fstat = owner.os.open, owner.os.fstat
+            def fstat_root(fd):
+                info = real_fstat(fd)
+                return type("Info", (), {"st_mode": info.st_mode, "st_uid": 0,
+                                          "st_nlink": info.st_nlink})()
+            def lose_after_publish(name, flags, *args, **kwargs):
+                if flags & getattr(os, "O_DIRECTORY", 0):
+                    raise OSError("simulated response loss after atomic publication")
+                return real_open(name, flags, *args, **kwargs)
+            with patch.object(owner, "JOURNAL", journal), patch.object(owner, "ensure_journal_dir"), \
+                    patch.object(owner, "_read_completion", side_effect=[None]), \
+                    patch.object(owner.os, "fstat", side_effect=fstat_root), \
+                    patch.object(owner.os, "open", side_effect=lose_after_publish):
+                with self.assertRaisesRegex(owner.Stop, "Atomic immutable TLS completion"):
+                    owner._publish_completion(completion)
+            self.assertTrue(path.is_file())
+            self.assertEqual(path.stat().st_nlink, 1)
+            self.assertEqual(path.read_bytes(), owner.canonical(completion))
+
+    def test_v2_recovery_ignores_only_incomplete_final_journal_line_and_never_reposts(self):
+        plan, plan_raw, prepared, prepared_raw, _ = self.v2_inputs()
+        original = baseline()
+        final = owner.activate_custom_tls(owner.remove_legacy_handler(original))
+        final_etag = "9" * 64
+        adoption = {"prepare_receipt_sha256": owner.digest(prepared_raw),
+                    "upgrade_receipt_nonce": plan["upgrade_receipt_nonce"],
+                    "upgrade_receipt_sha256": plan["upgrade_receipt_sha256"],
+                    "source_sha": plan["source_sha"], "operation_id": plan["operation_id"],
+                    "project": plan["project"], "previous_nginx_id": prepared["previous_nginx_id"],
+                    "nginx_id": prepared["nginx_id"],
+                    "nginx_configuration_sha256": prepared["nginx_configuration_sha256"],
+                    "nginx_image_id": prepared["nginx_image_id"],
+                    "nginx_network_ids": prepared["nginx_network_ids"],
+                    "unchanged_runtime_sha256": prepared["unchanged_runtime_sha256"]}
+        initial = {"schema": "belib-tls-owner-journal/v1", "plan_sha256": owner.digest(plan_raw),
+                   "original_config_b64": __import__("base64").b64encode(original).decode("ascii"),
+                   "original_sha256": owner.digest(original), "original_etag": plan["serve_etag"],
+                   "event": "prepared", "adoption": adoption}
+        committed = {"event": "retirement-committed", "phase": "add-custom-tls",
+                     "config_sha256": owner.digest(final), "etag": final_etag}
+        journal_raw = owner.canonical(initial) + b"\n" + owner.canonical(committed) + b"\n" + b'{"event":'
+        self.api.raw = final
+        self.api.etag = final_etag
+        with patch.object(owner, "_read_root_regular", return_value=journal_raw):
+            result = owner._recover_v2_completion(plan, owner.digest(plan_raw),
+                                                  owner.digest(prepared_raw), prepared)
+        self.assertEqual(result, {"status": "complete", "serve_config_sha256": owner.digest(final),
+                                  "serve_etag": final_etag})
+        self.assertEqual(self.api.posts, 0)
+        torn_commit = owner.canonical(initial) + b"\n" + owner.canonical(committed)
+        with patch.object(owner, "_read_root_regular", return_value=torn_commit), \
+                self.assertRaisesRegex(owner.Stop, "no durable final Serve commit"):
+            owner._recover_v2_completion(plan, owner.digest(plan_raw), owner.digest(prepared_raw), prepared)
+            with patch.object(owner, "JOURNAL", journal), patch.object(owner, "ensure_journal_dir"), \
+                    patch.object(owner, "_read_completion", return_value=completion):
+                self.assertEqual(owner._publish_completion(completion), completion)
+                conflict = {**completion, "serve_etag": "foreign-etag"}
+                with self.assertRaisesRegex(owner.Stop, "conflicting immutable"):
+                    owner._publish_completion(conflict)
+            self.assertEqual(path.read_bytes(), owner.canonical(completion))
 
     def test_retirement_replaces_exact_legacy_handler_with_custom_tls_and_rejects_other_sni(self):
         result = self.execute()
