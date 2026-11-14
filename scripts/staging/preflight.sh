@@ -81,14 +81,14 @@ rev="$(/usr/bin/sed -n 's/^BELIB_STAGE_VCS_REF=//p' "$file")"
 [[ "$port" =~ ^[0-9]{4,5}$ && "$port" -ge 1024 && "$port" -le 65535 ]] || fail 'Invalid loopback port'
 [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || fail 'Revision must be full lowercase 40-character Git SHA'
 actual_revision="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONAL_LOCKS=0 \
-  "$git_cli" -c core.fsmonitor=false -c core.untrackedCache=false -C "$root" rev-parse --verify HEAD 2>/dev/null)" || \
+  "$git_cli" -c "safe.directory=$root" -c core.fsmonitor=false -c core.untrackedCache=false -C "$root" rev-parse --verify HEAD 2>/dev/null)" || \
   fail 'Cannot resolve checked-out Git HEAD'
 [[ "$actual_revision" == "$rev" ]] || fail 'Checked-out Git HEAD differs from staging revision'
 [[ -f "$source_tree_guard" && ! -L "$source_tree_guard" ]] || fail 'Exact-source verifier is missing or unsafe'
 "$python_cli" -I -B "$source_tree_guard" --repo-root "$root" --source-sha "$rev" || \
   fail 'Exact Git source verification rejected staging build inputs'
 tree_status="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONAL_LOCKS=0 \
-  "$git_cli" -c core.fsmonitor=false -c core.untrackedCache=false -c status.showUntrackedFiles=all \
+  "$git_cli" -c "safe.directory=$root" -c core.fsmonitor=false -c core.untrackedCache=false -c status.showUntrackedFiles=all \
   -C "$root" status --porcelain=v1 --untracked-files=all --ignore-submodules=none 2>/dev/null)" || \
   fail 'Cannot verify clean Git worktree'
 [[ -z "$tree_status" ]] || fail 'Dirty source tree: fixed staging SHA cannot describe local changes'

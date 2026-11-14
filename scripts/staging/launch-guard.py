@@ -69,14 +69,62 @@ OPERATOR_BOOTSTRAP_BLOCK_REASON = (
 )
 
 
-def _require_operator_bootstrap_admission() -> None:
-    """Fail closed until an independently installed trust root is integrated.
+ROOT_ADMISSION: dict | None = None
 
-    This candidate-controlled source cannot authenticate itself or the candidate
-    approval helper. No grant format or key is trusted here; the external bootstrap,
-    verifier, and one-use grant integration are not available in this checkout.
-    """
-    raise LaunchBlocked(OPERATOR_BOOTSTRAP_BLOCK_REASON)
+
+def _require_operator_bootstrap_admission() -> None:
+    """Admit only a sealed root-created descriptor bound to this process/argv."""
+    global ROOT_ADMISSION
+    ROOT_ADMISSION = None
+    value = os.environ.pop("BELIB_BOOTSTRAP_FD", "")
+    if not re.fullmatch(r"[0-9]{1,4}", value) or not 3 <= int(value) <= 4096:
+        raise LaunchBlocked(OPERATOR_BOOTSTRAP_BLOCK_REASON)
+    fd = int(value)
+    try:
+        info = os.fstat(fd)
+        seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+        if (info.st_uid != 0 or not stat.S_ISREG(info.st_mode) or info.st_nlink != 0
+                or info.st_size > 16384 or fcntl.fcntl(fd, fcntl.F_GET_SEALS) & seals != seals):
+            raise LaunchBlocked("Operator admission descriptor is not root-owned and immutable")
+        os.lseek(fd, 0, os.SEEK_SET)
+        raw = os.read(fd, 16385)
+        def unique(pairs):
+            result = {}
+            for key, item in pairs:
+                if key in result:
+                    raise LaunchBlocked("Admission contains duplicate fields")
+                result[key] = item
+            return result
+        admission = json.loads(raw, object_pairs_hook=unique)
+        if (not isinstance(admission, dict) or set(admission) != {"schema", "grant", "source_root", "pid", "argv_sha256"}
+                or admission["schema"] != "belib-staging-operator-admission/v1"
+                or type(admission["pid"]) is not int or admission["pid"] != os.getpid()
+                or admission["argv_sha256"] != hashlib.sha256(json.dumps(sys.argv[1:], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()):
+            raise LaunchBlocked("Operator admission process/arguments mismatch")
+        grant = admission["grant"]
+        if (not isinstance(grant, dict) or not isinstance(grant.get("source_sha"), str)
+                or not SOURCE_SHA_PATTERN.fullmatch(grant["source_sha"])
+                or admission["source_root"] != "/opt/belib-staging/sources/" + grant["source_sha"]
+                or grant.get("host") != socket.gethostname() or grant.get("uid") != os.getuid()
+                or type(grant.get("expires_at")) is not int or int(time.time()) >= grant["expires_at"]):
+            raise LaunchBlocked("Operator admission target/source/expiry mismatch")
+        ROOT_ADMISSION = admission
+    except (OSError, ValueError, TypeError, AttributeError) as error:
+        raise LaunchBlocked("Operator admission could not be verified") from error
+    finally:
+        os.close(fd)
+
+
+def _require_operation_approval(args) -> None:
+    if ROOT_ADMISSION is None:
+        raise LaunchBlocked(OPERATOR_BOOTSTRAP_BLOCK_REASON)
+    grant = ROOT_ADMISSION["grant"]
+    expected = {"source_sha": args.source_sha, "operation": args.operation,
+                "evidence_sha256": args.evidence_sha256}
+    if args.operation == "resume-ingress":
+        expected.update(prior_source_sha=args.prior_source_sha, retained_state_sha256=args.retained_state_sha256)
+    if any(grant.get(name) != value for name, value in expected.items()) or int(time.time()) >= grant["expires_at"]:
+        raise LaunchBlocked("Admitted operation differs from the one-use root-verified grant")
 
 
 def load_approval_module():
@@ -935,8 +983,9 @@ def _trusted_git(repo_root: Path, *arguments: str) -> subprocess.CompletedProces
     environment = {
         "HOME": str(EXPECTED_HOME), "PATH": SAFE_PATH, "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
     }
-    return _run(["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+    return _run(["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", f"safe.directory={repo_root}",
                  "-C", str(repo_root), *arguments], environment=environment, timeout=10)
 
 
@@ -944,6 +993,19 @@ def _admission_source_root(checkout: Path, source_sha: str) -> Path:
     """Admit the fixed detached tree and its bytes before importing any privileged helper."""
     if not SOURCE_SHA_PATTERN.fullmatch(source_sha):
         raise LaunchBlocked("Source revision must be a full lowercase Git SHA")
+    if ROOT_ADMISSION is not None:
+        candidate = Path(ROOT_ADMISSION["source_root"])
+        if (ROOT_ADMISSION["grant"]["source_sha"] != source_sha
+                or Path(__file__).resolve(strict=True) != candidate / "scripts/staging/launch-guard.py"):
+            raise LaunchBlocked("Installed source does not match the admitted launcher")
+        for path in [*reversed(candidate.parents), candidate]:
+            metadata = path.lstat()
+            if metadata.st_uid != 0 or stat.S_ISLNK(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o022:
+                raise LaunchBlocked("Installed source ancestry is not root-owned")
+        head = _trusted_git(candidate, "rev-parse", "--verify", "HEAD")
+        if head.returncode != 0 or head.stdout.strip() != source_sha:
+            raise LaunchBlocked("Installed Git revision differs from the admitted source")
+        return candidate
     candidate = ADMISSION_WORKTREE_PREFIX.parent / f"{ADMISSION_WORKTREE_PREFIX.name}{source_sha[:7]}"
     expected_launcher = candidate / "scripts/staging/launch-guard.py"
     if Path(__file__).resolve(strict=True) != expected_launcher:
@@ -1082,16 +1144,7 @@ def main(argv: list[str] | None = None) -> int:
                                                          expected_db_image=expected_db_image)
                         if retained_manifest_sha256(before) != args.retained_state_sha256:
                             raise LaunchBlocked("Signed retained-state digest does not match the stopped project")
-                        approval = load_approval_module()
-                        try:
-                            approval.request_and_wait(
-                                args.source_sha, "resume-ingress", args.evidence_sha256,
-                                uid=EXPECTED_UID, output=sys.stdout,
-                                prior_source_sha=args.prior_source_sha,
-                                retained_state_sha256=args.retained_state_sha256,
-                            )
-                        except approval.ApprovalError as error:
-                            raise LaunchBlocked(str(error)) from error
+                        _require_operation_approval(args)
                         after_approval = build_retained_manifest(args.prior_source_sha, inspect_env,
                                                                  docker_prefix=inspect_prefix,
                                                                  expected_db_image=expected_db_image)
@@ -1139,12 +1192,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise LaunchBlocked(str(error)) from error
                 except Exception as error:
                     raise LaunchBlocked("Retained source or resume admission failed") from error
-            approval = load_approval_module()
-            try:
-                approval.request_and_wait(args.source_sha, "deploy", args.evidence_sha256,
-                                          uid=EXPECTED_UID, output=sys.stdout)
-            except approval.ApprovalError as error:
-                raise LaunchBlocked(str(error)) from error
+            _require_operation_approval(args)
             env_snapshot_fd = -1
             docker_config_temporary = None
             try:

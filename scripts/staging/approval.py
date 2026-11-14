@@ -275,9 +275,20 @@ def request_and_wait(
     timeout: int = POLL_SECONDS, prior_source_sha: str | None = None,
     retained_state_sha256: str | None = None,
     tls_binding: dict[str, str] | None = None,
+    retained_upgrade_binding: dict[str, str] | None = None,
 ) -> str:
-    if operation not in ("deploy", "resume-ingress", TLS_OPERATION):
+    if operation not in ("deploy", "resume-ingress", TLS_OPERATION, RETAINED_UPGRADE_OPERATION):
         raise ApprovalError("Approval operation is not allowlisted")
+    if operation != RETAINED_UPGRADE_OPERATION and retained_upgrade_binding is not None:
+        raise ApprovalError("Retained-upgrade pins require the distinct upgrade operation")
+    if operation == RETAINED_UPGRADE_OPERATION:
+        if prior_source_sha is not None or retained_state_sha256 is not None or tls_binding is not None:
+            raise ApprovalError("Retained-upgrade approval uses its distinct four-field binding")
+        now = int(time.time())
+        payload = expected_payload(source_sha, operation, "0" * 64, now, evidence_sha256,
+                                   retained_upgrade_binding=retained_upgrade_binding)
+        validate_payload(payload, source_sha, operation, "0" * 64, evidence_sha256, now,
+                         retained_upgrade_binding=retained_upgrade_binding)
     if operation == "deploy" and (prior_source_sha is not None or retained_state_sha256 is not None):
         raise ApprovalError("Deploy approval cannot carry retained-state resume fields")
     if operation == "resume-ingress" and (
@@ -319,6 +330,8 @@ def request_and_wait(
         challenge["retained_state_sha256"] = retained_state_sha256
     elif operation == TLS_OPERATION:
         challenge.update(tls_binding or {})
+    elif operation == RETAINED_UPGRADE_OPERATION:
+        challenge.update(retained_upgrade_binding or {})
     try:
         output.write(canonical_json(challenge).decode("utf-8") + "\n")
         output.flush()
@@ -350,7 +363,7 @@ def request_and_wait(
                 os.close(fd)
             verify_envelope(strict_json(raw), source_sha, operation, nonce, evidence_sha256,
                             prior_source_sha=prior_source_sha, retained_state_sha256=retained_state_sha256,
-                            tls_binding=tls_binding)
+                            tls_binding=tls_binding, retained_upgrade_binding=retained_upgrade_binding)
             return nonce
         raise ApprovalError("Timed out waiting for the one-time external approval")
     finally:

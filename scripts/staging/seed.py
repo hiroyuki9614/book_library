@@ -361,6 +361,7 @@ def git_command(repo_root: Path, *arguments: str) -> list[str]:
         "core.untrackedCache=false",
         "-c",
         "core.splitIndex=false",
+        "-c", f"safe.directory={repo_root}",
         "-C",
         str(repo_root),
         *arguments,

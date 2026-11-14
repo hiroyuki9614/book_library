@@ -309,7 +309,72 @@ Offline checks for this step are `bash scripts/staging/test-compose-isolation.sh
 
 ## Acceptance after actual i5 deployment
 
-### Retained database transaction implementation
+### Independently installed operator bootstrap candidate
+
+`scripts/staging/operator-bootstrap.py` is an installable, one-shot operator entry,
+not an adopted trust root merely because this file is in the PR. It accepts only
+the existing external Work public key fingerprint
+`8f49fad277be0d1c05bf0b75246a5895a8b3489ddaaeef4f43a3e8b90e25e629`.
+No key generation, relocation or standing sudoers rule is part of this change.
+
+| Installed object | Ownership and purpose |
+| --- | --- |
+| `/usr/local/libexec/belib-staging/operator-bootstrap.py` | root:root 0755; independently reviewed bootstrap bytes |
+| `/etc/belib-staging/operator-bootstrap.json` | root:root 0600; canonical JSON selecting one reviewed source SHA and full source manifest |
+| `/opt/belib-staging/sources/<full-source-sha>/` | root:root directories 0755, files with reviewed Git modes; complete clean Git checkout with no symlinks or hardlinks |
+| `/var/lib/belib-staging/operator/` | root:root 0700; project lock and durable consumed nonces; do not delete to retry |
+
+The config has exactly `schema: belib-staging-operator/v1`, `enabled` (boolean),
+`source_sha` (full commit), and `manifest`. The manifest maps every non-`.git`
+source path to exactly its SHA-256 and numeric Git file mode (`420` or `493`).
+It must be generated from the independently reviewed fixed checkout, not supplied
+by a grant. The bootstrap validates root ownership through every ancestor,
+complete file inventory, bytes/modes, clean Git state and exact HEAD. Git safety
+exceptions are scoped to that checkout in each command; no global safe.directory
+or global trust setting is changed.
+
+Prepare installation only after the final commit and independent review are
+known: export a Git bundle of that exact clean commit as the normal user, record
+its SHA-256 together with the bootstrap and manifest SHA-256, and independently
+verify those digests. An operator then imports the verified bundle into the fixed
+root-owned source directory using isolated Git configuration, an empty template
+directory and `core.hooksPath=/dev/null`; do not run root `git clone` against a
+user-controlled live repository or copy its hooks/configuration. Install the
+reviewed bootstrap and canonical config with the ownership above. Start with
+`enabled:false`; changing it to true is the explicit trust adoption step after
+the fixed-source package has passed review. No installation has been performed
+by the source tests. Keep the previous installed config/source for rollback.
+
+For each operation, the existing external signer verifies the exact source and
+CI/review evidence and signs a fresh canonical `belib-staging-bootstrap-approval/v1`
+payload, including the fixed target, random 64-hex nonce and at most five-minute
+validity. It supplies the same base64 payload/signature envelope used by
+`approval.py`. The operator invokes the installed bootstrap with `--grant` pointing
+to that bounded envelope. No secrets are arguments. Root verifies the grant,
+consumes the nonce durably, and executes only the fixed launcher as UID/GID 1000
+with supplementary groups removed. The launcher receives a root-owned sealed
+descriptor bound to its PID and exact argv, validates that descriptor before
+candidate helper imports and rechecks the admitted operation before effects.
+The same grant is not requested a second time by the candidate launcher.
+
+This first bootstrap candidate admits only existing `deploy` and `resume-ingress`.
+It does not claim retained-DB upgrade, TLS root operations, CD workflow trust or
+physical GUI acceptance. Those require their own fixed executable integration;
+the source-only retained transaction rehearsal below is not sufficient.
+
+Revoke by atomically installing an `enabled:false` config; keep consumed nonce
+files. Restore a prior reviewed config/source only while the project is idle,
+then require a fresh signature and nonce. Source/bootstrap rollback does not
+restore or delete a database or volume. A failed or timed-out child leaves its
+nonce consumed and returns its exact operation/source/host/principal/exit status;
+reconcile that operation's state before issuing a new grant. Existing database
+and application transaction journals remain the recovery authority.
+
+The focused operator tests use synthetic keys and ownership seams. Their child
+process and sealed descriptor checks run on Linux, but they are not an actual
+root installation or a recovered original signing environment.
+
+### Retained transaction rehearsal
 
 `scripts/staging/retained-db-transaction.py` implements the bounded transaction
 order for the independently admitted staging executor: quiesce writes, durable
@@ -343,4 +408,3 @@ they are not BeLib application deployment, a signature, or physical Chrome accep
 The first transaction showed that nginx had the expected loopback HostConfig but no published port while attached only to the internal isolated network. The source correction adds a project bridge ingress network to nginx alone; db, migrate, backend, and frontend remain on the internal network, and the loopback port binding is unchanged. This source change is not evidence that runtime publication now works. After a separately reviewed resume operation, verify the configured loopback port at `http://127.0.0.1:<verified-port>/health`; treat failure as a deployment blocker. Then, only after the owner-approved Tailnet-only custom HTTPS ingress and certificate gates above are met, use the physical i5 Google Chrome GUI, not a headless substitute, at `https://stg-bl.hiroyuki9614.com` to check anonymous protected API 401, separate staging admin/general identities, general-user denial of admin-only books and management API, synthetic EPUB and PDF body/page displays, reading-position save and restore after reload and new login, and Shelf/Reader UI. Read the real `frontend/package.json` scripts before executing tests; the current reader script is `npm --prefix frontend run test:readers`. Confirm test fixtures reference only the isolated staging DB/storage and never delete real users/books.
 
 Report separately: candidate code, fixed HEAD, current CI, independent review, i5 preflight, real Compose services/volume identities, HTTP smoke, Playwright, physical i5 Chrome, and final acceptance. Only observed results count. If the stage is running, persist the observed loopback and verified Tailnet HTTPS URLs with an evidence pointer in the original PV3 Work Prompt/owner PR. Do not commit confidential browser traces or uploaded books.
-

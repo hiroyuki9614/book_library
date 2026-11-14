@@ -282,7 +282,7 @@ class LaunchReceiptTests(unittest.TestCase):
                             untouched.assert_not_called()
                         self.assertFalse(marker.exists())
 
-    def test_mocked_operator_seam_keeps_legacy_signed_approval_check_testable(self) -> None:
+    def test_mocked_operator_seam_still_requires_matching_operation_grant(self) -> None:
         account = pwd.getpwuid(os.getuid())
         error_output = io.StringIO()
         arguments = [
@@ -291,10 +291,9 @@ class LaunchReceiptTests(unittest.TestCase):
             "--env-file", str(Path(account.pw_dir) / ".config/belib-staging/i5.env"),
             "deploy",
         ]
-        fake_approval = SimpleNamespace(ApprovalError=RuntimeError, request_and_wait=Mock(side_effect=RuntimeError("no verifier configured")))
+        operation_check = Mock(side_effect=launch.LaunchBlocked("operation grant mismatch"))
         with (
-            # This test seam exercises the preserved legacy path without inventing
-            # or accepting an unsigned grant. Production admission always blocks.
+            # Mock descriptor admission only; operation binding remains required.
             patch.object(launch, "_require_operator_bootstrap_admission", return_value=None),
             patch.object(launch, "verify_python_runtime"),
             patch.object(launch, "reject_caller_environment"),
@@ -306,16 +305,14 @@ class LaunchReceiptTests(unittest.TestCase):
             patch.object(launch, "EXPECTED_REPO_ROOT", ROOT),
             patch.object(launch, "_admission_source_root", return_value=ROOT),
             patch.object(launch, "project_lock", return_value=nullcontext()),
-            patch.object(launch, "load_approval_module", return_value=fake_approval),
+            patch.object(launch, "_require_operation_approval", operation_check),
             redirect_stderr(error_output),
         ):
             result = launch.main(arguments)
 
         self.assertEqual(result, 1)
-        self.assertIn("no verifier configured", error_output.getvalue())
-        fake_approval.request_and_wait.assert_called_once_with(
-            SOURCE_SHA, "deploy", "e" * 64, uid=account.pw_uid, output=unittest.mock.ANY
-        )
+        self.assertIn("operation grant mismatch", error_output.getvalue())
+        operation_check.assert_called_once()
 
 
 class LaunchOperationTests(unittest.TestCase):
@@ -659,7 +656,7 @@ class LaunchOperationTests(unittest.TestCase):
             patch.object(launch.socket, "gethostname", return_value="test-host"),
             patch.object(launch, "EXPECTED_REPO_ROOT", ROOT),
             patch.object(launch, "_admission_source_root", return_value=ROOT),
-            patch.object(launch, "load_approval_module", return_value=SimpleNamespace(ApprovalError=RuntimeError, request_and_wait=Mock())),
+            patch.object(launch, "_require_operation_approval"),
             patch.object(launch, "load_seed_module", return_value=fake_seed),
                         patch.object(launch, "project_lock", return_value=nullcontext()),
             patch.object(launch, "load_source_tree_guard", return_value=fake_source_guard),

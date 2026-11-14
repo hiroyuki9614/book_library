@@ -291,12 +291,46 @@ class ApprovalTests(unittest.TestCase):
                     now, retained_upgrade_binding=malformed,
                 )
 
-    def test_retained_upgrade_cannot_create_an_approval_challenge(self):
-        with self.assertRaisesRegex(approval.ApprovalError, "not allowlisted"):
+    def test_retained_upgrade_without_evidence_cannot_create_a_challenge(self):
+        with self.assertRaisesRegex(approval.ApprovalError, "exact prior-state"):
             approval.request_and_wait(
                 "a" * 40, approval.RETAINED_UPGRADE_OPERATION, "d" * 64,
                 uid=os.getuid(), output=io.StringIO(), timeout=0,
             )
+
+    def test_retained_upgrade_challenge_consumes_only_exact_signed_response(self):
+        state_root = self.root / "upgrade-state"
+        state_root.mkdir(mode=0o700)
+        binding = self.retained_upgrade_binding()
+        outer = self
+        class Response(io.StringIO):
+            def write(self, text):
+                challenge = json.loads(text)
+                for name, value in binding.items():
+                    outer.assertEqual(challenge[name], value)
+                response = Path(challenge["response_path"])
+                response.write_bytes(approval.canonical_json(outer.retained_upgrade_envelope(binding)))
+                response.chmod(0o600)
+                return super().write(text)
+        with patch.object(approval, "STATE_ROOT", state_root), \
+                patch.object(approval.secrets, "token_hex", return_value="c" * 64):
+            nonce = approval.request_and_wait("a" * 40, "upgrade-retained", "d" * 64,
+                uid=os.getuid(), output=Response(), timeout=1, retained_upgrade_binding=binding)
+        self.assertEqual(nonce, "c" * 64)
+        self.assertEqual(list(state_root.iterdir()), [])
+
+    def test_retained_upgrade_rejects_unbound_or_cross_operation_evidence_before_challenge(self):
+        state_root = self.root / "unused-state"
+        for operation, kwargs in (
+            ("deploy", {"retained_upgrade_binding": self.retained_upgrade_binding()}),
+            ("upgrade-retained", {"retained_upgrade_binding": {**self.retained_upgrade_binding(), "extra": "x"}}),
+            ("upgrade-retained", {"retained_upgrade_binding": self.retained_upgrade_binding(), "tls_binding": {}}),
+        ):
+            with self.subTest(operation=operation, kwargs=kwargs), patch.object(approval, "STATE_ROOT", state_root), \
+                    self.assertRaises(approval.ApprovalError):
+                approval.request_and_wait("a" * 40, operation, "d" * 64, uid=os.getuid(),
+                    output=io.StringIO(), timeout=0, **kwargs)
+        self.assertFalse(state_root.exists())
 
     def verify_tls_tamper(self, binding, name, value):
         envelope = self.tls_envelope(binding, **{name: value})

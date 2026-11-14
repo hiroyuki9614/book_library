@@ -75,6 +75,7 @@ def git(root: Path, *args: str) -> bytes:
                 "core.fsmonitor=false",
                 "-c",
                 "core.untrackedCache=false",
+                "-c", f"safe.directory={root}",
                 *args,
             ],
             cwd=root,
