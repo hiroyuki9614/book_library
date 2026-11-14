@@ -117,3 +117,75 @@ for (const width of [320, 393, 1280, 1440, 1663]) {
 		}
 	});
 }
+
+test('PDF mobile reader chrome keeps its header, reading surface and footer within 320/393px viewports', async ({ page, browser }) => {
+	test.setTimeout(150_000);
+	const pdfSource = await browser.newPage();
+	await pdfSource.setContent('<h1>Mobile reader chrome</h1><p>Synthetic PDF page.</p>');
+	const pdf = await pdfSource.pdf();
+	await pdfSource.close();
+	await useProtectedBook(page, pdf, 'pdf');
+
+	for (const [width, height] of [[320, 640], [393, 851]] as const) {
+		await page.setViewportSize({ width, height });
+		await page.goto('/e2e/readers/harness.html?kind=pdf');
+		await expect(page.getByTestId('pdf-viewport')).toBeVisible({ timeout: 45_000 });
+		await expect(page.locator('[data-pdf-page="1"] img')).toBeVisible({ timeout: 45_000 });
+		await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 45_000 });
+
+		const footer = page.getByTestId('pdf-reader-footer');
+		await expect(footer).toBeVisible();
+		await expect(page.getByRole('button', { name: '操作メニューを開く' })).toBeVisible();
+		await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+		const geometry = await footer.evaluate((footerElement) => {
+			const root = footerElement.parentElement!;
+			const header = root.querySelector('header');
+			const main = root.querySelector('main');
+			if (!header || !main) throw new Error('PDF reader chrome is missing its header or main');
+			const rect = (element: Element) => {
+				const box = element.getBoundingClientRect();
+				return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, height: box.height };
+			};
+			const controls = [...header.querySelectorAll<HTMLElement>('a, button')]
+				.map((element) => ({ name: element.getAttribute('aria-label') || element.textContent?.trim() || element.tagName, box: rect(element) }))
+				.filter(({ box }) => box.right > box.left && box.bottom > box.top);
+			const collisions: string[] = [];
+			for (let i = 0; i < controls.length; i++) {
+				for (let j = i + 1; j < controls.length; j++) {
+					const a = controls[i], b = controls[j];
+					if (Math.min(a.box.right, b.box.right) - Math.max(a.box.left, b.box.left) > 1
+						&& Math.min(a.box.bottom, b.box.bottom) - Math.max(a.box.top, b.box.top) > 1) {
+						collisions.push(`${a.name} / ${b.name}`);
+					}
+				}
+			}
+			return {
+				viewportHeight: window.innerHeight,
+				documentScrollWidth: document.documentElement.scrollWidth,
+				headerScrollWidth: header.scrollWidth,
+				headerClientWidth: header.clientWidth,
+				footerScrollWidth: footerElement.scrollWidth,
+				footerClientWidth: footerElement.clientWidth,
+				header: rect(header),
+				main: rect(main),
+				footer: rect(footerElement),
+				collisions,
+			};
+		});
+		expect(geometry.documentScrollWidth, `PDF ${width}px horizontal document overflow`).toBeLessThanOrEqual(width + 2);
+		expect(geometry.headerScrollWidth, `PDF ${width}px header overflow`).toBeLessThanOrEqual(geometry.headerClientWidth + 2);
+		expect(geometry.footerScrollWidth, `PDF ${width}px footer overflow`).toBeLessThanOrEqual(geometry.footerClientWidth + 2);
+		expect(geometry.collisions, `PDF ${width}px header controls collide`).toEqual([]);
+		expect(geometry.main.top, `PDF ${width}px main overlaps header`).toBeGreaterThanOrEqual(geometry.header.bottom - 2);
+		expect(geometry.footer.top, `PDF ${width}px footer overlaps main`).toBeGreaterThanOrEqual(geometry.main.bottom - 2);
+		expect(geometry.main.height, `PDF ${width}px body too small`).toBeGreaterThanOrEqual(geometry.viewportHeight * 0.6);
+		expect(geometry.footer.bottom, `PDF ${width}px footer outside viewport`).toBeLessThanOrEqual(geometry.viewportHeight + 2);
+
+		await page.getByRole('button', { name: '操作メニューを開く' }).click();
+		await expect(footer).toHaveAttribute('aria-hidden', 'true');
+		await expect(footer).toHaveAttribute('inert');
+		await page.getByRole('button', { name: '閉じる', exact: true }).click();
+		await expect(footer).not.toHaveAttribute('aria-hidden');
+		await expect(footer).not.toHaveAttribute('inert');
+	}
+});
