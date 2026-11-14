@@ -229,8 +229,13 @@ async function checkEpubNavigationButtonGeometry(page: Page, width: number) {
 	const footer = page.getByTestId('epub-reader-footer');
 	const previous = footer.getByRole('button', { name: '前のページへ', exact: true });
 	const next = footer.getByRole('button', { name: '次のページへ', exact: true });
+	const viewport = page.locator('[data-reader-viewport]');
 	await expect(previous).toBeVisible();
 	await expect(next).toBeEnabled();
+	await expect(viewport).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
+	const readCfi = () => page.evaluate(() => localStorage.getItem('reader-location:1'));
+	await expect.poll(readCfi, { timeout: 45_000 }).toMatch(/^epubcfi\(/);
+	const beforeCfi = await readCfi();
 	const measure = () => footer.evaluate((element) => {
 		return ['前のページへ', '次のページへ'].map((name) => {
 			const button = [...element.querySelectorAll<HTMLButtonElement>('button')]
@@ -256,7 +261,10 @@ async function checkEpubNavigationButtonGeometry(page: Page, width: number) {
 		expect(Math.abs(button.glyphCenterOffsetY), `EPUB ${width}px ${button.name} glyph vertically centered`).toBeLessThanOrEqual(3);
 	}
 	await next.click();
-	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
+	await expect.poll(readCfi, { timeout: 45_000 }).not.toBe(beforeCfi);
+	await expect(viewport).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
+	const afterCfi = await readCfi();
+	expect(afterCfi, `EPUB ${width}px page turn must leave a changed current CFI after becoming idle`).not.toBe(beforeCfi);
 	const after = await measure();
 	for (let index = 0; index < before.length; index++) {
 		for (const property of ['x', 'y', 'width', 'height'] as const) {
