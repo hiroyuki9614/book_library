@@ -36,3 +36,24 @@ export function epubFixture({ vertical = false, rtl = false, titleOnly = false, 
 	}
 	return createStoredZip(entries);
 }
+
+// Four chapters, eight explicit columns each. Stable source-page labels expose
+// skipped/duplicated screens and the physical order of native horizontal spreads.
+// Generated in memory; no EPUB binary or staging dataset is needed.
+export function directionEpubFixture({ opfDirection = 'rtl', bodyDirection = 'rtl', htmlDirection }: { opfDirection?: 'ltr' | 'rtl'; bodyDirection?: 'ltr' | 'rtl'; htmlDirection?: 'ltr' | 'rtl' } = {}) {
+	const entries: Array<{ name: string; data: Buffer }> = [];
+	const add = (name: string, value: string) => entries.push({ name, data: Buffer.from(value) });
+	const chapters = [1, 2, 3, 4];
+	add('mimetype', 'application/epub+zip');
+	add('META-INF/container.xml', '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OPS/book.opf" media-type="application/oebps-package+xml"/></rootfiles></container>');
+	add('OPS/book.opf', `<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">belib-owner-ltr-regression</dc:identifier><dc:title>Direction regression</dc:title><dc:language>en</dc:language><meta property="dcterms:modified">2026-11-09T00:00:00Z</meta></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>${chapters.map(i => `<item id="s${i}" href="s${i}.xhtml" media-type="application/xhtml+xml"/>`).join('')}</manifest><spine page-progression-direction="${opfDirection}">${chapters.map(i => `<itemref idref="s${i}"/>`).join('')}</spine></package>`);
+	add('OPS/nav.xhtml', `<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Contents</title></head><body><nav epub:type="toc"><ol>${chapters.map(i => `<li><a href="s${i}.xhtml">Chapter ${i}</a></li>`).join('')}</ol></nav></body></html>`);
+	for (const chapter of chapters) {
+		const pages = Array.from({ length: 8 }, (_, i) => {
+			const number = (chapter - 1) * 8 + i + 1;
+			return `<p data-source-page="${number}">SOURCE PAGE ${String(number).padStart(2, '0')}. Chapter ${chapter}, column ${i + 1}. Read in source order. العربية <span dir="ltr">LTR</span></p>`;
+		}).join('');
+		add(`OPS/s${chapter}.xhtml`, `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter ${chapter}</title><style>${htmlDirection ? `html{direction:${htmlDirection}!important}` : ''}body{writing-mode:horizontal-tb;direction:${bodyDirection};font:18px/1.5 serif}p{margin:0;break-after:column}p:last-child{break-after:auto}</style></head><body>${pages}</body></html>`);
+	}
+	return createStoredZip(entries);
+}

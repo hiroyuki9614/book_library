@@ -1,6 +1,6 @@
 # BeLib Current Implementation Status
 
-- Updated: 2026-10-31
+- Updated: 2026-11-11
 - Purpose: 現在のMVP実装、暫定実装、正式要件との差分、次の作業境界を把握する
 - Current main checkpoint for the scoped frontend release candidate: `f8d69c7f1f9a6676ff268ef3da7d815232a779d2`
 - The prior 2026-10-27 implementation snapshot remains historical; this scoped update does not refresh unrelated R2 or portfolio branch state.
@@ -8,7 +8,183 @@
 - The owner reports that the checkpoint above was deployed frontend-only at 2026-10-31 18:42:59 JST with image `sha256:49bf745ed0f5b7fd3d8951d64cbeed51d33034c762eed93547be8081c71f63c9`; this candidate did not independently read back that running image identity.
 - Candidate scope, test evidence and release holds: [2026-10-31 frontend candidate record](records/2026-10-31-frontend-candidate.md).
 - The portfolio MVP is live. The detailed immutable deployment and production-browser evidence is in [the 2026-10-26 production release record](records/2026-10-26-mvp-production-release.md).
-- Scoped update (2026-10-01): Home/BookTable reading-evidence behavior below; this is not a fresh R2 or production acceptance.
+- Scoped update (2026-11-11): reading progress percentage and authenticated-route revalidation source candidates are composed with the existing i5 staging candidate below; this does not establish deployment or acceptance.
+
+## 2026-11-11 PR #103 integration candidate
+
+The isolated source composition combines the existing PR #103 staging source at
+`4774ad6d7f6dc93211a4e2eaa18d17a9097693a2` with the already tested #93/#98
+composition at `072c17ffc435fa27488e783953a9e060ba15e2fd`. This records a source
+candidate only. It does not establish that this composition is deployed. The
+previously deployed staging application identity remains
+`81256268276d7ead95029849037f69ec6beec202`; no new runtime identity has been
+read back.
+
+The retained staging database needs the additive
+`progress_percentage` migration applied through an independently approved
+upgrade operation before this candidate can use the new field. The
+`resume-ingress` operation skips migrations and does not satisfy that upgrade.
+The configured staging origin remains `https://stg-bl.hiroyuki9614.com`, but
+HTTPS availability and physical i5 acceptance are unverified. Physical i5
+acceptance of both EPUB and PDF remains the task acceptance gate.
+
+## 2026-11-09 isolated i5 staging storage and PostgreSQL role candidate
+
+The staging-only Compose backend explicitly runs as `node` and mounts its
+dedicated persistent book volume over the Node image's pre-existing
+`/home/node` directory. Docker's default empty-volume copy-up carries that
+directory into a new volume. The seed verifies the mount point and owner,
+refuses unexpected top-level book data, creates `/home/node/books` as `node`
+with mode `0700`, and probes nonroot file creation/removal before connecting
+to the staging database. Offline Compose, wrapper, initializer, and Vitest
+checks cover the source contract. Neither role initialization nor book-volume
+ownership has been observed on i5.
+
+Dated correction (2026-11-09 12:15 JST): the rootless Docker context/socket,
+daemon rootless security option, and Docker Compose v5.7.0 were verified on
+i5. No staging containers or volumes were present, and no staging HTTP/TLS
+service was available. Deployment and seed remain blocked pending admission.
+
+Dated correction (2026-11-09, i5 staging preflight P2): independent review of
+parent `61ccbf8173a28d9314ac763821b7cc7930267177` found that Git status could
+be spoofed through an exported `git()` function or a PATH shim, and that an
+in-script `BASH_ENV` check could not stop startup code that had already unset
+itself. The preflight now starts through an absolute `/usr/bin/env -S -i`
+shebang before Bash startup, pins and checks `/usr/bin/git`, checks the Git
+PATH resolution, and uses absolute identity executables. The runbook requires
+direct execution of the preflight file; explicit `bash scripts/staging/preflight.sh`
+invocation bypasses the sanitized shebang and is unsupported. Offline
+`test-preflight-secrets.sh` passed 21 checks, including synthetic dirty-tree
+Git-function, PATH-shim, and hostile `BASH_ENV` cases. This source-only repair
+does not establish staging admission or deployment; no Compose deployment or
+seed was run.
+
+Dated correction (2026-11-09, i5 same-claim P2 repair): independent review of
+exact candidate `88872ac5a2c0d02a9b2ac3330c3d81b23ed5bf92` found that ordinary
+Git status did not detect `assume-unchanged` / `skip-worktree` index flags or
+Git-ignored files that could still enter a frontend Docker context, and that
+Docker plugin/config lookup was not pinned before Compose and Buildx commands.
+The candidate now verifies the exact Git commit, complete index, tracked file
+bytes/modes, symlinks, and effective backend/frontend context contents against
+the committed `.dockerignore` rules; unsupported ignore syntax fails closed.
+Both the preflight and seed wrapper validate the root-owned Docker CLI plugin
+installation before Docker calls and use a private empty Docker config pinned
+to the local rootless endpoint. The seed repeats the source/context check
+before opening credentials. Adversarial offline tests cover both index flags,
+ignored frontend injection, fake user/config plugins, and ambient Docker config
+override. This is code/test work only: no live Docker build/up, migration,
+seed, deployment, or secret read was performed. The repair is not deployed and
+does not clear the existing staging admission gates.
+
+Dated correction (2026-11-09, same-claim P1/P2 review response): the independent
+review of local candidate `25e81b8ca70289f994b3c61092399d39b2770725` blocked
+unguarded runbook Compose commands, ordinary Python seed startup, and missing
+coverage for the Compose-selected staging Dockerfiles/full file modes. The
+staging runbook now routes migration/build/up/seed through an allowlisted
+`launch-guard.py` bound to PR #103, exact source SHA, the existing supervisor
+receipt and lock group, the validated rootless Docker context, trusted CLI and
+plugins, and the Compose/image/build-context guard. Direct seed invocation now
+fails; it runs only under `/usr/bin/python3 -I -B` through the launch guard.
+Preflight uses the absolute isolated Python interpreter. The source-tree guard
+checks external Dockerfile symlinks, full safe file modes, context directory
+permissions, tracked/index identity, and ignored build-context content.
+Adversarial offline coverage includes incorrect context/endpoint, caller
+overrides, unapproved or stale receipts, project/build-context/image changes,
+Python startup injection, Docker plugin substitution, external Dockerfile
+symlinks, unsafe modes, index flags, and ignored inputs. No Compose build/up,
+migration, seed, DB operation, secret read, or deployment was performed.
+
+Source admission remains **BLOCKED**: ignored Playwright output under
+`frontend/test-results/` would enter the frontend build context, and the
+untracked Python cache also keeps Git status dirty. Both remain outside the
+committed diff. No archive or generated checkout workaround was adopted because
+it could bypass the existing admission gate. The one-time next step is to
+obtain separate authorization for a clean exact-SHA source tree on the existing
+i5 host, preserve the current artifacts/cache, and rerun read-only admission.
+The local repair has not been independently re-reviewed, pushed, or checked by
+GitHub CI; it does not approve or deploy staging.
+
+Dated correction (2026-11-09, same-claim bounded P1/P2 response for draft PR
+#103): no trusted independent supervisor verifier is configured. The launcher
+now rejects every local receipt claim before lock acquisition, preflight,
+staging env-file access, or Docker setup; same-principal hashes or credentials
+are not treated as independent approval. A new offline test submits a complete
+self-asserted approval and confirms the launcher stops before the project lock.
+The source guard now materializes the selected commit's Git blobs into a
+private temporary snapshot containing only tracked effective backend
+and frontend contexts plus required staging Compose files. Compose validation
+and build operations use that snapshot path. Tests mutate tracked checkout
+content after snapshot admission and add ignored Playwright output and tracked
+`dist` output; the snapshot remains SHA-derived and excludes those artifacts.
+The rootless Docker socket is still accessible to the same `hiroyuki` principal,
+who can bypass the launcher and lock with direct Docker API access or alter a
+same-UID snapshot. The runbook records a single-owner,
+one-operation-at-a-time boundary and the residual risk; no daemon or permission
+change was made. Local source admission remains blocked
+by preserved Playwright/test artifacts and Python cache. No Docker build/up,
+migration, seed, DB operation, secret read, or deployment was performed. The
+changes have not been independently re-reviewed, pushed, or checked by GitHub
+CI; they do not approve or deploy staging.
+
+- Scoped update (2026-11-07): authenticated-route session revalidation and stale Admin view masking candidate below; this is not a production acceptance.
+
+## 2026-11-12 cross-device reading-save behavior (superseded note)
+
+The earlier note's instruction to assign a higher sequence to a stale payload
+and retry it is superseded. Authenticated GET returns `saveSequence` as a
+decimal string. PATCH compares `expectedSaveSequence` exactly with the stored
+row version; a versioned `saveSequence` must be greater than that base and may
+advance by at most 1,000,000 to accommodate local reservations. Creating a row
+requires base zero. A request without either sequence field remains on the
+version-zero compatibility path.
+
+When a PATCH receives `STALE_READING_SAVE`, the API refreshes the authoritative
+server version and the hook drops its held intent and sets stale conflict
+status. The hook's Retry action cannot reserve or resend that old payload, and
+the reader does not switch its displayed position during this error handling.
+A later distinct reader action creates a new intent from the refreshed base. An exact
+successful acknowledgement may advance a newer queued intent's base. A lost
+acknowledgement can still lead to a stale conflict; that old intent is not
+rebased automatically. On initial load or reload, `fetchReadingInfo` returns
+the authoritative position and clears a mismatched stale outbox entry.
+
+Generation checks and account/book-scoped outboxes continue to prevent
+cross-account replay. This is source behavior only; no production database or
+deployment action is established by this candidate.
+
+## 2026-11-07 authenticated-route revalidation candidate
+
+The `RequireAuth` boundary now owns focus, visibility-return and `pageshow`
+session revalidation for every authenticated route. Its router outlet stays
+mounted under an inert hidden veil until the current identity is confirmed.
+Book hooks retain route-entry revalidation without registering duplicate
+browser listeners. `RequireAdmin` redirects after role loss and remounts its
+nested view when the authenticated user or role changes. It unmounts the admin
+outlet while any identity check is pending so body-mounted portals are removed;
+admin form state can reset during same-account focus checks. Same-session reader
+content remains mounted across focus checks. This is a candidate-only source
+change; no production or release action was performed.
+
+## 2026-11-05 Issue #90 shelf actions and reading percentage candidate
+
+The BookTable no longer renders the inert MoreHorizontal/Star controls or a
+trailing empty action column. Row click, keyboard navigation, responsive
+column alignment, empty-state colspan, and loading skeleton cell counts remain
+covered by focused frontend tests.
+
+`ReadingInfo.progressPercentage` is now a nullable 0–100 integer persisted per
+user and book under the Issue #90 owner-requested exception recorded in
+requirements §6.8. Derived-only shelf percentages are not honest across reload:
+PDF `currentPosition` stores only the current page while the total page count
+is known only to the reader runtime, and an EPUB CFI is an anchor rather than a
+numeric position; persisting total-page or EPUB-location metadata would be a
+speculative schema expansion. Authorized list/detail/reading-info responses map
+unread to 0, completed to 100, and an unmeasured in-progress record to null.
+PDF saves a rounded current-page/total-page percentage when both values are
+valid; EPUB saves a generated-location percentage when the current location
+and generated total are valid. Home averages only non-null percentages and
+displays the measured-book denominator. This is a candidate-only source
+change; no production database, storage, or deployment action was performed.
 
 ## 2026-11-04 stale admin-list follow-up
 
@@ -117,7 +293,9 @@ Current behavior:
 - books are filtered by `RoleBookPermission` and logical deletion state.
 - list/detail/file/reading-info use the same role-based authorization boundary.
 - list joins only the current user's `ReadingInfo` and returns the persisted `readStatus`.
-- list supports `page`, `limit`, `q`, and `categoryId`.
+- the authenticated route boundary refreshes the current session when the tab regains focus or returns visible, and hides account-scoped route content while that refresh is pending.
+- book-list and reading-info requests that provide an expected user ID reject a mismatch with the cookie session; legacy reading-info callers may omit the hint.
+- list supports `page`, `limit`, `q`, and `categoryId`; the Home client retrieves all authorized pages in batches capped at 100 records so its summary is not limited to the first page.
 - `q` searches title and author name case-insensitively and is limited to 100 characters.
 - `categoryId` must be a positive integer.
 - EPUB is preferred when both supported file formats exist.
@@ -131,7 +309,9 @@ Known authorization requirement drift:
 
 ## ReadingInfo
 
-`ReadingInfo.currentPosition VARCHAR(255)` is used without a schema migration for both formats.
+The candidate schema uses nullable `TEXT` for `ReadingInfo.currentPosition`, with a forward migration; this task does not apply it to a database. The reading API accepts non-empty positions up to 16,384 characters.
+`ReadingInfo.progressPercentage INTEGER` is nullable and stores the per-user PDF/EPUB reader measurement when valid; it is the narrow §6.8 exception for Issue #90, not a total-page/location-history table.
+`ReadingInfo.saveSequence BIGINT` is a per-user/book compare-and-set version with default `0`; the reading-info API serializes it as a decimal string to avoid JavaScript safe-integer loss.
 
 PDF request example:
 
@@ -153,17 +333,18 @@ EPUB request example:
 
 Rules:
 
-- exactly one of `currentPage` or `currentPosition` is accepted.
+- exactly one of `currentPage` or `currentPosition` is accepted; `currentPosition` must be non-empty and at most 16,384 characters.
 - omitted `readStatus` defaults to `reading` for backward compatibility.
 - explicit status may be `reading` or `completed`.
 - GET returns both `currentPosition` and a numeric compatibility `currentPage`.
+- authenticated GET returns the authoritative `saveSequence` decimal string. A stale PATCH refreshes the base, drops the hook-held intent, and sets stale conflict status; it does not replace the current reader's displayed position. Retry does not reserve or resend that intent. On initial load or reload, `fetchReadingInfo` returns the authoritative position and clears a mismatched stale outbox entry. A later distinct reader action uses the refreshed base; a lost acknowledgement may still lead to a stale conflict.
 - a numeric position restores the PDF page.
 - an EPUB CFI restores through `currentPosition`; `currentPage` remains the compatibility value `1` for non-numeric positions.
 - EpubReader reads the DB CFI first and keeps `reader-location:<bookId>` localStorage only as a fallback/cache.
 - PDF Reader saves `completed` when the final page is displayed.
 - EPUB Reader saves `completed` only when epub.js reports `relocated.atEnd`.
 
-The reader derives progress without adding a database percentage column. PDF displays the current page, total pages, and percentage from EmbedPDF scroll state. EPUB generates epub.js locations and displays a one-based location, generated total, and percentage when those values are valid. Home's status counts and BookTable's status badges/filter continue to use backend `readStatus` through `Book.status`; shelf-wide average percentage remains `未計測`.
+PDF displays the current page, total pages, and percentage from EmbedPDF scroll state and persists the rounded percentage when both values are valid. EPUB generates epub.js locations, persists a percentage only when the generated total and current location are valid, and displays a one-based location. Home's status counts and BookTable's status badges/filter continue to use backend `readStatus` through `Book.status`; BookTable uses the current user's persisted percentage. Home averages only measured percentages and states the measured-book/total-book denominator; an in-progress book with no valid measurement remains `未計測`. Unread and completed books are represented as 0% and 100% respectively. The existing completed status remains monotonic.
 
 ## Reader navigation and usability
 
@@ -171,7 +352,7 @@ The reader derives progress without adding a database percentage column. PDF dis
 - PDF uses the matching EmbedPDF bookmark plugin and its existing PDFium engine. PDFs without an outline explicitly report that no table of contents is present.
 - `Book.pageTurnDirection` is included in the frontend book contract and passed to both readers as the common `ltr` / `rtl` direction source.
 - Both readers use approximately the outer 15% as tap navigation. Pointer travel, long press, multi-touch, existing text selection, links and interactive controls are excluded. EPUB listeners are installed inside each epub.js iframe through content hooks, de-duplicated per document, removed with the view, and fully cleaned up on reader teardown.
-- ReadingInfo writes are delayed briefly during ordinary navigation and serialized; the final PDF page and epub.js `atEnd` retain the existing immediate completed transition.
+- ReadingInfo writes are delayed briefly during ordinary navigation and serialized; the final PDF page and epub.js `atEnd` retain the existing immediate completed transition. Standalone readers may omit `X-BeLib-User-Id`; authenticated frontend saves include it as an optional account hint, and the backend checks an explicitly mismatched PATCH hint only after book permission authorization, preserving `403` for unauthorized books. The save hook keeps queues scoped by account and clears stale pending payloads when the authenticated account changes, preventing queued or retried writes from crossing accounts.
 - Physical i5 GUI-browser acceptance is the release gate for this reader repair and is not replaced by headless or mobile emulation. Android hardware acceptance is tracked and reported separately; it is not a blocker for this approved release path.
 - The 2026-10-28 reader branch (`6c4c6d0`) is historical reference work. The current 2026-10-31 candidate applies the accepted Paper & Navy EPUB surface on the real `ReaderPage -> EpubReader` route, keeps the viewer full-width with a 16px iframe text inset at every viewport, and preserves existing menus and the book title. Its local harness/browser checks pass; production and physical i5 acceptance remain incomplete. See the candidate record for exact scope and blockers.
 
@@ -260,8 +441,9 @@ Important constraints already present:
 - `BookFile.fileHash` unique.
 - `ReadingInfo` unique by `userId + bookId`.
 - `RoleBookPermission` unique by `roleId + bookId`.
-- `ReadingInfo.currentPosition` is nullable `VARCHAR(255)` and can contain a PDF page string or EPUB CFI.
-- no schema migration is required for the non-R2 ReadingInfo expansion.
+- `ReadingInfo.currentPosition` is nullable `TEXT` and can contain a PDF page string or EPUB CFI; the API caps values at 16,384 characters.
+- `ReadingInfo.progressPercentage` is nullable `INTEGER` with a database check constraint from 0 through 100.
+- the reading percentage is scoped by the existing `ReadingInfo.userId + bookId` unique key and is returned only through the current user's authorized book/reading-info queries.
 
 The earlier fresh PostgreSQL verification for `book_files.file_hash` remains valid and is not modified by this work.
 
@@ -303,7 +485,6 @@ R2-dependent:
 Non-R2:
 
 - disabled-user / existing-session semantic alignment.
-- shelf-wide aggregate reader-derived progress presentation (the reader-local percentage is implemented).
 - category management CRUD and Admin UI.
 - general-user administration and disable/restore flow.
 - logical book delete / restore / permanent delete.
@@ -344,8 +525,7 @@ Production preflight, verified private DB backup, protection, deployment and pub
 3. Implement logical book delete/restore/permanent-delete lifecycle.
 4. Implement category management and user administration.
 5. Implement file replacement/recovery while keeping the storage adapter boundary R2-ready.
-6. Decide whether reader-derived percentages should also appear in shelf-wide aggregate UI.
-7. Run final backup/restore and browser/device acceptance after the management surface is complete.
+6. Run final backup/restore and browser/device acceptance after the management surface is complete.
 
 ## Documentation responsibilities
 
@@ -379,6 +559,9 @@ reader repair record; implementation alone is not final production acceptance.
 PDF restoration waits for the real document layout and runs once per document,
 independently of subsequent saves and zoom/layout changes. Reading-info writes
 are ordered per book in a browser tab, and immediate reentry waits for pending
-writes. Failures are visible and retryable. Cross-device conflict resolution is
-not implemented. See [reader acceptance](runbooks/reader-acceptance.md) for the
-production GUI and real rendering gates.
+writes. Transient failures are visible and retryable with the same intent. A
+stale cross-device CAS conflict is visible as stale conflict status and drops
+that intent; Retry does not re-reserve it. A later distinct reader action can
+create a new intent from the refreshed server base. See
+[reader acceptance](runbooks/reader-acceptance.md) for the production GUI and
+real rendering gates.

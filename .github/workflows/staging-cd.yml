@@ -1,0 +1,82 @@
+name: BeLib protected staging evidence handoff
+
+# This workflow becomes dispatchable only after its trusted definition is on main.
+# A dispatch selected on an unmerged or otherwise mutable branch cannot run the job.
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Open same-repository PR number
+        required: true
+        type: string
+      source_sha:
+        description: Full immutable PR head SHA
+        required: true
+        type: string
+      request_supervisor_review:
+        description: Owner request to send evidence to the existing supervisor; this does not authorize deployment
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: belib-staging-cd-belib-isolated-i5
+  cancel-in-progress: false
+
+jobs:
+  staging-admission-handoff:
+    name: Validate exact candidate evidence for independent supervisor review
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.workflow_ref == 'hiroyuki9614/book_library/.github/workflows/staging-cd.yml@refs/heads/main' &&
+      github.workflow_sha == github.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout the immutable trusted workflow revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Validate candidate and authoritative workflow evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
+          INPUT_REQUEST_SUPERVISOR_REVIEW: ${{ inputs.request_supervisor_review }}
+        run: |
+          python3 -B scripts/staging/test-cd-handoff.py
+          python3 -B scripts/staging/test-cd-handoff-executor.py
+          python3 -B scripts/staging/cd-handoff.py \
+            --receipt-path "$RUNNER_TEMP/belib-staging-handoff.json"
+
+      - name: Publish candidate check evidence for existing-supervisor verification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact v4
+        with:
+          name: belib-staging-checks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/belib-staging-handoff.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Record handoff status and local operator entry
+        run: |
+          {
+            echo "Candidate CI and workflow provenance checks passed for the exact source SHA."
+            echo "Candidate source CI is not trusted staging admission."
+            echo "Independent existing-supervisor provenance verification: pending."
+            echo "The uploaded handoff remains pending until the existing supervisor independently verifies provenance and issues its existing one-use grant."
+            echo "After that separate review, the existing i5 operator may call the fixed local executor with the downloaded handoff and signed grant."
+            echo "The local executor calls only the installed operator bootstrap, reads its durable source/operation receipt, and checks loopback health plus the running OCI revision through read-only rootless Docker inspection."
+            echo "For an admitted retained upgrade, the executor verifies the root-receipted isolated-copy plan, candidate and retained container IDs, stopped old application services, pinned images, volumes, networks, and exact loopback binding before reporting local deployment confirmation."
+            echo "This GitHub runner does not contact the staging host or execute the local adapter."
+            echo "Owner-side command after independent review and existing-grant issuance: /usr/bin/python3 -I -B /opt/belib-staging/sources/<source-sha>/scripts/staging/cd-handoff-executor.py --handoff <downloaded-handoff.json> --grant <signed-one-use-grant.json> --result <new-local-result.json>"
+            echo "Deployment authorized: false"
+            echo "Deployment started: false"
+            echo "Deployment asserted: false"
+          } >> "$GITHUB_STEP_SUMMARY"

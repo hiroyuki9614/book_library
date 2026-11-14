@@ -1,8 +1,9 @@
-import { Navigate, Outlet } from 'react-router-dom';
+import { Navigate, useOutlet } from 'react-router-dom';
 import { useAuth } from '@/contexts/useAuth';
 
 export default function RequireAdmin() {
-	const { role, isPending } = useAuth();
+	const { user, role, isPending } = useAuth();
+	const outlet = useOutlet();
 
 	if (isPending) {
 		return <div>Loading...</div>;
@@ -12,5 +13,5 @@ export default function RequireAdmin() {
 		return <Navigate to='/' replace />;
 	}
 
-	return <Outlet />;
+	return <div key={`${user?.id ?? ''}:${role}`} style={{ display: 'contents' }}>{outlet}</div>;
 }

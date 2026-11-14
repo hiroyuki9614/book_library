@@ -30,9 +30,11 @@ paths:
       summary: 閲覧権限のある書籍一覧を取得
       description: |
         RoleBookPermissionで現在ユーザーのroleに許可された、論理削除されていない書籍だけを返す。
-        一覧のreadStatusは現在ユーザーのReadingInfoから取得する。
+        一覧のreadStatusとprogressPercentageは現在ユーザーのReadingInfoから取得する。
         EPUBとPDFの両方が存在する場合はEPUBを優先する。
+        X-BeLib-User-Idはcookie sessionで認証したユーザーIDへの任意の期待値hint。認可には使用せず、指定値とcookie sessionのユーザーが異なる場合は409を返す。省略時は従来どおり動作する。
       parameters:
+        - $ref: '#/components/parameters/ReadingSessionUserId'
         - name: page
           in: query
           schema:
@@ -81,6 +83,8 @@ paths:
           $ref: '#/components/responses/InvalidRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/ReadingSessionMismatch'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -145,24 +149,33 @@ paths:
   /books/{bookId}/reading-info:
     parameters:
       - $ref: '#/components/parameters/BookId'
+      - $ref: '#/components/parameters/ReadingSessionUserId'
     get:
       summary: 現在ユーザーの読書情報を取得
       description: |
         currentPositionはPDFではページ番号文字列、EPUBではCFIを保持できる。
         numeric currentPositionの場合は互換用currentPageにも復元する。
+        saveSequenceは現在ユーザー・書籍行のサーバー管理CAS版であり、JSON numberの丸めを避けるため10進文字列で返す。
+        progressPercentageはIssue #90のowner-requested exceptionとして、現在ユーザーの
+        ReadingInfoに保存したreader計測スナップショットから返す。未読は0、読了は100、
+        読書中で有効なreader計測値がない場合はnull。X-BeLib-User-Idは互換用の任意の
+        hintであり、省略できる。指定された場合は書籍閲覧権限の確認後、Cookie sessionの
+        user IDと一致することを確認する。
       responses:
         '200':
           description: Reading info
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ReadingInfo'
+                $ref: '#/components/schemas/ReadingInfoGet'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/BookNotFound'
+        '409':
+          $ref: '#/components/responses/ReadingSessionMismatch'
         '500':
           $ref: '#/components/responses/InternalError'
     patch:
@@ -170,7 +183,13 @@ paths:
       description: |
         currentPageまたはcurrentPositionのどちらか一方だけを受け取る。
         currentPageは既存PDF caller互換。
+        progressPercentageはreaderが有効なcurrent/totalから計算できた0〜100の整数、
+        または計測不能を表すnull。Issue #90のowner-requested exceptionとして既存の
+        ReadingInfoへ保存する。省略時は既存値を保持する。X-BeLib-User-Idが指定された場合に
+        現在のCookie sessionと一致しない保存は拒否する。hintの照合は書籍の存在と
+        RoleBookPermissionの確認後に行い、hintを省略した既存callerも受け入れる。
         readStatusを省略した場合はreading。明示値はreadingまたはcompleted。
+        新しい認証済みcallerはsaveSequenceとexpectedSaveSequenceを一緒に送り、expectedSaveSequenceは意図作成時に観測したサーバー版とする。サーバーはこの版との完全一致をPATCHで原子的に確認し、saveSequenceはbaseより大きく、baseからの増分は最大1,000,000とする。ReadingInfoの作成にはbase 0が必要。古いoutboxのpayloadを409後に再採番して再送してはならない。STALE_READING_SAVEではAPIが最新GETでserver baseを更新し、hookは古いintentを破棄してstale conflict statusにする。現在のreader表示位置はこのPATCH error handlingでは置き換えない。Retryはそのintentを予約・再送しない。明示的な新しいreader操作が更新済みbaseで新intentを作る。saveSequenceとexpectedSaveSequenceの両方がない旧callerはserver版0に限り互換動作する。
       requestBody:
         required: true
         content:
@@ -194,6 +213,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/BookNotFound'
+        '409':
+          $ref: '#/components/responses/ReadingSaveConflict'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -398,6 +419,15 @@ components:
         type: integer
         minimum: 1
 
+    ReadingSessionUserId:
+      name: X-BeLib-User-Id
+      in: header
+      required: false
+      description: Optional expected authenticated user ID hint; it does not grant access. The book list GET and reading-info GET/PATCH reject an explicitly mismatched hint. Legacy callers may omit it.
+      schema:
+        type: integer
+        minimum: 1
+
   responses:
     InvalidRequest:
       description: Invalid request
@@ -431,6 +461,18 @@ components:
             $ref: '#/components/schemas/Error'
     Conflict:
       description: Duplicate file content or one-file-per-book conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ReadingSessionMismatch:
+      description: The request's expected authenticated user does not match the Cookie session.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ReadingSaveConflict:
+      description: The request's expected authenticated user does not match the Cookie session, or expectedSaveSequence no longer matches the stored row. For STALE_READING_SAVE, the API refreshes the authoritative server base and the hook discards its held intent and sets stale conflict status; PATCH error handling does not replace the displayed reader position. Do not automatically retry or rebase the stale payload. An initial load or reload through fetchReadingInfo returns the authoritative position and clears a mismatched stale outbox entry; a later distinct reader action may save against the refreshed base. A lost acknowledgement may still result in a conflict.
       content:
         application/json:
           schema:
@@ -484,7 +526,7 @@ components:
 
     Book:
       type: object
-      required: [id, title, category, pageTurnDirection, readStatus, hasFile, createdAt, updatedAt]
+      required: [id, title, category, pageTurnDirection, readStatus, progressPercentage, hasFile, createdAt, updatedAt]
       properties:
         id:
           type: integer
@@ -512,6 +554,12 @@ components:
           type: string
           enum: [unread, reading, completed]
           description: Current user's persisted ReadingInfo state for list/detail responses.
+        progressPercentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: Current user's progress. Unread is 0, completed is 100, and an unmeasured in-progress book is null.
         hasFile:
           type: boolean
         fileType:
@@ -534,22 +582,38 @@ components:
 
     ReadingInfo:
       type: object
-      required: [bookId, currentPosition, currentPage, readStatus]
+      required: [bookId, currentPosition, currentPage, progressPercentage, readStatus, saveSequence]
       properties:
         bookId:
           type: integer
         currentPosition:
           type: string
-          maxLength: 255
+          maxLength: 16384
           nullable: true
           description: PDF page number string or EPUB CFI.
         currentPage:
           type: integer
           minimum: 1
           description: Numeric compatibility projection; EPUB CFI returns 1 here.
+        progressPercentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: Nullable reader-derived snapshot persisted per user and book for the Issue #90 §6.8 exception; null when an in-progress position has not been measured.
         readStatus:
           type: string
           enum: [unread, reading, completed]
+        saveSequence:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)$'
+          description: Authoritative per-user/book CAS version as a decimal string. It fits PostgreSQL BIGINT; clients must not coerce it to a JavaScript number.
+
+    ReadingInfoGet:
+      allOf:
+        - $ref: '#/components/schemas/ReadingInfo'
+        - type: object
+          required: [saveSequence]
 
     PdfReadingInfoUpdateRequest:
       type: object
@@ -559,10 +623,33 @@ components:
         currentPage:
           type: integer
           minimum: 1
+        progressPercentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
         readStatus:
           type: string
           enum: [reading, completed]
           default: reading
+        saveSequence:
+          description: Monotonic client reservation number for this user and book. It is not a cross-device version; send it with the server-derived expectedSaveSequence and use the decimal-string form.
+          oneOf:
+            - type: string
+              pattern: '^[0-9]+$'
+              description: Decimal string from 0 through 9223372036854775807 inclusive; leading zeroes are accepted.
+            - type: integer
+              minimum: 0
+              maximum: 9007199254740991
+        expectedSaveSequence:
+          description: Exact server base returned by the most recent authoritative GET or proven prior PATCH acknowledgement. A stale base returns 409 and must not be rebased automatically.
+          oneOf:
+            - type: string
+              pattern: '^[0-9]+$'
+              description: Decimal string from 0 through 9223372036854775807 inclusive.
+            - type: integer
+              minimum: 0
+              maximum: 9007199254740991
 
     EpubReadingInfoUpdateRequest:
       type: object
@@ -572,12 +659,35 @@ components:
         currentPosition:
           type: string
           minLength: 1
-          maxLength: 255
+          maxLength: 16384
           description: EPUB CFI or another supported textual reading position.
+        progressPercentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
         readStatus:
           type: string
           enum: [reading, completed]
           default: reading
+        saveSequence:
+          description: Monotonic client reservation number for this user and book. It is not a cross-device version; send it with the server-derived expectedSaveSequence and use the decimal-string form.
+          oneOf:
+            - type: string
+              pattern: '^[0-9]+$'
+              description: Decimal string from 0 through 9223372036854775807 inclusive; leading zeroes are accepted.
+            - type: integer
+              minimum: 0
+              maximum: 9007199254740991
+        expectedSaveSequence:
+          description: Exact server base returned by the most recent authoritative GET or proven prior PATCH acknowledgement. A stale base returns 409 and must not be rebased automatically.
+          oneOf:
+            - type: string
+              pattern: '^[0-9]+$'
+              description: Decimal string from 0 through 9223372036854775807 inclusive.
+            - type: integer
+              minimum: 0
+              maximum: 9007199254740991
 
     AdminBookCreateRequest:
       type: object

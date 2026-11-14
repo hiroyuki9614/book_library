@@ -7,6 +7,7 @@ export type BookDetails = {
 	authorName: string | null;
 	category: { id: number; name: string };
 	readStatus: 'unread' | 'reading' | 'completed';
+	progressPercentage: number | null;
 	pageTurnDirection: 'ltr' | 'rtl';
 	hasFile: boolean;
 	fileType: 'pdf' | 'epub' | null;
@@ -15,8 +16,20 @@ export type BookDetails = {
 };
 
 type BooksResponse = {
+	total: number;
+	page: number;
+	limit: number;
 	books: BookDetails[];
 };
+
+const BOOKS_PAGE_LIMIT = 100;
+const READING_SESSION_USER_HEADER = 'X-BeLib-User-Id';
+
+function throwIfAborted(signal?: AbortSignal) {
+	if (signal?.aborted) {
+		throw new DOMException('The operation was aborted', 'AbortError');
+	}
+}
 
 function toFrontendBook(book: BookDetails): Book {
 	const status = book.readStatus[0].toUpperCase() + book.readStatus.slice(1) as Book['status'];
@@ -30,14 +43,33 @@ function toFrontendBook(book: BookDetails): Book {
 		fileType: book.fileType ?? 'pdf',
 		category,
 		currentPage: 0,
+		progressPercentage: book.progressPercentage,
 		createdAt: book.createdAt,
 		updatedAt: book.updatedAt,
 	};
 }
 
-export async function fetchBooks() {
-	const response = await apiFetch<BooksResponse>('/api/v1/books');
-	return response.books.map(toFrontendBook);
+export async function fetchBooks(expectedUserId: number, signal?: AbortSignal) {
+	const books: Book[] = [];
+	let page = 1;
+
+	while (true) {
+		throwIfAborted(signal);
+		const requestOptions: RequestInit = {
+			headers: { [READING_SESSION_USER_HEADER]: String(expectedUserId) },
+		};
+		if (signal) requestOptions.signal = signal;
+		const response = await apiFetch<BooksResponse>(
+			`/api/v1/books?page=${page}&limit=${BOOKS_PAGE_LIMIT}`,
+			requestOptions,
+		);
+		throwIfAborted(signal);
+		books.push(...response.books.map(toFrontendBook));
+		if (response.books.length === 0 || books.length >= response.total) break;
+		page += 1;
+	}
+
+	return books;
 }
 
 export async function fetchBook(bookId: number) {

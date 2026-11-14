@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import { auth } from '../../lib/auth.js';
 import { BookStorageNotFoundError, getBookFileAccess } from '../../lib/bookStorage.js';
 import type { PrismaVariables } from '../../lib/prisma.js';
+import { hasReadingSessionUserMismatch, MAX_CURRENT_POSITION_LENGTH, normalizeProgressPercentage, normalizeReadStatus, parseReadingSaveSequence, persistReadingInfo, READING_SESSION_USER_HEADER, StaleReadingInfoError, toReadingInfoResponse, toReadingProgress, type ReadingProgressRecord } from './readingProgress.js';
 
 const app = new Hono<PrismaVariables>();
 
@@ -29,12 +30,13 @@ type BookWithRelations = {
 		originalFileName: string;
 		fileUrl: string;
 	}>;
+	readingInfos?: ReadingProgressRecord[];
 };
 
 type BookFileRecord = BookWithRelations['bookFiles'][number];
 type SupportedBookFileType = 'epub' | 'pdf';
 
-function jsonError(c: BooksContext, status: 400 | 401 | 403 | 404 | 500, message: string, code: string) {
+function jsonError(c: BooksContext, status: 400 | 401 | 403 | 404 | 409 | 500, message: string, code: string) {
 	return c.json({ message, code }, status);
 }
 
@@ -66,19 +68,8 @@ function parseBookId(rawBookId: string | undefined) {
 	return Number.isSafeInteger(bookId) ? bookId : null;
 }
 
-type ReadingInfoRecord = {
-	currentPosition: string | null;
-	readStatus: string;
-};
-
-function toReadingInfoResponse(bookId: number, readingInfo: ReadingInfoRecord | null) {
-	const parsedPage = Number(readingInfo?.currentPosition);
-	const currentPage = Number.isSafeInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
-	const readStatus = ['unread', 'reading', 'completed'].includes(readingInfo?.readStatus ?? '')
-		? readingInfo?.readStatus
-		: 'unread';
-
-	return { bookId, currentPage, readStatus };
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function getSupportedBookFileType(file: BookFileRecord): SupportedBookFileType | null {
@@ -108,7 +99,7 @@ function getPreferredBookFile(book: BookWithRelations) {
 	return null;
 }
 
-function toBookResponse(book: BookWithRelations, readStatus = 'unread') {
+function toBookResponse(book: BookWithRelations, readingInfo: ReadingProgressRecord | null = null) {
 	const preferredFile = getPreferredBookFile(book);
 	const file = preferredFile?.file;
 	return {
@@ -120,7 +111,8 @@ function toBookResponse(book: BookWithRelations, readStatus = 'unread') {
 		description: book.description,
 		category: book.category,
 		pageTurnDirection: book.pageTurnDirection,
-		readStatus,
+		readStatus: normalizeReadStatus(readingInfo?.readStatus),
+		progressPercentage: toReadingProgress(readingInfo),
 		hasFile: Boolean(file),
 		fileType: preferredFile?.fileType ?? null,
 		fileSize: file?.fileSize ?? null,
@@ -151,13 +143,21 @@ async function getBookForAuthorizedUser(c: BooksContext, bookId: number, userId:
 	return { book, prisma, userId };
 }
 
-async function getAuthorizedBook(c: BooksContext, bookId: number) {
+async function getAuthorizedBook(c: BooksContext, bookId: number, requireReadingSession = false) {
 	const user = await getAuthenticatedUser(c);
 	if (!user) {
 		return { response: jsonError(c, 401, 'Authentication required', 'UNAUTHORIZED') };
 	}
 
-	return getBookForAuthorizedUser(c, bookId, user.id, user.roleId);
+	const result = await getBookForAuthorizedUser(c, bookId, user.id, user.roleId);
+	if ('response' in result) {
+		return result;
+	}
+	if (requireReadingSession && hasReadingSessionUserMismatch(c.req.header(READING_SESSION_USER_HEADER), user.id)) {
+		return { response: jsonError(c, 409, 'Reading request is bound to a different authenticated user', 'READING_SESSION_MISMATCH') };
+	}
+
+	return result;
 }
 
 app.get('/', async (c) => {
@@ -178,7 +178,11 @@ app.get('/', async (c) => {
 			prisma.book.count({ where }),
 			prisma.book.findMany({
 				where,
-				include: { category: true, bookFiles: { orderBy: { id: 'asc' } } },
+				include: {
+					category: true,
+					bookFiles: { orderBy: { id: 'asc' } },
+					readingInfos: { where: { userId: user.id }, take: 1 },
+				},
 				orderBy: { createdAt: 'desc' },
 				skip: (page - 1) * limit,
 				take: limit,
@@ -189,7 +193,7 @@ app.get('/', async (c) => {
 			total,
 			page,
 			limit,
-			books: books.map((book) => toBookResponse(book as BookWithRelations)),
+			books: books.map((book) => toBookResponse(book as BookWithRelations, (book as BookWithRelations).readingInfos?.[0] ?? null)),
 		});
 	} catch (error) {
 		console.error(error);
@@ -204,7 +208,7 @@ app.get('/:bookId/reading-info', async (c) => {
 			return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
 		}
 
-		const result = await getAuthorizedBook(c, bookId);
+		const result = await getAuthorizedBook(c, bookId, true);
 		if ('response' in result) {
 			return result.response;
 		}
@@ -212,7 +216,7 @@ app.get('/:bookId/reading-info', async (c) => {
 		const readingInfo = await result.prisma.readingInfo.findUnique({
 			where: { userId_bookId: { userId: result.userId, bookId } },
 		});
-		return c.json(toReadingInfoResponse(bookId, readingInfo));
+		return c.json(toReadingInfoResponse(bookId, readingInfo, true));
 	} catch (error) {
 		console.error(error);
 		return c.json({ error: 'Failed to fetch reading info' }, 500);
@@ -226,7 +230,7 @@ app.patch('/:bookId/reading-info', async (c) => {
 			return jsonError(c, 404, 'Book not found', 'BOOK_NOT_FOUND');
 		}
 
-		const result = await getAuthorizedBook(c, bookId);
+		const result = await getAuthorizedBook(c, bookId, true);
 		if ('response' in result) {
 			return result.response;
 		}
@@ -237,19 +241,71 @@ app.patch('/:bookId/reading-info', async (c) => {
 		} catch {
 			return jsonError(c, 400, 'Request body must be valid JSON', 'INVALID_REQUEST');
 		}
-
-		const currentPage = (body as { currentPage?: unknown })?.currentPage;
-		if (typeof currentPage !== 'number' || !Number.isSafeInteger(currentPage) || currentPage < 1) {
-			return jsonError(c, 400, 'currentPage must be a positive integer', 'INVALID_CURRENT_PAGE');
+		if (!isJsonObject(body)) {
+			return jsonError(c, 400, 'Request body must be a JSON object', 'INVALID_REQUEST');
 		}
 
-		const readingInfo = await result.prisma.readingInfo.upsert({
-			where: { userId_bookId: { userId: result.userId, bookId } },
-			create: { userId: result.userId, bookId, currentPosition: String(currentPage), readStatus: 'reading' },
-			update: { currentPosition: String(currentPage), readStatus: 'reading' },
+		const input = body as { currentPage?: unknown; currentPosition?: unknown; progressPercentage?: unknown; readStatus?: unknown; saveSequence?: unknown; expectedSaveSequence?: unknown };
+		const hasPage = input.currentPage !== undefined;
+		const hasPosition = input.currentPosition !== undefined;
+		if (hasPage === hasPosition) {
+			return jsonError(c, 400, 'Exactly one reading position is required', 'INVALID_CURRENT_POSITION');
+		}
+		let currentPosition: string;
+		if (hasPage) {
+			if (typeof input.currentPage !== 'number' || !Number.isSafeInteger(input.currentPage) || input.currentPage < 1) {
+				return jsonError(c, 400, 'currentPage must be a positive integer', 'INVALID_CURRENT_PAGE');
+			}
+			currentPosition = String(input.currentPage);
+		} else {
+			if (typeof input.currentPosition !== 'string' || !input.currentPosition.trim() || input.currentPosition.length > MAX_CURRENT_POSITION_LENGTH) {
+				return jsonError(c, 400, `currentPosition must be a non-empty string of ${MAX_CURRENT_POSITION_LENGTH} characters or fewer`, 'INVALID_CURRENT_POSITION');
+			}
+			currentPosition = input.currentPosition;
+		}
+		const requestedReadStatus = input.readStatus === undefined ? 'reading' : input.readStatus;
+		if (requestedReadStatus !== 'reading' && requestedReadStatus !== 'completed') {
+			return jsonError(c, 400, 'readStatus must be reading or completed', 'INVALID_READ_STATUS');
+		}
+		const hasProgressPercentage = input.progressPercentage !== undefined;
+		if (hasProgressPercentage && input.progressPercentage !== null && normalizeProgressPercentage(input.progressPercentage) === null) {
+			return jsonError(c, 400, 'progressPercentage must be an integer between 0 and 100 or null', 'INVALID_PROGRESS_PERCENTAGE');
+		}
+		const readStatus: 'reading' | 'completed' = requestedReadStatus;
+		const saveSequence = parseReadingSaveSequence(input.saveSequence);
+		const expectedSaveSequence = parseReadingSaveSequence(input.expectedSaveSequence);
+		if (saveSequence === null) {
+			return jsonError(c, 400, 'saveSequence must be a safe non-negative integer', 'INVALID_SAVE_SEQUENCE');
+		}
+		if (expectedSaveSequence === null) {
+			return jsonError(c, 400, 'expectedSaveSequence must be a safe non-negative integer', 'INVALID_EXPECTED_SAVE_SEQUENCE');
+		}
+		if (saveSequence !== undefined && saveSequence > 0n && expectedSaveSequence === undefined) {
+			return jsonError(c, 400, 'Versioned saves require expectedSaveSequence', 'EXPECTED_SAVE_SEQUENCE_REQUIRED');
+		}
+		if (expectedSaveSequence !== undefined && (saveSequence === undefined || saveSequence <= expectedSaveSequence)) {
+			return jsonError(c, 400, 'saveSequence must be greater than expectedSaveSequence', 'INVALID_SAVE_SEQUENCE');
+		}
+		const persistedProgress = readStatus === 'completed'
+			? 100
+			: hasProgressPercentage
+				? normalizeProgressPercentage(input.progressPercentage)
+				: undefined;
+
+		const readingInfo = await persistReadingInfo(result.prisma, {
+			userId: result.userId,
+			bookId,
+			currentPosition,
+			readStatus,
+			progressPercentage: persistedProgress,
+			saveSequence,
+			expectedSaveSequence,
 		});
-		return c.json(toReadingInfoResponse(bookId, readingInfo));
+		return c.json(toReadingInfoResponse(bookId, readingInfo, true));
 	} catch (error) {
+		if (error instanceof StaleReadingInfoError) {
+			return jsonError(c, 409, error.message, error.code);
+		}
 		console.error(error);
 		return c.json({ error: 'Failed to save reading info' }, 500);
 	}
@@ -270,7 +326,7 @@ app.get('/:bookId', async (c) => {
 		const readingInfo = await result.prisma.readingInfo.findUnique({
 			where: { userId_bookId: { userId: result.userId, bookId } },
 		});
-		return c.json(toBookResponse(result.book as BookWithRelations, readingInfo?.readStatus ?? 'unread'));
+		return c.json(toBookResponse(result.book as BookWithRelations, readingInfo));
 	} catch (error) {
 		console.error(error);
 		return c.json({ error: 'Failed to fetch book' }, 500);

@@ -49,7 +49,7 @@ vi.mock('@embedpdf/plugin-viewport/react', () => ({
 }));
 vi.mock('@embedpdf/plugin-scroll/react', () => ({
 	ScrollPluginPackage: {},
-	useScrollCapability: () => ({ provides: { onLayoutReady: (callback: (event: {documentId:string;totalPages:number}) => void) => { queueMicrotask(() => callback({documentId:'doc-1',totalPages:5})); return () => {}; }, forDocument: () => mocks.scrollProvides } }),
+	useScrollCapability: () => ({ provides: { onLayoutReady: (callback: (event: {documentId:string;totalPages:number}) => void) => { queueMicrotask(() => callback({documentId:'doc-1',totalPages:mocks.scrollState.totalPages})); return () => {}; }, forDocument: () => mocks.scrollProvides } }),
 	ScrollStrategy: { Vertical: 'vertical' },
 	useScroll: () => mocks.useScroll(),
 	Scroller: ({ renderPage }: { renderPage: (value: { width: number; height: number; pageIndex: number }) => React.ReactNode }) => (
@@ -113,6 +113,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 	afterEach(async () => {
 		await cleanup();
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 		mocks.fetchBookFile.mockReset();
 		mocks.fetchReadingInfo.mockReset();
 		mocks.saveReadingInfo.mockReset();
@@ -125,8 +126,412 @@ describe('PdfReader navigation, outline, and progress', () => {
 		const { getByText } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
 		await expect.element(getByText('2 / 5 ページ 40%')).toBeInTheDocument();
-		await new Promise((resolve) => setTimeout(resolve, 850));
+		// A pagehide flush proves no pending restore save without elapsed-time guesses.
+		window.dispatchEvent(new Event('pagehide'));
 		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+	});
+
+
+
+	test('レイアウト準備後に復元先の状態が遅れても古いページを保存せず、復元後の操作だけ保存する', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		// A pagehide flush proves no pending restore save without elapsed-time guesses.
+		window.dispatchEvent(new Event('pagehide'));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		// A pagehide flush proves no pending restore save without elapsed-time guesses.
+		window.dispatchEvent(new Event('pagehide'));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		mocks.scrollState.currentPage = 11;
+		mocks.viewportScrollState.currentPage = 11;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92, undefined, undefined, false, undefined), { timeout: 1_500 });
+	});
+
+	test('復元先未到着でホイール移動するとページ保存が再開し古い復元エコーを無視する', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		// A real user gesture interrupts the outstanding programmatic restore.
+		view.getByTestId('pdf-viewport').element().dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 150 }));
+		mocks.scrollState.currentPage = 2;
+		mocks.viewportScrollState.currentPage = 2;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 2, 'reading', 17, undefined, undefined, false, undefined), { timeout: 1_500 });
+
+		// The interrupted restore can still emit page 10, but must not save it.
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		window.dispatchEvent(new Event('pagehide'));
+		expect(mocks.saveReadingInfo.mock.calls.some(([bookId, position, status, progress]) => bookId === 7 && position === 10 && status === 'reading' && progress === 83)).toBe(false);
+
+		// A later native observation should save again rather than stay blocked.
+		mocks.scrollState.currentPage = 3;
+		mocks.viewportScrollState.currentPage = 3;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 3, 'reading', 25, undefined, undefined, false, undefined), { timeout: 1_500 });
+		expect(mocks.scrollToPage).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo.mock.calls.some(([bookId, position, status, progress]) => bookId === 7 && position === 10 && status === 'reading' && progress === 83)).toBe(false);
+	});
+
+	test('移動先のページが先に描画された直後のホイール操作でも保存を落とさない', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		const input = view.getByRole('spinbutton', { name: 'ページ番号' });
+		await input.fill('11');
+		input.element().closest('form')?.requestSubmit();
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 11, behavior: 'auto' }));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		// EmbedPDF emits the target page just before the React navigation effect.
+		// The next wheel gesture must persist that already visible explicit page.
+		mocks.scrollState.currentPage = 11;
+		mocks.viewportScrollState.currentPage = 11;
+		view.getByTestId('pdf-viewport').element().dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 120 }));
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92, undefined, undefined, false, undefined), { timeout: 1_500 });
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+		mocks.scrollState.currentPage = 12;
+		mocks.viewportScrollState.currentPage = 12;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100, undefined, undefined, false, undefined), { timeout: 1_500 });
+	});
+
+	test('遅い復元エコーを保留したまま明示移動後のホイールでも新しい位置を守る', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		const input = view.getByRole('spinbutton', { name: 'ページ番号' });
+		await input.fill('11');
+		input.element().closest('form')?.requestSubmit();
+		// The old restore (10) completes; the queued explicit jump (11) begins.
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 11, behavior: 'auto' }));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		// The explicit page is already visible when the user starts scrolling.
+		mocks.scrollState.currentPage = 11;
+		mocks.viewportScrollState.currentPage = 11;
+		view.getByTestId('pdf-viewport').element().dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 120 }));
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92, undefined, undefined, false, undefined), { timeout: 1_500 });
+
+		// The earlier, superseded restore echo arrives AFTER the wheel.
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		window.dispatchEvent(new Event('pagehide'));
+		expect(mocks.saveReadingInfo.mock.calls.some(([bookId, position, status, progress]) => bookId === 7 && position === 10 && status === 'reading' && progress === 83)).toBe(false);
+
+		mocks.scrollState.currentPage = 12;
+		mocks.viewportScrollState.currentPage = 12;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100, undefined, undefined, false, undefined), { timeout: 1_500 });
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(2);
+	});
+
+	test('復元途中の明示的なページ入力による移動は新しいページとして保存する', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		const pageInput = view.getByRole('spinbutton', { name: 'ページ番号' });
+		await pageInput.fill('11');
+		pageInput.element().closest('form')?.requestSubmit();
+		// A pagehide flush proves no pending restore save without elapsed-time guesses.
+		window.dispatchEvent(new Event('pagehide'));
+		expect(mocks.scrollToPage).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 11, behavior: 'auto' }));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		mocks.scrollState.currentPage = 11;
+		mocks.viewportScrollState.currentPage = 11;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92, undefined, undefined, false, undefined), { timeout: 1_500 });
+	});
+
+
+	test('復元途中の明示的なページ選択は遅れて届く旧復元ページで上書きされない', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		const input = view.getByRole('spinbutton', { name: 'ページ番号' });
+		await input.fill('11');
+		input.element().closest('form')?.requestSubmit();
+		// Force an immediate flush boundary instead of relying on a sleep shorter than debounce.
+		window.dispatchEvent(new Event('pagehide'));
+		expect(mocks.scrollToPage).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 11, behavior: 'auto' }));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		mocks.scrollState.currentPage = 11;
+		mocks.viewportScrollState.currentPage = 11;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92, undefined, undefined, false, undefined), { timeout: 1_500 });
+		// A late restoration echo must not override the acknowledged page input.
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		// If the late restored page queued a stale save, pagehide would flush it now.
+		window.dispatchEvent(new Event('pagehide'));
+		expect(mocks.saveReadingInfo.mock.calls.some(([bookId, position, status, progress]) => bookId === 7 && position === 10 && status === 'reading' && progress === 83)).toBe(false);
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+
+		// Ignoring the restore echo must still allow subsequent native scrolling.
+		mocks.scrollState.currentPage = 12;
+		mocks.viewportScrollState.currentPage = 12;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100, undefined, undefined, false, undefined), { timeout: 1_500 });
+		expect(mocks.scrollToPage).not.toHaveBeenCalledWith(expect.objectContaining({ pageNumber: 12 }));
+	});
+
+	test('復元途中の現在ページを明示選択した場合も利用者の意図を保存する', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+		const input = view.getByRole('spinbutton', { name: 'ページ番号' });
+		await input.fill('1');
+		input.element().closest('form')?.requestSubmit();
+		// Force an immediate flush boundary instead of relying on a sleep shorter than debounce.
+		window.dispatchEvent(new Event('pagehide'));
+		expect(mocks.scrollToPage).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 1, behavior: 'auto' }));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		mocks.scrollState.currentPage = 1;
+		mocks.viewportScrollState.currentPage = 1;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 1, 'reading', 8, undefined, undefined, false, undefined), { timeout: 1_500 });
+
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		// If the late restored page queued a stale save, pagehide would flush it now.
+		window.dispatchEvent(new Event('pagehide'));
+		expect(mocks.saveReadingInfo.mock.calls.some(([bookId, position, status, progress]) => bookId === 7 && position === 10 && status === 'reading' && progress === 83)).toBe(false);
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+	});
+
+	test('ページ入力11→12で11のPATCHが遅延しても後続の12を正規APIが順序保証し保存する', async () => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+
+		// Keep the reader's actual UI but replace its default API mock with the real
+		// reading-info client. This exercises its same-book serial PATCH queue.
+		const actualApi = await vi.importActual<typeof import('@/api/readingInfo')>('@/api/readingInfo');
+		mocks.saveReadingInfo.mockImplementation(actualApi.saveReadingInfo);
+		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
+		let releaseOldSave!: () => void;
+		const firstSavePending = new Promise<void>((resolve) => { releaseOldSave = resolve; });
+		const requests: string[] = [];
+		let persistedPage = 10;
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+			if (options?.method === 'PATCH') {
+				const { currentPage } = JSON.parse(String(options.body)) as { currentPage: number };
+				requests.push(`PATCH ${currentPage}`);
+				if (currentPage === 11) await firstSavePending;
+				persistedPage = currentPage;
+			} else {
+				requests.push(`GET ${persistedPage}`);
+			}
+			return new Response(JSON.stringify({
+				bookId: 7, currentPosition: String(persistedPage), currentPage: persistedPage,
+				progressPercentage: Math.round(persistedPage / 12 * 100),
+				readStatus: persistedPage === 12 ? 'completed' : 'reading',
+			}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+		});
+
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		const input = view.getByRole('spinbutton', { name: 'ページ番号' });
+		await input.fill('11');
+		input.element().closest('form')?.requestSubmit();
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 11, behavior: 'auto' }));
+		mocks.scrollState.currentPage = 11;
+		mocks.viewportScrollState.currentPage = 11;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(requests).toEqual(['PATCH 11']), { timeout: 1_750 });
+
+		await input.fill('12');
+		input.element().closest('form')?.requestSubmit();
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 12, behavior: 'auto' }));
+		mocks.scrollState.currentPage = 12;
+		mocks.viewportScrollState.currentPage = 12;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 12, 'completed', 100, undefined, undefined, false, undefined));
+		// Page 12 has been requested through the real API but cannot overtake page 11.
+		expect(requests).toEqual(['PATCH 11']);
+		releaseOldSave();
+		await vi.waitFor(() => expect(requests).toEqual(['PATCH 11', 'PATCH 12']));
+		await expect(actualApi.fetchReadingInfo(7)).resolves.toMatchObject({ currentPage: 12, readStatus: 'completed' });
+		expect(persistedPage).toBe(12);
+		expect(requests).toEqual(['PATCH 11', 'PATCH 12', 'GET 12']);
+	});
+
+	test.each(['wheel', 'page-input'])('復元後の利用者による復元ページへの移動は保存する (%s)', async (intent) => {
+		mocks.scrollState.currentPage = 1;
+		mocks.scrollState.totalPages = 12;
+		mocks.viewportScrollState.currentPage = 1;
+		mocks.viewportScrollState.totalPages = 12;
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '10', currentPage: 10, readStatus: 'reading' });
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		const input = view.getByRole('spinbutton', { name: 'ページ番号' });
+		await input.fill('11');
+		input.element().closest('form')?.requestSubmit();
+
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 11, behavior: 'auto' }));
+		mocks.scrollState.currentPage = 11;
+		mocks.viewportScrollState.currentPage = 11;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 11, 'reading', 92, undefined, undefined, false, undefined), { timeout: 1_500 });
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+
+		mocks.scrollToPage.mockClear();
+		if (intent === 'wheel') {
+			view.getByTestId('pdf-viewport').element().dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: -100 }));
+			expect(mocks.scrollToPage).not.toHaveBeenCalled();
+		} else {
+			await input.fill('10');
+			input.element().closest('form')?.requestSubmit();
+			await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 10, behavior: 'auto' }));
+		}
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+		mocks.scrollState.currentPage = 10;
+		mocks.viewportScrollState.currentPage = 10;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 10, 'reading', 83, undefined, undefined, false, undefined), { timeout: 1_500 });
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(2);
+	});
+
+	test.each([
+		{ currentPage: 1, totalPages: 7, expected: '1 / 7 ページ 14%' },
+		{ currentPage: 2, totalPages: 7, expected: '2 / 7 ページ 29%' },
+		{ currentPage: 5, totalPages: 8, expected: '5 / 8 ページ 63%' },
+		{ currentPage: 7, totalPages: 7, expected: '7 / 7 ページ 100%' },
+	])('PDFの読書進捗を整数表示する ($currentPage/$totalPages)', async ({ currentPage, totalPages, expected }) => {
+		mocks.scrollState.currentPage = currentPage;
+		mocks.scrollState.totalPages = totalPages;
+		mocks.viewportScrollState.currentPage = currentPage;
+		mocks.viewportScrollState.totalPages = totalPages;
+		mocks.scrollProvides.getCurrentPage.mockReturnValue(currentPage);
+		mocks.fetchReadingInfo.mockResolvedValue({
+			bookId: 7,
+			currentPosition: String(currentPage),
+			currentPage,
+			readStatus: 'reading',
+		});
+		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await expect.element(getByTestId('pdf-reader-footer')).toHaveTextContent(expected);
+	});
+
+
+	test('同じ本でuserIdが変わるとPDFの復元ページを新しいユーザーから読み直す', async () => {
+		mocks.fetchReadingInfo.mockImplementation((_bookId: number, userId: number) => Promise.resolve({
+			bookId: 7,
+			currentPosition: String(userId === 11 ? 2 : 4),
+			currentPage: userId === 11 ? 2 : 4,
+			readStatus: 'reading',
+		}));
+		const view = await render(<PdfReader bookId={7} userId={11} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
+
+		mocks.scrollToPage.mockClear();
+		await view.rerender(<PdfReader bookId={7} userId={22} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 4, behavior: 'auto' }));
+		expect(mocks.fetchReadingInfo).toHaveBeenCalledWith(7, 22);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+	});
+
+	test('ページ移動時に現在ページと総ページから進捗率を保存する', async () => {
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
+
+		// The restoration command may run before React observes the saved page.
+		// Flush the restored page's state before simulating a real page turn.
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		mocks.scrollState.currentPage = 3;
+		mocks.viewportScrollState.currentPage = 3;
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 3, 'reading', 60, undefined, undefined, false, undefined), { timeout: 1_500 });
+		expect(mocks.scrollToPage).not.toHaveBeenCalledWith(expect.objectContaining({ pageNumber: 3 }));
 	});
 
 	test('places title, save state, outline and display settings in the header with reading controls below the page', async () => {
@@ -174,7 +579,25 @@ describe('PdfReader navigation, outline, and progress', () => {
 	});
 
 	test('LTRの右端タップは次ページへ進み、ドラッグはページ移動しない', async () => {
-		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		// Begin with an actual pre-restore scroll snapshot; a mocked scrollToPage
+		// invocation alone does not prove that EmbedPDF has reported the target page.
+		mocks.scrollState.currentPage = 1;
+		mocks.viewportScrollState.currentPage = 1;
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
+		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(1);
+		await expect.element(view.getByTestId('pdf-reader-footer')).toHaveTextContent('1 / 5 ページ 20%');
+		// Simulate the scroll plugin's renderer acknowledgement, then verify it
+		// is consumed by the visible navigation state before the edge tap.
+		mocks.scrollState = { ...mocks.scrollState, currentPage: 2 };
+		mocks.viewportScrollState = { ...mocks.viewportScrollState, currentPage: 2 };
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(2);
+		await expect.element(view.getByTestId('pdf-reader-footer')).toHaveTextContent('2 / 5 ページ 40%');
+		// Flush any pending debounced save before asserting restore stayed read-only.
+		window.dispatchEvent(new Event('pagehide'));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+		const { getByTestId } = view;
 		const viewport = getByTestId('pdf-viewport');
 		await expect.element(viewport).toBeInTheDocument();
 		const element = viewport.element() as HTMLElement;
@@ -194,7 +617,17 @@ describe('PdfReader navigation, outline, and progress', () => {
 	test('端タップはツールバーと共有するページ状態から次ページを計算する', async () => {
 		mocks.scrollState.currentPage = 4;
 		mocks.viewportScrollState.currentPage = 2;
-		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		// Keep the page source for toolbar/navigation stable across concurrent React re-renders.
+		// The separate stale viewport snapshot must not drive an edge turn.
+		mocks.useScroll.mockImplementation(() => ({ provides: mocks.scrollProvides, state: mocks.scrollState }));
+		mocks.fetchReadingInfo.mockResolvedValue({ bookId: 7, currentPosition: '4', currentPage: 4, readStatus: 'reading' });
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 4, behavior: 'auto' }));
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='ltr' />);
+		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(4);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		const { getByTestId } = view;
 		const viewport = getByTestId('pdf-viewport');
 		await expect.element(viewport).toBeInTheDocument();
 		const element = viewport.element() as HTMLElement;
@@ -221,7 +654,22 @@ describe('PdfReader navigation, outline, and progress', () => {
 	});
 
 	test('RTLの左端タップは次ページへ進む', async () => {
-		const { getByTestId } = await render(<PdfReader bookId={7} pageTurnDirection='rtl' />);
+		mocks.scrollState.currentPage = 1;
+		mocks.viewportScrollState.currentPage = 1;
+		const view = await render(<PdfReader bookId={7} pageTurnDirection='rtl' />);
+		await vi.waitFor(() => expect(mocks.scrollToPage).toHaveBeenCalledWith({ pageNumber: 2, behavior: 'auto' }));
+		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(1);
+		await expect.element(view.getByTestId('pdf-reader-footer')).toHaveTextContent('1 / 5 ページ 20%');
+		// Only the plugin-observed page transition acknowledges the restore.
+		mocks.scrollState = { ...mocks.scrollState, currentPage: 2 };
+		mocks.viewportScrollState = { ...mocks.viewportScrollState, currentPage: 2 };
+		await view.rerender(<PdfReader bookId={7} pageTurnDirection='rtl' />);
+		await expect.element(view.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue(2);
+		await expect.element(view.getByTestId('pdf-reader-footer')).toHaveTextContent('2 / 5 ページ 40%');
+		// Flush any pending debounced save before asserting restore stayed read-only.
+		window.dispatchEvent(new Event('pagehide'));
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+		const { getByTestId } = view;
 		await expect.element(getByTestId('pdf-viewport')).toBeInTheDocument();
 		const element = getByTestId('pdf-viewport').element() as HTMLElement;
 		vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 600, width: 1000, height: 600, x: 0, y: 0, toJSON: () => ({}) });

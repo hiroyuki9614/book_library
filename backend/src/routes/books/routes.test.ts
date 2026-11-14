@@ -99,6 +99,24 @@ describe('protected book viewing APIs', () => {
 		);
 	});
 
+	test('一覧は現在ユーザーのReadingInfoから読書状態と進捗を返す', async () => {
+		mocks.bookCount.mockResolvedValue(1);
+		mocks.bookFindMany.mockResolvedValue([{
+			...book,
+			readingInfos: [{ currentPosition: '8', progressPercentage: 42, readStatus: 'reading' }],
+		}]);
+
+		const response = await app.request('/');
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({
+			books: [{ id: 1, readStatus: 'reading', progressPercentage: 42 }],
+		});
+		expect(mocks.bookFindMany).toHaveBeenCalledWith(expect.objectContaining({
+			include: expect.objectContaining({ readingInfos: { where: { userId: 7 }, take: 1 } }),
+		}));
+	});
+
 	test('RoleBookPermissionがない一般ユーザーの一覧には書籍が表示されない', async () => {
 		mocks.bookCount.mockResolvedValue(0);
 		mocks.bookFindMany.mockResolvedValue([]);
