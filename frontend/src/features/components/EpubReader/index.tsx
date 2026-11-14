@@ -310,8 +310,13 @@ function EpubReaderSession({ bookId, bookTitle, pageTurnDirection, userId }: { b
 	const handleNext = () => enqueue((r) => r.next());
 	const handleTocJump = (href: string) => {
 		setTocVisible(false);
-		if (currentCfiRef.current) setHistory((prev) => [...prev, currentCfiRef.current].slice(-20));
-		enqueue((r) => r.display(href));
+		enqueue(async (r) => {
+			const previousCfi = currentCfiRef.current;
+			await r.display(href);
+			if (previousCfi.startsWith('epubcfi(')) {
+				setHistory((prev) => [...prev, previousCfi].slice(-20));
+			}
+		});
 	};
 	const handleBack = () => {
 		const cfi = history.at(-1);

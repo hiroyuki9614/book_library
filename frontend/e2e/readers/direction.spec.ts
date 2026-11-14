@@ -212,3 +212,57 @@ for (const config of cases) {
 		}
 	});
 }
+
+
+test('TOC back records the position after a queued next turn', async ({ page }) => {
+	await page.setViewportSize({ width: 393, height: 850 });
+	await fileApi(page, directionEpubFixture({ opfDirection: 'ltr', bodyDirection: 'ltr' }));
+	await page.goto('/e2e/readers/harness.html?direction=ltr');
+	await idle(page);
+
+	const nextButton = page.getByRole('button', { name: '次のページへ', exact: true });
+	const previousButton = page.getByRole('button', { name: '前のページへ', exact: true });
+	const initial = await observe(page);
+	expect(initial.visible.map((item) => item.number)).toEqual([1]);
+
+	// Establish an independent expected CFI and actual clipped content for
+	// one completed page turn, then return to the original position.
+	await nextButton.click();
+	await idle(page);
+	const afterNext = await observe(page);
+	expect(afterNext.visible.map((item) => item.number)).toEqual([2]);
+	expect(afterNext.cfi).not.toBe(initial.cfi);
+	await previousButton.click();
+	await idle(page);
+	const returnedToStart = await observe(page);
+	expect(returnedToStart.cfi).toBe(initial.cfi);
+	expect(returnedToStart.visible.map((item) => item.number)).toEqual([1]);
+
+	await page.getByRole('button', { name: '目次', exact: true }).click();
+
+	// Dispatch both rendered UI button events synchronously in one browser task.
+	// The queued next turn cannot finish between these clicks, so the prior
+	// implementation synchronously recorded the wrong pre-turn CFI.
+	await page.evaluate(() => {
+		const next = document.querySelector<HTMLButtonElement>('button[aria-label="次のページへ"]');
+		const toc = Array.from(document.querySelectorAll<HTMLButtonElement>('nav[aria-label="EPUB目次"] button'))
+			.find((button) => button.textContent?.trim() === 'Chapter 4');
+		if (!next || !toc || next.disabled || toc.disabled) throw new Error('Next/TOC controls unavailable');
+		next.click();
+		toc.click();
+	});
+
+	await idle(page);
+	const jumped = await observe(page);
+	expect(jumped.visible.map((item) => item.number)).toEqual([25]);
+	expect(jumped.visible[0].text).toContain('Chapter 4, column 1.');
+
+	const backButton = page.getByRole('button', { name: '目次移動前へ戻る', exact: true });
+	await expect(backButton).toBeVisible();
+	await backButton.click();
+	await idle(page);
+	const returned = await observe(page);
+	expect(returned.cfi).toBe(afterNext.cfi);
+	expect(returned.visible.map((item) => item.number)).toEqual(afterNext.visible.map((item) => item.number));
+	expect(returned.visible[0].text).toContain('Chapter 1, column 2.');
+});
