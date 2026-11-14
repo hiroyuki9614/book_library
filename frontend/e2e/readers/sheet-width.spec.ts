@@ -220,6 +220,51 @@ async function checkReaderChrome(page: Page, kind: 'epub' | 'pdf', width: number
 	expect(data.footer.bottom, `${label} footer offscreen`).toBeLessThanOrEqual(data.viewHeight + 2);
 }
 
+
+/**
+ * The B layout may optically adjust only the chevron glyph, never its round
+ * hit target. Assert real Chromium geometry before/after an actual EPUB turn.
+ */
+async function checkEpubNavigationButtonGeometry(page: Page, width: number) {
+	const footer = page.getByTestId('epub-reader-footer');
+	const previous = footer.getByRole('button', { name: '前のページへ', exact: true });
+	const next = footer.getByRole('button', { name: '次のページへ', exact: true });
+	await expect(previous).toBeVisible();
+	await expect(next).toBeEnabled();
+	const measure = () => footer.evaluate((element) => {
+		return ['前のページへ', '次のページへ'].map((name) => {
+			const button = [...element.querySelectorAll<HTMLButtonElement>('button')]
+				.find((candidate) => candidate.getAttribute('aria-label') === name);
+			if (!button) throw new Error(`Missing EPUB turn button: ${name}`);
+			const bounds = button.getBoundingClientRect();
+			const glyph = button.querySelector<HTMLElement>('span[aria-hidden="true"]');
+			if (!glyph) throw new Error(`Missing EPUB turn glyph: ${name}`);
+			const glyphBounds = glyph.getBoundingClientRect();
+			return {
+				name,
+				x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height,
+				glyphCenterOffsetY: (glyphBounds.top + glyphBounds.height / 2) - (bounds.top + bounds.height / 2),
+				buttonTransform: getComputedStyle(button).transform,
+			};
+		});
+	});
+	const before = await measure();
+	for (const button of before) {
+		expect(button.width, `EPUB ${width}px ${button.name} button width`).toBeCloseTo(44, 0);
+		expect(button.height, `EPUB ${width}px ${button.name} button height`).toBeCloseTo(44, 0);
+		expect(button.buttonTransform, `EPUB ${width}px ${button.name} outer button is not translated`).toBe('none');
+		expect(Math.abs(button.glyphCenterOffsetY), `EPUB ${width}px ${button.name} glyph vertically centered`).toBeLessThanOrEqual(3);
+	}
+	await next.click();
+	await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
+	const after = await measure();
+	for (let index = 0; index < before.length; index++) {
+		for (const property of ['x', 'y', 'width', 'height'] as const) {
+			expect(Math.abs(after[index][property] - before[index][property]), `EPUB ${width}px ${before[index].name} ${property} must not shift after page turn`).toBeLessThanOrEqual(0.75);
+		}
+	}
+}
+
 for (const width of [1280, 1440, 1663]) {
 	test(`EPUB desktop B chrome ${width}px`, async ({ page }) => {
 		test.setTimeout(90_000);
@@ -228,6 +273,7 @@ for (const width of [1280, 1440, 1663]) {
 		await page.goto('/e2e/readers/harness.html');
 		await expect(page.locator('[data-reader-viewport]')).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
 		await checkReaderChrome(page, 'epub', width);
+		await checkEpubNavigationButtonGeometry(page, width);
 	});
 	test(`PDF desktop B chrome ${width}px`, async ({ page, browser }) => {
 		test.setTimeout(90_000);
