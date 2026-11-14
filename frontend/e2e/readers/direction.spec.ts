@@ -219,47 +219,38 @@ test('TOC back records the position after a queued next turn', async ({ page }) 
 	await page.goto('/e2e/readers/harness.html?direction=ltr');
 	await idle(page);
 
-	const viewport = page.locator('[data-reader-viewport]');
-	const spreadSelect = page.getByRole('combobox', { name: 'ページ表示方法' });
 	const nextButton = page.getByRole('button', { name: '次のページへ', exact: true });
 	const previousButton = page.getByRole('button', { name: '前のページへ', exact: true });
 	const initial = await observe(page);
 	expect(initial.visible.map((item) => item.number)).toEqual([1]);
 
-	const selectSpread = async (name: string) => {
-		await spreadSelect.click();
-		await page.getByRole('option', { name, exact: true }).click({ animations: 'disabled' });
-		await idle(page);
-	};
-	await selectSpread('常に見開き');
-	const spreadStart = await observe(page);
-	expect(spreadStart.visible.map((item) => item.number)).toEqual([1, 2]);
-
-	// Capture the exact visible position reached by one real next operation, then
-	// return to the start so the queued run has an independent expected result.
+	// Establish an independent expected CFI and actual clipped content for
+	// one completed page turn, then return to the original position.
 	await nextButton.click();
 	await idle(page);
 	const afterNext = await observe(page);
-	expect(afterNext.visible.map((item) => item.number)).toEqual([3, 4]);
-	expect(afterNext.cfi).not.toBe(spreadStart.cfi);
+	expect(afterNext.visible.map((item) => item.number)).toEqual([2]);
+	expect(afterNext.cfi).not.toBe(initial.cfi);
 	await previousButton.click();
 	await idle(page);
 	const returnedToStart = await observe(page);
-	expect(returnedToStart.cfi).toBe(spreadStart.cfi);
-	expect(returnedToStart.visible.map((item) => item.number)).toEqual([1, 2]);
-	await selectSpread('常に単ページ');
-	const singlePageStart = await observe(page);
-	expect(singlePageStart.visible.map((item) => item.number)).toEqual([1]);
+	expect(returnedToStart.cfi).toBe(initial.cfi);
+	expect(returnedToStart.visible.map((item) => item.number)).toEqual([1]);
 
-	// A real spread reflow holds the serial queue while one next turn and the
-	// distant TOC destination are added behind it through visible UI controls.
-	await spreadSelect.click();
-	await page.getByRole('option', { name: '常に見開き', exact: true }).click({ animations: 'disabled' });
-	await nextButton.click();
-	await expect(viewport).toHaveAttribute('data-reader-queue', '2');
-	await page.getByRole('button', { name: '目次', exact: true }).click({ animations: 'disabled' });
-	await page.getByRole('button', { name: 'Chapter 4', exact: true }).click({ animations: 'disabled' });
-	await expect(viewport).toHaveAttribute('data-reader-queue', '3');
+	await page.getByRole('button', { name: '目次', exact: true }).click();
+
+	// Dispatch both rendered UI button events synchronously in one browser task.
+	// The queued next turn cannot finish between these clicks, so the prior
+	// implementation synchronously recorded the wrong pre-turn CFI.
+	await page.evaluate(() => {
+		const next = document.querySelector<HTMLButtonElement>('button[aria-label="次のページへ"]');
+		const toc = Array.from(document.querySelectorAll<HTMLButtonElement>('nav[aria-label="EPUB目次"] button'))
+			.find((button) => button.textContent?.trim() === 'Chapter 4');
+		if (!next || !toc || next.disabled || toc.disabled) throw new Error('Next/TOC controls unavailable');
+		next.click();
+		toc.click();
+	});
+
 	await idle(page);
 	const jumped = await observe(page);
 	expect(jumped.visible.map((item) => item.number)).toEqual([25]);
@@ -272,5 +263,5 @@ test('TOC back records the position after a queued next turn', async ({ page }) 
 	const returned = await observe(page);
 	expect(returned.cfi).toBe(afterNext.cfi);
 	expect(returned.visible.map((item) => item.number)).toEqual(afterNext.visible.map((item) => item.number));
-	expect(returned.visible[0].text).toContain('Chapter 1, column 3.');
+	expect(returned.visible[0].text).toContain('Chapter 1, column 2.');
 });
