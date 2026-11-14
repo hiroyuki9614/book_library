@@ -85,6 +85,68 @@ def serve():
         }, separators=(",", ":")).encode()
 
 
+@contextlib.contextmanager
+def fixture_operator_owned(root):
+    """Model UID 1000 only for this temp fixture while retaining real modes."""
+    home = Path.home().resolve()
+    root = Path(root).resolve()
+    if not root.is_relative_to(home):
+        raise AssertionError("operator-owned fixture must stay below the test home")
+    real_os = cli.os
+    opened_paths = {}
+    wrong_owner_paths = set()
+
+    def fixture_path(path):
+        try:
+            resolved = Path(real_os.fsdecode(path)).resolve(strict=False)
+        except (TypeError, ValueError, OSError):
+            return None
+        return resolved if resolved in {root, home} or resolved.is_relative_to(root) else None
+
+    def fixture_stat(info, path):
+        if path not in wrong_owner_paths and info.st_uid not in (real_os.getuid(), 1000):
+            return info
+        values = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        values["st_uid"] = 4242 if path in wrong_owner_paths else 1000
+        return types.SimpleNamespace(**values)
+
+    class FixtureOs:
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+        def lstat(self, path, *args, **kwargs):
+            info = real_os.lstat(path, *args, **kwargs)
+            modeled_path = fixture_path(path)
+            return fixture_stat(info, modeled_path) if modeled_path is not None else info
+
+        def open(self, path, *args, **kwargs):
+            directory_fd = kwargs.get("dir_fd")
+            base = opened_paths.get(directory_fd)
+            if isinstance(path, (str, bytes, os.PathLike)):
+                opened_path = Path(real_os.fsdecode(path))
+                if not opened_path.is_absolute() and base is not None:
+                    opened_path = base / opened_path
+                modeled_path = fixture_path(opened_path)
+            else:
+                modeled_path = None
+            descriptor = real_os.open(path, *args, **kwargs)
+            if modeled_path is not None:
+                opened_paths[descriptor] = modeled_path
+            return descriptor
+
+        def fstat(self, descriptor):
+            info = real_os.fstat(descriptor)
+            modeled_path = opened_paths.get(descriptor)
+            return fixture_stat(info, modeled_path) if modeled_path is not None else info
+
+        def close(self, descriptor):
+            opened_paths.pop(descriptor, None)
+            return real_os.close(descriptor)
+
+    with patch.object(cli, "os", FixtureOs()):
+        yield lambda path: wrong_owner_paths.add(Path(path).resolve())
+
+
 class FakeEffects:
     source_sha = "a" * 40
     tls_config_sha256 = "b" * 64
@@ -145,7 +207,7 @@ class TlsPrepareTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="tls-v2-plan-", dir=Path.home()) as temporary:
             root = Path(temporary)
             state = root / "state"; state.mkdir(mode=0o700)
-            with patch.object(cli, "STATE", state), patch.object(cli, "TLS_CONTEXT", state / "tls-work-context"), \
+            with fixture_operator_owned(root), patch.object(cli, "STATE", state), patch.object(cli, "TLS_CONTEXT", state / "tls-work-context"), \
                  patch.object(cli, "_v2_source_sha", return_value=source_sha), \
                  patch.object(cli, "_v2_read_upgrade_receipt", return_value=(root_result, cli._v2_digest(root_result))), \
                  patch.object(cli, "_v2_load_executor", return_value=fake_executor), \
@@ -213,13 +275,14 @@ class TlsPrepareTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="tls-v2-receipt-", dir=Path.home()) as temporary:
             directory = Path(temporary)
             raw = b'{"candidate":true}'
-            cli._v2_publish_once(directory, "prepare-receipt.json", raw)
-            cli._v2_publish_once(directory, "prepare-receipt.json", raw)
+            with fixture_operator_owned(directory):
+                cli._v2_publish_once(directory, "prepare-receipt.json", raw)
+                cli._v2_publish_once(directory, "prepare-receipt.json", raw)
+                with self.assertRaisesRegex(cli.PrepareError, "conflicting"):
+                    cli._v2_publish_once(directory, "prepare-receipt.json", b'{"candidate":false}')
             self.assertEqual((directory / "prepare-receipt.json").read_bytes(), raw)
             self.assertEqual((directory / "prepare-receipt.json").stat().st_nlink, 1)
             self.assertEqual(list(directory.glob("*.tmp")), [])
-            with self.assertRaisesRegex(cli.PrepareError, "conflicting"):
-                cli._v2_publish_once(directory, "prepare-receipt.json", b'{"candidate":false}')
 
     def test_v2_prepared_compose_override_is_deterministic_and_mutation_is_rejected(self):
         operation, source_sha = "b" * 32, "a" * 40
@@ -308,7 +371,7 @@ class TlsPrepareTests(unittest.TestCase):
             for name, value in (("candidate-config.json", config), ("preparation-receipt.json", receipt),
                                 ("preparation-journal.json", journal), ("compose.override.json", override)):
                 (prepared / name).write_bytes(cli.canonical(value)); (prepared / name).chmod(0o600)
-            with patch.object(cli, "PREPARED_ROOT", root):
+            with fixture_operator_owned(root) as wrong_owner, patch.object(cli, "PREPARED_ROOT", root):
                 self.assertEqual(cli._v2_validate_prepared_inputs(root, prepared, expected), config)
                 changed_authorities = json.loads(json.dumps(authorities))
                 changed_authorities["roots"]["issuer"] = "different-root.example"
@@ -333,6 +396,9 @@ class TlsPrepareTests(unittest.TestCase):
                 override["services"]["nginx"] = {"privileged": True}
                 (prepared / "compose.override.json").write_bytes(cli.canonical(override))
                 with self.assertRaisesRegex(cli.PrepareError, "deterministic admitted operation model"):
+                    cli._v2_validate_prepared_inputs(root, prepared, expected)
+                wrong_owner(prepared / "candidate-config.json")
+                with self.assertRaisesRegex(cli.PrepareError, "unsafe ownership"):
                     cli._v2_validate_prepared_inputs(root, prepared, expected)
 
     @staticmethod
