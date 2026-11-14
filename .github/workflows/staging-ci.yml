@@ -167,6 +167,8 @@ jobs:
           /usr/bin/python3 -I -B scripts/staging/test-retained-postgres.py
           /usr/bin/python3 -I -B scripts/staging/test-retained-cutover.py
           /usr/bin/python3 -I -B scripts/staging/test-retained-entrypoint.py
+          /usr/bin/python3 -I -B scripts/staging/test-prepare-retained.py
+          /usr/bin/python3 -I -B scripts/staging/test-prepare-retained-integration.py
           /usr/bin/python3 -I -B scripts/staging/test-cd-handoff.py
           /usr/bin/python3 -I -B scripts/staging/test-cd-handoff-executor.py
           /usr/bin/python3 -I -B scripts/staging/test-ci-isolation-guard.py
