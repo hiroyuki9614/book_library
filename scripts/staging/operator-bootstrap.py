@@ -222,6 +222,56 @@ def consume_nonce(grant):
         os.close(directory)
 
 
+def _result_path(nonce):
+    if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{64}", nonce):
+        raise Blocked("Receipt nonce is malformed")
+    trusted_path(STATE, directory=True)
+    if stat.S_IMODE(STATE.stat().st_mode) != 0o700:
+        raise Blocked("Receipt directory must be root-only")
+    return STATE / (nonce + ".result.json")
+
+
+def write_result(grant, code):
+    if type(code) is not int or not -128 <= code <= 255:
+        raise Blocked("Executor exit status is invalid")
+    result = {"schema": "belib-staging-operation-result/v1", "nonce": grant["nonce"],
+              "grant_sha256": hashlib.sha256(canonical(grant)).hexdigest(),
+              **{name: grant[name] for name in ("source_sha", "operation", "host", "principal", "uid", "project")},
+              "exit_code": code, "completed_at": int(time.time()), "nonce_consumed": True}
+    path = _result_path(grant["nonce"])
+    # A result is immutable. Duplicate execution is already denied by the nonce
+    # journal; never replace a completed result with a second claimant's result.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(canonical(result))
+        stream.flush()
+        os.fsync(stream.fileno())
+    directory = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return result
+
+
+def read_result(nonce):
+    path = _result_path(nonce)
+    result = parse(read_regular(path, MAX_GRANT, trusted=True), MAX_GRANT)
+    fields = {"schema", "nonce", "grant_sha256", "source_sha", "operation", "host", "principal", "uid", "project",
+              "exit_code", "completed_at", "nonce_consumed"}
+    if (not isinstance(result, dict) or set(result) != fields
+            or result.get("schema") != "belib-staging-operation-result/v1" or result.get("nonce") != nonce
+            or result.get("nonce_consumed") is not True
+            or any(result.get(name) != TARGET[name] for name in ("host", "principal", "uid", "project"))
+            or type(result.get("uid")) is not int or type(result.get("exit_code")) is not int
+            or not -128 <= result["exit_code"] <= 255 or type(result.get("completed_at")) is not int
+            or not isinstance(result.get("source_sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", result["source_sha"])
+            or not isinstance(result.get("grant_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", result["grant_sha256"])
+            or result.get("operation") not in {"deploy", "resume-ingress"}):
+        raise Blocked("Stored operation result is invalid")
+    return result
+
+
 def spawn_admitted(root, grant):
     arguments = launcher_arguments(grant)
     pid = os.fork()
@@ -260,7 +310,9 @@ def spawn_admitted(root, grant):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--grant", type=Path, required=True)
+    request = parser.add_mutually_exclusive_group(required=True)
+    request.add_argument("--grant", type=Path)
+    request.add_argument("--receipt")
     args = parser.parse_args()
     try:
         if not hasattr(os, "memfd_create") or not hasattr(fcntl, "F_ADD_SEALS"):
@@ -272,6 +324,9 @@ def main():
             raise Blocked("Use only the independently installed isolated operator entry on i5")
         trusted_path(INSTALL)
         trusted_path(Path("/usr/bin/python3").resolve())
+        if args.receipt is not None:
+            print(canonical(read_result(args.receipt)).decode())
+            return 0
         config = parse(read_regular(CONFIG, MAX_CONFIG, trusted=True), MAX_CONFIG)
         root = verify_source(config)
         grant = validate_grant(read_regular(args.grant, MAX_GRANT), config["source_sha"])
@@ -281,10 +336,10 @@ def main():
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             consume_nonce(grant)
             code = spawn_admitted(root, grant)
+            result = write_result(grant, code)
         finally:
             os.close(lock_fd)
-        print(json.dumps({"source_sha": config["source_sha"], "operation": grant["operation"], "host": TARGET["host"],
-                          "principal": TARGET["principal"], "exit_code": code, "nonce_consumed": True}, sort_keys=True))
+        print(canonical(result).decode())
         return code if code >= 0 else 1
     except (Blocked, OSError, ValueError, subprocess.SubprocessError) as error:
         print("BLOCKED: " + str(error), file=sys.stderr)

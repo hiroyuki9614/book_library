@@ -87,6 +87,28 @@ class OperatorBootstrapTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 bootstrap.consume_nonce(self.grant)
 
+    def test_result_is_durable_exact_grant_bound_and_immutable(self):
+        with patch.object(bootstrap, "trusted_path"):
+            bootstrap.consume_nonce(self.grant)
+            result=bootstrap.write_result(self.grant,0)
+            self.assertEqual(result,bootstrap.read_result(self.grant['nonce']))
+            self.assertEqual(result['grant_sha256'],hashlib.sha256(bootstrap.canonical(self.grant)).hexdigest())
+            self.assertEqual(result['exit_code'],0)
+            with self.assertRaises(FileExistsError):
+                bootstrap.write_result(self.grant,1)
+
+    def test_result_records_failure_and_rejects_invented_or_tampered_identity(self):
+        with patch.object(bootstrap, "trusted_path"):
+            bootstrap.consume_nonce(self.grant)
+            result=bootstrap.write_result(self.grant,124)
+            self.assertEqual(bootstrap.read_result(self.grant['nonce'])['exit_code'],124)
+            path=bootstrap._result_path(self.grant['nonce'])
+            path.write_bytes(bootstrap.canonical({**result,'host':'other'}))
+            with self.assertRaises(bootstrap.Blocked):
+                bootstrap.read_result(self.grant['nonce'])
+            with self.assertRaises(FileNotFoundError):
+                bootstrap.read_result('d'*64)
+
     def test_hostile_tmpdir_cannot_replace_openssl_inputs(self):
         hostile = self.root / "attacker-parent"
         hostile.mkdir()
