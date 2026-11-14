@@ -72,6 +72,32 @@ class ApprovalTests(unittest.TestCase):
                         "-in", str(message), "-out", str(signature)], check=True)
         return {"payload": approval.b64(raw), "signature": approval.b64(signature.read_bytes())}
 
+    def retained_upgrade_envelope(self, binding, *, now=None, changes=None, drop_fields=()):
+        now = int(time.time()) if now is None else now
+        payload = approval.expected_payload(
+            "a" * 40, approval.RETAINED_UPGRADE_OPERATION, "c" * 64, now, "d" * 64,
+            retained_upgrade_binding=binding,
+        )
+        for name in drop_fields:
+            del payload[name]
+        payload.update(changes or {})
+        raw = approval.canonical_json(payload)
+        message = self.root / "upgrade-message"
+        signature = self.root / "upgrade-signature"
+        message.write_bytes(raw)
+        subprocess.run(["/usr/bin/openssl", "pkeyutl", "-sign", "-inkey", str(self.private), "-rawin",
+                        "-in", str(message), "-out", str(signature)], check=True)
+        return {"payload": approval.b64(raw), "signature": approval.b64(signature.read_bytes())}
+
+    @staticmethod
+    def retained_upgrade_binding():
+        return {
+            "prior_application_sha": approval.RETAINED_UPGRADE_PRIOR_APPLICATION_SHA,
+            "retained_state_sha256": "1" * 64,
+            "backup_sha256": "2" * 64,
+            "restore_attestation_sha256": "3" * 64,
+        }
+
     def test_valid_external_signature_uses_trusted_openssl_path(self):
         self.assertEqual(approval.verify_envelope(
             self.envelope(), "a" * 40, "deploy", "c" * 64, "d" * 64), "c" * 64)
@@ -188,6 +214,89 @@ class ApprovalTests(unittest.TestCase):
         with self.assertRaises(approval.ApprovalError):
             approval.request_and_wait("a" * 40, "tls-ingress", "d" * 64, uid=os.getuid(),
                                       output=io.StringIO(), timeout=0)
+
+    def test_retained_upgrade_signature_binds_prior_state_backup_and_restore_pins(self):
+        now = int(time.time())
+        binding = self.retained_upgrade_binding()
+        envelope = self.retained_upgrade_envelope(binding, now=now)
+        with patch.object(approval, "_verify_trusted_openssl"):
+            self.assertEqual(approval.verify_envelope(
+                envelope, "a" * 40, approval.RETAINED_UPGRADE_OPERATION, "c" * 64, "d" * 64,
+                now=now, retained_upgrade_binding=binding,
+            ), "c" * 64)
+
+        retained_upgrade_path = Path(__file__).with_name("retained-upgrade.py")
+        retained_spec = importlib.util.spec_from_file_location("retained_upgrade_for_approval_test", retained_upgrade_path)
+        retained_upgrade = importlib.util.module_from_spec(retained_spec)
+        self.assertIsNotNone(retained_spec.loader)
+        retained_spec.loader.exec_module(retained_upgrade)
+        self.assertEqual(approval.RETAINED_UPGRADE_PRIOR_APPLICATION_SHA,
+                         retained_upgrade.OLD_APPLICATION_SHA)
+
+    def test_retained_upgrade_payload_rejects_scope_pin_and_lifetime_drift(self):
+        now = int(time.time())
+        binding = self.retained_upgrade_binding()
+        signed = self.retained_upgrade_envelope(binding, now=now)
+
+        changed_bindings = (
+            {**binding, "retained_state_sha256": "4" * 64},
+            {**binding, "backup_sha256": "4" * 64},
+            {**binding, "restore_attestation_sha256": "4" * 64},
+            {**binding, "prior_application_sha": "4" * 40},
+            {**binding, "unexpected": "5" * 64},
+            {key: value for key, value in binding.items() if key != "backup_sha256"},
+        )
+        for changed in changed_bindings:
+            with self.subTest(binding=changed), self.assertRaises(approval.ApprovalError):
+                approval.verify_envelope(
+                    signed, "a" * 40, approval.RETAINED_UPGRADE_OPERATION, "c" * 64, "d" * 64,
+                    now=now, retained_upgrade_binding=changed,
+                )
+
+        signed_payload_changes = (
+            ({"backup_sha256": "4" * 64}, ()),
+            ({"prior_application_sha": "4" * 40}, ()),
+            ({"operation": "deploy"}, ()),
+            ({"source_sha": "b" * 40}, ()),
+            ({"nonce": "e" * 64}, ()),
+            ({"evidence_sha256": "e" * 64}, ()),
+            ({"expires_at": now - 1}, ()),
+            ({"expires_at": now + approval.MAX_GRANT_SECONDS + 1}, ()),
+            ({"issued_at": now + 30}, ()),
+            ({"unexpected": True}, ()),
+            ({}, ("restore_attestation_sha256",)),
+        )
+        for changes, drop_fields in signed_payload_changes:
+            malformed = self.retained_upgrade_envelope(
+                binding, now=now, changes=changes, drop_fields=drop_fields,
+            )
+            with self.subTest(changes=changes, drop_fields=drop_fields), self.assertRaises(approval.ApprovalError):
+                approval.verify_envelope(
+                    malformed, "a" * 40, approval.RETAINED_UPGRADE_OPERATION, "c" * 64, "d" * 64,
+                    now=now, retained_upgrade_binding=binding,
+                )
+
+        for malformed in (
+            {**binding, "retained_state_sha256": "not-a-digest"},
+            {**binding, "backup_sha256": None},
+            {**binding, "restore_attestation_sha256": "A" * 64},
+        ):
+            with self.subTest(binding=malformed), self.assertRaises(approval.ApprovalError):
+                approval.validate_payload(
+                    approval.expected_payload(
+                        "a" * 40, approval.RETAINED_UPGRADE_OPERATION, "c" * 64, now, "d" * 64,
+                        retained_upgrade_binding=binding,
+                    ),
+                    "a" * 40, approval.RETAINED_UPGRADE_OPERATION, "c" * 64, "d" * 64,
+                    now, retained_upgrade_binding=malformed,
+                )
+
+    def test_retained_upgrade_cannot_create_an_approval_challenge(self):
+        with self.assertRaisesRegex(approval.ApprovalError, "not allowlisted"):
+            approval.request_and_wait(
+                "a" * 40, approval.RETAINED_UPGRADE_OPERATION, "d" * 64,
+                uid=os.getuid(), output=io.StringIO(), timeout=0,
+            )
 
     def verify_tls_tamper(self, binding, name, value):
         envelope = self.tls_envelope(binding, **{name: value})

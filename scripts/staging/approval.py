@@ -36,6 +36,11 @@ MAX_GRANT_SECONDS = 300
 POLL_SECONDS = 300
 TLS_OPERATION = "tls-ingress"
 TLS_SERVE_ETAG = "031c8cd8bbc73f27c4b6a503142d1dd0a0bc0e0f1536a497041a4faa0cd1de5e"
+RETAINED_UPGRADE_OPERATION = "upgrade-retained"
+RETAINED_UPGRADE_PRIOR_APPLICATION_SHA = "81256268276d7ead95029849037f69ec6beec202"
+RETAINED_UPGRADE_BINDING_FIELDS = frozenset({
+    "prior_application_sha", "retained_state_sha256", "backup_sha256", "restore_attestation_sha256",
+})
 
 
 class ApprovalError(Exception):
@@ -82,6 +87,7 @@ def expected_payload(
     source_sha: str, operation: str, nonce: str, issued_at: int, evidence_sha256: str,
     prior_source_sha: str | None = None, retained_state_sha256: str | None = None,
     tls_binding: dict[str, str] | None = None,
+    retained_upgrade_binding: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "branch": TARGET["branch"],
@@ -106,6 +112,11 @@ def expected_payload(
         if tls_binding is None:
             raise ApprovalError("TLS approval requires a fresh retained-state binding")
         payload.update(tls_binding)
+    elif operation == RETAINED_UPGRADE_OPERATION:
+        if (not isinstance(retained_upgrade_binding, dict)
+                or set(retained_upgrade_binding) != RETAINED_UPGRADE_BINDING_FIELDS):
+            raise ApprovalError("Retained-upgrade approval requires the exact prior-state and evidence pins")
+        payload.update(retained_upgrade_binding)
     return payload
 
 
@@ -113,11 +124,13 @@ def validate_payload(
     payload: Any, source_sha: str, operation: str, nonce: str, evidence_sha256: str, now: int,
     prior_source_sha: str | None = None, retained_state_sha256: str | None = None,
     tls_binding: dict[str, str] | None = None,
+    retained_upgrade_binding: dict[str, str] | None = None,
 ) -> None:
-    if operation not in ("deploy", "resume-ingress", TLS_OPERATION):
+    if operation not in ("deploy", "resume-ingress", TLS_OPERATION, RETAINED_UPGRADE_OPERATION):
         raise ApprovalError("Approval operation is not allowlisted")
     expected_fields = set(expected_payload(source_sha, operation, nonce, 0, evidence_sha256,
-                                           prior_source_sha, retained_state_sha256, tls_binding))
+                                           prior_source_sha, retained_state_sha256, tls_binding,
+                                           retained_upgrade_binding))
     if not isinstance(payload, dict) or set(payload) != expected_fields:
         raise ApprovalError("Approval payload fields do not match the fixed schema")
     for name in ("pull_request", "uid", "issued_at", "expires_at"):
@@ -153,6 +166,20 @@ def validate_payload(
             raise ApprovalError("TLS state binding is malformed")
         if any(payload[name] != value for name, value in tls_binding.items()):
             raise ApprovalError("TLS approval does not match the current retained state")
+    if operation == RETAINED_UPGRADE_OPERATION:
+        if (not isinstance(retained_upgrade_binding, dict)
+                or set(retained_upgrade_binding) != RETAINED_UPGRADE_BINDING_FIELDS):
+            raise ApprovalError("Retained-upgrade approval requires the exact prior-state and evidence pins")
+        if (not isinstance(retained_upgrade_binding["prior_application_sha"], str)
+                or retained_upgrade_binding["prior_application_sha"] != RETAINED_UPGRADE_PRIOR_APPLICATION_SHA
+                or not re.fullmatch(r"[0-9a-f]{40}", retained_upgrade_binding["prior_application_sha"])
+                or any(not isinstance(retained_upgrade_binding[name], str)
+                       or not re.fullmatch(r"[0-9a-f]{64}", retained_upgrade_binding[name]) for name in (
+                           "retained_state_sha256", "backup_sha256", "restore_attestation_sha256"
+                       ))):
+            raise ApprovalError("Retained-upgrade prior application or evidence pin is malformed")
+        if any(payload[name] != value for name, value in retained_upgrade_binding.items()):
+            raise ApprovalError("Retained-upgrade approval does not match the current retained state and evidence")
     issued, expires = payload["issued_at"], payload["expires_at"]
     if issued > now + 5 or issued < now - MAX_GRANT_SECONDS or expires < now or expires <= issued or expires - issued > MAX_GRANT_SECONDS:
         raise ApprovalError("Approval is expired or outside the bounded grant lifetime")
@@ -163,6 +190,7 @@ def verify_envelope(
     now: int | None = None, prior_source_sha: str | None = None,
     retained_state_sha256: str | None = None,
     tls_binding: dict[str, str] | None = None,
+    retained_upgrade_binding: dict[str, str] | None = None,
 ) -> str:
     if hashlib.sha256(PUBLIC_KEY_PEM).hexdigest() != PUBLIC_KEY_SHA256:
         raise ApprovalError("Embedded approval public key fingerprint mismatch")
@@ -175,7 +203,8 @@ def verify_envelope(
     if canonical_json(payload) != payload_raw:
         raise ApprovalError("Approval payload is not canonical JSON")
     validate_payload(payload, source_sha, operation, nonce, evidence_sha256,
-                     int(time.time()) if now is None else now, prior_source_sha, retained_state_sha256, tls_binding)
+                     int(time.time()) if now is None else now, prior_source_sha, retained_state_sha256,
+                     tls_binding, retained_upgrade_binding)
     _verify_trusted_openssl()
     with tempfile.TemporaryDirectory(prefix="belib-approval-verify-", dir="/tmp") as temporary:
         key_path = Path(temporary) / "public.pem"
