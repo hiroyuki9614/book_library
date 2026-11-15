@@ -230,16 +230,14 @@ for (const kind of ['epub', 'pdf'] as const) {
 					expect(button.marginTop).toBe('0px');
 					const previous = index === 0;
 					const pointsRight = previous === (direction === 'rtl');
-					expect(button.text).toBe(kind === 'epub' ? pointsRight ? '›' : '‹' : pointsRight ? '>' : '<');
-					if (kind === 'epub') {
-						expect(Number.parseFloat(button.radius)).toBeGreaterThanOrEqual(22);
-						expect(button.glyph, 'only the glyph has an optical correction').not.toBeNull();
-						expect(button.glyph!.x + button.glyph!.width / 2).toBeCloseTo(button.x + 22, 1);
-						expect(Math.abs(button.glyph!.y + button.glyph!.height / 2 - (button.y + 22))).toBeLessThanOrEqual(1);
-						// Glyph ink varies by roughly 0.5px across installed system fonts;
-						// 1px still catches meaningful optical off-centering.
-						expect(Math.abs(button.inkCenterY - (button.y + 22)), 'visible glyph ink is vertically centered within 1px').toBeLessThanOrEqual(1);
-					} else expect(button.radius).toBe('6px');
+					expect(button.text).toBe(pointsRight ? '›' : '‹');
+					expect(Number.parseFloat(button.radius), 'EPUB/PDF page-turn targets must be circular').toBeGreaterThanOrEqual(22);
+					expect(button.glyph, 'only the glyph has an optical correction').not.toBeNull();
+					expect(button.glyph!.x + button.glyph!.width / 2).toBeCloseTo(button.x + 22, 1);
+					expect(Math.abs(button.glyph!.y + button.glyph!.height / 2 - (button.y + 22))).toBeLessThanOrEqual(1);
+					// Glyph ink varies by roughly 0.5px across installed system fonts;
+					// 1px still catches meaningful optical off-centering.
+					expect(Math.abs(button.inkCenterY - (button.y + 22)), 'visible glyph ink is vertically centered within 1px').toBeLessThanOrEqual(1);
 				}
 				if (width >= 640) {
 					expect(observed.controls.find((control) => control.name === '本棚に戻る')!.x).toBe(12);
