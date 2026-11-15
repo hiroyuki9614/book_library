@@ -33,10 +33,10 @@ const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageIn
 				onClick={prevResolved.execute}
 				disabled={prevResolved.disabled}
 				aria-label='前のページへ'
-				className='size-11 shrink-0 px-0 text-lg'
+				className='size-11 shrink-0 rounded-full px-0 text-2xl'
 				title={`${prevResolved.label} (${prevResolved.shortcuts?.[0] || ''})`}
 			>
-				{prevResolved.label}
+				<span aria-hidden='true' className='block -translate-y-px leading-none'>{prevResolved.label === '<' ? '‹' : prevResolved.label === '>' ? '›' : prevResolved.label}</span>
 			</Button>
 
 			<form onSubmit={handleGoToPage} className='flex items-center gap-2'>
@@ -63,10 +63,10 @@ const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageIn
 				onClick={nextResolved?.execute}
 				disabled={nextResolved?.disabled}
 				aria-label='次のページへ'
-				className='size-11 shrink-0 px-0 text-lg'
+				className='size-11 shrink-0 rounded-full px-0 text-2xl'
 				title={`${nextResolved?.label} (${nextResolved?.shortcuts?.[0] || ''})`}
 			>
-				{nextResolved?.label}
+				<span aria-hidden='true' className='block -translate-y-px leading-none'>{nextResolved?.label === '<' ? '‹' : nextResolved?.label === '>' ? '›' : nextResolved?.label}</span>
 			</Button>
 		</div>
 	);
