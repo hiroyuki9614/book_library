@@ -291,6 +291,18 @@ test('pdf page turns keep circular chevron buttons fixed at desktop and mobile w
 		await page.setViewportSize({ width, height: 851 });
 		await page.goto('/e2e/readers/harness.html?kind=pdf&direction=ltr');
 		await ready(page, 'pdf');
+		// The mocked reading-info survives the preceding viewport. Normalize the
+		// starting page after PDF.js reports its real document page count: a
+		// previous viewport may have persisted page 2 before its return save.
+		const pageNumber = page.getByRole('spinbutton', { name: 'ページ番号' });
+		await expect.poll(async () => Number(await pageNumber.getAttribute('max')),
+			'PDF fixture must expose at least two real pages').toBeGreaterThanOrEqual(2);
+		if (await pageNumber.inputValue() !== '1') {
+			await pageNumber.fill('1');
+			await pageNumber.press('Enter');
+			await expect(pageNumber).toHaveValue('1');
+		}
+		await expect(page.getByTestId('pdf-reader-footer').getByRole('button', { name: '次のページへ', exact: true })).toBeEnabled();
 		const firstPage = await buttonRects();
 		for (const button of firstPage) {
 			expect({ width: button.width, height: button.height }).toEqual({ width: 44, height: 44 });
