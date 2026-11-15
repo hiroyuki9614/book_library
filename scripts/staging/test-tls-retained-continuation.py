@@ -19,6 +19,7 @@ import socket
 import ssl
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import traceback
@@ -549,7 +550,12 @@ class RetainedTlsContinuationIntegration(unittest.TestCase):
             "operation_id": f.prep_operation, "prepared_directory": str(f.prepared),
             "env_file": str(f.env), "active_generation": active,
             "active_generation_sha256": sha(canonical(active))}
-        receipt = f.prepare_call(admission)
+        try:
+            receipt = f.prepare_call(admission)
+        except Exception as error:
+            self._emit_safe_preparation_failure(f.prep_operation,
+                f.project + "-upgrade-" + f.prep_operation, error)
+            raise
         self.assertTrue(receipt["candidate_database_started"])
         self.assertTrue(receipt["candidate_apps_stopped"])
         self.assertFalse(receipt["original_database_mutated"])
@@ -566,6 +572,177 @@ class RetainedTlsContinuationIntegration(unittest.TestCase):
         f.executor.STAGING_ENV_FILE = f.env
         self.assertEqual(finalized["backup_sha256"], f.fixture.backup_sha)
         return revision, receipt
+
+    def _emit_safe_preparation_failure(self, operation_id, project, error):
+        diagnostic = self._safe_candidate_db_diagnostic(project)
+        print("C2B PREPARATION FAILURE " + canonical({
+            "operation_id": operation_id,
+            "error_type": type(error).__name__,
+            "candidate_database": diagnostic,
+        }).decode("utf-8"), file=sys.stderr)
+
+    def _safe_candidate_db_diagnostic(self, project):
+        """Read only bounded, sanitized health/identity metadata before cleanup."""
+        f = self.fixture
+        try:
+            rows = f.docker("ps", "--all", "--no-trunc", "--filter",
+                "label=com.docker.compose.project=" + project,
+                "--filter", "label=com.docker.compose.service=db",
+                "--format", "{{.ID}}").decode("ascii", "replace").splitlines()
+        except Exception as error:
+            return {"inspect_error_type": type(error).__name__}
+        result = []
+        for identity in rows[:3]:
+            if len(identity) != 64 or any(char not in "0123456789abcdef" for char in identity):
+                continue
+            try:
+                value = json.loads(f.docker("inspect", identity))[0]
+            except Exception as error:
+                result.append({"container_id": identity, "inspect_error_type": type(error).__name__})
+                continue
+            try:
+                startup_classes, startup_exit = self._safe_startup_log_classes(identity)
+            except Exception:
+                startup_classes, startup_exit = ["unavailable"], None
+            state = value.get("State") if isinstance(value.get("State"), dict) else {}
+            health = state.get("Health") if isinstance(state.get("Health"), dict) else {}
+            logs = health.get("Log") if isinstance(health.get("Log"), list) else []
+            safe_logs = []
+            for row in logs[-5:]:
+                if not isinstance(row, dict):
+                    continue
+                output = row.get("Output") if isinstance(row.get("Output"), str) else ""
+                folded = output.lower()
+                output_classes = self._safe_error_classes(folded)
+                output_class = (output_classes[0] if output_classes else
+                    "accepting_connections" if "accepting connections" in folded else
+                    "no_response" if "no response" in folded else
+                    "rejecting_connections" if "rejecting connections" in folded else
+                    "empty" if not output else "other")
+                exit_code = row.get("ExitCode")
+                safe_logs.append({"exit_code": exit_code if type(exit_code) is int else None,
+                                  "output_class": output_class,
+                                  "error_classes": output_classes,
+                                  "error_present": bool(row.get("Error"))})
+            labels = value.get("Config", {}).get("Labels") or {}
+            networks = value.get("NetworkSettings", {}).get("Networks") or {}
+            mounts = value.get("Mounts") if isinstance(value.get("Mounts"), list) else []
+            predicates = self._safe_candidate_db_health_predicates(identity)
+            result.append({
+                "container_id": identity,
+                "state": state.get("Status") if state.get("Status") in {
+                    "created", "restarting", "running", "removing", "paused", "exited", "dead"} else "unknown",
+                "running": state.get("Running") if type(state.get("Running")) is bool else None,
+                "exit_code": state.get("ExitCode") if type(state.get("ExitCode")) is int else None,
+                "health_status": health.get("Status") if health.get("Status") in {
+                    "none", "starting", "healthy", "unhealthy"} else "unknown",
+                "health_failing_streak": health.get("FailingStreak")
+                    if type(health.get("FailingStreak")) is int else None,
+                "health_log": safe_logs,
+                "startup_log_exit_code": startup_exit,
+                "startup_log_classes": startup_classes,
+                "health_predicates": predicates,
+                "labels": {"project_matches": labels.get("com.docker.compose.project") == project,
+                    "service_is_db": labels.get("com.docker.compose.service") == "db",
+                    "prepare_intent_present": bool(labels.get("belib.retained-prepare-intent")),
+                    "prepare_source_present": bool(labels.get("belib.retained-prepare-source"))},
+                "mounts": [{"name": item.get("Name"), "destination": item.get("Destination"),
+                    "type": item.get("Type"), "read_write": item.get("RW") if type(item.get("RW")) is bool else None}
+                    for item in mounts if isinstance(item, dict)],
+                "networks": [{"name": name, "network_id": network.get("NetworkID")}
+                    for name, network in sorted(networks.items()) if isinstance(network, dict)],
+            })
+        return result
+
+    def _safe_candidate_db_health_predicates(self, identity):
+        """Query only fixed boolean role/database health predicates as bootstrap."""
+        sql = """SELECT json_build_object(
+          'current_user_is_bootstrap', current_user = 'belib_staging_bootstrap',
+          'current_user_is_app', current_user = 'belib_staging_app',
+          'database_marker_matches', COALESCE(shobj_description(
+            (SELECT oid FROM pg_database WHERE datname = current_database()), 'pg_database')
+            = 'belib-staging-role-bootstrap-v1', false),
+          'app_role_exists', EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_app'),
+          'app_role_login', COALESCE((SELECT rolcanlogin FROM pg_roles WHERE rolname = 'belib_staging_app'), false),
+          'app_role_flags_ok', EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_app'
+            AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole
+            AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit),
+          'migrate_role_exists', EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_migrate'),
+          'migrate_role_login', COALESCE((SELECT rolcanlogin FROM pg_roles WHERE rolname = 'belib_staging_migrate'), false),
+          'migrate_role_flags_ok', EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_migrate'
+            AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole
+            AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit),
+          'app_db_connect', CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_app')
+            THEN has_database_privilege('belib_staging_app', current_database(), 'CONNECT') ELSE false END,
+          'app_db_create', CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_app')
+            THEN has_database_privilege('belib_staging_app', current_database(), 'CREATE') ELSE false END,
+          'app_db_temporary', CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_app')
+            THEN has_database_privilege('belib_staging_app', current_database(), 'TEMPORARY') ELSE false END,
+          'app_schema_usage', CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_app')
+            THEN has_schema_privilege('belib_staging_app', 'public', 'USAGE') ELSE false END,
+          'app_schema_create', CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'belib_staging_app')
+            THEN has_schema_privilege('belib_staging_app', 'public', 'CREATE') ELSE false END,
+          'schema_owner_is_migrate', COALESCE((SELECT nspowner =
+            (SELECT oid FROM pg_roles WHERE rolname = 'belib_staging_migrate')
+            FROM pg_namespace WHERE nspname = 'public'), false)
+        )::text;"""
+        expected = {"current_user_is_bootstrap", "current_user_is_app", "database_marker_matches",
+            "app_role_exists", "app_role_login", "app_role_flags_ok", "migrate_role_exists",
+            "migrate_role_login", "migrate_role_flags_ok", "app_db_connect", "app_db_create",
+            "app_db_temporary", "app_schema_usage", "app_schema_create", "schema_owner_is_migrate"}
+        try:
+            raw = self.fixture.docker("exec", identity, "timeout", "8", "psql", "-X", "-w",
+                "-U", "belib_staging_bootstrap", "-d", "belib_staging", "-A", "-t",
+                "-v", "ON_ERROR_STOP=1", "-c", sql)
+            value = json.loads(raw.decode("utf-8", "strict"))
+            if (not isinstance(value, dict) or set(value) != expected
+                    or any(type(item) is not bool for item in value.values())):
+                return {"status": "malformed"}
+            return {"status": "ok", "predicates": value}
+        except Exception as error:
+            return {"status": "unavailable", "error_type": type(error).__name__}
+
+    def _safe_startup_log_classes(self, identity, *, runner=None):
+        """Capture a fixed bounded Docker log tail on both streams, emit classes only."""
+        command = ["/usr/bin/docker", "--host", f"unix:///run/user/{os.getuid()}/docker.sock",
+                   "logs", "--tail", "20", identity]
+        run = subprocess.run if runner is None else runner
+        try:
+            response = run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, check=False, timeout=30)
+        except Exception:
+            return ["unavailable"], None
+        out = response.stdout if isinstance(response.stdout, bytes) else b""
+        err = response.stderr if isinstance(response.stderr, bytes) else b""
+        combined = (out + b"\n" + err)[-8192:].decode("utf-8", "replace").lower()
+        classes = self._safe_error_classes(combined)
+        if not classes:
+            classes.append("unknown" if combined.strip() else "empty")
+        exit_code = response.returncode if type(response.returncode) is int else None
+        return classes, exit_code
+
+    @staticmethod
+    def _safe_error_classes(text):
+        """Map diagnostics to fixed labels without returning source text."""
+        classes = []
+        for marker, category in (
+            ("password authentication failed", "missing_password"),
+            ("no password supplied", "missing_password"),
+            ("authentication failed", "auth_failed"),
+            ("permission denied", "permission"),
+            ("syntax error", "syntax"),
+            ("invalid input syntax", "syntax"),
+            ("initdb", "initdb"),
+            ("role ", "role_initialization"),
+        ):
+            if marker in text and category not in classes:
+                classes.append(category)
+        if " does not exist" in text:
+            if "role " in text and "role_missing" not in classes:
+                classes.append("role_missing")
+            if "database " in text and "database_missing" not in classes:
+                classes.append("database_missing")
+        return classes
 
     def test_two_generation_copy_tls_and_active_pointer_lineage(self):
         """Actual disposable Docker/PG prep, cutover and TLS; fake only fixed host identity."""
