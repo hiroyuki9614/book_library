@@ -230,14 +230,33 @@ for (const kind of ['epub', 'pdf'] as const) {
 					expect(button.marginTop).toBe('0px');
 					const previous = index === 0;
 					const pointsRight = previous === (direction === 'rtl');
-					expect(button.text).toBe(pointsRight ? '›' : '‹');
 					expect(Number.parseFloat(button.radius), 'EPUB/PDF page-turn targets must be circular').toBeGreaterThanOrEqual(22);
 					expect(button.glyph, 'only the glyph has an optical correction').not.toBeNull();
 					expect(button.glyph!.x + button.glyph!.width / 2).toBeCloseTo(button.x + 22, 1);
 					expect(Math.abs(button.glyph!.y + button.glyph!.height / 2 - (button.y + 22))).toBeLessThanOrEqual(1);
-					// Glyph ink varies by roughly 0.5px across installed system fonts;
-					// 1px still catches meaningful optical off-centering.
-					expect(Math.abs(button.inkCenterY - (button.y + 22)), 'visible glyph ink is vertically centered within 1px').toBeLessThanOrEqual(1);
+					if (kind === 'pdf') {
+						const chevron = page.getByRole('button', { name: button.name }).locator('svg');
+						await expect(chevron).toHaveAttribute('viewBox', '0 0 24 24');
+						const path = chevron.locator('path');
+						const pathGeometry = await path.evaluate((element) => {
+							const svg = (element as SVGPathElement).ownerSVGElement!;
+							const bounds = (element as SVGPathElement).getBBox();
+							const viewBox = svg.viewBox.baseVal;
+							const rect = svg.getBoundingClientRect();
+							return {
+								d: element.getAttribute('d'),
+								centerX: rect.x + (bounds.x + bounds.width / 2 - viewBox.x) * rect.width / viewBox.width,
+								centerY: rect.y + (bounds.y + bounds.height / 2 - viewBox.y) * rect.height / viewBox.height,
+							};
+						});
+						expect(pathGeometry.d).toBe(pointsRight ? 'M9 18 15 12 9 6' : 'M15 18 9 12 15 6');
+						expect(pathGeometry.centerX).toBeCloseTo(button.x + 22, 1);
+						expect(pathGeometry.centerY).toBeCloseTo(button.y + 22, 1);
+					} else {
+						expect(button.text).toBe(pointsRight ? '›' : '‹');
+						// Require visible ink to stay centered across supported environments.
+						expect(Math.abs(button.inkCenterY - (button.y + 22)), 'visible glyph ink is vertically centered within 1px').toBeLessThanOrEqual(1);
+					}
 				}
 				if (width >= 640) {
 					expect(observed.controls.find((control) => control.name === '本棚に戻る')!.x).toBe(12);
