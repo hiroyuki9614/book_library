@@ -302,7 +302,7 @@ for (const kind of ['epub', 'pdf'] as const) {
 			await source.close();
 		}
 		await useProtectedBook(page, file, kind);
-		for (const width of [1280, 1440, 1663, 393, 320]) {
+		for (const width of [1024, 1280, 1440, 1663, 393, 320]) {
 			await page.setViewportSize({ width, height: 851 });
 			await page.goto(`/e2e/readers/harness.html?kind=${kind}&direction=ltr`);
 			await ready(page, kind);
