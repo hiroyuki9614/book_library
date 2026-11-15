@@ -333,10 +333,13 @@ test('pdf page turns keep circular chevron buttons fixed at desktop and mobile w
 		// would otherwise produce a false positive for restoration.
 		await expect.poll(() => api.attempts.slice(attemptsBeforeTurn).some((attempt) => attempt.currentPage === 2),
 			'PDF turn must persist page 2 before reload').toBe(true);
+		const patchesBeforeReload = api.attempts.length;
 		await page.reload();
 		await expect(page.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue('2', { timeout: 30_000 });
 		await expect(page.locator('[data-pdf-page="2"] img').first()).toBeVisible({ timeout: 30_000 });
 		await page.evaluate(() => document.fonts.ready);
+		await page.waitForTimeout(850);
+		expect(api.attempts, 'restoring PDF page 2 must not issue an unsolicited PATCH').toHaveLength(patchesBeforeReload);
 		expect(await buttonRects(), 'restored PDF page 2 must preserve the navigation targets').toEqual(firstPage);
 
 		await footer.getByRole('button', { name: '前のページへ', exact: true }).click();
