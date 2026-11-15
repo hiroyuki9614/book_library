@@ -411,3 +411,75 @@ for (const kind of ['epub', 'pdf'] as const) {
 		});
 	}
 }
+
+for (const width of [1280, 393, 320]) {
+	test(`pdf ${width}: persisted page restores without moving circular footer buttons`, async ({ page, browser }) => {
+		test.setTimeout(90_000);
+		const source = await browser.newPage();
+		let file: Buffer;
+		try {
+			await source.setContent('<style>.page{break-after:page}</style><div class="page">FIRST PAGE</div><div>SECOND PAGE</div>');
+			file = await source.pdf();
+		} finally {
+			await source.close();
+		}
+
+		const api = await useProtectedBook(page, file, 'pdf');
+		await page.setViewportSize({ width, height: 851 });
+		await page.goto('/e2e/readers/harness.html?kind=pdf&direction=ltr');
+		await ready(page, 'pdf');
+
+		const footer = page.getByTestId('pdf-reader-footer');
+		const pageInput = page.getByRole('spinbutton');
+		await expect(pageInput).toHaveValue('1');
+		await expect(pageInput).toHaveAttribute('max', '2');
+		await expect(page.locator('[data-pdf-page="1"] img').first()).toBeVisible();
+		const buttonGeometry = async () => (await geometry(page, 'pdf')).buttons.map(({ name, x, y, width: buttonWidth, height, radius }) => ({
+			name, x, y, width: buttonWidth, height, radius,
+		}));
+		const pageOneGeometry = await buttonGeometry();
+		for (const button of pageOneGeometry) {
+			expect({ width: button.width, height: button.height }).toEqual({ width: 44, height: 44 });
+			expect(Number.parseFloat(button.radius)).toBeGreaterThanOrEqual(22);
+		}
+
+		const next = footer.getByRole('button', { name: '次のページへ', exact: true });
+		await expect(next).toBeEnabled();
+
+		const savedPageResponse = page.waitForResponse((response) =>
+			response.url().endsWith('/api/v1/books/1/reading-info') &&
+			response.request().method() === 'PATCH',
+		);
+		await next.click();
+		const patch = await savedPageResponse;
+		expect(patch.status()).toBe(200);
+		expect(patch.request().postDataJSON().currentPage).toBe(2);
+		await expect(pageInput).toHaveValue('2');
+		await expect(page.locator('[data-pdf-page="2"] img').first()).toBeVisible();
+
+		await expect.poll(buttonGeometry).toEqual(pageOneGeometry);
+		const patchCountAfterPageTwo = api.attempts.length;
+		const restoreResponse = page.waitForResponse((response) =>
+			response.url().endsWith('/api/v1/books/1/reading-info') &&
+			response.request().method() === 'GET',
+		);
+		await page.reload();
+		const restored = await restoreResponse;
+		expect(restored.status()).toBe(200);
+		expect((await restored.json()).currentPage).toBe(2);
+		await expect(page.getByRole('spinbutton')).toHaveValue('2');
+		await expect(page.locator('[data-pdf-page="2"] img').first()).toBeVisible();
+		await expect(page.locator('[data-pdf-page="2"] img').first()).toBeInViewport();
+		await expect(page.getByText('PDF本文を描画しています…')).toHaveCount(0, { timeout: 30_000 });
+		await page.evaluate(() => document.fonts.ready);
+		await expect.poll(buttonGeometry).toEqual(pageOneGeometry);
+		await page.waitForTimeout(850);
+		expect(api.attempts).toHaveLength(patchCountAfterPageTwo);
+
+		const previous = page.getByTestId('pdf-reader-footer').getByRole('button', { name: '前のページへ', exact: true });
+		await previous.click();
+		await expect(page.getByRole('spinbutton')).toHaveValue('1');
+		await expect(page.locator('[data-pdf-page="1"] img').first()).toBeVisible();
+		await expect.poll(buttonGeometry).toEqual(pageOneGeometry);
+	});
+}
