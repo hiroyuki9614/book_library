@@ -175,6 +175,52 @@ esac
         self.assertLess(daemon_restart, restarted_frontend)
         self.assertLess(restarted_frontend, restarted_nginx)
 
+    def test_runtime_capture_requires_exact_project_network_attachment(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        function = re.search(
+            r"(?ms)^verify_service_network_attachment\(\) \{\n.*?^\}", source
+        )
+        self.assertIsNotNone(function)
+        self.assertIn('index .NetworkSettings.Networks \\"$network\\"', function.group(0))
+        self.assertIn('verify_service_network_attachment "$service" "$id"', source)
+        harness = "\n".join((
+            "set -euo pipefail",
+            'network="belib-recovery-ci-123-1_default"',
+            'docker() {',
+            '  [[ "$1" == inspect && "$2" == --format && "$4" == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]] || return 90',
+            '  [[ "$3" == "{{if index .NetworkSettings.Networks \\"$network\\"}}attached{{else}}missing{{end}}" ]] || return 91',
+            '  [[ "$FAKE_NETWORK_STATE" != inspect-failure ]] || return 93',
+            '  local -A inspected_networks=()',
+            '  case "$FAKE_NETWORK_STATE" in zero|inspect-failure|unexpected) ;; wrong) inspected_networks[other_project_default]="bridge-id" ;; attached) inspected_networks["$network"]="bridge-id" ;; *) return 92 ;; esac',
+            '  if [[ "$FAKE_NETWORK_STATE" == unexpected ]]; then printf "%s\\n" unknown; return; fi',
+            '  if [[ -v "inspected_networks[$network]" ]]; then printf "%s\\n" attached; else printf "%s\\n" missing; fi',
+            '}',
+            function.group(0),
+            'verify_service_network_attachment backend aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        ))
+
+        cases = (
+            ("attached", True, None),
+            ("zero", False, "not attached to its project network"),
+            ("wrong", False, "not attached to its project network"),
+            ("unexpected", False, "not attached to its project network"),
+            ("inspect-failure", False, "Cannot verify synthetic service network attachment"),
+        )
+        for state, expected_success, diagnostic in cases:
+            with self.subTest(network_state=state):
+                result = subprocess.run(
+                    ["bash", "-c", harness],
+                    cwd=ROOT,
+                    env={**os.environ, "FAKE_NETWORK_STATE": state},
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode == 0, expected_success, result.stderr)
+                if diagnostic:
+                    self.assertIn(diagnostic, result.stderr)
+
     def test_synthetic_restore_is_private_isolated_and_fail_closed(self):
         source = SCRIPT.read_text(encoding="utf-8")
         function = re.search(
