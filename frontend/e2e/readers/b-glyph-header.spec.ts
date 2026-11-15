@@ -275,3 +275,37 @@ test('epub desktop: failed server restore keeps the 52px header and visible warn
 	expect(observed.footer).toEqual({ x: 0, y: 794, width: 1280, height: 57 });
 	expect(api.attempts, 'failed server GET must not trigger an initial save').toEqual([]);
 });
+
+test('pdf page turns keep circular chevron buttons fixed at desktop and mobile widths', async ({ page, browser }) => {
+	test.setTimeout(150_000);
+	const source = await browser.newPage();
+	await source.setContent('<style>.page{break-after:page}</style><div class="page">FIRST PAGE</div><div>SECOND PAGE</div>');
+	const file = await source.pdf();
+	await source.close();
+	await useProtectedBook(page, file, 'pdf');
+
+	const buttonRects = async () => (await geometry(page, 'pdf')).buttons.map(({ name, x, y, width, height, radius }) => ({
+		name, x, y, width, height, radius,
+	}));
+	for (const width of [1280, 393]) {
+		await page.setViewportSize({ width, height: 851 });
+		await page.goto('/e2e/readers/harness.html?kind=pdf&direction=ltr');
+		await ready(page, 'pdf');
+		const firstPage = await buttonRects();
+		for (const button of firstPage) {
+			expect({ width: button.width, height: button.height }).toEqual({ width: 44, height: 44 });
+			expect(Number.parseFloat(button.radius), 'PDF navigation must remain circular').toBeGreaterThanOrEqual(22);
+		}
+
+		const footer = page.getByTestId('pdf-reader-footer');
+		await footer.getByRole('button', { name: '次のページへ', exact: true }).click();
+		await expect(page.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue('2');
+		await expect(page.locator('[data-pdf-page="2"] img').first()).toBeVisible();
+		expect(await buttonRects(), 'PDF page 2 must not move the navigation targets').toEqual(firstPage);
+
+		await footer.getByRole('button', { name: '前のページへ', exact: true }).click();
+		await expect(page.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue('1');
+		await expect(page.locator('[data-pdf-page="1"] img').first()).toBeVisible();
+		expect(await buttonRects(), 'restoring PDF page 1 must not move the navigation targets').toEqual(firstPage);
+	}
+});
