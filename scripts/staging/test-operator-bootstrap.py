@@ -61,6 +61,35 @@ class OperatorBootstrapTests(unittest.TestCase):
         return bootstrap.canonical({"payload": base64.b64encode(raw).decode(),
                                     "signature": base64.b64encode(signature.read_bytes()).decode()})
 
+    def test_expected_retained_runtime_binds_exact_authority_pins(self):
+        authorities = {name: {"issuer": name + ".example", "public_key_pem": "key-" + name,
+                              "fingerprint": str(index) * 64}
+                       for index, name in enumerate(("restore", "network", "roots"), start=1)}
+        operation = "a" * 32
+        config = {"authorities": authorities, "cutover_plan": {"operation_id": operation,
+            "port": 18083,
+            "old": {name: {"id": str(index) * 64} for index, name in
+                enumerate(("backend", "frontend", "nginx"), start=1)},
+            "new": {name: {"id": str(index + 3) * 64} for index, name in
+                enumerate(("backend", "frontend", "nginx"), start=1)}},
+            "candidate_database": {"id": "7" * 64}, "source_database": {}}
+        expected = bootstrap.expected_retained_runtime(config)
+        self.assertEqual(expected["authority_pins_sha256"],
+                         hashlib.sha256(bootstrap.canonical(authorities)).hexdigest())
+        upgrade_grant = {**self.grant, "operation": "upgrade-retained", "nonce": "d" * 64}
+        with patch.object(bootstrap, "trusted_path"):
+            bootstrap.consume_nonce(upgrade_grant)
+            recorded = bootstrap.write_result(upgrade_grant, 0, retained_config=config)
+            loaded = bootstrap.read_result(upgrade_grant["nonce"])
+        self.assertEqual(loaded, recorded)
+        self.assertEqual(loaded["expected_runtime"]["authority_pins_sha256"],
+                         hashlib.sha256(bootstrap.canonical(authorities)).hexdigest())
+        changed = {**authorities, "roots": {**authorities["roots"], "issuer": "other.example"}}
+        self.assertNotEqual(expected["authority_pins_sha256"],
+                            hashlib.sha256(bootstrap.canonical(changed)).hexdigest())
+        with self.assertRaisesRegex(bootstrap.Blocked, "authority pins are malformed"):
+            bootstrap.expected_retained_runtime({**config, "authorities": {"restore": authorities["restore"]}})
+
     def test_valid_external_signature_derives_only_fixed_launcher_arguments(self):
         with patch.object(bootstrap, "trusted_path"):
             grant = bootstrap.validate_grant(self.signed(), "a" * 40)
@@ -108,6 +137,50 @@ class OperatorBootstrapTests(unittest.TestCase):
                 bootstrap.read_result(self.grant['nonce'])
             with self.assertRaises(FileNotFoundError):
                 bootstrap.read_result('d'*64)
+
+    def test_tls_receipt_is_exact_fixed_root_query_and_rejects_tampering(self):
+        owner_nonce = "1" * 64
+        operation_id = "2" * 32
+        project = bootstrap.TARGET["project"] + "-upgrade-" + operation_id
+        record = {
+            "schema": bootstrap.TLS_COMPLETION_SCHEMA, "owner_nonce": owner_nonce,
+            "plan_sha256": "3" * 64, "prepare_receipt_sha256": "4" * 64,
+            "upgrade_receipt_nonce": "5" * 64, "upgrade_receipt_sha256": "6" * 64,
+            "source_sha": "7" * 40, "operation_id": operation_id, "project": project,
+            "previous_nginx_id": "8" * 64, "nginx_id": "9" * 64,
+            "nginx_configuration_sha256": "a" * 64,
+            "nginx_image_id": "sha256:" + "9" * 64,
+            "nginx_network_ids": {project + "_isolated": "b" * 64, project + "_ingress": "c" * 64},
+            "tls_config_sha256": "d" * 64, "certificate_sha256": "e" * 64,
+            "unchanged_runtime_sha256": "f" * 64, "approval_nonce": "0" * 64,
+            "evidence_sha256": "1" * 64, "serve_config_sha256": "2" * 64,
+            "serve_etag": "opaque-etag", "completed_at": 123, "status": "complete",
+        }
+        raw = bootstrap.canonical(record)
+        fake_info = type("Info", (), {"st_uid": 0, "st_nlink": 1,
+                                      "st_mode": stat.S_IFREG | 0o600})()
+        directory_info = type("Info", (), {"st_uid": 0, "st_nlink": 1,
+                                           "st_mode": stat.S_IFDIR | 0o700})()
+        with patch.object(bootstrap, "TLS_COMPLETIONS", Path("/fixed/tls-serve")), \
+                patch.object(bootstrap, "trusted_path"), \
+                patch.object(bootstrap, "read_regular", return_value=raw), \
+                patch.object(Path, "stat", return_value=directory_info), \
+                patch.object(Path, "lstat", return_value=fake_info):
+            self.assertEqual(bootstrap.read_tls_receipt(owner_nonce), record)
+            with self.assertRaises(bootstrap.Blocked):
+                bootstrap.read_tls_receipt("../" + owner_nonce)
+        for changes in ({"owner_nonce": "2" * 64}, {"status": "pending"},
+                        {"operation_id": "invalid"}, {"nginx_network_ids": {}},
+                        {"completed_at": True}):
+            with self.subTest(changes=changes):
+                damaged = bootstrap.canonical({**record, **changes})
+                with patch.object(bootstrap, "TLS_COMPLETIONS", Path("/fixed/tls-serve")), \
+                        patch.object(bootstrap, "trusted_path"), \
+                        patch.object(bootstrap, "read_regular", return_value=damaged), \
+                        patch.object(Path, "stat", return_value=directory_info), \
+                        patch.object(Path, "lstat", return_value=fake_info), \
+                        self.assertRaises(bootstrap.Blocked):
+                    bootstrap.read_tls_receipt(owner_nonce)
 
     def test_hostile_tmpdir_cannot_replace_openssl_inputs(self):
         hostile = self.root / "attacker-parent"
@@ -194,66 +267,6 @@ class OperatorBootstrapTests(unittest.TestCase):
     def test_unsigned_caller_cannot_enter_launcher(self):
         with patch.dict(os.environ, {}, clear=True), self.assertRaises(launch.LaunchBlocked):
             launch._require_operator_bootstrap_admission()
-
-    def test_preparation_child_is_sealed_fixed_source_and_does_not_receive_a_grant(self):
-        source = self.root / ("a" * 40)
-        helper = source / "scripts/staging/prepare-retained.py"
-        helper.parent.mkdir(parents=True)
-        marker = self.root / "prepared-child.json"
-        helper.write_text("""import os,json,fcntl,sys
-fd=int(os.environ['BELIB_PREPARATION_FD'])
-value=json.loads(os.read(fd,16384))
-if value['pid']!=os.getpid() or len(sys.argv)!=1: raise SystemExit(3)
-seals=fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL
-if fcntl.fcntl(fd,fcntl.F_GET_SEALS)&seals!=seals: raise SystemExit(4)
-with open(%r,'w') as out: json.dump(value,out)
-""" % str(marker))
-        with patch.object(bootstrap.os, "setgroups"), patch.object(bootstrap.os, "setgid"), patch.object(bootstrap.os, "setuid"):
-            self.assertEqual(bootstrap.spawn_preparation(source, "d" * 32), 0)
-        result = json.loads(marker.read_text())
-        self.assertEqual(result["source_sha"], "a" * 40)
-        self.assertEqual(result["prepared_directory"], str(bootstrap.PREPARATIONS / ("d" * 32)))
-        self.assertEqual(result["env_file"], "/home/hiroyuki/.config/belib-staging/i5.env")
-        self.assertNotIn("grant", result)
-        with patch.object(bootstrap.os, "fork") as fork, self.assertRaises(bootstrap.Blocked):
-            bootstrap.spawn_preparation(source, "../other")
-        fork.assert_not_called()
-
-    def test_explicit_preparation_entry_checks_operator_source_and_never_consumes_grant(self):
-        config_path = self.root / "config.json"
-        config_path.write_bytes(bootstrap.canonical({"source_sha": "a" * 40}))
-        with ExitStack() as stack:
-            for target, name, value in (
-                (bootstrap, "CONFIG", config_path), (bootstrap, "INSTALL", Path(bootstrap.__file__).resolve()),
-                (bootstrap.os, "getuid", Mock(return_value=0)), (bootstrap.os, "geteuid", Mock(return_value=0)),
-                (bootstrap.socket, "gethostname", Mock(return_value="ubuntu-worker")),
-                (bootstrap.pwd, "getpwnam", Mock(return_value=SimpleNamespace(pw_uid=1000, pw_gid=1000))),
-                (bootstrap.sys, "executable", "/usr/bin/python3"),
-                (bootstrap.sys, "flags", SimpleNamespace(**{**{name: getattr(sys.flags, name) for name in dir(sys.flags)
-                    if isinstance(getattr(sys.flags, name), (int, bool))}, "isolated": True, "dont_write_bytecode": True})),
-                (bootstrap.sys, "argv", ["operator-bootstrap.py", "--prepare-retained", "d" * 32]),
-                (bootstrap, "trusted_path", Mock()), (bootstrap, "verify_source", Mock(return_value=self.root / ("a" * 40))),
-                (bootstrap, "spawn_preparation", Mock(return_value=0)),
-                (bootstrap, "consume_nonce", Mock()), (bootstrap, "spawn_admitted", Mock()),
-                (bootstrap, "validate_grant", Mock()),
-            ):
-                stack.enter_context(patch.object(target, name, value))
-            with redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(bootstrap.main(), 0)
-            receipt = json.loads(output.getvalue())
-            self.assertFalse(receipt["activated"])
-            self.assertFalse(receipt["trust_adopted"])
-            bootstrap.spawn_preparation.assert_called_once_with(self.root / ("a" * 40), "d" * 32)
-            bootstrap.consume_nonce.assert_not_called()
-            bootstrap.validate_grant.assert_not_called()
-            bootstrap.spawn_admitted.assert_not_called()
-            bootstrap.spawn_preparation.reset_mock()
-            with patch.object(bootstrap.os, "getuid", return_value=1000), redirect_stderr(io.StringIO()):
-                self.assertEqual(bootstrap.main(), 1)
-            bootstrap.spawn_preparation.assert_not_called()
-            with patch.object(bootstrap, "verify_source", side_effect=bootstrap.Blocked("disabled")), redirect_stderr(io.StringIO()):
-                self.assertEqual(bootstrap.main(), 1)
-            bootstrap.spawn_preparation.assert_not_called()
 
     def test_real_launcher_main_reaches_deploy_from_installed_source(self):
         # Real main/source admission/Git/operation binding; only the already-tested

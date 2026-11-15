@@ -30,6 +30,7 @@ INSTALL = Path("/usr/local/libexec/belib-staging/operator-bootstrap.py")
 SOURCES = Path("/opt/belib-staging/sources")
 STATE = Path("/var/lib/belib-staging/operator")
 PREPARATIONS = Path("/home/hiroyuki/.local/state/belib-staging/retained-upgrades")
+TLS_COMPLETIONS = Path("/var/lib/belib-staging/tls-serve")
 PUBLIC_KEY = b"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAw1k8oqGkMOUb8KJb6thJY5GUtENwWuLGvWrKi6oBXaA=\n-----END PUBLIC KEY-----\n"
 PUBLIC_FINGERPRINT = "8f49fad277be0d1c05bf0b75246a5895a8b3489ddaaeef4f43a3e8b90e25e629"
 TARGET = {"repository": "hiroyuki9614/book_library", "pull_request": 103,
@@ -40,6 +41,15 @@ PRIOR_SOURCE = "6963103fd6bec332b4057457d07b890fe5c11e73"
 RETAINED_DB_ID = "9ab9d141599e8b33f51a1e4e9bcd16d66e92b9d134889014d9d9bd618b42f73d"
 MAX_GRANT = 16384
 MAX_CONFIG = 4 * 1024 * 1024
+MAX_TLS_COMPLETION = 16384
+TLS_COMPLETION_SCHEMA = "belib-tls-owner-completion/v1"
+TLS_COMPLETION_FIELDS = {
+    "schema", "owner_nonce", "plan_sha256", "prepare_receipt_sha256",
+    "upgrade_receipt_nonce", "upgrade_receipt_sha256", "source_sha", "operation_id", "project",
+    "previous_nginx_id", "nginx_id", "nginx_configuration_sha256", "nginx_image_id",
+    "nginx_network_ids", "tls_config_sha256", "certificate_sha256", "unchanged_runtime_sha256",
+    "approval_nonce", "evidence_sha256", "serve_config_sha256", "serve_etag", "completed_at", "status",
+}
 
 
 class Blocked(RuntimeError):
@@ -259,6 +269,15 @@ def _result_path(nonce):
 
 def expected_retained_runtime(config):
     plan = config["cutover_plan"]
+    authorities = config.get("authorities")
+    if (not isinstance(authorities, dict) or set(authorities) != {"restore", "network", "roots"}
+            or any(not isinstance(pin, dict) or set(pin) != {"issuer", "public_key_pem", "fingerprint"}
+                   or not isinstance(pin.get("issuer"), str) or not pin["issuer"]
+                   or not isinstance(pin.get("public_key_pem"), str) or not pin["public_key_pem"]
+                   or not isinstance(pin.get("fingerprint"), str)
+                   or not re.fullmatch(r"[0-9a-f]{64}", pin["fingerprint"])
+                   for pin in authorities.values())):
+        raise Blocked("Retained authority pins are malformed")
     public_plan = {"cutover_plan": plan, "candidate_database": config["candidate_database"],
                    "source_database": config["source_database"]}
     value = {"project": TARGET["project"] + "-upgrade-" + plan["operation_id"],
@@ -271,6 +290,7 @@ def expected_retained_runtime(config):
                                       "books": TARGET["project"] + "_staging-book-files"},
                           "stopped_application_ids": [plan["old"][service]["id"] for service in ("backend", "frontend", "nginx")]},
              "port": plan["port"],
+             "authority_pins_sha256": hashlib.sha256(canonical(authorities)).hexdigest(),
              "plan_sha256": hashlib.sha256(canonical(public_plan)).hexdigest()}
     return value
 
@@ -320,6 +340,60 @@ def read_result(nonce):
             or result.get("operation") not in {"deploy", "resume-ingress", "upgrade-retained"}):
         raise Blocked("Stored operation result is invalid")
     return result
+
+
+def _tls_completion_path(owner_nonce):
+    if not isinstance(owner_nonce, str) or not re.fullmatch(r"[0-9a-f]{64}", owner_nonce):
+        raise Blocked("TLS completion nonce is malformed")
+    trusted_path(TLS_COMPLETIONS, directory=True)
+    if stat.S_IMODE(TLS_COMPLETIONS.stat().st_mode) != 0o700:
+        raise Blocked("TLS completion directory must be root-only")
+    return TLS_COMPLETIONS / (owner_nonce + ".complete.json")
+
+
+def read_tls_receipt(owner_nonce):
+    """Read one exact root-owned TLS completion without scanning or mutating state."""
+    path = _tls_completion_path(owner_nonce)
+    raw = read_regular(path, MAX_TLS_COMPLETION, trusted=True)
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise Blocked("TLS completion record metadata is unsafe")
+    value = parse(raw, MAX_TLS_COMPLETION)
+    if (not isinstance(value, dict) or set(value) != TLS_COMPLETION_FIELDS
+            or canonical(value) != raw or value.get("schema") != TLS_COMPLETION_SCHEMA
+            or value.get("owner_nonce") != owner_nonce or value.get("status") != "complete"):
+        raise Blocked("TLS completion fields, encoding, or identity are invalid")
+    for field in ("plan_sha256", "prepare_receipt_sha256", "upgrade_receipt_nonce", "upgrade_receipt_sha256",
+                  "nginx_configuration_sha256", "tls_config_sha256", "certificate_sha256",
+                  "unchanged_runtime_sha256", "approval_nonce", "evidence_sha256", "serve_config_sha256"):
+        if not isinstance(value[field], str) or not re.fullmatch(r"[0-9a-f]{64}", value[field]):
+            raise Blocked("TLS completion digest or nonce is malformed")
+    if (not isinstance(value["source_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", value["source_sha"])
+            or not isinstance(value["operation_id"], str) or not re.fullmatch(r"[0-9a-f]{32}", value["operation_id"])
+            or value["project"] != TARGET["project"] + "-upgrade-" + value["operation_id"]):
+        raise Blocked("TLS completion project/source identity is invalid")
+    for field in ("previous_nginx_id", "nginx_id"):
+        if not isinstance(value[field], str) or not re.fullmatch(r"[0-9a-f]{64}", value[field]):
+            raise Blocked("TLS completion nginx identity is malformed")
+    if value["nginx_id"] == value["previous_nginx_id"]:
+        raise Blocked("TLS completion nginx transition is empty")
+    if (not isinstance(value["nginx_image_id"], str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["nginx_image_id"])):
+        raise Blocked("TLS completion nginx image identity is malformed")
+    networks = value["nginx_network_ids"]
+    expected_networks = {value["project"] + "_isolated", value["project"] + "_ingress"}
+    if (not isinstance(networks, dict) or set(networks) != expected_networks
+            or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item)
+                   for item in networks.values())):
+        raise Blocked("TLS completion network identities are malformed")
+    etag = value["serve_etag"]
+    if (not isinstance(etag, str) or not etag or len(etag) > 256
+            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in etag)):
+        raise Blocked("TLS completion Serve ETag is malformed")
+    if type(value["completed_at"]) is not int or value["completed_at"] <= 0:
+        raise Blocked("TLS completion timestamp is malformed")
+    return value
 
 
 def spawn_admitted(root, grant, retained_config=None):
@@ -405,6 +479,7 @@ def main():
     request = parser.add_mutually_exclusive_group(required=True)
     request.add_argument("--grant", type=Path)
     request.add_argument("--receipt")
+    request.add_argument("--tls-receipt", metavar="OWNER_NONCE")
     request.add_argument("--prepare-retained", metavar="OPERATION_ID",
                          help="explicit operator preparation only; does not sign, adopt or activate an upgrade")
     args = parser.parse_args()
@@ -420,6 +495,9 @@ def main():
         trusted_path(Path("/usr/bin/python3").resolve())
         if args.receipt is not None:
             print(canonical(read_result(args.receipt)).decode())
+            return 0
+        if args.tls_receipt is not None:
+            print(canonical(read_tls_receipt(args.tls_receipt)).decode())
             return 0
         config = parse(read_regular(CONFIG, MAX_CONFIG, trusted=True), MAX_CONFIG)
         root = verify_source(config)

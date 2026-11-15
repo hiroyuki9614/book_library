@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import base64
 import contextlib
+import ctypes
 import fcntl
 import hashlib
 import http.client
@@ -13,6 +14,7 @@ import json
 import os
 import re
 import signal
+import secrets
 import socket
 import ssl
 import stat
@@ -33,9 +35,29 @@ JOURNAL = Path("/var/lib/belib-staging/tls-serve")
 CA_FILE = "/etc/ssl/certs/ca-certificates.crt"
 MAX_CONFIG = 1024 * 1024
 PLAN_SCHEMA = "belib-tls-owner-retirement-plan/v1"
+PLAN_SCHEMA_V2 = "belib-tls-owner-retirement-plan/v2"
 PLAN_DISPOSITION = "retire-old-fedora-bri-image-publication-handler-only"
 PLAN_KEYS = {"schema", "disposition", "source_sha", "prior_application_sha", "retained_state_sha256", "serve_config_sha256",
              "serve_etag", "certificate_sha256", "tls_config_sha256", "nonce", "expires_at"}
+PLAN_KEYS_V2 = PLAN_KEYS | {"upgrade_receipt_nonce", "upgrade_receipt_sha256", "operation_id", "project"}
+PREPARE_SCHEMA_V2 = "belib-staging-tls-prepare-receipt/v2"
+PREPARE_KEYS_V2 = {"schema", "plan_sha256", "retained_state_sha256", "nginx_id", "source_sha",
+                   "tls_config_sha256", "certificate_sha256", "approval_nonce", "evidence_sha256",
+                   "prepared", "owner_nonce", "upgrade_receipt_nonce", "upgrade_receipt_sha256",
+                   "operation_id", "project", "previous_nginx_id", "nginx_configuration_sha256",
+                   "nginx_image_id", "nginx_network_ids", "unchanged_runtime_sha256"}
+COMPLETION_SCHEMA = "belib-tls-owner-completion/v1"
+COMPLETION_KEYS = {"schema", "owner_nonce", "plan_sha256", "prepare_receipt_sha256",
+                   "upgrade_receipt_nonce", "upgrade_receipt_sha256", "source_sha", "operation_id",
+                   "project", "previous_nginx_id", "nginx_id", "nginx_configuration_sha256",
+                   "nginx_image_id", "nginx_network_ids", "tls_config_sha256", "certificate_sha256",
+                   "unchanged_runtime_sha256", "approval_nonce", "evidence_sha256",
+                   "serve_config_sha256", "serve_etag", "completed_at", "status"}
+UPGRADE_RESULTS = Path("/var/lib/belib-staging/operator")
+UPGRADE_PROJECT = "belib-isolated-i5"
+UPGRADE_RETAINED_DATABASE_ID = "9ab9d141599e8b33f51a1e4e9bcd16d66e92b9d134889014d9d9bd618b42f73d"
+UPGRADE_PROJECT = "belib-isolated-i5"
+UPGRADE_RETAINED_DATABASE_ID = "9ab9d141599e8b33f51a1e4e9bcd16d66e92b9d134889014d9d9bd618b42f73d"
 TAILSCALE_BUILD = "1.104.5-t788384763-gd9218e278"
 PRIOR_APP_SHA = "81256268276d7ead95029849037f69ec6beec202"
 
@@ -89,33 +111,170 @@ def pairs_no_duplicates(pairs):
 
 def strict_json(raw: bytes):
     try:
-        return json.loads(raw.decode("utf-8", "strict"), object_pairs_hook=pairs_no_duplicates)
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        return json.loads(raw.decode("utf-8", "strict"), object_pairs_hook=pairs_no_duplicates,
+                          parse_constant=lambda value: (_ for _ in ()).throw(Stop("Non-finite JSON value")))
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
         raise Stop("Malformed bounded JSON") from exc
 
 
 def canonical(value) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                      allow_nan=False).encode()
 
 
-def validate_plan(plan, now=None):
+def validate_plan(plan, now=None, *, allow_expired=False):
     now = int(time.time()) if now is None else now
-    if (not isinstance(plan, dict) or set(plan) != PLAN_KEYS or plan["schema"] != PLAN_SCHEMA
-            or plan["disposition"] != PLAN_DISPOSITION):
+    if not isinstance(plan, dict) or plan.get("disposition") != PLAN_DISPOSITION:
         raise Stop("Plan schema is not the fixed owner contract")
-    if plan["prior_application_sha"] != PRIOR_APP_SHA:
+    version = plan.get("schema")
+    keys = PLAN_KEYS_V2 if version == PLAN_SCHEMA_V2 else PLAN_KEYS
+    if set(plan) != keys or version not in {PLAN_SCHEMA, PLAN_SCHEMA_V2}:
+        raise Stop("Plan fields do not match the fixed owner contract")
+    if version == PLAN_SCHEMA and plan["prior_application_sha"] != PRIOR_APP_SHA:
         raise Stop("Live application revision differs from the approved TLS baseline")
     for field in ("source_sha",):
         if not isinstance(plan[field], str) or not re.fullmatch(r"[0-9a-f]{40}", plan[field]):
             raise Stop("Malformed source identity")
-    for field in PLAN_KEYS - {"schema", "disposition", "source_sha", "prior_application_sha", "expires_at", "nonce"}:
+    for field in ("retained_state_sha256", "serve_config_sha256", "certificate_sha256", "tls_config_sha256"):
         if not isinstance(plan[field], str) or not re.fullmatch(r"[0-9a-f]{64}", plan[field]):
             raise Stop("Malformed plan evidence digest")
-    if type(plan["expires_at"]) is not int or not now < plan["expires_at"] <= now + 1800:
+    if type(plan["expires_at"]) is not int or (not allow_expired and not now < plan["expires_at"] <= now + 1800):
         raise Stop("Owner plan is expired or outside its thirty-minute window")
+    if allow_expired and plan["expires_at"] <= 0:
+        raise Stop("Owner plan expiry is malformed")
     if not isinstance(plan["nonce"], str) or not re.fullmatch(r"[0-9a-f]{64}", plan["nonce"]):
         raise Stop("Malformed one-use plan nonce")
+    if version == PLAN_SCHEMA_V2:
+        if (plan["source_sha"] != plan["prior_application_sha"]
+                or not isinstance(plan["upgrade_receipt_nonce"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", plan["upgrade_receipt_nonce"])
+                or not isinstance(plan["upgrade_receipt_sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", plan["upgrade_receipt_sha256"])
+                or not isinstance(plan["operation_id"], str)
+                or not re.fullmatch(r"[0-9a-f]{32}", plan["operation_id"])
+                or plan["project"] != UPGRADE_PROJECT + "-upgrade-" + plan["operation_id"]):
+            raise Stop("TLS v2 project or retained-upgrade identity is invalid")
     return plan
+
+
+def _sha(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _safe_root_path(directory):
+    current = Path("/")
+    for part in Path(directory).parts[1:]:
+        current = current / part
+        try:
+            info = current.lstat()
+        except OSError as error:
+            raise Stop("Fixed root receipt parent is unavailable") from error
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise Stop("Fixed root receipt parent is unsafe")
+
+
+def _read_root_regular(path, limit):
+    try:
+        before = path.lstat()
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o600 or before.st_size <= 0 or before.st_size > limit):
+            raise Stop("Fixed root upgrade receipt metadata is unsafe")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            opened = os.fstat(fd)
+            if opened.st_ino != before.st_ino or opened.st_dev != before.st_dev or opened.st_size != before.st_size:
+                raise Stop("Fixed root upgrade receipt changed during open")
+            raw = b""
+            while len(raw) <= limit:
+                chunk = os.read(fd, min(65536, limit + 1 - len(raw)))
+                if not chunk:
+                    break
+                raw += chunk
+            if len(raw) != opened.st_size or len(raw) > limit:
+                raise Stop("Fixed root upgrade receipt changed during read")
+            return raw
+        finally:
+            os.close(fd)
+    except OSError as error:
+        raise Stop("Fixed root upgrade receipt is unavailable or unsafe") from error
+
+
+def _root_unchanged_digest_from_upgrade(plan):
+    path = UPGRADE_RESULTS / (plan["upgrade_receipt_nonce"] + ".result.json")
+    _safe_root_path(path.parent)
+    result = strict_json(_read_root_regular(path, 4 * 1024 * 1024))
+    if digest(canonical(result)) != plan["upgrade_receipt_sha256"]:
+        raise Stop("Fixed root upgrade receipt digest differs from the owner plan")
+    if (not isinstance(result, dict) or result.get("schema") != "belib-staging-operation-result/v1"
+            or result.get("operation") != "upgrade-retained" or result.get("exit_code") != 0
+            or result.get("nonce_consumed") is not True or result.get("nonce") != plan["upgrade_receipt_nonce"]
+            or result.get("source_sha") != plan["source_sha"] or result.get("host") != "ubuntu-worker"
+            or result.get("principal") != "hiroyuki" or type(result.get("uid")) is not int
+            or result.get("uid") != 1000 or result.get("project") != UPGRADE_PROJECT
+            or type(result.get("completed_at")) is not int or result["completed_at"] <= 0
+            or not _sha(result.get("grant_sha256")) or not isinstance(result.get("expected_runtime"), dict)):
+        raise Stop("Fixed root upgrade receipt does not bind the TLS owner plan")
+    runtime = result["expected_runtime"]
+    if runtime.get("project") != plan["project"] or runtime.get("operation_id") != plan["operation_id"]:
+        raise Stop("Root upgrade receipt project or operation differs from the owner plan")
+    if not _sha(runtime.get("plan_sha256")) or not isinstance(runtime.get("services"), dict):
+        raise Stop("Root upgrade runtime pins are malformed")
+    plan_object = runtime.get("plan")
+    if not isinstance(plan_object, dict) or hashlib.sha256(canonical(plan_object)).hexdigest() != runtime["plan_sha256"]:
+        raise Stop("Root upgrade runtime plan digest is invalid")
+    cutover = plan_object.get("cutover_plan")
+    if (not isinstance(cutover, dict) or cutover.get("source_sha") != plan["source_sha"]
+            or cutover.get("operation_id") != plan["operation_id"]
+            or not isinstance(cutover.get("old"), dict) or not isinstance(cutover.get("new"), dict)
+            or cutover["old"].get("nginx", {}).get("id") == cutover["new"].get("nginx", {}).get("id")
+            or runtime["services"].get("nginx") != cutover["new"]["nginx"].get("id")):
+        raise Stop("Root upgrade nginx transition pins are malformed")
+    stable = copy.deepcopy(runtime)
+    del stable["services"]["nginx"]
+    del stable["plan"]["cutover_plan"]["new"]["nginx"]["id"]
+    del stable["plan"]["cutover_plan"]["new"]["nginx"]["configuration_sha256"]
+    del stable["plan_sha256"]
+    return digest(canonical(stable)), runtime
+
+
+def _validate_prepare_v2(prepared_raw, prepared_sha256, plan, plan_sha256):
+    if not isinstance(prepared_raw, bytes) or not prepared_raw or len(prepared_raw) > 16384:
+        raise Stop("Prepared TLS receipt is empty or exceeds its fixed bound")
+    if not _sha(prepared_sha256) or digest(prepared_raw) != prepared_sha256:
+        raise Stop("Prepared TLS receipt bytes do not match the reviewed loader digest")
+    prepared = strict_json(prepared_raw)
+    if (not isinstance(prepared, dict) or set(prepared) != PREPARE_KEYS_V2
+            or prepared.get("schema") != PREPARE_SCHEMA_V2 or canonical(prepared) != prepared_raw):
+        raise Stop("Prepared TLS receipt does not match the exact v2 schema")
+    links = {"plan_sha256": plan_sha256, "retained_state_sha256": plan["retained_state_sha256"],
+             "source_sha": plan["source_sha"], "tls_config_sha256": plan["tls_config_sha256"],
+             "certificate_sha256": plan["certificate_sha256"], "owner_nonce": plan["nonce"],
+             "upgrade_receipt_nonce": plan["upgrade_receipt_nonce"],
+             "upgrade_receipt_sha256": plan["upgrade_receipt_sha256"],
+             "operation_id": plan["operation_id"], "project": plan["project"]}
+    if any(prepared.get(key) != value for key, value in links.items()) or prepared.get("prepared") is not True:
+        raise Stop("Prepared TLS receipt does not bind the adopted plan and root upgrade")
+    for field in ("approval_nonce", "evidence_sha256", "unchanged_runtime_sha256", "nginx_configuration_sha256"):
+        if not _sha(prepared.get(field)):
+            raise Stop("Prepared TLS receipt has malformed evidence digests")
+    for field in ("nginx_id", "previous_nginx_id"):
+        if not _sha(prepared.get(field)):
+            raise Stop("Prepared TLS receipt has malformed nginx IDs")
+    if prepared["nginx_id"] == prepared["previous_nginx_id"]:
+        raise Stop("Prepared TLS receipt does not describe a nginx transition")
+    if not isinstance(prepared.get("nginx_image_id"), str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", prepared["nginx_image_id"]):
+        raise Stop("Prepared TLS receipt has malformed nginx image identity")
+    networks = prepared.get("nginx_network_ids")
+    expected_names = {plan["project"] + "_isolated", plan["project"] + "_ingress"}
+    if (not isinstance(networks, dict) or set(networks) != expected_names
+            or any(not _sha(value) for value in networks.values())):
+        raise Stop("Prepared TLS receipt nginx network pins are malformed")
+    unchanged, runtime = _root_unchanged_digest_from_upgrade(plan)
+    original_nginx = runtime["services"]["nginx"]
+    if (prepared["unchanged_runtime_sha256"] != unchanged or prepared["previous_nginx_id"] != original_nginx):
+        raise Stop("Prepared TLS receipt stable-runtime or original nginx pin differs from root upgrade pins")
+    return prepared
 
 
 def config(raw: bytes):
@@ -346,7 +505,7 @@ def operation_lock():
         os.close(fd)
 
 
-def journal_start(plan, original, etag, plan_sha256):
+def journal_start(plan, original, etag, plan_sha256, adoption=None):
     ensure_journal_dir()
     nonce_path = JOURNAL / (plan["nonce"] + ".used")
     journal_path = JOURNAL / (plan["nonce"] + ".jsonl")
@@ -377,6 +536,8 @@ def journal_start(plan, original, etag, plan_sha256):
             initial = {"schema": "belib-tls-owner-journal/v1", "plan_sha256": plan_sha256,
                        "original_config_b64": base64.b64encode(original).decode("ascii"),
                        "original_sha256": digest(original), "original_etag": etag, "event": "prepared"}
+            if adoption is not None:
+                initial["adoption"] = adoption
             _write_all(fd, canonical(initial) + b"\n")
             os.fsync(fd)
             dirfd = os.open(JOURNAL, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
@@ -396,6 +557,200 @@ def journal_event(journal, event, **fields):
     fd, path = journal
     _write_all(fd, canonical({"event": event, **fields}) + b"\n")
     os.fsync(fd)
+
+
+def _completion_path(owner_nonce):
+    if not isinstance(owner_nonce, str) or not re.fullmatch(r"[0-9a-f]{64}", owner_nonce):
+        raise Stop("Malformed owner completion nonce")
+    return JOURNAL / (owner_nonce + ".complete.json")
+
+
+def _read_completion(owner_nonce):
+    path = _completion_path(owner_nonce)
+    try:
+        before = path.lstat()
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o600 or before.st_size <= 0 or before.st_size > 16384):
+            raise Stop("TLS completion record metadata is unsafe")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            opened = os.fstat(fd)
+            if opened.st_ino != before.st_ino or opened.st_dev != before.st_dev or opened.st_size != before.st_size:
+                raise Stop("TLS completion record changed while opening")
+            raw = b""
+            while len(raw) <= 16384:
+                chunk = os.read(fd, min(65536, 16385 - len(raw)))
+                if not chunk:
+                    break
+                raw += chunk
+            if len(raw) != opened.st_size or len(raw) > 16384:
+                raise Stop("TLS completion record changed while reading")
+        finally:
+            os.close(fd)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise Stop("TLS completion record is unavailable or unsafe") from error
+    value = strict_json(raw)
+    if (not isinstance(value, dict) or set(value) != COMPLETION_KEYS
+            or value.get("schema") != COMPLETION_SCHEMA or value.get("owner_nonce") != owner_nonce
+            or value.get("status") != "complete" or type(value.get("completed_at")) is not int
+            or value["completed_at"] <= 0
+            or canonical(value) != raw):
+        raise Stop("TLS completion record does not match its immutable schema")
+    for field in ("plan_sha256", "prepare_receipt_sha256", "upgrade_receipt_nonce", "upgrade_receipt_sha256",
+                  "nginx_configuration_sha256", "tls_config_sha256", "certificate_sha256",
+                  "unchanged_runtime_sha256", "approval_nonce", "evidence_sha256", "serve_config_sha256"):
+        if not _sha(value.get(field)):
+            raise Stop("TLS completion has malformed digest or nonce links")
+    if (not isinstance(value.get("source_sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", value["source_sha"])
+            or not isinstance(value.get("operation_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", value["operation_id"])
+            or value.get("project") != UPGRADE_PROJECT + "-upgrade-" + value["operation_id"]
+            or any(not _sha(value.get(field)) for field in ("previous_nginx_id", "nginx_id"))
+            or value["previous_nginx_id"] == value["nginx_id"]
+            or not isinstance(value.get("nginx_image_id"), str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["nginx_image_id"])):
+        raise Stop("TLS completion target or nginx identities are malformed")
+    expected_networks = {value["project"] + "_isolated", value["project"] + "_ingress"}
+    if (not isinstance(value.get("nginx_network_ids"), dict)
+            or set(value["nginx_network_ids"]) != expected_networks
+            or any(not _sha(network_id) for network_id in value["nginx_network_ids"].values())
+            or not isinstance(value.get("serve_etag"), str) or not value["serve_etag"]
+            or len(value["serve_etag"]) > 256
+            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in value["serve_etag"])):
+        raise Stop("TLS completion network or Serve identity is malformed")
+    return value
+
+
+def _completion_value(plan, plan_sha256, prepare_sha256, prepared, serve_result):
+    return {
+        "schema": COMPLETION_SCHEMA, "owner_nonce": plan["nonce"], "plan_sha256": plan_sha256,
+        "prepare_receipt_sha256": prepare_sha256, "upgrade_receipt_nonce": plan["upgrade_receipt_nonce"],
+        "upgrade_receipt_sha256": plan["upgrade_receipt_sha256"], "source_sha": plan["source_sha"],
+        "operation_id": plan["operation_id"], "project": plan["project"],
+        "previous_nginx_id": prepared["previous_nginx_id"], "nginx_id": prepared["nginx_id"],
+        "nginx_configuration_sha256": prepared["nginx_configuration_sha256"],
+        "nginx_image_id": prepared["nginx_image_id"], "nginx_network_ids": prepared["nginx_network_ids"],
+        "tls_config_sha256": plan["tls_config_sha256"], "certificate_sha256": plan["certificate_sha256"],
+        "unchanged_runtime_sha256": prepared["unchanged_runtime_sha256"],
+        "approval_nonce": prepared["approval_nonce"], "evidence_sha256": prepared["evidence_sha256"],
+        "serve_config_sha256": serve_result["serve_config_sha256"], "serve_etag": serve_result["serve_etag"],
+        "completed_at": int(time.time()), "status": "complete",
+    }
+
+
+def _publish_completion(value):
+    ensure_journal_dir()
+    final = _completion_path(value["owner_nonce"])
+    existing = _read_completion(value["owner_nonce"])
+    if existing is not None:
+        if not all(existing.get(key) == expected for key, expected in value.items() if key != "completed_at"):
+            raise Stop("A conflicting immutable TLS completion already exists")
+        return existing
+    temporary = JOURNAL / ("." + value["owner_nonce"] + "." + secrets.token_hex(16) + ".tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        fd = os.open(temporary, flags, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1:
+                raise Stop("Temporary TLS completion metadata is unsafe")
+            _write_all(fd, canonical(value))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise Stop("Atomic no-replace completion publication is unavailable")
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+        if renameat2(-100, os.fsencode(temporary), -100, os.fsencode(final), 1) != 0:
+            error = ctypes.get_errno()
+            if error == 17:
+                current = _read_completion(value["owner_nonce"])
+                if current is not None and all(current.get(key) == expected for key, expected in value.items()
+                                               if key != "completed_at"):
+                    return current
+            raise OSError(error, os.strerror(error))
+        dirfd = os.open(JOURNAL, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
+        result = _read_completion(value["owner_nonce"])
+        if result != value:
+            raise Stop("Published TLS completion differs from its verified bytes")
+        return result
+    except OSError as error:
+        raise Stop("Atomic immutable TLS completion could not be published") from error
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _recover_v2_completion(plan, plan_sha256, prepare_sha256, prepared):
+    path = JOURNAL / (plan["nonce"] + ".jsonl")
+    raw = _read_root_regular(path, 1024 * 1024)
+    rows = []
+    chunks = raw.split(b"\n")
+    complete_lines = chunks[:-1]  # A non-newline-terminated tail is not a durable event.
+    if not complete_lines:
+        raise Stop("TLS journal has no complete newline-terminated records")
+    for line in complete_lines:
+        if not line:
+            raise Stop("TLS journal contains an empty durable record")
+        rows.append(strict_json(line))
+    if not rows or not isinstance(rows[0], dict):
+        raise Stop("TLS journal has no durable prepared intent")
+    initial = rows[0]
+    adoption = initial.get("adoption")
+    expected_adoption = {"prepare_receipt_sha256": prepare_sha256,
+                         "upgrade_receipt_nonce": plan["upgrade_receipt_nonce"],
+                         "upgrade_receipt_sha256": plan["upgrade_receipt_sha256"],
+                         "source_sha": plan["source_sha"], "operation_id": plan["operation_id"],
+                         "project": plan["project"], "previous_nginx_id": prepared["previous_nginx_id"],
+                         "nginx_id": prepared["nginx_id"],
+                         "nginx_configuration_sha256": prepared["nginx_configuration_sha256"],
+                         "nginx_image_id": prepared["nginx_image_id"],
+                         "nginx_network_ids": prepared["nginx_network_ids"],
+                         "unchanged_runtime_sha256": prepared["unchanged_runtime_sha256"]}
+    if (initial.get("schema") != "belib-tls-owner-journal/v1" or initial.get("event") != "prepared"
+            or initial.get("plan_sha256") != plan_sha256 or adoption != expected_adoption):
+        raise Stop("TLS journal does not match the exact adopted plan and preparation receipt")
+    try:
+        original = base64.b64decode(initial["original_config_b64"], validate=True)
+    except (KeyError, ValueError, TypeError) as error:
+        raise Stop("TLS journal baseline encoding is invalid") from error
+    if (digest(original) != initial.get("original_sha256")
+            or digest(original) != plan["serve_config_sha256"]
+            or initial.get("original_etag") != plan["serve_etag"]):
+        raise Stop("TLS journal baseline differs from the owner plan")
+    commits = [row for row in rows[1:] if isinstance(row, dict)
+               and row.get("event") == "retirement-committed"
+               and row.get("phase") == "add-custom-tls"]
+    if not commits:
+        raise Stop("TLS journal has no durable final Serve commit to reconcile")
+    commit = commits[-1]
+    final = activate_custom_tls(remove_legacy_handler(original))
+    api = LocalAPI()
+    api.status()
+    live, etag = api.get()
+    if (canonical(config(live)) != canonical(config(final))
+            or digest(live) != commit.get("config_sha256") or etag != commit.get("etag")):
+        raise Stop("Live Serve state does not match the exact journal-owned final state")
+    http_18083()
+    pin = plan["certificate_sha256"]
+    tls_request(443, CUSTOM, "/health", connect_host=SELF_IP, fingerprint=pin)
+    tls_unknown_rejected(443, connect_host=SELF_IP)
+    tls_no_sni_rejected(443, connect_host=SELF_IP)
+    tls_legacy_sni_rejected(443, connect_host=SELF_IP)
+    tls_self_sni_rejected(443, connect_host=SELF_IP)
+    tls_request(443, CUSTOM, "/health", connect_host=SELF_IP, fingerprint=pin)
+    return {"status": "complete", "serve_config_sha256": digest(live), "serve_etag": etag}
 
 
 @contextlib.contextmanager
@@ -480,7 +835,7 @@ def _rollback(api, original, owned, journal):
     journal_event(journal, "restored", config_sha256=digest(restored), etag=restored_etag)
 
 
-def _serve_transaction(plan, plan_sha256):
+def _serve_transaction(plan, plan_sha256, adoption=None):
     api = LocalAPI()
     api.status()
     original, etag = api.get()
@@ -499,7 +854,8 @@ def _serve_transaction(plan, plan_sha256):
     tls_request(18443, CUSTOM, "/health", fingerprint=pin)
 
     validate_plan(plan)
-    journal = journal_start(plan, original, etag, plan_sha256)
+    journal = (journal_start(plan, original, etag, plan_sha256) if adoption is None
+               else journal_start(plan, original, etag, plan_sha256, adoption=adoption))
     current, current_etag = original, etag
     owned = []
     inflight = None
@@ -553,8 +909,8 @@ def _serve_transaction(plan, plan_sha256):
         os.close(journal[0])
 
 
-def run(plan_raw: bytes, expected_plan_sha256: str):
-    """Execute only the exact in-memory plan whose digest the reviewed loader pinned."""
+def run(plan_raw: bytes, expected_plan_sha256: str, prepared_raw=None, prepared_sha256=None):
+    """Execute a digest-pinned plan; v1 retains its original two-argument API."""
     _check_owner_identity()
     if not isinstance(plan_raw, bytes) or len(plan_raw) > 16384:
         raise Stop("Plan input exceeds the fixed byte bound")
@@ -563,7 +919,9 @@ def run(plan_raw: bytes, expected_plan_sha256: str):
     observed_sha = digest(plan_raw)
     if observed_sha != expected_plan_sha256:
         raise Stop("In-memory plan bytes do not match the reviewed loader digest")
-    plan = validate_plan(strict_json(plan_raw))
+    parsed = strict_json(plan_raw)
+    is_v2 = isinstance(parsed, dict) and parsed.get("schema") == PLAN_SCHEMA_V2
+    plan = validate_plan(parsed, allow_expired=is_v2)
     if canonical(plan) != plan_raw:
         raise Stop("Plan bytes must be canonical JSON")
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
@@ -573,7 +931,49 @@ def run(plan_raw: bytes, expected_plan_sha256: str):
         for sig in previous:
             signal.signal(sig, interrupt)
         with operation_lock():
-            return _serve_transaction(plan, observed_sha)
+            if not is_v2:
+                return _serve_transaction(plan, observed_sha)
+            prepared = _validate_prepare_v2(prepared_raw, prepared_sha256, plan, observed_sha)
+            existing = _read_completion(plan["nonce"])
+            if existing is not None:
+                expected_fields = {
+                    "plan_sha256": observed_sha, "prepare_receipt_sha256": prepared_sha256,
+                    "upgrade_receipt_nonce": plan["upgrade_receipt_nonce"],
+                    "upgrade_receipt_sha256": plan["upgrade_receipt_sha256"], "source_sha": plan["source_sha"],
+                    "operation_id": plan["operation_id"], "project": plan["project"],
+                    "previous_nginx_id": prepared["previous_nginx_id"], "nginx_id": prepared["nginx_id"],
+                    "nginx_configuration_sha256": prepared["nginx_configuration_sha256"],
+                    "nginx_image_id": prepared["nginx_image_id"], "nginx_network_ids": prepared["nginx_network_ids"],
+                    "tls_config_sha256": plan["tls_config_sha256"], "certificate_sha256": plan["certificate_sha256"],
+                    "unchanged_runtime_sha256": prepared["unchanged_runtime_sha256"],
+                    "approval_nonce": prepared["approval_nonce"], "evidence_sha256": prepared["evidence_sha256"],
+                }
+                if any(existing.get(key) != value for key, value in expected_fields.items()):
+                    raise Stop("Existing TLS completion belongs to conflicting immutable inputs")
+                return existing
+            adoption = {"prepare_receipt_sha256": prepared_sha256,
+                        "upgrade_receipt_nonce": plan["upgrade_receipt_nonce"],
+                        "upgrade_receipt_sha256": plan["upgrade_receipt_sha256"],
+                        "source_sha": plan["source_sha"], "operation_id": plan["operation_id"],
+                        "project": plan["project"], "previous_nginx_id": prepared["previous_nginx_id"],
+                        "nginx_id": prepared["nginx_id"],
+                        "nginx_configuration_sha256": prepared["nginx_configuration_sha256"],
+                        "nginx_image_id": prepared["nginx_image_id"],
+                        "nginx_network_ids": prepared["nginx_network_ids"],
+                        "unchanged_runtime_sha256": prepared["unchanged_runtime_sha256"]}
+            journal_path = JOURNAL / (plan["nonce"] + ".jsonl")
+            try:
+                journal_path.lstat()
+                prior = True
+            except FileNotFoundError:
+                prior = False
+            if prior:
+                serve_result = _recover_v2_completion(plan, observed_sha, prepared_sha256, prepared)
+            else:
+                validate_plan(plan)
+                serve_result = _serve_transaction(plan, observed_sha, adoption=adoption)
+            completion = _completion_value(plan, observed_sha, prepared_sha256, prepared, serve_result)
+            return _publish_completion(completion)
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
