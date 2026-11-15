@@ -241,6 +241,47 @@ def load_retained_config(grant):
     return value
 
 
+def verify_staging_source_access(root, fixed_entry):
+    """Check the exact worker credentials can traverse and read fixed staged code."""
+    allowed = {
+        "scripts/staging/launch-guard.py",
+        "scripts/staging/prepare-retained.py",
+    }
+    if fixed_entry not in allowed:
+        raise Blocked("Staging source access check received an unexpected fixed entry")
+    probe = (
+        "import os, stat, sys\n"
+        "root, entry = sys.argv[1], sys.argv[2]\n"
+        "if entry not in ('scripts/staging/launch-guard.py', 'scripts/staging/prepare-retained.py'): raise SystemExit(2)\n"
+        "info = os.stat(root, follow_symlinks=False)\n"
+        "if not stat.S_ISDIR(info.st_mode) or not os.access(root, os.X_OK): raise SystemExit(3)\n"
+        "path = os.path.join(root, entry)\n"
+        "fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)\n"
+        "try:\n"
+        " info = os.fstat(fd)\n"
+        " if not stat.S_ISREG(info.st_mode): raise SystemExit(3)\n"
+        "finally: os.close(fd)\n"
+    )
+    try:
+        result = subprocess.run(
+            ["/usr/bin/python3", "-I", "-B", "-c", probe, str(root), fixed_entry],
+            user=1000, group=1000, extra_groups=(),
+            env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise Blocked(
+            "Staging source access could not be verified for worker UID/GID 1000; "
+            "verify source directory traversal and fixed entry permissions"
+        ) from error
+    if result.returncode != 0:
+        raise Blocked(
+            "Staging source is not readable by worker UID/GID 1000; "
+            "verify source directory traversal and fixed entry permissions"
+        )
+
+
 def consume_nonce(grant):
     trusted_path(STATE, directory=True)
     if stat.S_IMODE(STATE.stat().st_mode) != 0o700:
@@ -508,6 +549,7 @@ def main():
             lock_fd = os.open(STATE / "project.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                verify_staging_source_access(root, "scripts/staging/prepare-retained.py")
                 code = spawn_preparation(root, args.prepare_retained)
             finally:
                 os.close(lock_fd)
@@ -523,6 +565,7 @@ def main():
         lock_fd = os.open(STATE / "project.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            verify_staging_source_access(root, "scripts/staging/launch-guard.py")
             consume_nonce(grant)
             code = spawn_admitted(root, grant, retained_config) if retained_config is not None else spawn_admitted(root, grant)
             result = write_result(grant, code, retained_config)

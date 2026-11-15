@@ -52,6 +52,24 @@ class OperatorBootstrapTests(unittest.TestCase):
                       "source_sha": "a" * 40, "operation": "deploy", "nonce": "b" * 64,
                       "evidence_sha256": "c" * 64, "issued_at": now, "expires_at": now + 300}
 
+    def main_identity(self, argv):
+        stack = ExitStack()
+        stack.enter_context(patch.object(bootstrap, "INSTALL", Path(bootstrap.__file__).resolve()))
+        stack.enter_context(patch.object(bootstrap.os, "getuid", return_value=0))
+        stack.enter_context(patch.object(bootstrap.os, "geteuid", return_value=0))
+        stack.enter_context(patch.object(bootstrap.socket, "gethostname", return_value="ubuntu-worker"))
+        stack.enter_context(patch.object(bootstrap.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1000, pw_gid=1000)))
+        stack.enter_context(patch.object(bootstrap.sys, "executable", "/usr/bin/python3"))
+        flags = SimpleNamespace(**{
+            **{name: getattr(sys.flags, name) for name in dir(sys.flags)
+               if isinstance(getattr(sys.flags, name), (int, bool))},
+            "isolated": True, "dont_write_bytecode": True,
+        })
+        stack.enter_context(patch.object(bootstrap.sys, "flags", flags))
+        stack.enter_context(patch.object(bootstrap.sys, "argv", ["operator-bootstrap.py", *argv]))
+        stack.enter_context(patch.object(bootstrap, "trusted_path"))
+        return stack
+
     def signed(self, grant=None):
         raw = bootstrap.canonical(grant or self.grant)
         source, signature = self.root / "payload", self.root / "signature"
@@ -106,6 +124,53 @@ class OperatorBootstrapTests(unittest.TestCase):
         value["signature"] = base64.b64encode(b"x" * 64).decode()
         with patch.object(bootstrap, "trusted_path"), self.assertRaises(bootstrap.Blocked):
             bootstrap.validate_grant(bootstrap.canonical(value), "a" * 40)
+
+    def test_worker_source_access_probe_uses_fixed_isolated_uid_drop(self):
+        with patch.object(bootstrap.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+            bootstrap.verify_staging_source_access(self.root, "scripts/staging/launch-guard.py")
+        argv = run.call_args.args[0]
+        kwargs = run.call_args.kwargs
+        self.assertEqual(argv[:3], ["/usr/bin/python3", "-I", "-B"])
+        self.assertEqual(argv[3], "-c")
+        self.assertIn("os.open", argv[4])
+        self.assertEqual(argv[5:], [str(self.root), "scripts/staging/launch-guard.py"])
+        self.assertEqual(kwargs["user"], 1000)
+        self.assertEqual(kwargs["group"], 1000)
+        self.assertEqual(kwargs["extra_groups"], ())
+        self.assertEqual(kwargs["env"], {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C"})
+        self.assertEqual(kwargs["timeout"], 5)
+        self.assertFalse(kwargs["check"])
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
+
+    def test_worker_source_access_probe_denial_is_generic_and_fixed(self):
+        with patch.object(bootstrap.subprocess, "run", return_value=SimpleNamespace(returncode=13)) as run:
+            with self.assertRaisesRegex(bootstrap.Blocked, "not readable by worker UID/GID 1000"):
+                bootstrap.verify_staging_source_access(self.root, "scripts/staging/prepare-retained.py")
+        self.assertEqual(run.call_args.args[0][-1], "scripts/staging/prepare-retained.py")
+        with self.assertRaisesRegex(bootstrap.Blocked, "unexpected fixed entry"):
+            bootstrap.verify_staging_source_access(self.root, "../../private.env")
+
+    @unittest.skipUnless(os.geteuid() == 0, "real UID/GID drop requires root; run in disposable rootless Docker fixture")
+    def test_real_worker_access_probe_rejects_private_source_parent_then_allows_traversable_parent(self):
+        os.chmod(self.root, 0o755)
+        source = self.root / "source"
+        source.mkdir(mode=0o700)
+        entry = source / "scripts/staging/launch-guard.py"
+        entry.parent.mkdir(parents=True)
+        entry.parent.parent.chmod(0o755)
+        entry.parent.chmod(0o755)
+        entry.write_text("# fixed fixture\n")
+        entry.chmod(0o644)
+        prepared = source / "scripts/staging/prepare-retained.py"
+        prepared.write_text("# fixed fixture\n")
+        prepared.chmod(0o644)
+        with self.assertRaisesRegex(bootstrap.Blocked, "not readable by worker"):
+            bootstrap.verify_staging_source_access(source, "scripts/staging/launch-guard.py")
+        source.chmod(0o711)
+        bootstrap.verify_staging_source_access(source, "scripts/staging/launch-guard.py")
+        bootstrap.verify_staging_source_access(source, "scripts/staging/prepare-retained.py")
 
     def test_nonce_is_durable_one_use(self):
         state = self.root / "state"
@@ -263,6 +328,60 @@ class OperatorBootstrapTests(unittest.TestCase):
             self.assertEqual(bootstrap.main(), 1)
         consume.assert_not_called()
         spawn.assert_not_called()
+
+    def test_denied_worker_access_preserves_grant_nonce_spawn_and_result(self):
+        grant_path = self.root / "grant.json"
+        grant_path.write_bytes(self.signed())
+        config_path = self.root / "config.json"
+        config_path.write_bytes(bootstrap.canonical({
+            "schema": "belib-staging-operator/v1", "enabled": True,
+            "source_sha": "a" * 40, "manifest": {"fixture.py": {"sha256": "d" * 64, "mode": 0o644}},
+        }))
+        consume, spawn, write = Mock(), Mock(), Mock()
+        with patch.object(bootstrap, "CONFIG", config_path), \
+                patch.object(bootstrap, "verify_source", return_value=self.root), \
+                patch.object(bootstrap, "verify_staging_source_access",
+                             side_effect=bootstrap.Blocked("Staging source is not readable by worker UID/GID 1000; verify source directory traversal and fixed entry permissions")), \
+                patch.object(bootstrap, "consume_nonce", consume), \
+                patch.object(bootstrap, "spawn_admitted", spawn), \
+                patch.object(bootstrap, "write_result", write), \
+                redirect_stderr(io.StringIO()), self.main_identity(["--grant", str(grant_path)]):
+            self.assertEqual(bootstrap.main(), 1)
+        consume.assert_not_called()
+        spawn.assert_not_called()
+        write.assert_not_called()
+        self.assertFalse((bootstrap.STATE / (self.grant["nonce"] + ".used")).exists())
+        self.assertFalse((bootstrap.STATE / (self.grant["nonce"] + ".result.json")).exists())
+
+    def test_denied_worker_access_blocks_retained_prepare_before_spawn(self):
+        config_path = self.root / "config.json"
+        config_path.write_bytes(bootstrap.canonical({
+            "schema": "belib-staging-operator/v1", "enabled": True,
+            "source_sha": "a" * 40, "manifest": {"fixture.py": {"sha256": "d" * 64, "mode": 0o644}},
+        }))
+        spawn = Mock()
+        operation_id = "e" * 32
+        with patch.object(bootstrap, "CONFIG", config_path), \
+                patch.object(bootstrap, "verify_source", return_value=self.root), \
+                patch.object(bootstrap, "verify_staging_source_access",
+                             side_effect=bootstrap.Blocked("Staging source is not readable by worker UID/GID 1000; verify source directory traversal and fixed entry permissions")) as access, \
+                patch.object(bootstrap, "spawn_preparation", spawn), \
+                redirect_stderr(io.StringIO()), self.main_identity(["--prepare-retained", operation_id]):
+            self.assertEqual(bootstrap.main(), 1)
+        access.assert_called_once_with(self.root, "scripts/staging/prepare-retained.py")
+        spawn.assert_not_called()
+        self.assertFalse(any(self.root.glob("*.result.json")))
+
+    def test_receipt_routes_return_before_source_access_check(self):
+        for option, reader in (("--receipt", "read_result"), ("--tls-receipt", "read_tls_receipt")):
+            with self.subTest(option=option):
+                value = {"receipt": "fixed"}
+                nonce = "f" * 64
+                with patch.object(bootstrap, reader, return_value=value), \
+                        patch.object(bootstrap, "verify_staging_source_access") as access, \
+                        redirect_stdout(io.StringIO()), self.main_identity([option, nonce]):
+                    self.assertEqual(bootstrap.main(), 0)
+                access.assert_not_called()
 
     def test_unsigned_caller_cannot_enter_launcher(self):
         with patch.dict(os.environ, {}, clear=True), self.assertRaises(launch.LaunchBlocked):

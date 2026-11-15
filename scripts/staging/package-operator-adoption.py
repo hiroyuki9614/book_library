@@ -159,7 +159,7 @@ from pathlib import Path
 p = Path(sys.argv[1])
 if not p.is_absolute() or p.resolve() != p:
     raise SystemExit('packet path is not absolute and symlink-free')
-targets = [Path('/opt/belib-staging/sources'), Path('/etc/belib-staging/operator-bootstrap.json'),
+targets = [Path('/opt/belib-staging'), Path('/opt/belib-staging/sources'), Path('/etc/belib-staging/operator-bootstrap.json'),
            Path('/usr/local/libexec/belib-staging/operator-bootstrap.py'),
            Path('/var/lib/belib-staging/operator'), Path('/var/lib/belib-staging/adoption-backups')]
 existing = [item for target in targets for item in [*target.parents, target]
@@ -171,6 +171,34 @@ for item in [*p.parents, p, *p.iterdir(), *existing]:
     if not (stat.S_ISDIR(s.st_mode) or (stat.S_ISREG(s.st_mode) and s.st_nlink == 1)):
         raise SystemExit('packet or target path type is unsafe')
 PY
+worker_access_probe() {{
+  /usr/bin/python3 -I -B - "$@" <<'PY'
+import os, stat, subprocess, sys
+probe = """import os, stat, sys
+for item in sys.argv[1:]:
+    kind, path = item.split(':', 1)
+    if kind == 'dir':
+        info = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode) or not os.access(path, os.X_OK): raise SystemExit(3)
+    elif kind == 'file':
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit(3)
+        finally: os.close(fd)
+    else: raise SystemExit(2)
+"""
+try:
+    result = subprocess.run(["/usr/bin/python3", "-I", "-B", "-c", probe, *sys.argv[1:]],
+        user=1000, group=1000, extra_groups=(),
+        env={{"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C"}},
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=5, check=False)
+except (OSError, subprocess.SubprocessError):
+    raise SystemExit("worker UID/GID 1000 could not verify staging source access; check directory traversal and fixed entry permissions")
+if result.returncode != 0:
+    raise SystemExit("worker UID/GID 1000 cannot traverse or read the staging source; check directory traversal and fixed entry permissions")
+PY
+}}
 cd "$PACKET"
 sha256sum --check SHA256SUMS
 test -f operator-config.json
@@ -182,13 +210,17 @@ CFG=/etc/belib-staging/operator-bootstrap.json
 install -d -m 0700 /var/lib/belib-staging/operator /var/lib/belib-staging/adoption-backups
 exec 9>/var/lib/belib-staging/operator/project.lock
 flock -n 9
+if test ! -e /opt/belib-staging; then install -d -o root -g root -m 0711 /opt/belib-staging; fi
+worker_access_probe dir:/opt/belib-staging
+if test ! -e /opt/belib-staging/sources; then install -d -o root -g root -m 0755 /opt/belib-staging/sources; fi
+worker_access_probe dir:/opt/belib-staging/sources
 test ! -e "$SRC"
 test ! -e "$BACKUP"
 install -d -m 0700 "$BACKUP"
 for entry in "$OP" "$CFG"; do
   if test -e "$entry"; then cp --parents --preserve=mode,timestamps "$entry" "$BACKUP/"; fi
 done
-install -d -m 0755 /opt/belib-staging/sources /usr/local/libexec/belib-staging /etc/belib-staging
+install -d -m 0755 /usr/local/libexec/belib-staging /etc/belib-staging
 git_clean() {{ env -i PATH=/usr/bin:/bin HOME=/nonexistent LANG=C GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 /usr/bin/git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.autocrlf=false "$@"; }}
 umask 022
 git_clean init --template= "$SRC"
@@ -197,6 +229,7 @@ git_clean -C "$SRC" checkout --detach "$SHA"
 test "$(git_clean -C "$SRC" rev-parse HEAD)" = "$SHA"
 test -z "$(git_clean -C "$SRC" status --porcelain=v1 --untracked-files=all)"
 (cd "$SRC" && sha256sum --check "$PACKET/source-files.sha256")
+worker_access_probe "dir:$SRC" "file:$SRC/scripts/staging/launch-guard.py" "file:$SRC/scripts/staging/prepare-retained.py"
 cmp "$PACKET/operator-bootstrap.py" "$SRC/scripts/staging/operator-bootstrap.py"
 install -m 0600 "$PACKET/config-template.json" "$CFG.pending"
 mv "$CFG.pending" "$CFG"
