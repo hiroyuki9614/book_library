@@ -299,7 +299,7 @@ test('pdf page turns keep circular chevron buttons fixed at desktop and mobile w
 	const buttonRects = async () => (await geometry(page, 'pdf')).buttons.map(({ name, x, y, width, height, radius }) => ({
 		name, x, y, width, height, radius,
 	}));
-	for (const width of [1280, 393]) {
+	for (const width of [1280, 393, 320]) {
 		await page.setViewportSize({ width, height: 851 });
 		await page.goto('/e2e/readers/harness.html?kind=pdf&direction=ltr');
 		await ready(page, 'pdf');
