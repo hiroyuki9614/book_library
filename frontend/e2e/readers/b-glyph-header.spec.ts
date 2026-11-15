@@ -56,7 +56,10 @@ async function geometry(page: Page, kind: ReaderKind) {
 		const names = ['前のページへ', '次のページへ'];
 		for (const name of names) {
 			const cloneButton = reference.querySelector(`[aria-label="${name}"]`);
-			cloneButton?.replaceChildren(document.createTextNode(cloneButton.textContent ?? ''));
+			const path = cloneButton?.querySelector('svg path');
+			let text = cloneButton?.textContent ?? '';
+			if (path) text = path.getAttribute('d') === 'M9 18 15 12 9 6' ? '›' : '‹';
+			cloneButton?.replaceChildren(document.createTextNode(text));
 		}
 		document.body.appendChild(reference);
 		const baseline = names.map((name) => rect(reference.querySelector(`[aria-label="${name}"]`)!));
@@ -81,10 +84,24 @@ async function geometry(page: Page, kind: ReaderKind) {
 			footer: rect(footer),
 			buttons: names.map((name, index) => {
 				const button = footer.querySelector(`[aria-label="${name}"]`)!;
+				const style = getComputedStyle(button);
+				if (readerKind === 'epub') {
+					const svg = button.querySelector('svg');
+					const path = svg?.querySelector('path');
+					return {
+						name, text: button.textContent, ...rect(button), baseline: baseline[index], radius: style.borderRadius,
+						translate: style.translate, transform: style.transform, marginTop: style.marginTop,
+						viewBox: svg?.getAttribute('viewBox') ?? null,
+						svg: svg ? rect(svg) : null,
+						path: path?.getAttribute('d') ?? null,
+						pathBounds: path ? rect(path) : null,
+						glyph: null,
+						inkCenterY: null,
+					};
+				}
 				const glyph = button.querySelector('span');
 				const range = document.createRange();
 				range.selectNodeContents(glyph ?? button);
-				const style = getComputedStyle(button);
 				const canvas = document.createElement('canvas');
 				const context = canvas.getContext('2d')!;
 				context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
@@ -94,6 +111,10 @@ async function geometry(page: Page, kind: ReaderKind) {
 					translate: style.translate, transform: style.transform, marginTop: style.marginTop,
 					glyph: glyph ? rect(glyph) : null,
 					inkCenterY: range.getBoundingClientRect().y + metrics.fontBoundingBoxAscent + (metrics.actualBoundingBoxDescent - metrics.actualBoundingBoxAscent) / 2,
+					viewBox: null,
+					svg: null,
+					path: null,
+					pathBounds: null,
 				};
 			}),
 		};
@@ -183,14 +204,25 @@ for (const kind of ['epub', 'pdf'] as const) {
 					expect(button.marginTop).toBe('0px');
 					const previous = index === 0;
 					const pointsRight = previous === (direction === 'rtl');
-					expect(button.text).toBe(pointsRight ? '›' : '‹');
 					expect(Number.parseFloat(button.radius), 'EPUB/PDF page-turn targets must be circular').toBeGreaterThanOrEqual(22);
-					expect(button.glyph, 'only the glyph has an optical correction').not.toBeNull();
-					expect(button.glyph!.x + button.glyph!.width / 2).toBeCloseTo(button.x + 22, 1);
-					expect(Math.abs(button.glyph!.y + button.glyph!.height / 2 - (button.y + 22))).toBeLessThanOrEqual(1);
-					// Glyph ink varies by roughly 0.5px across installed system fonts;
-					// 1px still catches meaningful optical off-centering.
-					expect(Math.abs(button.inkCenterY - (button.y + 22)), 'visible glyph ink is vertically centered within 1px').toBeLessThanOrEqual(1);
+					if (kind === 'epub') {
+						expect(button.text).toBe('');
+						expect(button.viewBox).toBe('0 0 24 24');
+						expect(button.svg).not.toBeNull();
+						expect({ width: button.svg!.width, height: button.svg!.height }).toEqual({ width: 24, height: 24 });
+						expect(button.path).toBe(pointsRight ? 'M9 18 15 12 9 6' : 'M15 18 9 12 15 6');
+						expect(button.pathBounds, 'the SVG path must render visibly').not.toBeNull();
+						expect(button.pathBounds!.x + button.pathBounds!.width / 2).toBeCloseTo(button.x + 22, 1);
+						expect(button.pathBounds!.y + button.pathBounds!.height / 2).toBeCloseTo(button.y + 22, 1);
+					} else {
+						expect(button.text).toBe(pointsRight ? '›' : '‹');
+						expect(button.glyph, 'only the glyph has an optical correction').not.toBeNull();
+						expect(button.glyph!.x + button.glyph!.width / 2).toBeCloseTo(button.x + 22, 1);
+						expect(Math.abs(button.glyph!.y + button.glyph!.height / 2 - (button.y + 22))).toBeLessThanOrEqual(1);
+						// Glyph ink varies by roughly 0.5px across installed system fonts;
+						// 1px still catches meaningful optical off-centering.
+						expect(Math.abs(button.inkCenterY - (button.y + 22)), 'visible glyph ink is vertically centered within 1px').toBeLessThanOrEqual(1);
+					}
 				}
 				if (width >= 640) {
 					expect(observed.controls.find((control) => control.name === '本棚に戻る')!.x).toBe(12);
