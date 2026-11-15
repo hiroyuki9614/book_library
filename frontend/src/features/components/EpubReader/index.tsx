@@ -468,7 +468,11 @@ function EpubReaderSession({ bookId, bookTitle, pageTurnDirection, userId }: { b
 					aria-label='前のページへ'
 					className='size-11 rounded-full text-2xl'
 				>
-					<span aria-hidden='true' className='block -translate-y-px leading-none'>{direction === 'rtl' ? '›' : '‹'}</span>
+					<span aria-hidden='true' className='block'>
+						<svg className='block size-6' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='1.75' strokeLinecap='round' strokeLinejoin='round'>
+							<path d={direction === 'rtl' ? 'M9 18 15 12 9 6' : 'M15 18 9 12 15 6'} />
+						</svg>
+					</span>
 				</Button>
 				<Button
 					type='button'
@@ -479,7 +483,11 @@ function EpubReaderSession({ bookId, bookTitle, pageTurnDirection, userId }: { b
 					aria-label='次のページへ'
 					className='size-11 rounded-full text-2xl'
 				>
-					<span aria-hidden='true' className='block -translate-y-px leading-none'>{direction === 'rtl' ? '‹' : '›'}</span>
+					<span aria-hidden='true' className='block'>
+						<svg className='block size-6' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='1.75' strokeLinecap='round' strokeLinejoin='round'>
+							<path d={direction === 'rtl' ? 'M15 18 9 12 15 6' : 'M9 18 15 12 9 6'} />
+						</svg>
+					</span>
 				</Button>
 				<div className='order-3 min-w-[9rem] flex-1 basis-full text-center text-xs sm:order-none sm:min-w-0 sm:flex-none sm:basis-auto sm:text-sm' aria-live='polite'>
 					<div>章内ページ: {screenPage.page} / {screenPage.total}（第{screenPage.section}節）</div>

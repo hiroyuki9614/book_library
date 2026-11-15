@@ -123,7 +123,7 @@ for (const config of cases) {
 				const buttonRects = [await previousButton.boundingBox(), await nextButton.boundingBox()];
 				if (config.direction === 'ltr') expect(buttonRects[0]!.x).toBeLessThan(buttonRects[1]!.x);
 				else expect(buttonRects[0]!.x).toBeGreaterThan(buttonRects[1]!.x);
-				await expect(nextButton).toHaveText(config.direction === 'ltr' ? '›' : '‹');
+				await expect(nextButton.locator('svg path')).toHaveAttribute('d', config.direction === 'ltr' ? 'M9 18 15 12 9 6' : 'M15 18 9 12 15 6');
 				const turn = async (next: boolean, input: number, changes = true) => {
 					const side = next === (config.direction === 'ltr') ? 'right' : 'left';
 					if (input % 3 === 0) await (next ? nextButton : previousButton).click();
