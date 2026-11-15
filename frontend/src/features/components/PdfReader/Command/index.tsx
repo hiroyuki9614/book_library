@@ -36,7 +36,13 @@ const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageIn
 				className='size-11 shrink-0 rounded-full px-0 text-2xl'
 				title={`${prevResolved.label} (${prevResolved.shortcuts?.[0] || ''})`}
 			>
-				<span aria-hidden='true' className='block -translate-y-px leading-none'>{prevResolved.label === '<' ? '‹' : prevResolved.label === '>' ? '›' : prevResolved.label}</span>
+				<span aria-hidden='true' className='block size-6 leading-none'>
+					{prevResolved.label === '<' || prevResolved.label === '>' ? (
+						<svg aria-hidden='true' className='block size-6' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='1.75' strokeLinecap='round' strokeLinejoin='round'>
+							<path d={prevResolved.label === '<' ? 'M15 18 9 12 15 6' : 'M9 18 15 12 9 6'} />
+						</svg>
+					) : prevResolved.label}
+				</span>
 			</Button>
 
 			<form onSubmit={handleGoToPage} className='flex items-center gap-2'>
@@ -66,7 +72,13 @@ const CommandButton = ({ prevResolved, nextResolved, state, pageInput, setPageIn
 				className='size-11 shrink-0 rounded-full px-0 text-2xl'
 				title={`${nextResolved?.label} (${nextResolved?.shortcuts?.[0] || ''})`}
 			>
-				<span aria-hidden='true' className='block -translate-y-px leading-none'>{nextResolved?.label === '<' ? '‹' : nextResolved?.label === '>' ? '›' : nextResolved?.label}</span>
+				<span aria-hidden='true' className='block size-6 leading-none'>
+					{nextResolved?.label === '<' || nextResolved?.label === '>' ? (
+						<svg aria-hidden='true' className='block size-6' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='1.75' strokeLinecap='round' strokeLinejoin='round'>
+							<path d={nextResolved.label === '<' ? 'M15 18 9 12 15 6' : 'M9 18 15 12 9 6'} />
+						</svg>
+					) : nextResolved?.label}
+				</span>
 			</Button>
 		</div>
 	);
