@@ -74,6 +74,34 @@ class PreparationContractTests(unittest.TestCase):
             load.assert_not_called()
             run.assert_not_called()
 
+    def test_retained_database_port_uses_root_generation_database_pins(self):
+        database = {"id":"1"*64,"configuration_sha256":"2"*64,"image_id":"sha256:"+"3"*64,
+            "network_ids":{"belib-isolated-i5-upgrade-"+"a"*32+"_isolated":"4"*64}}
+        active = {"project":"belib-isolated-i5-upgrade-"+"a"*32,
+            "database_volume":"belib-isolated-i5-upgrade-"+"a"*32+"_staging-postgres-data",
+            "services":{"db":database}}
+        calls = []
+        class PortFactory:
+            class RetainedPostgres:
+                @staticmethod
+                def for_generation(directory, operation, baseline):
+                    calls.append(("generation", directory, operation, baseline))
+                    return "active-port"
+
+                @staticmethod
+                def for_retained(directory, operation):
+                    calls.append(("legacy", directory, operation))
+                    return "legacy-port"
+
+        prepared = Path("/private/prepared")
+        self.assertEqual(prepare._retained_database_port(PortFactory, prepared, "b"*32, active), "active-port")
+        self.assertEqual(calls, [("generation", prepared, "b"*32, {"id":database["id"],
+            "project":active["project"],"volume_name":active["database_volume"],
+            "network_ids":database["network_ids"],"image_id":database["image_id"],
+            "configuration_sha256":database["configuration_sha256"]})])
+        self.assertEqual(prepare._retained_database_port(PortFactory, prepared, "c"*32, None), "legacy-port")
+        self.assertEqual(calls[-1], ("legacy", prepared, "c"*32))
+
     def test_malformed_operation_is_rejected_before_docker(self):
         with tempfile.TemporaryDirectory() as root:
             prepared = Path(root) / "prepared"

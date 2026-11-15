@@ -277,6 +277,16 @@ def _source_db_pin(info, cutover, baseline=None):
             "network_ids": ids, "volume_name": expected_volume}
 
 
+def _retained_database_port(pg, prepared: Path, operation: str, active: dict | None):
+    if active is None:
+        return pg.RetainedPostgres.for_retained(prepared, operation)
+    database = active["services"]["db"]
+    baseline = {"id": database["id"], "project": active["project"],
+        "volume_name": active["database_volume"], "network_ids": database["network_ids"],
+        "image_id": database["image_id"], "configuration_sha256": database["configuration_sha256"]}
+    return pg.RetainedPostgres.for_generation(prepared, operation, baseline)
+
+
 def _container_pin(docker, identity, project, service, cutover):
     info = docker.inspect(identity)
     labels = info.get("Config", {}).get("Labels") or {}
@@ -779,7 +789,7 @@ def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
     if not candidate_infos["db"].get("State", {}).get("Running"):
         docker.run("start", candidate["db"], timeout=120)
     # Confirm the retained DB has not changed during candidate build and preparation.
-    source_port = pg.RetainedPostgres.for_retained(prepared, operation)
+    source_port = _retained_database_port(pg, prepared, operation, active)
     try:
         dump_sha = source_port.backup()
         source_port.verify_restore(dump_sha)
