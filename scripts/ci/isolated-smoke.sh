@@ -183,6 +183,7 @@ capture_runtime() {
       echo "Service escaped the fixed synthetic Compose identity: $service" >&2
       return 1
     }
+    verify_service_network_attachment "$service" "$id"
     runtime_ids[$service]="$actual_id"
     runtime_images[$service]="$actual_image"
     runtime_records[$service]="$record"
@@ -208,6 +209,18 @@ capture_runtime() {
     }
     volume_records[$volume]="$record"
   done
+}
+
+verify_service_network_attachment() {
+  local service="$1" id="$2" attachment
+  attachment="$(docker inspect --format "{{if index .NetworkSettings.Networks \"$network\"}}attached{{else}}missing{{end}}" "$id" 2>/dev/null)" || {
+    echo "Cannot verify synthetic service network attachment: $service" >&2
+    return 1
+  }
+  [[ "$attachment" == attached ]] || {
+    echo "Synthetic service is not attached to its project network: $service" >&2
+    return 1
+  }
 }
 
 wait_service_running() {
