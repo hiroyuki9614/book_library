@@ -310,6 +310,7 @@ test('pdf page turns keep circular chevron buttons fixed at desktop and mobile w
 		}
 
 		const footer = page.getByTestId('pdf-reader-footer');
+		const attemptsBeforeTurn = api.attempts.length;
 		await footer.getByRole('button', { name: '次のページへ', exact: true }).click();
 		await expect(page.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue('2');
 		await expect(page.locator('[data-pdf-page="2"] img').first()).toBeVisible();
@@ -318,7 +319,7 @@ test('pdf page turns keep circular chevron buttons fixed at desktop and mobile w
 		// Persisted page 2 must restore without shifting the circular controls.
 		// Wait for the real mocked PATCH before a reload; a local-only page update
 		// would otherwise produce a false positive for restoration.
-		await expect.poll(() => api.attempts.some((attempt) => attempt.currentPage === 2),
+		await expect.poll(() => api.attempts.slice(attemptsBeforeTurn).some((attempt) => attempt.currentPage === 2),
 			'PDF turn must persist page 2 before reload').toBe(true);
 		await page.reload();
 		await expect(page.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue('2', { timeout: 30_000 });
