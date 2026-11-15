@@ -301,7 +301,7 @@ for (const kind of ['epub', 'pdf'] as const) {
 			file = await source.pdf();
 			await source.close();
 		}
-		await useProtectedBook(page, file, kind);
+		const api = await useProtectedBook(page, file, kind);
 		for (const width of [1024, 1280, 1440, 1663, 393, 320]) {
 			await page.setViewportSize({ width, height: 851 });
 			await page.goto(`/e2e/readers/harness.html?kind=${kind}&direction=ltr`);
@@ -341,6 +341,9 @@ for (const kind of ['epub', 'pdf'] as const) {
 			}
 			expect(await page.evaluate(() => document.documentElement.scrollWidth),
 				`${kind} ${width}px: closed sheet must not leave horizontal overflow`).toBeLessThanOrEqual(width);
+			// Opening/closing reader-only panels must not mutate the saved position.
+			await page.waitForTimeout(850);
+			expect(api.attempts, `${kind} ${width}px: panel interactions must not issue position PATCH`).toEqual([]);
 		}
 	});
 }
