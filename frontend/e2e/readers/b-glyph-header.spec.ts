@@ -288,6 +288,61 @@ test('epub desktop: failed server restore keeps the 52px header and visible warn
 	expect(api.attempts, 'failed server GET must not trigger an initial save').toEqual([]);
 });
 
+// The sheet's width is an actual viewport measurement, not an assumption based
+// on Tailwind class names: EPUB/PDF must share a narrow reading-first sidebar.
+for (const kind of ['epub', 'pdf'] as const) {
+	test(`${kind}: TOC/settings side sheets stay narrow at desktop and phone widths`, async ({ page, browser }) => {
+		test.setTimeout(120_000);
+		let file: Buffer;
+		if (kind === 'epub') file = epubFixture();
+		else {
+			const source = await browser.newPage();
+			await source.setContent('<h1>PDF sheet-width fixture</h1><p>Synthetic PDF content.</p>');
+			file = await source.pdf();
+			await source.close();
+		}
+		await useProtectedBook(page, file, kind);
+		for (const width of [1280, 393, 320]) {
+			await page.setViewportSize({ width, height: 851 });
+			await page.goto(`/e2e/readers/harness.html?kind=${kind}&direction=ltr`);
+			await ready(page, kind);
+			const expectedSheetWidth = width >= 640 ? 224 : 208;
+			const verifySheet = async (dialog: ReturnType<typeof page.getByRole>) => {
+				await expect(dialog).toBeVisible();
+				const box = await dialog.boundingBox();
+				expect(box, `${kind} ${width}px: sheet must have a visible rectangle`).not.toBeNull();
+				expect(box!.width, `${kind} ${width}px: reading-side sheet width`).toBe(expectedSheetWidth);
+				await expect.poll(async () => {
+					const settled = await dialog.boundingBox();
+					return settled ? Math.round(settled.x + settled.width) : 0;
+				}, `${kind} ${width}px: sheet must settle against right edge`).toBe(width);
+			};
+			if (kind === 'pdf' && width < 768) {
+				await page.getByRole('button', { name: '操作メニューを開く' }).click();
+				const menu = page.getByRole('dialog', { name: '操作メニュー' });
+				await verifySheet(menu);
+				await expect(menu.getByRole('region', { name: '表示設定' })).toBeVisible();
+				await expect(menu.getByRole('button', { name: '目次', exact: true })).toBeVisible();
+				await menu.getByRole('button', { name: '閉じる' }).click();
+				await expect(menu).toBeHidden();
+			} else {
+				await page.getByRole('button', { name: '目次', exact: true }).click();
+				const toc = page.getByRole('dialog', { name: kind === 'epub' ? 'この書籍の目次' : 'このPDFの目次' });
+				await verifySheet(toc);
+				await toc.getByRole('button', { name: '閉じる' }).click();
+				await expect(toc).toBeHidden();
+				await page.getByRole('button', { name: '表示設定', exact: true }).click();
+				const settings = page.getByRole('dialog', { name: '表示設定' });
+				await verifySheet(settings);
+				await settings.getByRole('button', { name: '閉じる' }).click();
+				await expect(settings).toBeHidden();
+			}
+			expect(await page.evaluate(() => document.documentElement.scrollWidth),
+				`${kind} ${width}px: closed sheet must not leave horizontal overflow`).toBeLessThanOrEqual(width);
+		}
+	});
+}
+
 test('pdf page turns keep circular chevron buttons fixed at desktop and mobile widths', async ({ page, browser }) => {
 	test.setTimeout(150_000);
 	const source = await browser.newPage();
