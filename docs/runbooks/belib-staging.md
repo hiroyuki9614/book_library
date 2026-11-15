@@ -711,3 +711,40 @@ the owner's normal terminal, plus the independently established signing identity
 Do not disable that process restriction, add a broker/sudoers rule or switch to
 another privilege mechanism to bypass it. All source preparation, isolated tests,
 review and packet verification can proceed without that host effect.
+
+### Active generation projection
+
+After a successful retained upgrade and its linked TLS owner completion, the
+installed root operator can record the active generation with both immutable
+receipt nonces:
+
+```sh
+sudo /usr/local/libexec/belib-staging/operator-bootstrap.py --promote-completed <upgrade-receipt-nonce> <tls-owner-nonce>
+```
+
+Promotion holds the existing project lock, re-reads both root receipts, and asks
+the fixed owner-side inspector to verify the live HTTP/TLS runtime and certificate
+using a sealed descriptor. It writes a root-only immutable generation journal
+before atomically publishing `active-generation.json`. A v2 approval binds the
+exact predecessor pointer digest and source; the v2 pointer preserves the
+original v1 genesis digest and records the predecessor link. Repeating the same
+receipt pair is idempotent only while its verified active projection matches.
+
+When `active-generation.json` exists, `--prepare-retained` revalidates the linked
+receipts and exact live pins before handing the sealed projection to preparation.
+It uses the active database, project, service and network identities while
+preserving the original shared books volume and database lineage. The candidate
+build uses an in-memory sealed env snapshot; only a committed v2 cutover switches
+the live source ref through an env digest CAS. Missing-pointer migration may use
+the legacy baseline once; malformed or unsafe pointers never fall back to it.
+The next cutover stays disabled until external evidence adoption and a fresh v2
+grant bind the prepared manifest and predecessor.
+
+For generations after the v1 genesis, TLS continuation uses the explicit
+`belib-tls-owner-stable-serve-plan/v3` contract. It binds the active pointer digest
+and its linked TLS completion, then verifies the already active TCP 443 mapping,
+Serve ETag, certificate, candidate health and SNI rejection before and after
+approval. The owner performs LocalAPI status/get and read-only probes; it does not
+rewrite Serve. Its v2 completion links the predecessor generation and TLS receipt.
+The existing `owner-command.py` command infers this plan version from the pinned
+plan bytes; v1 and v2 retirement plans keep their existing command path.

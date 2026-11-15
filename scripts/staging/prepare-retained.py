@@ -253,19 +253,28 @@ def _volume_identity(info):
     return hashlib.sha256(json.dumps(fixed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _source_db_pin(info, cutover):
+def _source_db_pin(info, cutover, baseline=None):
     networks = info.get("NetworkSettings", {}).get("Networks", {})
     ids = {name: entry.get("NetworkID") for name, entry in networks.items()}
     mounts = [m for m in info.get("Mounts", []) if m.get("Destination") == "/var/lib/postgresql/data"]
     labels = info.get("Config", {}).get("Labels") or {}
-    if (info.get("Id") != OLD_DB_ID or info.get("Config", {}).get("Image") != OLD_DB_IMAGE
-            or labels.get("com.docker.compose.project") != PROJECT or labels.get("com.docker.compose.service") != "db"
-            or len(mounts) != 1 or mounts[0].get("Type") != "volume" or mounts[0].get("Name") != DB_VOLUME
-            or set(ids) != {PROJECT + "_isolated"} or not ids[PROJECT + "_isolated"]
+    expected_id = baseline["services"]["db"]["id"] if baseline else OLD_DB_ID
+    expected_project = baseline["project"] if baseline else PROJECT
+    expected_volume = baseline["database_volume"] if baseline else DB_VOLUME
+    expected_networks = baseline["services"]["db"]["network_ids"] if baseline else {PROJECT + "_isolated": ids.get(PROJECT + "_isolated")}
+    if (info.get("Id") != expected_id
+            or (baseline is None and info.get("Config", {}).get("Image") != OLD_DB_IMAGE)
+            or labels.get("com.docker.compose.project") != expected_project or labels.get("com.docker.compose.service") != "db"
+            or len(mounts) != 1 or mounts[0].get("Type") != "volume" or mounts[0].get("Name") != expected_volume
+            or ids != expected_networks or len(ids) != 1
             or info.get("HostConfig", {}).get("PortBindings")):
         raise PreparationBlocked("Retained database identity differs from the admitted baseline")
-    return {"id": info["Id"], "configuration_sha256": cutover.configuration_digest(info),
-            "network_ids": ids, "volume_name": DB_VOLUME}
+    configuration_sha256 = cutover.configuration_digest(info)
+    if baseline and (configuration_sha256 != baseline["services"]["db"]["configuration_sha256"]
+                     or info.get("Image") != baseline["services"]["db"]["image_id"]):
+        raise PreparationBlocked("Active database configuration differs from the root generation pin")
+    return {"id": info["Id"], "configuration_sha256": configuration_sha256,
+            "network_ids": ids, "volume_name": expected_volume}
 
 
 def _container_pin(docker, identity, project, service, cutover):
@@ -390,15 +399,73 @@ def _compose(directory: Path, source: Path, env_file: Path, project: str, overri
         "-f", str(source / "compose.staging.yaml"), "-f", str(override), *args, timeout=timeout)
 
 
+def _validate_active_baseline(admission):
+    active = admission.get("active_generation")
+    expected = {"active_generation", "active_generation_sha256"} | {
+        "source_root", "source_sha", "operation_id", "prepared_directory", "env_file"}
+    if not isinstance(active, dict) or set(admission) != expected:
+        raise PreparationBlocked("Sealed active-generation admission fields are invalid")
+    raw = json.dumps(active, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    digest = admission.get("active_generation_sha256")
+    if not isinstance(digest, str) or not HEX64.fullmatch(digest) or hashlib.sha256(raw).hexdigest() != digest:
+        raise PreparationBlocked("Sealed active-generation digest differs from its exact projection")
+    schema = active.get("schema")
+    if schema not in {"belib-active-generation/v1", "belib-active-generation/v2"}:
+        raise PreparationBlocked("Active-generation schema is unsupported")
+    if schema == "belib-active-generation/v2" and any(
+            not HEX64.fullmatch(active.get(name, ""))
+            for name in ("previous_generation_sha256", "genesis_generation_sha256", "staging_env_sha256")):
+        raise PreparationBlocked("Active-generation lineage hashes are malformed")
+    if (active.get("host") != "ubuntu-worker" or active.get("principal") != "hiroyuki"
+            or active.get("uid") != 1000 or not HEX40.fullmatch(active.get("source_sha", ""))
+            or not HEX32.fullmatch(active.get("operation_id", ""))
+            or active.get("project") != PROJECT + "-upgrade-" + active["operation_id"]
+            or active.get("shared_books_volume") != BOOK_VOLUME
+            or active.get("database_volume") != active["project"] + "_staging-postgres-data"
+            or type(active.get("http_port")) is not int or not 1024 <= active["http_port"] <= 65535
+            or active.get("tls_loopback_port") != 18443):
+        raise PreparationBlocked("Active-generation target, project, volume, or endpoint is invalid")
+    services = active.get("services")
+    if not isinstance(services, dict) or set(services) != {"db", "backend", "frontend", "nginx"}:
+        raise PreparationBlocked("Active-generation service pins are incomplete")
+    for service, pin in services.items():
+        networks = pin.get("network_ids") if isinstance(pin, dict) else None
+        wanted = {active["project"] + "_isolated"}
+        if service == "nginx":
+            wanted.add(active["project"] + "_ingress")
+        if (not isinstance(pin, dict) or set(pin) != {"id", "configuration_sha256", "image_id", "network_ids"}
+                or not HEX64.fullmatch(pin.get("id", ""))
+                or not HEX64.fullmatch(pin.get("configuration_sha256", ""))
+                or not isinstance(pin.get("image_id"), str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", pin["image_id"])
+                or not isinstance(networks, dict) or set(networks) != wanted
+                or any(not HEX64.fullmatch(value or "") for value in networks.values())):
+            raise PreparationBlocked("Active-generation service pin is malformed")
+    return active, digest
+
+
+def _replace_env_source(raw: bytes, expected_source: str, candidate_source: str) -> bytes:
+    """Replace only the validated source assignment, preserving exact bytes around it."""
+    if not isinstance(raw, bytes) or not HEX40.fullmatch(expected_source or "") or not HEX40.fullmatch(candidate_source or ""):
+        raise PreparationBlocked("Staging env source transition is malformed")
+    lines = raw.split(b"\n")
+    matches = [index for index, line in enumerate(lines) if line.startswith(b"BELIB_STAGE_VCS_REF=")]
+    if len(matches) != 1 or lines[matches[0]] != b"BELIB_STAGE_VCS_REF=" + expected_source.encode("ascii"):
+        raise PreparationBlocked("Staging env source does not match its active-generation pin")
+    lines[matches[0]] = b"BELIB_STAGE_VCS_REF=" + candidate_source.encode("ascii")
+    return b"\n".join(lines)
+
+
 def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
     """Build and stage one operation from a trusted admission handed off by bootstrap."""
     required = {"source_root", "source_sha", "operation_id", "prepared_directory", "env_file"}
-    if not isinstance(admission, dict) or set(admission) != required:
+    if not isinstance(admission, dict) or set(admission) not in (required, required | {"active_generation", "active_generation_sha256"}):
         raise PreparationBlocked("Trusted admission descriptor has invalid fields")
     source = Path(admission["source_root"])
     prepared = Path(admission["prepared_directory"])
     env_file = Path(admission["env_file"])
     sha, operation = admission["source_sha"], admission["operation_id"]
+    active = _validate_active_baseline(admission)[0] if "active_generation" in admission else None
     if not HEX40.fullmatch(sha or "") or not HEX32.fullmatch(operation or ""):
         raise PreparationBlocked("Source and operation identities are malformed")
     if source != source.resolve(strict=True) or not source.is_dir():
@@ -414,8 +481,32 @@ def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
     seed = _load(stage / "seed.py", "prepare_seed")
     pg = _load(stage / "retained-postgres.py", "prepare_pg")
     cutover = _load(stage / "retained-cutover.py", "prepare_cutover")
-    # This validation is mandatory and happens before credentials or Docker are used.
-    env_fd, values = seed.validate_staging_admission(source, env_file, os.getuid())
+    # Candidate builds use an immutable env snapshot. With an active generation,
+    # the live env must still describe that generation; only the snapshot's VCS
+    # ref is advanced to the admitted candidate. The live file is never edited.
+    active_env_transition = None
+    if active is None:
+        env_fd, values = seed.validate_staging_admission(source, env_file, os.getuid())
+    else:
+        live_fd = seed.open_staging_env_file(env_file, os.getuid())
+        try:
+            env_raw, values = seed.read_staging_env_file(live_fd)
+        finally:
+            os.close(live_fd)
+        seed.verify_reviewed_source(source, sha)
+        if (values.get("BELIB_STAGE_VCS_REF") != active["source_sha"]
+                or values.get("BELIB_STAGE_PORT") != str(active["http_port"])):
+            raise PreparationBlocked("Live staging env differs from the verified active generation")
+        if (active.get("schema") == "belib-active-generation/v2"
+                and hashlib.sha256(env_raw).hexdigest() != active.get("staging_env_sha256")):
+            raise PreparationBlocked("Live staging env bytes differ from the sealed active-generation pin")
+        candidate_env_raw = _replace_env_source(env_raw, active["source_sha"], sha)
+        active_env_transition = {"prior_sha256":hashlib.sha256(env_raw).hexdigest(),
+            "candidate_sha256":hashlib.sha256(candidate_env_raw).hexdigest(),
+            "prior_source_sha":active["source_sha"],"candidate_source_sha":sha}
+        env_fd = seed.create_sealed_env_snapshot(candidate_env_raw)
+        values = dict(values)
+        values["BELIB_STAGE_VCS_REF"] = sha
     env_closer = _FDCloser(env_fd)
     os.set_inheritable(env_fd, True)
     compose_env = Path(f"/proc/{os.getpid()}/fd/{env_fd}")
@@ -428,8 +519,14 @@ def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
         _atomic(prepared, "preparation-journal.json", journal)
     docker = docker or Docker()
     project = PROJECT + "-upgrade-" + operation
-    old_db = docker.inspect(OLD_DB_ID)
-    source_pin = _source_db_pin(old_db, cutover)
+    prior_project = active["project"] if active else PROJECT
+    prior_application_sha = active["source_sha"] if active else OLD_APP_SHA
+    prior_generation_sha = admission.get("active_generation_sha256") if active else None
+    prior_database_volume = active["database_volume"] if active else DB_VOLUME
+    prior_books_volume = active["shared_books_volume"] if active else BOOK_VOLUME
+    old_db_id = active["services"]["db"]["id"] if active else OLD_DB_ID
+    old_db = docker.inspect(old_db_id)
+    source_pin = _source_db_pin(old_db, cutover, active)
     if (not old_db.get("State", {}).get("Running") or old_db.get("State", {}).get("Health", {}).get("Status") != "healthy"
             or old_db.get("State", {}).get("Restarting") or old_db.get("State", {}).get("Paused")):
         raise PreparationBlocked("Retained database is not in its exact healthy baseline state")
@@ -437,13 +534,20 @@ def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
     old_pins = {}
     old_info = {}
     for service in SERVICES:
-        # Resolve exactly one currently retained Compose service by fixed project/service labels.
-        rows = docker.run("ps", "--all", "--no-trunc", "--filter", "label=com.docker.compose.project=" + PROJECT,
-                          "--filter", "label=com.docker.compose.service=" + service, "--format", "{{.ID}}")
-        ids = [line for line in rows.decode().splitlines() if line]
+        if active:
+            ids = [active["services"][service]["id"]]
+        else:
+            # Initial migration retains the reviewed fixed original project.
+            rows = docker.run("ps", "--all", "--no-trunc", "--filter", "label=com.docker.compose.project=" + prior_project,
+                              "--filter", "label=com.docker.compose.service=" + service, "--format", "{{.ID}}")
+            ids = [line for line in rows.decode().splitlines() if line]
         if len(ids) != 1 or not HEX64.fullmatch(ids[0]):
             raise PreparationBlocked("Retained application service identity is ambiguous")
-        pin, info = _container_pin(docker, ids[0], PROJECT, service, cutover)
+        pin, info = _container_pin(docker, ids[0], prior_project, service, cutover)
+        if active and (pin != {key: active["services"][service][key]
+                               for key in ("id", "configuration_sha256", "network_ids")}
+                       or info.get("Image") != active["services"][service]["image_id"]):
+            raise PreparationBlocked("Active service differs from its sealed root-generation pins")
         if (not info.get("State", {}).get("Running") or info.get("State", {}).get("Restarting")
                 or info.get("State", {}).get("Paused")):
             raise PreparationBlocked("A retained application service is not in the expected running state")
@@ -451,26 +555,33 @@ def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
         image_info = json.loads(image)[0]
         image_revision = (image_info.get("Config", {}).get("Labels") or {}).get("org.opencontainers.image.revision")
         expected = OLD_BACKEND_IMAGE if service == "backend" else OLD_FRONTEND_IMAGE if service == "frontend" else None
-        if service in ("backend", "frontend") and (info.get("Image") != expected or image_revision != OLD_APP_SHA):
+        expected_revision = prior_application_sha
+        if service in ("backend", "frontend") and (
+                (not active and info.get("Image") != expected) or image_revision != expected_revision):
             raise PreparationBlocked("Retained application OCI identity differs from the approved baseline")
-        if service == "nginx" and info.get("Config", {}).get("Image") != "nginx:1.27-alpine@sha256:62223d644fa234c3a1cc785ee14242ec47a77364226f1c811d2f669f96dc2ac8":
+        if service == "nginx" and not active and info.get("Config", {}).get("Image") != "nginx:1.27-alpine@sha256:62223d644fa234c3a1cc785ee14242ec47a77364226f1c811d2f669f96dc2ac8":
             raise PreparationBlocked("Retained nginx image differs from the approved baseline")
-        expected_ports = {"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":values["BELIB_STAGE_PORT"]}]} if service == "nginx" else {}
+        expected_ports = ({"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":values["BELIB_STAGE_PORT"]}],
+                           "8443/tcp":[{"HostIp":"127.0.0.1","HostPort":str(active["tls_loopback_port"])}]}
+                          if active and service == "nginx" else
+                          {"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":values["BELIB_STAGE_PORT"]}]}
+                          if service == "nginx" else {})
         if (info.get("HostConfig", {}).get("PortBindings") or {}) != expected_ports:
             raise PreparationBlocked("Retained application endpoint differs from the exact loopback baseline")
         if service == "backend":
             books = [m for m in info.get("Mounts", []) if m.get("Destination") == "/home/node"]
-            if len(books) != 1 or books[0].get("Name") != BOOK_VOLUME:
+            if len(books) != 1 or books[0].get("Name") != prior_books_volume:
                 raise PreparationBlocked("Retained backend book-volume identity differs from the baseline")
         old_app_ids[service], old_pins[service], old_info[service] = ids[0], pin, info
     volume_infos = {}
-    for name in (BOOK_VOLUME, DB_VOLUME):
+    for name in (prior_books_volume, prior_database_volume):
         rows = json.loads(docker.run("volume", "inspect", name, maximum=1024 * 1024))
         if len(rows) != 1 or rows[0].get("Name") != name:
             raise PreparationBlocked("Retained volume identity is ambiguous")
         labels = rows[0].get("Labels") or {}
-        expected_compose_volume = name.removeprefix(PROJECT + "_")
-        if (labels.get("com.docker.compose.project") != PROJECT
+        volume_project = PROJECT if name == prior_books_volume else prior_project
+        expected_compose_volume = name.removeprefix(volume_project + "_")
+        if (labels.get("com.docker.compose.project") != volume_project
                 or labels.get("com.docker.compose.volume") != expected_compose_volume):
             raise PreparationBlocked("Retained volume labels differ from the exact Compose baseline")
         volume_infos[name] = rows[0]
@@ -658,12 +769,12 @@ def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
         if ports != expected_ports:
             raise PreparationBlocked("Candidate service port binding differs from the fixed loopback endpoint")
     backend_book_mounts = [m for m in candidate_infos["backend"].get("Mounts", []) if m.get("Destination") == "/home/node"]
-    if len(backend_book_mounts) != 1 or backend_book_mounts[0].get("Name") != BOOK_VOLUME or backend_book_mounts[0].get("RW") is not True:
+    if len(backend_book_mounts) != 1 or backend_book_mounts[0].get("Name") != prior_books_volume or backend_book_mounts[0].get("RW") is not True:
         raise PreparationBlocked("Candidate backend does not mount the retained book volume at its fixed application path")
     db_info = candidate_infos["db"]
     db_mounts = [m for m in db_info.get("Mounts", []) if m.get("Destination") == "/var/lib/postgresql/data"]
     if (len(db_mounts) != 1 or db_mounts[0].get("Name") != project + "_staging-postgres-data"
-            or db_mounts[0].get("Name") == DB_VOLUME):
+            or db_mounts[0].get("Name") == prior_database_volume):
         raise PreparationBlocked("Candidate database volume is not operation-owned")
     if not candidate_infos["db"].get("State", {}).get("Running"):
         docker.run("start", candidate["db"], timeout=120)
@@ -687,15 +798,15 @@ def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
     for name in sorted(old_network_names):
         observed = json.loads(docker.run("network", "inspect", name, maximum=1024 * 1024))[0]
         labels = observed.get("Labels") or {}
-        expected_network_name = name.removeprefix(PROJECT + "_")
+        expected_network_name = name.removeprefix(prior_project + "_")
         if (observed.get("Id") not in [entry.get("NetworkID") for item in [old_db, *old_info.values()] for entry in item.get("NetworkSettings", {}).get("Networks", {}).values()]
-                or labels.get("com.docker.compose.project") != PROJECT
+            or labels.get("com.docker.compose.project") != prior_project
                 or labels.get("com.docker.compose.network") != expected_network_name
                 or observed.get("Driver") != "bridge"
                 or (expected_network_name == "isolated") != (observed.get("Internal") is True)):
             raise PreparationBlocked("Retained network identity changed during observation")
         network_ids.append(observed["Id"])
-    if old_network_names != {PROJECT + "_isolated", PROJECT + "_ingress"}:
+    if old_network_names != {prior_project + "_isolated", prior_project + "_ingress"}:
         raise PreparationBlocked("Retained application network set differs from the exact baseline")
     book_files = _book_inventory(docker, image_ids["backend"], operation)
     if _book_inventory(docker, image_ids["backend"], operation) != book_files:
@@ -707,21 +818,41 @@ def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
         report = json.loads(_read_private_file(report_path, 1024 * 1024))
     finally:
         source_port.cleanup_restore(missing_ok=True)
-    old_volumes = [{"name": name, "identity_sha256": _volume_identity(volume_infos[name])} for name in (BOOK_VOLUME, DB_VOLUME)]
-    manifest = {"schema":"belib-retained-upgrade-manifest/v2", "repository":"hiroyuki9614/book_library",
-        "pull_request":103,"branch":"codex/belib-i5-isolated-staging-20261107","host":"ubuntu-worker","principal":"hiroyuki","uid":1000,
-        "project":PROJECT,"source_sha":sha,"prior_application_sha":OLD_APP_SHA,"prior_backend_image_digest":OLD_BACKEND_IMAGE,
-        "prior_frontend_image_digest":OLD_FRONTEND_IMAGE,"database_lineage":"6963103fd6bec332b4057457d07b890fe5c11e73",
-        "db_container_id":OLD_DB_ID,"db_image_digest":OLD_DB_IMAGE,"volumes":old_volumes,"network_ids":sorted(network_ids),"book_files":book_files}
+    old_volumes = [{"name": name, "identity_sha256": _volume_identity(volume_infos[name])} for name in (prior_books_volume, prior_database_volume)]
+    if active is None:
+        manifest = {"schema":"belib-retained-upgrade-manifest/v2", "repository":"hiroyuki9614/book_library",
+            "pull_request":103,"branch":"codex/belib-i5-isolated-staging-20261107","host":"ubuntu-worker","principal":"hiroyuki","uid":1000,
+            "project":PROJECT,"source_sha":sha,"prior_application_sha":OLD_APP_SHA,"prior_backend_image_digest":OLD_BACKEND_IMAGE,
+            "prior_frontend_image_digest":OLD_FRONTEND_IMAGE,"database_lineage":"6963103fd6bec332b4057457d07b890fe5c11e73",
+            "db_container_id":OLD_DB_ID,"db_image_digest":OLD_DB_IMAGE,"volumes":old_volumes,"network_ids":sorted(network_ids),"book_files":book_files}
+    else:
+        manifest = {"schema":"belib-retained-upgrade-manifest/v3", "repository":"hiroyuki9614/book_library",
+            "pull_request":103,"branch":"codex/belib-i5-isolated-staging-20261107","host":"ubuntu-worker","principal":"hiroyuki","uid":1000,
+            "project":PROJECT,"source_sha":sha,"prior_application_sha":prior_application_sha,
+            "prior_project":prior_project,"prior_generation_sha256":prior_generation_sha,
+            "prior_backend_image_digest":active["services"]["backend"]["image_id"],
+            "prior_frontend_image_digest":active["services"]["frontend"]["image_id"],
+            "database_lineage":"6963103fd6bec332b4057457d07b890fe5c11e73",
+            "db_container_id":old_db_id,"db_image_digest":old_db.get("Config",{}).get("Image"),
+            "db_image_id":old_db.get("Image"),"volumes":old_volumes,
+            "network_ids":sorted(network_ids),"book_files":book_files}
     manifest_sha = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
     _atomic(prepared, "manifest.json", manifest)
     old_plan = {service: old_pins[service] for service in SERVICES}
+    if active:
+        old_plan = {service: {**old_pins[service], "image_id": active["services"][service]["image_id"]}
+                    for service in SERVICES}
     new_plan = {}
     for service in SERVICES:
         pin, _info = _container_pin(docker, candidate[service], project, service, cutover)
         new_plan[service] = pin
     port = int(values["BELIB_STAGE_PORT"])
     cutover_plan = {"schema":"belib-isolated-copy-cutover/v1","source_sha":sha,"operation_id":operation,"port":port,"old":old_plan,"new":new_plan}
+    if active:
+        cutover_plan = {"schema":"belib-isolated-copy-cutover/v2","source_sha":sha,"operation_id":operation,
+            "port":port,"prior_project":prior_project,"prior_application_sha":prior_application_sha,
+            "prior_generation_sha256":prior_generation_sha,"prior_http_port":active["http_port"],
+            "prior_tls_loopback_port":active["tls_loopback_port"],"old":old_plan,"new":new_plan}
     candidate_db_info = docker.inspect(candidate["db"])
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
@@ -768,21 +899,38 @@ def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
         raise PreparationBlocked("Candidate DB volume identity or ownership labels are invalid")
     candidate_db = {"id":candidate["db"],"configuration_sha256":cutover.configuration_digest(db_info),
         "volume_name":candidate_db_volume["Name"],"network_id":next(iter(db_info["NetworkSettings"]["Networks"].values()))["NetworkID"]}
+    if active:
+        source_pin["image_id"] = active["services"]["db"]["image_id"]
     _atomic(prepared, "restore-attestation-request.json", {"status":"UNSIGNED_NOT_ADOPTED","payload_template":{
         "schema":"belib-retained-upgrade-restore-attestation/v1","backup_sha256":dump_sha,"manifest_sha256":manifest_sha,
         "postgresql_major_version":16,"restore_target_identity":{"disposable":True,"identity":report["restore_container_id"]},
         "integrity_query_sha256":hashlib.sha256(query_report).hexdigest(),"restore_success":True}})
     stage_identity = {"repository":"hiroyuki9614/book_library","pull_request":103,"branch":"codex/belib-i5-isolated-staging-20261107",
         "host":"ubuntu-worker","principal":"hiroyuki","uid":1000,"project":PROJECT}
-    _atomic(prepared, "network-inventory-request.json", {"status":"UNSIGNED_NOT_ADOPTED","payload_template":{
-        "schema":"belib-retained-upgrade-network-inventory/v1",**stage_identity,"prior_application_sha":OLD_APP_SHA,
-        "network_ids":sorted(network_ids)}})
-    _atomic(prepared, "backup-roots-request.json", {"status":"UNSIGNED_NOT_ADOPTED","payload_template":{
-        "schema":"belib-retained-upgrade-backup-roots/v1",**stage_identity,"repository_root":str(source),
-        "retained_db_root":volume_infos[DB_VOLUME].get("Mountpoint"),"retained_books_root":volume_infos[BOOK_VOLUME].get("Mountpoint")}})
-    config = {"schema":"belib-retained-operator/v1","enabled":False,"source_sha":sha,"topology":"isolated-copy",
+    if active is None:
+        network_request = {"schema":"belib-retained-upgrade-network-inventory/v1",**stage_identity,
+                           "prior_application_sha":OLD_APP_SHA,"network_ids":sorted(network_ids)}
+        roots_request = {"schema":"belib-retained-upgrade-backup-roots/v1",**stage_identity,
+                         "repository_root":str(source),"retained_db_root":volume_infos[prior_database_volume].get("Mountpoint"),
+                         "retained_books_root":volume_infos[prior_books_volume].get("Mountpoint")}
+    else:
+        network_request = {"schema":"belib-retained-upgrade-network-inventory/v2",**stage_identity,
+            "prior_project":prior_project,"prior_application_sha":prior_application_sha,
+            "prior_generation_sha256":prior_generation_sha,"network_ids":sorted(network_ids)}
+        roots_request = {"schema":"belib-retained-upgrade-backup-roots/v2",**stage_identity,
+            "prior_project":prior_project,"prior_generation_sha256":prior_generation_sha,
+            "repository_root":str(source),"retained_db_root":volume_infos[prior_database_volume].get("Mountpoint"),
+            "retained_books_root":volume_infos[prior_books_volume].get("Mountpoint")}
+    _atomic(prepared, "network-inventory-request.json", {"status":"UNSIGNED_NOT_ADOPTED","payload_template":network_request})
+    _atomic(prepared, "backup-roots-request.json", {"status":"UNSIGNED_NOT_ADOPTED","payload_template":roots_request})
+    config = {"schema":"belib-retained-operator/v2" if active else "belib-retained-operator/v1",
+        "enabled":False,"source_sha":sha,"topology":"isolated-copy",
         "prepared_directory":str(prepared),"authorities":{},"cutover_plan":cutover_plan,"candidate_database":candidate_db,
         "source_database":source_pin,"migration_image":image_ids["migrate"]}
+    if active:
+        config["prior_generation_sha256"] = prior_generation_sha
+        config["prior_project"] = prior_project
+        config["environment_transition"] = active_env_transition
     _atomic(prepared, "candidate-config.json", config)
     receipt = {"schema":"belib-retained-preparation-receipt/v1","source_sha":sha,"operation_id":operation,
         "image_tags":tags,"image_ids":image_ids,
@@ -793,7 +941,7 @@ def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
         "old_container_oci":{"db":{"image_id":old_db.get("Image"),"image_ref":old_db.get("Config",{}).get("Image")},
             **{service:{"image_id":old_info[service].get("Image"),"image_ref":old_info[service].get("Config",{}).get("Image")}
                for service in SERVICES}},
-        "old_database_pin":source_pin,"old_volume_sha256":{name:row["identity_sha256"] for name,row in zip((BOOK_VOLUME,DB_VOLUME),old_volumes)},
+        "old_database_pin":source_pin,"old_volume_sha256":{name:row["identity_sha256"] for name,row in zip((prior_books_volume,prior_database_volume),old_volumes)},
         "manifest_sha256":manifest_sha,"backup_sha256":dump_sha,
         "candidate_apps_stopped":True,"candidate_database_started":True,"original_database_mutated":False}
     _atomic(prepared, "preparation-receipt.json", receipt)
@@ -803,7 +951,8 @@ def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
 
 def prepare(admission: dict, *, docker: Docker | None = None) -> dict:
     fields = {"source_root", "source_sha", "operation_id", "prepared_directory", "env_file"}
-    if (not isinstance(admission, dict) or set(admission) != fields
+    active_fields = {"active_generation", "active_generation_sha256"}
+    if (not isinstance(admission, dict) or set(admission) not in (fields, fields | active_fields)
             or not isinstance(admission.get("source_root"), str)
             or not isinstance(admission.get("source_sha"), str) or not HEX40.fullmatch(admission["source_sha"])
             or not isinstance(admission.get("operation_id"), str) or not HEX32.fullmatch(admission["operation_id"])):
@@ -840,6 +989,7 @@ def finalize(prepared_directory: str | os.PathLike[str], authorities: dict) -> d
     source_sha = manifest.get("source_sha") if isinstance(manifest, dict) else None
     if not isinstance(source_sha, str) or not HEX40.fullmatch(source_sha):
         raise PreparationBlocked("Prepared manifest source identity is malformed")
+    active_generation = manifest.get("schema") == "belib-retained-upgrade-manifest/v3"
     network = load_json("network-inventory.json")
     roots = load_json("backup-roots.json")
     attestation = load_json("restore-attestation.json")
@@ -851,7 +1001,9 @@ def finalize(prepared_directory: str | os.PathLike[str], authorities: dict) -> d
             trusted_network_inventory_fingerprint=pins["network"]["fingerprint"])
         backup_sha = upgrade.validate_backup_artifact(directory / "backup.dump", uid=os.getuid(), trusted_root_contract=roots,
             trusted_root_contract_issuer=pins["roots"]["issuer"], root_contract_public_key_pem=pins["roots"]["public_key_pem"].encode(),
-            trusted_root_contract_fingerprint=pins["roots"]["fingerprint"])
+            trusted_root_contract_fingerprint=pins["roots"]["fingerprint"],
+            expected_prior_project=manifest.get("prior_project") if active_generation else None,
+            expected_prior_generation_sha256=manifest.get("prior_generation_sha256") if active_generation else None)
         attestation_sha = upgrade.validate_restore_attestation(attestation, backup_sha256=backup_sha, manifest_sha256=manifest_sha,
             query_report=report, trusted_issuer=pins["restore"]["issuer"], verifier_public_key_pem=pins["restore"]["public_key_pem"].encode(),
             trusted_verifier_fingerprint=pins["restore"]["fingerprint"])
@@ -859,28 +1011,60 @@ def finalize(prepared_directory: str | os.PathLike[str], authorities: dict) -> d
         raise PreparationBlocked("External retained evidence did not validate") from exc
     config = load_json("candidate-config.json")
     required_config = {"schema","enabled","source_sha","topology","prepared_directory","authorities","cutover_plan","candidate_database","source_database","migration_image"}
-    if (not isinstance(config, dict) or set(config) != required_config or config.get("schema") != "belib-retained-operator/v1"
+    if active_generation:
+        required_config |= {"prior_project", "prior_generation_sha256", "environment_transition"}
+    if (not isinstance(config, dict) or set(config) != required_config
+            or config.get("schema") != ("belib-retained-operator/v2" if active_generation else "belib-retained-operator/v1")
             or config.get("enabled") is not False or config.get("source_sha") != source_sha
             or config.get("prepared_directory") != str(directory) or config.get("topology") != "isolated-copy"):
         raise PreparationBlocked("Candidate retained configuration differs from the prepared operation")
     cutover = _load(Path(__file__).resolve().with_name("retained-cutover.py"), "finalize_cutover")
     controller = cutover.RetainedCutover(config["cutover_plan"])
     plan = controller.plan
-    if plan["source_sha"] != source_sha or plan["operation_id"] != directory.name or manifest.get("db_container_id") != OLD_DB_ID:
+    if (plan["source_sha"] != source_sha or plan["operation_id"] != directory.name
+            or (not active_generation and manifest.get("db_container_id") != OLD_DB_ID)
+            or (active_generation and (plan.get("schema") != "belib-isolated-copy-cutover/v2"
+                or plan.get("prior_project") != manifest.get("prior_project")
+                or plan.get("prior_application_sha") != manifest.get("prior_application_sha")
+                or plan.get("prior_generation_sha256") != manifest.get("prior_generation_sha256")
+                or config.get("prior_project") != manifest.get("prior_project")
+                or config.get("prior_generation_sha256") != manifest.get("prior_generation_sha256")))):
         raise PreparationBlocked("Candidate cutover plan is not bound to this operation and retained baseline")
+    if active_generation:
+        transition=config.get("environment_transition")
+        if (not isinstance(transition,dict) or set(transition)!={"prior_sha256","candidate_sha256","prior_source_sha","candidate_source_sha"}
+                or any(not HEX64.fullmatch(transition.get(name,"")) for name in ("prior_sha256","candidate_sha256"))
+                or transition.get("prior_source_sha")!=manifest.get("prior_application_sha")
+                or transition.get("candidate_source_sha")!=source_sha):
+            raise PreparationBlocked("Candidate environment transition does not bind the exact predecessor and source")
     source_db = config["source_database"]
     candidate_db = config["candidate_database"]
-    if (not isinstance(source_db, dict) or set(source_db) != {"id","configuration_sha256","network_ids","volume_name"}
-            or source_db["id"] != manifest["db_container_id"] or source_db["volume_name"] != DB_VOLUME
+    source_fields={"id","configuration_sha256","network_ids","volume_name"}
+    if active_generation: source_fields.add("image_id")
+    if (not isinstance(source_db, dict) or set(source_db) != source_fields
+            or source_db["id"] != manifest["db_container_id"]
+            or source_db["volume_name"] != (manifest["volumes"][1]["name"] if active_generation else DB_VOLUME)
             or not HEX64.fullmatch(source_db["configuration_sha256"] or "")
-            or not isinstance(source_db["network_ids"], dict) or set(source_db["network_ids"]) != {PROJECT + "_isolated"}
+            or not isinstance(source_db["network_ids"], dict)
+            or set(source_db["network_ids"]) != {(manifest["prior_project"] if active_generation else PROJECT) + "_isolated"}
             or any(not isinstance(value, str) or not HEX64.fullmatch(value) for value in source_db["network_ids"].values())
+            or (active_generation and (not isinstance(source_db.get("image_id"), str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", source_db["image_id"])))
             or not isinstance(candidate_db, dict) or set(candidate_db) != {"id","configuration_sha256","volume_name","network_id"}
             or not HEX64.fullmatch(candidate_db["id"] or "") or not HEX64.fullmatch(candidate_db["configuration_sha256"] or "")
             or candidate_db["volume_name"] != PROJECT + "-upgrade-" + plan["operation_id"] + "_staging-postgres-data"
             or not HEX64.fullmatch(candidate_db["network_id"] or "")
             or not isinstance(config["migration_image"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", config["migration_image"])):
         raise PreparationBlocked("Candidate database/config identity is malformed")
+    if active_generation:
+        if (source_db.get("image_id") != manifest.get("db_image_id")
+                or plan["old"]["backend"].get("image_id") != manifest.get("prior_backend_image_digest")
+                or plan["old"]["frontend"].get("image_id") != manifest.get("prior_frontend_image_digest")
+                or sorted({*source_db["network_ids"].values(),
+                           *plan["old"]["backend"]["network_ids"].values(),
+                           *plan["old"]["frontend"]["network_ids"].values(),
+                           *plan["old"]["nginx"]["network_ids"].values()}) != manifest["network_ids"]):
+            raise PreparationBlocked("Prepared predecessor image or network pins differ from the signed manifest")
     candidate_app_networks = [set(plan["new"][service]["network_ids"].values()) for service in ("backend", "frontend")]
     if any(networks != {candidate_db["network_id"]} for networks in candidate_app_networks):
         raise PreparationBlocked("Candidate app and database network identities differ")
@@ -920,11 +1104,15 @@ def _read_root_admission() -> dict:
     except (ValueError, UnicodeError) as exc:
         raise PreparationBlocked("Preparation admission is malformed") from exc
     required = {"schema", "source_root", "source_sha", "operation_id", "prepared_directory", "env_file", "pid"}
-    if (not isinstance(admission, dict) or set(admission) != required
+    active_fields = {"active_generation", "active_generation_sha256"}
+    if (not isinstance(admission, dict) or set(admission) not in (required, required | active_fields)
             or admission.get("schema") != "belib-retained-preparation-admission/v1"
             or type(admission.get("pid")) is not int or admission["pid"] != os.getpid()):
         raise PreparationBlocked("Preparation admission process or schema mismatch")
-    return {key: admission[key] for key in required if key != "schema" and key != "pid"}
+    result = {key: admission[key] for key in required if key != "schema" and key != "pid"}
+    if active_fields <= set(admission):
+        result.update({key: admission[key] for key in active_fields})
+    return result
 
 
 def main() -> int:

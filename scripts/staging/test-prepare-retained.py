@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import ExitStack, redirect_stdout, redirect_stderr
+from contextlib import ExitStack, nullcontext, redirect_stdout, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -28,6 +28,52 @@ class PreparationContractTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(prepare.PreparationBlocked):
                 prepare._prepare_admitted(value)
 
+    def test_prepare_accepts_only_complete_active_generation_admission(self):
+        source = Path(__file__).resolve().parents[2]
+        active_operation = "a" * 32
+        active_project = prepare.PROJECT + "-upgrade-" + active_operation
+        active = {"schema":"belib-active-generation/v2", "host":"ubuntu-worker", "principal":"hiroyuki",
+            "uid":1000,"source_sha":"b"*40,"operation_id":active_operation,"project":active_project,
+            "upgrade_receipt_nonce":"2"*64,"upgrade_receipt_sha256":"3"*64,"tls_owner_nonce":"4"*64,
+            "tls_completion_sha256":"5"*64,"authority_pins_sha256":"6"*64,
+            "database_volume":active_project+"_staging-postgres-data","shared_books_volume":prepare.BOOK_VOLUME,
+            "http_port":18083,"tls_loopback_port":18443,"certificate_sha256":"7"*64,
+            "previous_generation_sha256":"8"*64,"genesis_generation_sha256":"9"*64,
+            "staging_env_sha256":"a"*64,"services":{}}
+        for service in ("db", "backend", "frontend", "nginx"):
+            networks = {active_project+"_isolated":"d"*64}
+            if service == "nginx":
+                networks[active_project+"_ingress"] = "e"*64
+            active["services"][service] = {"id":"f"*64,"configuration_sha256":"1"*64,
+                "image_id":"sha256:"+"2"*64,"network_ids":networks}
+        admission = {"source_root":str(source),"source_sha":"c"*40,"operation_id":"b"*32,
+            "prepared_directory":"/tmp/prepared","env_file":"/tmp/i5.env","active_generation":active,
+            "active_generation_sha256":hashlib.sha256(json.dumps(active,sort_keys=True,separators=(",",":"),
+                ensure_ascii=False).encode()).hexdigest()}
+        validated = []
+        def prepare_admitted(value, *, docker=None):
+            validated.append(prepare._validate_active_baseline(value))
+            return {"accepted":True}
+        guard = SimpleNamespace(project_lock=lambda: nullcontext())
+        with patch.object(prepare, "_load", return_value=guard), \
+                patch.object(prepare, "_prepare_admitted", side_effect=prepare_admitted):
+            self.assertEqual(prepare.prepare(admission), {"accepted":True})
+        self.assertEqual(validated, [(active, admission["active_generation_sha256"])])
+
+        for mutate in (
+            lambda value: value.pop("active_generation_sha256"),
+            lambda value: value.update(untrusted_extra="ignored"),
+        ):
+            malformed = dict(admission)
+            mutate(malformed)
+            with self.subTest(fields=set(malformed)), \
+                    patch.object(prepare, "_load") as load, \
+                    patch.object(prepare, "_prepare_admitted") as run, \
+                    self.assertRaisesRegex(prepare.PreparationBlocked, "Trusted root admission"):
+                prepare.prepare(malformed)
+            load.assert_not_called()
+            run.assert_not_called()
+
     def test_malformed_operation_is_rejected_before_docker(self):
         with tempfile.TemporaryDirectory() as root:
             prepared = Path(root) / "prepared"
@@ -36,6 +82,88 @@ class PreparationContractTests(unittest.TestCase):
                          "prepared_directory": str(prepared), "env_file": str(Path(root) / "env")}
             with self.assertRaises(prepare.PreparationBlocked):
                 prepare._prepare_admitted(admission)
+
+    def test_second_generation_preparation_targets_the_sealed_active_database(self):
+        """A later prep resolves the prior generation, not the removed v1 DB."""
+        active_operation = "a" * 32
+        active_project = prepare.PROJECT + "-upgrade-" + active_operation
+        active_db_id = "f" * 64
+        network_id = "d" * 64
+        config_sha = "e" * 64
+        image_id = "sha256:" + "1" * 64
+        live_env = b"BELIB_STAGE_VCS_REF=" + b"b" * 40 + b"\nBELIB_STAGE_PORT=18083\n"
+        active = {"schema":"belib-active-generation/v2", "host":"ubuntu-worker", "principal":"hiroyuki",
+            "uid":1000,"source_sha":"b"*40,"operation_id":active_operation,"project":active_project,
+            "upgrade_receipt_nonce":"2"*64,"upgrade_receipt_sha256":"3"*64,"tls_owner_nonce":"4"*64,
+            "tls_completion_sha256":"5"*64,"authority_pins_sha256":"6"*64,"database_volume":active_project+"_staging-postgres-data",
+            "shared_books_volume":prepare.BOOK_VOLUME,"http_port":18083,"tls_loopback_port":18443,"certificate_sha256":"7"*64,
+            "previous_generation_sha256":"a"*64,"genesis_generation_sha256":"a"*64,
+            "staging_env_sha256":hashlib.sha256(live_env).hexdigest(),"services":{}}
+        for service in ("db", "backend", "frontend", "nginx"):
+            networks = {active_project+"_isolated":network_id}
+            if service == "nginx": networks[active_project+"_ingress"] = "8"*64
+            active["services"][service] = {"id":active_db_id if service == "db" else format(int(active_db_id,16)-1,"064x"),
+                "configuration_sha256":config_sha,"image_id":image_id,"network_ids":networks}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "scripts/staging").mkdir(parents=True)
+            prepared = root / "prepared"
+            prepared.mkdir(mode=0o700)
+            env_file = root / "i5.env"
+            operation = "b" * 32
+            fd = os.memfd_create("preparation-env-fixture")
+            values = {"BELIB_STAGE_VCS_REF": active["source_sha"], "BELIB_STAGE_PORT": "18083"}
+            seed = SimpleNamespace(open_staging_env_file=lambda *_: fd,
+                read_staging_env_file=lambda *_: (live_env, values),
+                verify_reviewed_source=lambda *_: None,
+                create_sealed_env_snapshot=lambda *_: os.memfd_create("candidate-env"))
+            def load(_path, name):
+                if name == "prepare_seed": return seed
+                if name == "prepare_cutover": return SimpleNamespace(configuration_digest=lambda _info: config_sha)
+                return SimpleNamespace()
+            class ActiveDocker:
+                def __init__(self): self.inspected = []; self.runs = []
+                def inspect(self, identity):
+                    self.inspected.append(identity)
+                    if identity == active_db_id:
+                        return {"Id": active_db_id, "Image": image_id, "Config": {"Image": "postgres:16", "Labels": {
+                                    "com.docker.compose.project":active_project,"com.docker.compose.service":"db"}},
+                                "State": {"Running": True, "Health": {"Status": "healthy"}},
+                                "NetworkSettings": {"Networks": {active_project + "_isolated":
+                                    {"NetworkID": network_id}}}, "Mounts": [{"Destination":"/var/lib/postgresql/data",
+                                    "Type":"volume","Name":active["database_volume"]}],"HostConfig":{"PortBindings":{}}}
+                    raise prepare.PreparationBlocked("Pinned active application unavailable")
+                def run(self, *args, **kwargs):
+                    self.runs.append(args)
+                    return b""
+            docker = ActiveDocker()
+            admission = {"source_root": str(root), "source_sha": "c"*40,
+                "operation_id": operation, "prepared_directory": str(prepared), "env_file": str(env_file),
+                "active_generation":active,
+                "active_generation_sha256":hashlib.sha256(json.dumps(active,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()}
+            with patch.object(prepare, "_load", side_effect=load), \
+                    self.assertRaisesRegex(prepare.PreparationBlocked, "Pinned active application unavailable"):
+                prepare._prepare_admitted(admission, docker=docker)
+            self.assertEqual(docker.inspected, [active_db_id, active["services"]["backend"]["id"]])
+            self.assertEqual(docker.runs, [])
+
+    def test_active_baseline_rejects_digest_mismatch_before_docker(self):
+        active = {"schema":"belib-active-generation/v1", "host":"ubuntu-worker", "principal":"hiroyuki",
+            "uid":1000,"source_sha":"b"*40,"operation_id":"a"*32,"project":prepare.PROJECT+"-upgrade-"+"a"*32,
+            "upgrade_receipt_nonce":"2"*64,"upgrade_receipt_sha256":"3"*64,"tls_owner_nonce":"4"*64,
+            "tls_completion_sha256":"5"*64,"authority_pins_sha256":"6"*64,"database_volume":prepare.PROJECT+"-upgrade-"+"a"*32+"_staging-postgres-data",
+            "shared_books_volume":prepare.BOOK_VOLUME,"http_port":18083,"tls_loopback_port":18443,"certificate_sha256":"7"*64,
+            "services":{}}
+        for service in ("db", "backend", "frontend", "nginx"):
+            networks = {active["project"]+"_isolated":"8"*64}
+            if service == "nginx": networks[active["project"]+"_ingress"] = "9"*64
+            active["services"][service] = {"id":"a"*64,"configuration_sha256":"b"*64,
+                "image_id":"sha256:"+"c"*64,"network_ids":networks}
+        admission = {"source_root":"/tmp/source",
+            "source_sha":"c"*40,"operation_id":"d"*32,"prepared_directory":"/tmp/prepared",
+            "env_file":"/tmp/env","active_generation":active,"active_generation_sha256":"0"*64}
+        with self.assertRaisesRegex(prepare.PreparationBlocked, "digest differs"):
+            prepare._validate_active_baseline(admission)
 
     def test_finalize_blocks_when_required_external_evidence_is_missing(self):
         with tempfile.TemporaryDirectory() as root:

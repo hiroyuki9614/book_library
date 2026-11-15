@@ -319,6 +319,8 @@ TLS_V2_STATE_FIELDS = {
     "tls_config_sha256", "funnel_enabled", "unknown_sni", "owner_plan_sha256",
     "upgrade_receipt_nonce", "upgrade_receipt_sha256", "operation_id",
 }
+TLS_V3_STATE_FIELDS = TLS_V2_STATE_FIELDS | {
+    "prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"}
 
 
 def make_tls_state_v2(binding: dict[str, str], source_sha: str, *, project: str,
@@ -372,6 +374,52 @@ def signed_tls_binding_v2(binding: dict[str, str], source_sha: str, *, project: 
     # The existing approval verifier signs precisely this established tuple;
     # the v2 state digest binds the additional context without changing grant fields.
     return {**binding, "tls_state_sha256": tls_state_sha256_v2(state)}
+
+
+def make_tls_state_v3(binding: dict[str, str], source_sha: str, *, project: str,
+                      upgrade_receipt_nonce: str, upgrade_receipt_sha256: str,
+                      operation_id: str) -> dict[str, Any]:
+    if (set(binding) != {"prior_application_sha", "retained_state_sha256", "serve_config_sha256",
+            "serve_etag", "certificate_sha256", "tls_config_sha256", "owner_plan_sha256",
+            "prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"}
+            or binding.get("prior_application_sha") != source_sha
+            or not isinstance(binding.get("serve_etag"), str) or not binding["serve_etag"]
+            or any(not re.fullmatch(r"[0-9a-f]{64}", binding.get(name, "")) for name in (
+                "retained_state_sha256", "serve_config_sha256", "certificate_sha256", "tls_config_sha256",
+                "owner_plan_sha256", "prior_generation_sha256", "prior_tls_owner_nonce",
+                "prior_tls_completion_sha256"))):
+        raise TlsIngressError("TLS v3 predecessor-bound state tuple is malformed")
+    return {"schema": "belib-staging-tls-state/v3", "source_sha": source_sha, **binding,
+        "host": HOST, "principal": PRINCIPAL, "uid": UID, "project": project,
+        "funnel_enabled": False, "unknown_sni": "reject", "upgrade_receipt_nonce": upgrade_receipt_nonce,
+        "upgrade_receipt_sha256": upgrade_receipt_sha256, "operation_id": operation_id}
+
+
+def tls_state_sha256_v3(state: dict[str, Any]) -> str:
+    if (not isinstance(state, dict) or set(state) != TLS_V3_STATE_FIELDS
+            or state.get("schema") != "belib-staging-tls-state/v3"
+            or state.get("prior_application_sha") != state.get("source_sha")
+            or state.get("funnel_enabled") is not False or state.get("unknown_sni") != "reject"
+            or state.get("host") != HOST or state.get("principal") != PRINCIPAL or state.get("uid") != UID
+            or state.get("project") != PROJECT + "-upgrade-" + str(state.get("operation_id"))
+            or not re.fullmatch(r"[0-9a-f]{40}", state.get("source_sha", ""))
+            or any(not re.fullmatch(r"[0-9a-f]{64}", state.get(name, "")) for name in (
+                "retained_state_sha256", "serve_config_sha256", "certificate_sha256", "tls_config_sha256",
+                "owner_plan_sha256", "upgrade_receipt_nonce", "upgrade_receipt_sha256",
+                "prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"))
+            or not isinstance(state.get("serve_etag"), str) or not state["serve_etag"]
+            or state.get("certificate_sha256") != EXPECTED_CERT_SHA256):
+        raise TlsIngressError("TLS v3 state does not match the predecessor-bound contract")
+    return sha256(canonical_json(state))
+
+
+def signed_tls_binding_v3(binding: dict[str, str], source_sha: str, *, project: str,
+                          upgrade_receipt_nonce: str, upgrade_receipt_sha256: str,
+                          operation_id: str) -> dict[str, str]:
+    state = make_tls_state_v3(binding, source_sha, project=project,
+        upgrade_receipt_nonce=upgrade_receipt_nonce, upgrade_receipt_sha256=upgrade_receipt_sha256,
+        operation_id=operation_id)
+    return {**binding, "tls_state_sha256": tls_state_sha256_v3(state)}
 
 
 class LocalApiError(TlsIngressError):

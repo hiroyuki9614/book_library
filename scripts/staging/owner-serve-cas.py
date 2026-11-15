@@ -36,10 +36,12 @@ CA_FILE = "/etc/ssl/certs/ca-certificates.crt"
 MAX_CONFIG = 1024 * 1024
 PLAN_SCHEMA = "belib-tls-owner-retirement-plan/v1"
 PLAN_SCHEMA_V2 = "belib-tls-owner-retirement-plan/v2"
+PLAN_SCHEMA_V3 = "belib-tls-owner-stable-serve-plan/v3"
 PLAN_DISPOSITION = "retire-old-fedora-bri-image-publication-handler-only"
 PLAN_KEYS = {"schema", "disposition", "source_sha", "prior_application_sha", "retained_state_sha256", "serve_config_sha256",
              "serve_etag", "certificate_sha256", "tls_config_sha256", "nonce", "expires_at"}
 PLAN_KEYS_V2 = PLAN_KEYS | {"upgrade_receipt_nonce", "upgrade_receipt_sha256", "operation_id", "project"}
+PLAN_KEYS_V3 = PLAN_KEYS_V2 | {"prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"}
 PREPARE_SCHEMA_V2 = "belib-staging-tls-prepare-receipt/v2"
 PREPARE_KEYS_V2 = {"schema", "plan_sha256", "retained_state_sha256", "nginx_id", "source_sha",
                    "tls_config_sha256", "certificate_sha256", "approval_nonce", "evidence_sha256",
@@ -47,12 +49,14 @@ PREPARE_KEYS_V2 = {"schema", "plan_sha256", "retained_state_sha256", "nginx_id",
                    "operation_id", "project", "previous_nginx_id", "nginx_configuration_sha256",
                    "nginx_image_id", "nginx_network_ids", "unchanged_runtime_sha256"}
 COMPLETION_SCHEMA = "belib-tls-owner-completion/v1"
+COMPLETION_SCHEMA_V2 = "belib-tls-owner-completion/v2"
 COMPLETION_KEYS = {"schema", "owner_nonce", "plan_sha256", "prepare_receipt_sha256",
                    "upgrade_receipt_nonce", "upgrade_receipt_sha256", "source_sha", "operation_id",
                    "project", "previous_nginx_id", "nginx_id", "nginx_configuration_sha256",
                    "nginx_image_id", "nginx_network_ids", "tls_config_sha256", "certificate_sha256",
                    "unchanged_runtime_sha256", "approval_nonce", "evidence_sha256",
                    "serve_config_sha256", "serve_etag", "completed_at", "status"}
+COMPLETION_KEYS_V2 = COMPLETION_KEYS | {"prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"}
 UPGRADE_RESULTS = Path("/var/lib/belib-staging/operator")
 UPGRADE_PROJECT = "belib-isolated-i5"
 UPGRADE_RETAINED_DATABASE_ID = "9ab9d141599e8b33f51a1e4e9bcd16d66e92b9d134889014d9d9bd618b42f73d"
@@ -124,11 +128,14 @@ def canonical(value) -> bytes:
 
 def validate_plan(plan, now=None, *, allow_expired=False):
     now = int(time.time()) if now is None else now
-    if not isinstance(plan, dict) or plan.get("disposition") != PLAN_DISPOSITION:
+    if not isinstance(plan, dict):
         raise Stop("Plan schema is not the fixed owner contract")
     version = plan.get("schema")
-    keys = PLAN_KEYS_V2 if version == PLAN_SCHEMA_V2 else PLAN_KEYS
-    if set(plan) != keys or version not in {PLAN_SCHEMA, PLAN_SCHEMA_V2}:
+    expected_disposition = "reuse-exact-active-custom-tls-ingress" if version == PLAN_SCHEMA_V3 else PLAN_DISPOSITION
+    if plan.get("disposition") != expected_disposition:
+        raise Stop("Plan schema is not the fixed owner contract")
+    keys = PLAN_KEYS_V3 if version == PLAN_SCHEMA_V3 else PLAN_KEYS_V2 if version == PLAN_SCHEMA_V2 else PLAN_KEYS
+    if set(plan) != keys or version not in {PLAN_SCHEMA, PLAN_SCHEMA_V2, PLAN_SCHEMA_V3}:
         raise Stop("Plan fields do not match the fixed owner contract")
     if version == PLAN_SCHEMA and plan["prior_application_sha"] != PRIOR_APP_SHA:
         raise Stop("Live application revision differs from the approved TLS baseline")
@@ -144,7 +151,7 @@ def validate_plan(plan, now=None, *, allow_expired=False):
         raise Stop("Owner plan expiry is malformed")
     if not isinstance(plan["nonce"], str) or not re.fullmatch(r"[0-9a-f]{64}", plan["nonce"]):
         raise Stop("Malformed one-use plan nonce")
-    if version == PLAN_SCHEMA_V2:
+    if version in {PLAN_SCHEMA_V2, PLAN_SCHEMA_V3}:
         if (plan["source_sha"] != plan["prior_application_sha"]
                 or not isinstance(plan["upgrade_receipt_nonce"], str)
                 or not re.fullmatch(r"[0-9a-f]{64}", plan["upgrade_receipt_nonce"])
@@ -154,6 +161,10 @@ def validate_plan(plan, now=None, *, allow_expired=False):
                 or not re.fullmatch(r"[0-9a-f]{32}", plan["operation_id"])
                 or plan["project"] != UPGRADE_PROJECT + "-upgrade-" + plan["operation_id"]):
             raise Stop("TLS v2 project or retained-upgrade identity is invalid")
+    if version == PLAN_SCHEMA_V3:
+        if (not all(_sha(plan.get(name)) for name in ("prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"))
+                or plan.get("disposition") != "reuse-exact-active-custom-tls-ingress"):
+            raise Stop("TLS v3 predecessor links or stable Serve disposition are invalid")
     return plan
 
 
@@ -235,6 +246,68 @@ def _root_unchanged_digest_from_upgrade(plan):
     del stable["plan"]["cutover_plan"]["new"]["nginx"]["configuration_sha256"]
     del stable["plan_sha256"]
     return digest(canonical(stable)), runtime
+
+
+def _validate_v3_predecessor(plan, runtime):
+    prior = runtime.get("prior_tls_completion")
+    if (not isinstance(prior, dict)
+            or set(prior) != {"owner_nonce", "completion_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256"}
+            or plan.get("prior_generation_sha256") != runtime.get("prior_generation_sha256")
+            or plan.get("prior_tls_owner_nonce") != prior.get("owner_nonce")
+            or plan.get("prior_tls_completion_sha256") != prior.get("completion_sha256")
+            or plan.get("serve_config_sha256") != prior.get("serve_config_sha256")
+            or plan.get("serve_etag") != prior.get("serve_etag")
+            or plan.get("certificate_sha256") != prior.get("certificate_sha256")):
+        raise Stop("TLS v3 plan differs from the root-pinned active TLS predecessor")
+    return prior
+
+
+def _verify_stable_active_serve(plan, prepared, plan_sha256):
+    unchanged, runtime = _root_unchanged_digest_from_upgrade(plan)
+    prior = _validate_v3_predecessor(plan, runtime)
+    if (prepared["unchanged_runtime_sha256"] != unchanged
+            or prepared["previous_nginx_id"] != runtime["services"]["nginx"]):
+        raise Stop("Prepared candidate does not link to the exact v3 upgrade runtime")
+    expected_map = {"TCP": {"443": {"TCPForward": "127.0.0.1:18443"}}, "Web": {}}
+    api = LocalAPI()
+    api.status()
+    live, etag = api.get()
+    if (canonical(config(live)) != canonical(expected_map)
+            or digest(live) != prior["serve_config_sha256"] or etag != prior["serve_etag"]):
+        raise Stop("Active Serve ingress differs from its predecessor completion")
+    port = runtime["port"]
+    _http_health(port)
+    tls_request(443, CUSTOM, "/health", connect_host=SELF_IP, fingerprint=plan["certificate_sha256"])
+    tls_unknown_rejected(443, connect_host=SELF_IP)
+    tls_no_sni_rejected(443, connect_host=SELF_IP)
+    tls_legacy_sni_rejected(443, connect_host=SELF_IP)
+    tls_self_sni_rejected(443, connect_host=SELF_IP)
+    tls_request(443, CUSTOM, "/health", connect_host=SELF_IP, fingerprint=plan["certificate_sha256"])
+    api.status()
+    after, after_etag = api.get()
+    if (after != live or after_etag != etag or digest(after) != prior["serve_config_sha256"]
+            or after_etag != prior["serve_etag"]):
+        raise Stop("Active Serve changed during read-only v3 verification")
+    return {"status": "complete", "serve_config_sha256": digest(live), "serve_etag": etag,
+            "prior_generation_sha256": plan["prior_generation_sha256"],
+            "prior_tls_owner_nonce": plan["prior_tls_owner_nonce"],
+            "prior_tls_completion_sha256": plan["prior_tls_completion_sha256"]}
+
+
+def _http_health(port):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=4)
+    try:
+        connection.request("GET", "/health", headers={"Host": CUSTOM})
+        response = connection.getresponse()
+        response.read(1024 * 1024)
+        if response.status != 200:
+            raise Stop("Loopback HTTP health probe failed during stable Serve verification")
+    except Stop:
+        raise
+    except (OSError, http.client.HTTPException, TimeoutError) as error:
+        raise Stop("Loopback HTTP health probe failed during stable Serve verification") from error
+    finally:
+        connection.close()
 
 
 def _validate_prepare_v2(prepared_raw, prepared_sha256, plan, plan_sha256):
@@ -592,8 +665,9 @@ def _read_completion(owner_nonce):
     except OSError as error:
         raise Stop("TLS completion record is unavailable or unsafe") from error
     value = strict_json(raw)
-    if (not isinstance(value, dict) or set(value) != COMPLETION_KEYS
-            or value.get("schema") != COMPLETION_SCHEMA or value.get("owner_nonce") != owner_nonce
+    completion_v2 = isinstance(value, dict) and value.get("schema") == COMPLETION_SCHEMA_V2
+    if (not isinstance(value, dict) or set(value) != (COMPLETION_KEYS_V2 if completion_v2 else COMPLETION_KEYS)
+            or value.get("schema") != (COMPLETION_SCHEMA_V2 if completion_v2 else COMPLETION_SCHEMA) or value.get("owner_nonce") != owner_nonce
             or value.get("status") != "complete" or type(value.get("completed_at")) is not int
             or value["completed_at"] <= 0
             or canonical(value) != raw):
@@ -612,6 +686,9 @@ def _read_completion(owner_nonce):
             or not isinstance(value.get("nginx_image_id"), str)
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["nginx_image_id"])):
         raise Stop("TLS completion target or nginx identities are malformed")
+    if completion_v2 and any(not _sha(value.get(name)) for name in (
+            "prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256")):
+        raise Stop("TLS v2 completion predecessor links are malformed")
     expected_networks = {value["project"] + "_isolated", value["project"] + "_ingress"}
     if (not isinstance(value.get("nginx_network_ids"), dict)
             or set(value["nginx_network_ids"]) != expected_networks
@@ -624,8 +701,9 @@ def _read_completion(owner_nonce):
 
 
 def _completion_value(plan, plan_sha256, prepare_sha256, prepared, serve_result):
-    return {
-        "schema": COMPLETION_SCHEMA, "owner_nonce": plan["nonce"], "plan_sha256": plan_sha256,
+    value = {
+        "schema": COMPLETION_SCHEMA_V2 if plan.get("schema") == PLAN_SCHEMA_V3 else COMPLETION_SCHEMA,
+        "owner_nonce": plan["nonce"], "plan_sha256": plan_sha256,
         "prepare_receipt_sha256": prepare_sha256, "upgrade_receipt_nonce": plan["upgrade_receipt_nonce"],
         "upgrade_receipt_sha256": plan["upgrade_receipt_sha256"], "source_sha": plan["source_sha"],
         "operation_id": plan["operation_id"], "project": plan["project"],
@@ -638,6 +716,10 @@ def _completion_value(plan, plan_sha256, prepare_sha256, prepared, serve_result)
         "serve_config_sha256": serve_result["serve_config_sha256"], "serve_etag": serve_result["serve_etag"],
         "completed_at": int(time.time()), "status": "complete",
     }
+    if plan.get("schema") == PLAN_SCHEMA_V3:
+        value.update({name: plan[name] for name in (
+            "prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256")})
+    return value
 
 
 def _publish_completion(value):
@@ -920,7 +1002,8 @@ def run(plan_raw: bytes, expected_plan_sha256: str, prepared_raw=None, prepared_
     if observed_sha != expected_plan_sha256:
         raise Stop("In-memory plan bytes do not match the reviewed loader digest")
     parsed = strict_json(plan_raw)
-    is_v2 = isinstance(parsed, dict) and parsed.get("schema") == PLAN_SCHEMA_V2
+    is_v3 = isinstance(parsed, dict) and parsed.get("schema") == PLAN_SCHEMA_V3
+    is_v2 = isinstance(parsed, dict) and parsed.get("schema") in {PLAN_SCHEMA_V2, PLAN_SCHEMA_V3}
     plan = validate_plan(parsed, allow_expired=is_v2)
     if canonical(plan) != plan_raw:
         raise Stop("Plan bytes must be canonical JSON")
@@ -948,9 +1031,17 @@ def run(plan_raw: bytes, expected_plan_sha256: str, prepared_raw=None, prepared_
                     "unchanged_runtime_sha256": prepared["unchanged_runtime_sha256"],
                     "approval_nonce": prepared["approval_nonce"], "evidence_sha256": prepared["evidence_sha256"],
                 }
+                if is_v3:
+                    expected_fields.update({name: plan[name] for name in (
+                        "prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256")})
                 if any(existing.get(key) != value for key, value in expected_fields.items()):
                     raise Stop("Existing TLS completion belongs to conflicting immutable inputs")
                 return existing
+            if is_v3:
+                try:
+                    validate_plan(plan)
+                except Stop as error:
+                    raise Stop("Expired or out-of-window TLS v3 plan cannot publish its first completion") from error
             adoption = {"prepare_receipt_sha256": prepared_sha256,
                         "upgrade_receipt_nonce": plan["upgrade_receipt_nonce"],
                         "upgrade_receipt_sha256": plan["upgrade_receipt_sha256"],
@@ -967,7 +1058,9 @@ def run(plan_raw: bytes, expected_plan_sha256: str, prepared_raw=None, prepared_
                 prior = True
             except FileNotFoundError:
                 prior = False
-            if prior:
+            if is_v3:
+                serve_result = _verify_stable_active_serve(plan, prepared, observed_sha)
+            elif prior:
                 serve_result = _recover_v2_completion(plan, observed_sha, prepared_sha256, prepared)
             else:
                 validate_plan(plan)
