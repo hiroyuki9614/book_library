@@ -302,7 +302,7 @@ for (const kind of ['epub', 'pdf'] as const) {
 			await source.close();
 		}
 		await useProtectedBook(page, file, kind);
-		for (const width of [1280, 393, 320]) {
+		for (const width of [1280, 1440, 1663, 393, 320]) {
 			await page.setViewportSize({ width, height: 851 });
 			await page.goto(`/e2e/readers/harness.html?kind=${kind}&direction=ltr`);
 			await ready(page, kind);
@@ -316,6 +316,8 @@ for (const kind of ['epub', 'pdf'] as const) {
 					const settled = await dialog.boundingBox();
 					return settled ? Math.round(settled.x + settled.width) : 0;
 				}, `${kind} ${width}px: sheet must settle against right edge`).toBe(width);
+				expect(await page.evaluate(() => document.documentElement.scrollWidth),
+					`${kind} ${width}px: open side sheet must not introduce horizontal overflow`).toBeLessThanOrEqual(width);
 			};
 			if (kind === 'pdf' && width < 768) {
 				await page.getByRole('button', { name: '操作メニューを開く' }).click();
