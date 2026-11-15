@@ -282,7 +282,7 @@ test('pdf page turns keep circular chevron buttons fixed at desktop and mobile w
 	await source.setContent('<style>.page{break-after:page}</style><div class="page">FIRST PAGE</div><div>SECOND PAGE</div>');
 	const file = await source.pdf();
 	await source.close();
-	await useProtectedBook(page, file, 'pdf');
+	const api = await useProtectedBook(page, file, 'pdf');
 
 	const buttonRects = async () => (await geometry(page, 'pdf')).buttons.map(({ name, x, y, width, height, radius }) => ({
 		name, x, y, width, height, radius,
@@ -314,6 +314,17 @@ test('pdf page turns keep circular chevron buttons fixed at desktop and mobile w
 		await expect(page.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue('2');
 		await expect(page.locator('[data-pdf-page="2"] img').first()).toBeVisible();
 		expect(await buttonRects(), 'PDF page 2 must not move the navigation targets').toEqual(firstPage);
+
+		// Persisted page 2 must restore without shifting the circular controls.
+		// Wait for the real mocked PATCH before a reload; a local-only page update
+		// would otherwise produce a false positive for restoration.
+		await expect.poll(() => api.attempts.some((attempt) => attempt.currentPage === 2),
+			'PDF turn must persist page 2 before reload').toBe(true);
+		await page.reload();
+		await expect(page.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue('2', { timeout: 30_000 });
+		await expect(page.locator('[data-pdf-page="2"] img').first()).toBeVisible({ timeout: 30_000 });
+		await page.evaluate(() => document.fonts.ready);
+		expect(await buttonRects(), 'restored PDF page 2 must preserve the navigation targets').toEqual(firstPage);
 
 		await footer.getByRole('button', { name: '前のページへ', exact: true }).click();
 		await expect(page.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue('1');
