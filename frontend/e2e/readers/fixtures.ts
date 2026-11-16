@@ -57,3 +57,40 @@ export function directionEpubFixture({ opfDirection = 'rtl', bodyDirection = 'rt
 	}
 	return createStoredZip(entries);
 }
+
+/**
+ * Stable two-page PDF with real outlines and page destinations, generated in memory.
+ * Chromium page.pdf({ outline: true }) may omit bookmarks in CI, making TOC tests invalid.
+ */
+export function outlinedPdfFixture(): Buffer {
+	const text = (title: string, description: string) =>
+		`BT\n/F1 24 Tf\n72 720 Td\n(${title}) Tj\n/F1 12 Tf\n0 -48 Td\n(${description}) Tj\nET\n`;
+	const stream = (content: string) => `<< /Length ${Buffer.byteLength(content, 'ascii')} >>\nstream\n${content}endstream`;
+	const objects = [
+		'<< /Type /Catalog /Pages 2 0 R /Outlines 7 0 R /PageMode /UseOutlines >>',
+		'<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>',
+		'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 10 0 R >> >> /Contents 5 0 R >>',
+		'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 10 0 R >> >> /Contents 6 0 R >>',
+		stream(text('Chapter One', 'First PDF page.')),
+		stream(text('Chapter Two', 'Second PDF page.')),
+		'<< /Type /Outlines /First 8 0 R /Last 9 0 R /Count 2 >>',
+		'<< /Title (Chapter One) /Parent 7 0 R /Next 9 0 R /Dest [3 0 R /Fit] >>',
+		'<< /Title (Chapter Two) /Parent 7 0 R /Prev 8 0 R /Dest [4 0 R /Fit] >>',
+		'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+	];
+	const chunks = ['%PDF-1.4\n'];
+	const offsets = [0];
+	let position = Buffer.byteLength(chunks[0], 'ascii');
+	for (const [index, object] of objects.entries()) {
+		offsets.push(position);
+		const chunk = `${index + 1} 0 obj\n${object}\nendobj\n`;
+		chunks.push(chunk);
+		position += Buffer.byteLength(chunk, 'ascii');
+	}
+	chunks.push(
+		`xref\n0 ${offsets.length}\n0000000000 65535 f \n`
+		+ offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')
+		+ `trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${position}\n%%EOF\n`,
+	);
+	return Buffer.from(chunks.join(''), 'ascii');
+}
