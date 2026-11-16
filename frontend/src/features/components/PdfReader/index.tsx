@@ -491,6 +491,10 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialRe
 	// The mobile menu opens programmatically without a SheetTrigger, so return
 	// keyboard focus to the opener after closing it.
 	const mobileMenuTriggerRef = useRef<HTMLButtonElement>(null);
+	const handleMobileMenuChange = (open: boolean) => {
+		onMobileMenuChange(open);
+		if (!open) setMobileTocOpen(false);
+	};
 	const navigation = usePageNavigation({ bookId, documentId, initialPage, initialReadingInfo, pageTurnDirection });
 	return (
 		<div className='flex h-full flex-col'>
@@ -511,7 +515,7 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialRe
 				<Button ref={mobileMenuTriggerRef} type='button' variant='outline' className='min-h-11 shrink-0 px-3 md:hidden' aria-label='操作メニューを開く' onClick={() => onMobileMenuChange(true)}>メニュー</Button>
 			</header>
 			{restoreError && <p role='alert' className='shrink-0 px-3 py-1 text-xs'>保存位置を取得できませんでした。先頭から表示しています。</p>}
-			<Sheet open={mobileMenuOpen} onOpenChange={onMobileMenuChange}>
+			<Sheet open={mobileMenuOpen} onOpenChange={handleMobileMenuChange}>
 				<SheetContent side='right' className='w-[min(88vw,22rem)] p-0 duration-[240ms] motion-reduce:duration-0 [&>button]:size-11' onCloseAutoFocus={(event) => {
 					event.preventDefault();
 					mobileMenuTriggerRef.current?.focus();
@@ -525,7 +529,10 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialRe
 							<section aria-label='表示設定'><h3 className='mb-2 font-medium'>表示設定</h3><ZoomToolbar documentId={documentId} compact /></section>
 							<PageNavigation navigation={navigation} />
 							<Button type='button' variant='outline' className='min-h-11 w-full justify-start' aria-expanded={mobileTocOpen} onClick={() => setMobileTocOpen((open) => !open)}>目次</Button>
-							{mobileTocOpen && <PdfTableOfContents inline documentId={documentId} open={mobileTocOpen} onOpenChange={setMobileTocOpen} />}
+							{mobileTocOpen && <PdfTableOfContents inline documentId={documentId} open={mobileTocOpen} onOpenChange={(open) => {
+								setMobileTocOpen(open);
+								if (!open) handleMobileMenuChange(false);
+							}} />}
 						</div>
 					</div>
 				</SheetContent>
