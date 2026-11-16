@@ -143,7 +143,16 @@ test('PDF mobile menu releases its modal overlay and focus on transition to desk
 	await menu.getByRole('button', { name: '目次', exact: true }).click();
 	await expect(page.getByTestId('pdf-mobile-toc')).toBeVisible();
 
-	// The responsive breakpoint hides the trigger, but must also close the modal.
+	// Exactly below Tailwind's md breakpoint the mobile menu must remain usable.
+	await page.setViewportSize({ width: 767, height: 851 });
+	await expect(menu).toBeVisible();
+	await expect(footer).toHaveAttribute('inert');
+
+	// At md=768 the opener is hidden; close the modal without leaving a stale overlay.
+	await page.setViewportSize({ width: 768, height: 851 });
+	await expect(menu).toBeHidden();
+
+	// Keep the desktop reader functional at a common larger width as well.
 	await page.setViewportSize({ width: 1280, height: 851 });
 	await expect(menu).toBeHidden();
 	await expect(footer).not.toHaveAttribute('aria-hidden', 'true');
