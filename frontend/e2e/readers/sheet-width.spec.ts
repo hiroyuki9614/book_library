@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
-import { epubFixture } from './fixtures';
+import { epubFixture, outlinedPdfFixture } from './fixtures';
 
 // Observe production-built Tailwind CSS, not Vitest's unstyled component DOM.
 async function useProtectedBook(page: Page, file: Buffer, kind: 'epub' | 'pdf') {
@@ -121,13 +121,10 @@ for (const width of [320, 393, 1280, 1440, 1663]) {
 	});
 }
 
-test('PDF mobile TOC jump closes the operation sheet and the next open starts collapsed', async ({ page, browser }) => {
+test('PDF mobile TOC jump closes the operation sheet and the next open starts collapsed', async ({ page }) => {
 	test.setTimeout(150_000);
-	const source = await browser.newPage();
-	await source.setContent(`<style>@page{size:A4;margin:20mm}.chapter{break-after:page}</style><section class="chapter"><h1>Chapter One</h1><p>First PDF page.</p></section><section><h1>Chapter Two</h1><p>Second PDF page.</p></section>`);
-	const pdf = await source.pdf({ outline: true });
-	await source.close();
-	await useProtectedBook(page, pdf, 'pdf');
+	// Real /Outlines and /Dest bookmarks, not Chromium's experimental PDF outline generator.
+	await useProtectedBook(page, outlinedPdfFixture(), 'pdf');
 
 	for (const width of [320, 393]) {
 		await page.setViewportSize({ width, height: 851 });
