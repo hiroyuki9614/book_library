@@ -183,6 +183,45 @@ test('PDF mobile menu releases its modal overlay and focus on transition to desk
 	expect(positionWrites, 'responsive menu changes must not issue position PATCH').toEqual([]);
 });
 
+for (const [controlName, dialogName] of [['目次', 'このPDFの目次'], ['表示設定', '表示設定']] as const) {
+	test(`PDF desktop ${controlName} sheet releases its modal and focus on transition to mobile`, async ({ page }) => {
+		test.setTimeout(150_000);
+		await useProtectedBook(page, outlinedPdfFixture(), 'pdf');
+		const positionWrites: string[] = [];
+		page.on('request', (request) => {
+			if (request.method() === 'PATCH' && request.url().includes('/api/v1/books/1/reading-info')) {
+				positionWrites.push(request.postData() ?? '');
+			}
+		});
+		await page.setViewportSize({ width: 1280, height: 851 });
+		await page.goto('/e2e/readers/harness.html?kind=pdf');
+		await expect(page.locator('[data-pdf-page="1"] img')).toBeVisible({ timeout: 45_000 });
+
+		await page.getByRole('button', { name: controlName, exact: true }).click();
+		const desktopSheet = page.getByRole('dialog', { name: dialogName });
+		await expect(desktopSheet).toBeVisible();
+
+		// The desktop trigger remains visible exactly at md=768.
+		await page.setViewportSize({ width: 768, height: 851 });
+		await expect(desktopSheet).toBeVisible();
+		// At 767 the desktop-only trigger disappears; its active modal must close.
+		await page.setViewportSize({ width: 767, height: 851 });
+		await expect(desktopSheet).toBeHidden();
+		const mobileOpener = page.getByRole('button', { name: '操作メニューを開く' });
+		await expect(mobileOpener).toBeVisible();
+		await expect(mobileOpener).toBeFocused();
+
+		await mobileOpener.click();
+		const mobileSheet = page.getByRole('dialog', { name: '操作メニュー' });
+		await expect(mobileSheet).toBeVisible();
+		await page.keyboard.press('Escape');
+		await expect(mobileSheet).toBeHidden();
+		await expect(mobileOpener).toBeFocused();
+		await page.waitForTimeout(850);
+		expect(positionWrites, 'layout-only desktop/mobile transition must not save position').toEqual([]);
+	});
+}
+
 test('PDF mobile TOC jump closes the operation sheet and the next open starts collapsed', async ({ page }) => {
 	test.setTimeout(150_000);
 	// Real /Outlines and /Dest bookmarks, not Chromium's experimental PDF outline generator.
