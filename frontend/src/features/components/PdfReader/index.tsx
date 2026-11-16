@@ -215,7 +215,7 @@ function BookmarkItems({ bookmarks, currentPage, onJump, depth = 0 }: {
 	});
 }
 
-function PdfTableOfContents({ documentId, open, onOpenChange, inline = false }: { documentId: string; open: boolean; onOpenChange: (open: boolean) => void; inline?: boolean }) {
+function PdfTableOfContents({ documentId, open, onOpenChange, inline = false, onCloseAutoFocus }: { documentId: string; open: boolean; onOpenChange: (open: boolean) => void; inline?: boolean; onCloseAutoFocus?: (event: Event) => void }) {
 	const { provides: bookmarksCapability } = useBookmarkCapability();
 	const { provides: scroll, state } = useScroll(documentId);
 	const [bookmarks, setBookmarks] = useState<PdfBookmarkObject[] | null>(null);
@@ -255,7 +255,7 @@ function PdfTableOfContents({ documentId, open, onOpenChange, inline = false }: 
 	return (
 		<Sheet open={open} onOpenChange={onOpenChange}>
 			<SheetTrigger asChild><Button variant='outline' className='min-h-11 px-3'>目次</Button></SheetTrigger>
-			<SheetContent side='right' className='w-[calc(100vw-2rem)] max-w-sm [&>button]:size-11'>
+			<SheetContent side='right' className='w-[calc(100vw-2rem)] max-w-sm [&>button]:size-11' onCloseAutoFocus={onCloseAutoFocus}>
 				<SheetHeader className='shrink-0'>
 					<SheetTitle>このPDFの目次</SheetTitle>
 					<SheetDescription className='sr-only'>PDFに含まれるアウトラインからページへ移動します。</SheetDescription>
@@ -507,6 +507,20 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialRe
 		desktop.addEventListener('change', closeAtDesktop);
 		return () => desktop.removeEventListener('change', closeAtDesktop);
 	}, [mobileMenuOpen, handleMobileMenuChange]);
+	useEffect(() => {
+		if (!tocOpen && !settingsOpen) return;
+		// Closing the desktop-only trigger during a resize must also dismiss its portal.
+		const mobile = window.matchMedia('(max-width: 767px)');
+		const closeAtMobile = () => {
+			if (mobile.matches) {
+				setTocOpen(false);
+				setSettingsOpen(false);
+			}
+		};
+		closeAtMobile();
+		mobile.addEventListener('change', closeAtMobile);
+		return () => mobile.removeEventListener('change', closeAtMobile);
+	}, [tocOpen, settingsOpen]);
 	const navigation = usePageNavigation({ bookId, documentId, initialPage, initialReadingInfo, pageTurnDirection });
 	return (
 		<div className='flex h-full flex-col'>
@@ -515,10 +529,20 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialRe
 				<span className='min-w-0 flex-1 truncate px-1 text-center text-sm font-medium text-foreground'>{bookTitle || 'PDFリーダー'}</span>
 				<div className='max-w-[7rem] shrink md:max-w-none'><ReadingSaveStatus status={navigation.status} retry={navigation.retry} /></div>
 				<div className='hidden shrink-0 items-center gap-2 md:flex'>
-					<PdfTableOfContents documentId={documentId} open={tocOpen} onOpenChange={setTocOpen} />
+					<PdfTableOfContents documentId={documentId} open={tocOpen} onOpenChange={setTocOpen} onCloseAutoFocus={(event) => {
+						if (mobileMenuTriggerRef.current?.getClientRects().length) {
+							event.preventDefault();
+							mobileMenuTriggerRef.current.focus();
+						}
+					}} />
 					<Sheet open={settingsOpen} onOpenChange={setSettingsOpen}>
 						<SheetTrigger asChild><Button type='button' variant='outline' className='min-h-11 px-3'>表示設定</Button></SheetTrigger>
-						<SheetContent side='right' className='w-[min(88vw,22rem)] [&>button]:size-11'>
+						<SheetContent side='right' className='w-[min(88vw,22rem)] [&>button]:size-11' onCloseAutoFocus={(event) => {
+							if (mobileMenuTriggerRef.current?.getClientRects().length) {
+								event.preventDefault();
+								mobileMenuTriggerRef.current.focus();
+							}
+						}}>
 							<SheetHeader><SheetTitle>表示設定</SheetTitle><SheetDescription>PDFの拡大率を調整します。</SheetDescription></SheetHeader>
 							<div className='pt-4'><ZoomToolbar documentId={documentId} compact /></div>
 						</SheetContent>
