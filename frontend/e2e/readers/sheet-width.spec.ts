@@ -139,6 +139,9 @@ test('PDF mobile menu releases its modal overlay and focus on transition to desk
 	const footer = page.getByTestId('pdf-reader-footer');
 	await expect(menu).toBeVisible();
 	await expect(footer).toHaveAttribute('aria-hidden', 'true');
+	// Closing on resize must also discard the expanded mobile outline, not just the overlay.
+	await menu.getByRole('button', { name: '目次', exact: true }).click();
+	await expect(page.getByTestId('pdf-mobile-toc')).toBeVisible();
 
 	// The responsive breakpoint hides the trigger, but must also close the modal.
 	await page.setViewportSize({ width: 1280, height: 851 });
@@ -160,6 +163,8 @@ test('PDF mobile menu releases its modal overlay and focus on transition to desk
 	await expect(opener).toBeVisible();
 	await opener.click();
 	await expect(menu).toBeVisible();
+	await expect(page.getByTestId('pdf-mobile-toc')).toHaveCount(0);
+	await expect(menu.getByRole('button', { name: '目次', exact: true })).toHaveAttribute('aria-expanded', 'false');
 	await page.keyboard.press('Escape');
 	await expect(menu).toBeHidden();
 	await expect(opener).toBeFocused();
