@@ -124,6 +124,12 @@ for (const width of [320, 393, 1280, 1440, 1663]) {
 test('PDF mobile menu releases its modal overlay and focus on transition to desktop', async ({ page }) => {
 	test.setTimeout(150_000);
 	await useProtectedBook(page, outlinedPdfFixture(), 'pdf');
+	const positionWrites: string[] = [];
+	page.on('request', (request) => {
+		if (request.method() === 'PATCH' && request.url().includes('/api/v1/books/1/reading-info')) {
+			positionWrites.push(request.postData() ?? '');
+		}
+	});
 	await page.setViewportSize({ width: 393, height: 851 });
 	await page.goto('/e2e/readers/harness.html?kind=pdf');
 	await expect(page.locator('[data-pdf-page="1"] img')).toBeVisible({ timeout: 45_000 });
@@ -143,7 +149,24 @@ test('PDF mobile menu releases its modal overlay and focus on transition to desk
 
 	// Desktop reader controls must be operable after the transition.
 	await page.getByRole('button', { name: '目次', exact: true }).click();
-	await expect(page.getByRole('dialog', { name: 'このPDFの目次' })).toBeVisible();
+	const desktopToc = page.getByRole('dialog', { name: 'このPDFの目次' });
+	await expect(desktopToc).toBeVisible();
+	await page.keyboard.press('Escape');
+	await expect(desktopToc).toBeHidden();
+
+	// Returning to the phone layout must restore a usable opener without a stale overlay.
+	await page.setViewportSize({ width: 393, height: 851 });
+	const opener = page.getByRole('button', { name: '操作メニューを開く' });
+	await expect(opener).toBeVisible();
+	await opener.click();
+	await expect(menu).toBeVisible();
+	await page.keyboard.press('Escape');
+	await expect(menu).toBeHidden();
+	await expect(opener).toBeFocused();
+	await expect(footer).not.toHaveAttribute('inert');
+	// A pure layout/menu transition must never persist a new reading position.
+	await page.waitForTimeout(850);
+	expect(positionWrites, 'responsive menu changes must not issue position PATCH').toEqual([]);
 });
 
 test('PDF mobile TOC jump closes the operation sheet and the next open starts collapsed', async ({ page }) => {
