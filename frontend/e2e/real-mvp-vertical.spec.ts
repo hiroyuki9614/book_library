@@ -111,9 +111,8 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	await page.getByRole('button', { name: '目次' }).click();
 	await expect(page.getByRole('button', { name: 'First chapter' })).toBeVisible();
 	await page.getByRole('button', { name: 'First chapter' }).click();
-	if (mobileControls) {
-		await page.getByRole('button', { name: '閉じる', exact: true }).click();
-	}
+	// Selecting a mobile PDF TOC destination now closes the operation sheet itself.
+	// Do not try to click a close button on a dialog that has already unmounted.
 	await expect(page.getByRole('dialog')).toBeHidden();
 
 	const readingInfoPath = `/api/v1/books/${metadata.pdfBookId}/reading-info`;
