@@ -491,15 +491,27 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialRe
 	// The mobile menu opens programmatically without a SheetTrigger, so return
 	// keyboard focus to the opener after closing it.
 	const mobileMenuTriggerRef = useRef<HTMLButtonElement>(null);
-	const handleMobileMenuChange = (open: boolean) => {
+	const desktopReturnFocusRef = useRef<HTMLAnchorElement>(null);
+	const handleMobileMenuChange = useCallback((open: boolean) => {
 		onMobileMenuChange(open);
 		if (!open) setMobileTocOpen(false);
-	};
+	}, [onMobileMenuChange]);
+	useEffect(() => {
+		if (!mobileMenuOpen) return;
+		// A phone-to-desktop resize must not leave a hidden opener behind an active modal.
+		const desktop = window.matchMedia('(min-width: 768px)');
+		const closeAtDesktop = () => {
+			if (desktop.matches) handleMobileMenuChange(false);
+		};
+		closeAtDesktop();
+		desktop.addEventListener('change', closeAtDesktop);
+		return () => desktop.removeEventListener('change', closeAtDesktop);
+	}, [mobileMenuOpen, handleMobileMenuChange]);
 	const navigation = usePageNavigation({ bookId, documentId, initialPage, initialReadingInfo, pageTurnDirection });
 	return (
 		<div className='flex h-full flex-col'>
 			<header className='flex shrink-0 items-center gap-1 border-b px-1 py-1 sm:gap-2 sm:px-3 sm:py-2 xl:py-[3.5px]'>
-				<Link to='/' className='inline-flex min-h-11 shrink-0 items-center rounded-md px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'>本棚に戻る</Link>
+				<Link ref={desktopReturnFocusRef} to='/' className='inline-flex min-h-11 shrink-0 items-center rounded-md px-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'>本棚に戻る</Link>
 				<span className='min-w-0 flex-1 truncate px-1 text-center text-sm font-medium text-foreground'>{bookTitle || 'PDFリーダー'}</span>
 				<div className='max-w-[7rem] shrink md:max-w-none'><ReadingSaveStatus status={navigation.status} retry={navigation.retry} /></div>
 				<div className='hidden shrink-0 items-center gap-2 md:flex'>
@@ -518,7 +530,8 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialRe
 			<Sheet open={mobileMenuOpen} onOpenChange={handleMobileMenuChange}>
 				<SheetContent side='right' className='w-[min(88vw,22rem)] p-0 duration-[240ms] motion-reduce:duration-0 [&>button]:size-11' onCloseAutoFocus={(event) => {
 					event.preventDefault();
-					mobileMenuTriggerRef.current?.focus();
+					if (mobileMenuTriggerRef.current?.getClientRects().length) mobileMenuTriggerRef.current.focus();
+					else desktopReturnFocusRef.current?.focus();
 				}}>
 					<SheetHeader className='shrink-0 border-b pr-16'>
 						<SheetTitle>操作メニュー</SheetTitle>

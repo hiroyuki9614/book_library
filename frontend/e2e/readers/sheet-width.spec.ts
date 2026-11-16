@@ -121,6 +121,31 @@ for (const width of [320, 393, 1280, 1440, 1663]) {
 	});
 }
 
+test('PDF mobile menu releases its modal overlay and focus on transition to desktop', async ({ page }) => {
+	test.setTimeout(150_000);
+	await useProtectedBook(page, outlinedPdfFixture(), 'pdf');
+	await page.setViewportSize({ width: 393, height: 851 });
+	await page.goto('/e2e/readers/harness.html?kind=pdf');
+	await expect(page.locator('[data-pdf-page="1"] img')).toBeVisible({ timeout: 45_000 });
+
+	await page.getByRole('button', { name: '操作メニューを開く' }).click();
+	const menu = page.getByRole('dialog', { name: '操作メニュー' });
+	const footer = page.getByTestId('pdf-reader-footer');
+	await expect(menu).toBeVisible();
+	await expect(footer).toHaveAttribute('aria-hidden', 'true');
+
+	// The responsive breakpoint hides the trigger, but must also close the modal.
+	await page.setViewportSize({ width: 1280, height: 851 });
+	await expect(menu).toBeHidden();
+	await expect(footer).not.toHaveAttribute('aria-hidden', 'true');
+	await expect(footer).not.toHaveAttribute('inert', '');
+	await expect(page.getByRole('link', { name: '本棚に戻る' })).toBeFocused();
+
+	// Desktop reader controls must be operable after the transition.
+	await page.getByRole('button', { name: '目次', exact: true }).click();
+	await expect(page.getByRole('dialog', { name: 'このPDFの目次' })).toBeVisible();
+});
+
 test('PDF mobile TOC jump closes the operation sheet and the next open starts collapsed', async ({ page }) => {
 	test.setTimeout(150_000);
 	// Real /Outlines and /Dest bookmarks, not Chromium's experimental PDF outline generator.
