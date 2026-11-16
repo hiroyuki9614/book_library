@@ -121,6 +121,37 @@ for (const width of [320, 393, 1280, 1440, 1663]) {
 	});
 }
 
+test('PDF mobile TOC jump closes the operation sheet and the next open starts collapsed', async ({ page, browser }) => {
+	test.setTimeout(150_000);
+	const source = await browser.newPage();
+	await source.setContent(`<style>@page{size:A4;margin:20mm}.chapter{break-after:page}</style><section class="chapter"><h1>Chapter One</h1><p>First PDF page.</p></section><section><h1>Chapter Two</h1><p>Second PDF page.</p></section>`);
+	const pdf = await source.pdf({ outline: true });
+	await source.close();
+	await useProtectedBook(page, pdf, 'pdf');
+
+	for (const width of [320, 393]) {
+		await page.setViewportSize({ width, height: 851 });
+		await page.goto('/e2e/readers/harness.html?kind=pdf');
+		await expect(page.locator('[data-pdf-page="1"] img')).toBeVisible({ timeout: 45_000 });
+		await page.getByRole('button', { name: '操作メニューを開く' }).click();
+		const menu = page.getByRole('dialog', { name: '操作メニュー' });
+		await menu.getByRole('button', { name: '目次', exact: true }).click();
+		const toc = page.getByTestId('pdf-mobile-toc');
+		await expect(toc).toBeVisible();
+		await toc.getByRole('button', { name: 'Chapter Two', exact: true }).click();
+		await expect(menu).toBeHidden();
+		await expect(page.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue('2');
+		await expect(page.locator('[data-pdf-page="2"] img')).toBeVisible();
+		const opener = page.getByRole('button', { name: '操作メニューを開く' });
+		await expect(opener).toBeFocused();
+		await opener.click();
+		await expect(page.getByTestId('pdf-mobile-toc')).toHaveCount(0);
+		await expect(menu.getByRole('button', { name: '目次', exact: true })).toHaveAttribute('aria-expanded', 'false');
+		await page.keyboard.press('Escape');
+		await expect(opener).toBeFocused();
+	}
+});
+
 test('PDF mobile reader chrome keeps its header, reading surface and footer within 320/393px viewports', async ({ page, browser }) => {
 	test.setTimeout(150_000);
 	const pdfSource = await browser.newPage();
