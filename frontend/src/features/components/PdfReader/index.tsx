@@ -488,6 +488,9 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialRe
 	const [tocOpen, setTocOpen] = useState(false);
 	const [mobileTocOpen, setMobileTocOpen] = useState(false);
 	const [settingsOpen, setSettingsOpen] = useState(false);
+	// The mobile menu opens programmatically without a SheetTrigger, so return
+	// keyboard focus to the opener after closing it.
+	const mobileMenuTriggerRef = useRef<HTMLButtonElement>(null);
 	const navigation = usePageNavigation({ bookId, documentId, initialPage, initialReadingInfo, pageTurnDirection });
 	return (
 		<div className='flex h-full flex-col'>
@@ -505,11 +508,14 @@ function ReaderWorkspace({ bookId, bookTitle, documentId, initialPage, initialRe
 						</SheetContent>
 					</Sheet>
 				</div>
-				<Button type='button' variant='outline' className='min-h-11 shrink-0 px-3 md:hidden' aria-label='操作メニューを開く' onClick={() => onMobileMenuChange(true)}>メニュー</Button>
+				<Button ref={mobileMenuTriggerRef} type='button' variant='outline' className='min-h-11 shrink-0 px-3 md:hidden' aria-label='操作メニューを開く' onClick={() => onMobileMenuChange(true)}>メニュー</Button>
 			</header>
 			{restoreError && <p role='alert' className='shrink-0 px-3 py-1 text-xs'>保存位置を取得できませんでした。先頭から表示しています。</p>}
 			<Sheet open={mobileMenuOpen} onOpenChange={onMobileMenuChange}>
-				<SheetContent side='right' className='w-[min(88vw,22rem)] p-0 duration-[240ms] motion-reduce:duration-0 [&>button]:size-11'>
+				<SheetContent side='right' className='w-[min(88vw,22rem)] p-0 duration-[240ms] motion-reduce:duration-0 [&>button]:size-11' onCloseAutoFocus={(event) => {
+					event.preventDefault();
+					mobileMenuTriggerRef.current?.focus();
+				}}>
 					<SheetHeader className='shrink-0 border-b pr-16'>
 						<SheetTitle>操作メニュー</SheetTitle>
 						<SheetDescription>拡大・ページ移動・目次</SheetDescription>

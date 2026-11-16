@@ -98,6 +98,9 @@ for (const width of [320, 393, 1280, 1440, 1663]) {
 		if (width < 768) {
 			await page.getByRole('button', { name: '操作メニューを開く' }).click();
 			await checkSheet(page, `PDF mobile controls ${width}`, width, true);
+			// Unlike the desktop Sheet, mobile PDF has no Radix SheetTrigger;
+			// Escape must restore keyboard focus to its actual opener.
+			await expect(page.getByRole('button', { name: '操作メニューを開く' })).toBeFocused();
 		} else {
 			await page.getByRole('button', { name: '目次', exact: true }).click();
 			await checkSheet(page, `PDF TOC ${width}`, width);
