@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, render } from 'vitest-browser-react';
+import { page } from 'vitest/browser';
 
 const mocks = vi.hoisted(() => {
 	const scrollToPage = vi.fn();
@@ -112,6 +113,8 @@ describe('PdfReader navigation, outline, and progress', () => {
 
 	afterEach(async () => {
 		await cleanup();
+		// Vitest's browser iframe defaults to mobile width; restore it after desktop-only tests.
+		await page.viewport(414, 896);
 		vi.restoreAllMocks();
 		mocks.fetchBookFile.mockReset();
 		mocks.fetchReadingInfo.mockReset();
@@ -130,12 +133,13 @@ describe('PdfReader navigation, outline, and progress', () => {
 	});
 
 	test('places title, save state, outline and display settings in the header with reading controls below the page', async () => {
+		await page.viewport(1280, 800);
 		const { getByRole, getByTestId } = await render(<PdfReader bookId={7} bookTitle='A long PDF title' pageTurnDirection='ltr' />);
 
 		const header = getByRole('banner');
 		await expect.element(header).toHaveTextContent('A long PDF title');
-		await expect.element(getByRole('button', { name: '目次' })).toBeInTheDocument();
-		await expect.element(getByRole('button', { name: '表示設定' })).toBeInTheDocument();
+		await expect.element(getByRole('button', { name: '目次' })).toBeVisible();
+		await expect.element(getByRole('button', { name: '表示設定' })).toBeVisible();
 		await expect.element(header).toHaveTextContent('読書位置を保存済み');
 		await expect.element(getByTestId('pdf-reader-footer')).toHaveTextContent('2 / 5 ページ 40%');
 	});
@@ -158,6 +162,8 @@ describe('PdfReader navigation, outline, and progress', () => {
 	});
 
 	test('階層アウトラインを表示して対応ページへ移動し、目次を閉じる', async () => {
+		// This test opens the desktop-only TOC; mobile widths intentionally close that Sheet.
+		await page.viewport(1280, 800);
 		const { getByRole } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await getByRole('button', { name: '目次' }).click();
 		await expect.element(getByRole('button', { name: '第一章' })).toBeInTheDocument();
@@ -167,6 +173,7 @@ describe('PdfReader navigation, outline, and progress', () => {
 	});
 
 	test('アウトラインがないPDFでは目次なしと案内する', async () => {
+		await page.viewport(1280, 800);
 		mocks.bookmarkResult.mockResolvedValue({ bookmarks: [] });
 		const { getByRole, getByText } = await render(<PdfReader bookId={7} pageTurnDirection='ltr' />);
 		await getByRole('button', { name: '目次' }).click();
