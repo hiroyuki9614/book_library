@@ -108,6 +108,13 @@ class FakeAPI:
 
 class OwnerServeTests(unittest.TestCase):
     def setUp(self):
+        self.journal_temp = tempfile.TemporaryDirectory(prefix="owner-serve-state-test-")
+        self.addCleanup(self.journal_temp.cleanup)
+        isolated_journal = Path(self.journal_temp.name)
+        isolated_journal.chmod(0o700)
+        journal_patch = patch.object(owner, "JOURNAL", isolated_journal)
+        journal_patch.start()
+        self.addCleanup(journal_patch.stop)
         self.api = FakeAPI()
         self.used_nonces = set()
         self.probes = []
@@ -246,11 +253,16 @@ class OwnerServeTests(unittest.TestCase):
 
     def test_v2_adopts_exact_root_receipt_and_publishes_linked_completion(self):
         plan, plan_raw, prepared, prepared_raw, root_result = self.v2_inputs()
-        with patch.object(owner, "UPGRADE_RESULTS", Path("/offline/operator")), \
-                patch.object(owner, "_safe_root_path"), \
-                patch.object(owner, "_read_root_regular", return_value=owner.canonical(root_result)), \
-                patch.object(owner, "_publish_completion", side_effect=lambda value: value) as publish:
-            result = owner.run(plan_raw, owner.digest(plan_raw), prepared_raw, owner.digest(prepared_raw))
+        with tempfile.TemporaryDirectory(prefix="owner-v2-state-") as temporary:
+            journal = Path(temporary)
+            journal.chmod(0o700)
+            with patch.object(owner, "JOURNAL", journal), \
+                    patch.object(owner, "UPGRADE_RESULTS", Path("/offline/operator")), \
+                    patch.object(owner, "_safe_root_path"), \
+                    patch.object(owner, "_read_root_regular", return_value=owner.canonical(root_result)), \
+                    patch.object(owner, "_read_completion", return_value=None), \
+                    patch.object(owner, "_publish_completion", side_effect=lambda value: value) as publish:
+                result = owner.run(plan_raw, owner.digest(plan_raw), prepared_raw, owner.digest(prepared_raw))
         self.assertEqual(result["schema"], owner.COMPLETION_SCHEMA)
         self.assertEqual(result["owner_nonce"], plan["nonce"])
         self.assertEqual(result["nginx_id"], prepared["nginx_id"])
@@ -799,6 +811,72 @@ class OwnerServeTests(unittest.TestCase):
                 with self.assertRaisesRegex(owner.Stop, "fixed Serve operation lock"):
                     with RealOperationLock():
                         pass
+
+    def test_v3_stable_serve_path_only_reads_exact_active_mapping_and_probes(self):
+        raw = json.dumps({"TCP": {"443": {"TCPForward": "127.0.0.1:18443"}}, "Web": {}},
+            sort_keys=True, separators=(",", ":")).encode()
+        prior = {"owner_nonce": "1"*64, "completion_sha256": "2"*64,
+            "serve_config_sha256": owner.digest(raw), "serve_etag": "3"*64,
+            "certificate_sha256": "4"*64}
+        runtime = {"prior_generation_sha256": "5"*64, "prior_tls_completion": prior,
+            "project": "belib-isolated-i5-upgrade-"+"6"*32, "operation_id": "6"*32,
+            "services": {"nginx": "7"*64}, "port": 18083}
+        plan = {"schema": owner.PLAN_SCHEMA_V3, "disposition": "reuse-exact-active-custom-tls-ingress",
+            "source_sha": "8"*40, "prior_application_sha": "8"*40,
+            "retained_state_sha256": "9"*64, "serve_config_sha256": prior["serve_config_sha256"],
+            "serve_etag": prior["serve_etag"], "certificate_sha256": prior["certificate_sha256"],
+            "tls_config_sha256": "a"*64, "nonce": "b"*64, "expires_at": 1000,
+            "upgrade_receipt_nonce": "c"*64, "upgrade_receipt_sha256": "d"*64,
+            "operation_id": runtime["operation_id"], "project": runtime["project"],
+            "prior_generation_sha256": runtime["prior_generation_sha256"],
+            "prior_tls_owner_nonce": prior["owner_nonce"],
+            "prior_tls_completion_sha256": prior["completion_sha256"]}
+        prepared = {"unchanged_runtime_sha256": "e"*64, "previous_nginx_id": runtime["services"]["nginx"],
+            "nginx_id": "f"*64, "nginx_configuration_sha256": "1"*64}
+        class ReadOnlyApi:
+            def __init__(self): self.reads = 0; self.statuses = 0
+            def status(self): self.statuses += 1
+            def get(self): self.reads += 1; return raw, prior["serve_etag"]
+            def set(self, *_args): raise AssertionError("v3 path must never write Serve")
+        api = ReadOnlyApi()
+        with patch.object(owner, "LocalAPI", return_value=api), \
+                patch.object(owner, "_root_unchanged_digest_from_upgrade", return_value=("e"*64, runtime)), \
+                patch.object(owner, "_http_health") as http, \
+                patch.object(owner, "tls_request") as positive, \
+                patch.object(owner, "tls_unknown_rejected") as unknown, \
+                patch.object(owner, "tls_no_sni_rejected") as no_sni, \
+                patch.object(owner, "tls_legacy_sni_rejected") as legacy, \
+                patch.object(owner, "tls_self_sni_rejected") as self_sni:
+            result = owner._verify_stable_active_serve(plan, prepared, "f"*64)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual((api.statuses, api.reads), (2, 2))
+        http.assert_called_once_with(18083)
+        self.assertEqual(positive.call_count, 2)
+        unknown.assert_called_once(); no_sni.assert_called_once(); legacy.assert_called_once(); self_sni.assert_called_once()
+
+    def test_expired_v3_plan_cannot_publish_first_completion(self):
+        now = int(owner.time.time())
+        plan = {"schema": owner.PLAN_SCHEMA_V3, "disposition": "reuse-exact-active-custom-tls-ingress",
+            "source_sha": "a"*40, "prior_application_sha": "a"*40,
+            "retained_state_sha256": "b"*64, "serve_config_sha256": "c"*64,
+            "serve_etag": "d"*64, "certificate_sha256": "e"*64,
+            "tls_config_sha256": "f"*64, "nonce": "1"*64, "expires_at": now-1,
+            "upgrade_receipt_nonce": "2"*64, "upgrade_receipt_sha256": "3"*64,
+            "operation_id": "4"*32, "project": "belib-isolated-i5-upgrade-"+"4"*32,
+            "prior_generation_sha256": "5"*64, "prior_tls_owner_nonce": "6"*64,
+            "prior_tls_completion_sha256": "7"*64}
+        raw = owner.canonical(plan)
+        prepared = {"approval_nonce": "8"*64, "evidence_sha256": "9"*64,
+            "previous_nginx_id": "a"*64, "nginx_id": "b"*64,
+            "nginx_configuration_sha256": "c"*64, "nginx_image_id": "sha256:"+"d"*64,
+            "nginx_network_ids": {plan["project"]+"_isolated":"e"*64, plan["project"]+"_ingress":"f"*64},
+            "unchanged_runtime_sha256":"0"*64}
+        with patch.object(owner, "_validate_prepare_v2", return_value=prepared), \
+                patch.object(owner, "_read_completion", return_value=None), \
+                patch.object(owner, "_verify_stable_active_serve") as verify:
+            with self.assertRaisesRegex(owner.Stop, "Expired or out-of-window TLS v3"):
+                owner.run(raw, owner.digest(raw), b"{}", owner.digest(b"{}"))
+        verify.assert_not_called()
 
     def test_direct_cli_is_disabled(self):
         with self.assertRaisesRegex(owner.Stop, "digest-pinned"):

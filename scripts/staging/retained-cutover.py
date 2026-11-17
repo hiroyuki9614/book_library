@@ -36,19 +36,37 @@ def configuration_digest(info):
 
 class RetainedCutover:
     def __init__(self,plan):
-        if (not isinstance(plan,dict) or set(plan)!={'schema','source_sha','operation_id','port','old','new'}
-                or plan['schema']!='belib-isolated-copy-cutover/v1'
+        schema = plan.get('schema') if isinstance(plan, dict) else None
+        legacy = schema == 'belib-isolated-copy-cutover/v1'
+        fields = {'schema','source_sha','operation_id','port','old','new'}
+        if not legacy:
+            fields |= {'prior_project','prior_application_sha','prior_generation_sha256',
+                       'prior_http_port','prior_tls_loopback_port'}
+        if (not isinstance(plan,dict) or set(plan)!=fields
+                or schema not in {'belib-isolated-copy-cutover/v1','belib-isolated-copy-cutover/v2'}
                 or not re.fullmatch('[0-9a-f]{40}',plan.get('source_sha',''))
                 or not re.fullmatch('[0-9a-f]{32}',plan.get('operation_id',''))
                 or type(plan.get('port')) is not int or not 1024<=plan['port']<=65535):
             raise CutoverBlocked('Cutover requires an exact adopted staging plan')
+        if not legacy:
+            prefix = PROJECT + '-upgrade-'
+            if (not isinstance(plan['prior_project'], str)
+                    or not re.fullmatch(re.escape(prefix)+r'[0-9a-f]{32}', plan['prior_project'])
+                    or not re.fullmatch('[0-9a-f]{40}', plan['prior_application_sha'] or '')
+                    or not re.fullmatch('[0-9a-f]{64}', plan['prior_generation_sha256'] or '')
+                    or type(plan['prior_http_port']) is not int or not 1024<=plan['prior_http_port']<=65535
+                    or type(plan['prior_tls_loopback_port']) is not int or not 1024<=plan['prior_tls_loopback_port']<=65535):
+                raise CutoverBlocked('Prior-generation cutover identity is malformed')
         ids=[]
         for side in ('old','new'):
             if not isinstance(plan[side],dict) or set(plan[side])!=set(SERVICES):
                 raise CutoverBlocked('Cutover requires exactly the three application services')
-            for pin in plan[side].values():
-                if (not isinstance(pin,dict) or set(pin)!={'id','configuration_sha256','network_ids'}
+            for service,pin in plan[side].items():
+                pin_fields={'id','configuration_sha256','network_ids'}
+                if not legacy and side == 'old': pin_fields.add('image_id')
+                if (not isinstance(pin,dict) or set(pin)!=pin_fields
                         or any(not isinstance(pin[k],str) or not re.fullmatch('[0-9a-f]{64}',pin[k]) for k in ('id','configuration_sha256'))
+                        or ('image_id' in pin and not re.fullmatch('sha256:[0-9a-f]{64}',pin['image_id']))
                         or not isinstance(pin['network_ids'],dict) or not pin['network_ids']
                         or any(not isinstance(k,str) or not re.fullmatch('[A-Za-z0-9_.-]{1,128}',k)
                                or not isinstance(v,str) or not re.fullmatch('[0-9a-f]{64}',v) for k,v in pin['network_ids'].items())):
@@ -57,6 +75,8 @@ class RetainedCutover:
         if len(set(ids))!=6:
             raise CutoverBlocked('Old and candidate containers must be distinct')
         self.plan=json.loads(json.dumps(plan))
+        self.prior_project = PROJECT if legacy else plan['prior_project']
+        self.prior_application_sha = '81256268276d7ead95029849037f69ec6beec202' if legacy else plan['prior_application_sha']
         self.prefix=['/usr/bin/docker','--host',f'unix:///run/user/{os.getuid()}/docker.sock']
         self.environment={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','DOCKER_CONFIG':'/nonexistent'}
 
@@ -71,15 +91,17 @@ class RetainedCutover:
         result={}
         for service,pin in self.plan[side].items():
             info=json.loads(self.docker('inspect',pin['id']))[0]
-            project=PROJECT if side=='old' else PROJECT+'-upgrade-'+self.plan['operation_id']
+            project=self.prior_project if side=='old' else PROJECT+'-upgrade-'+self.plan['operation_id']
             labels=info.get('Config',{}).get('Labels') or {}
             if (info.get('Id')!=pin['id'] or configuration_digest(info)!=pin['configuration_sha256']
+                    or (side=='old' and self.plan['schema']=='belib-isolated-copy-cutover/v2'
+                        and info.get('Image')!=pin['image_id'])
                     or labels.get('com.docker.compose.project')!=project
                     or labels.get('com.docker.compose.service')!=service):
                 raise CutoverBlocked('Staging container configuration changed; CAS refused')
             if service in ('backend','frontend'):
                 image=json.loads(self.docker('image','inspect',info['Image']))[0]
-                expected_revision=self.plan['source_sha'] if side=='new' else '81256268276d7ead95029849037f69ec6beec202'
+                expected_revision=self.plan['source_sha'] if side=='new' else self.prior_application_sha
                 if (image.get('Id')!=info['Image'] or
                         (image.get('Config',{}).get('Labels') or {}).get('org.opencontainers.image.revision')!=expected_revision):
                     raise CutoverBlocked('Running application image revision differs from the adopted source')
@@ -93,7 +115,13 @@ class RetainedCutover:
                         or (network.get('Labels') or {}).get('com.docker.compose.project')!=project):
                     raise CutoverBlocked('Container network identity changed')
             ports=info.get('HostConfig',{}).get('PortBindings') or {}
-            expected={'8080/tcp':[{'HostIp':'127.0.0.1','HostPort':str(self.plan['port'])}]} if service=='nginx' else {}
+            if service != 'nginx':
+                expected={}
+            elif side == 'old' and self.plan['schema'] == 'belib-isolated-copy-cutover/v2':
+                expected={'8080/tcp':[{'HostIp':'127.0.0.1','HostPort':str(self.plan['prior_http_port'])}],
+                          '8443/tcp':[{'HostIp':'127.0.0.1','HostPort':str(self.plan['prior_tls_loopback_port'])}]}
+            else:
+                expected={'8080/tcp':[{'HostIp':'127.0.0.1','HostPort':str(self.plan['port'])}]}
             if ports!=expected:
                 raise CutoverBlocked('Cutover must reuse only the exact staging loopback endpoint')
             if info.get('State',{}).get('Paused') or info.get('State',{}).get('Restarting'):

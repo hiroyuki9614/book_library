@@ -83,13 +83,18 @@ class Journal:
 
     def __init__(self, root: Path, identity: dict):
         # Identity is selected by the trusted caller, never inferred from a file.
-        if set(identity) != {"operation_id", "source_sha", "retained_state_sha256"}:
+        base_identity={"operation_id", "source_sha", "retained_state_sha256"}
+        generation_identity={"prior_generation_sha256", "env_prior_sha256", "env_candidate_sha256"}
+        generation=set(identity)==base_identity|generation_identity
+        if set(identity) not in (base_identity, base_identity|generation_identity):
             raise UpgradeError("Transaction identity fields are invalid")
         if not re.fullmatch(r"[0-9a-f]{32}", identity.get("operation_id", "")):
             raise UpgradeError("Operation identity is invalid")
         if not re.fullmatch(r"[0-9a-f]{40}", identity.get("source_sha", "")):
             raise UpgradeError("Source revision is invalid")
         _digest(identity.get("retained_state_sha256", ""))
+        if generation:
+            for name in generation_identity: _digest(identity[name])
         info = root.lstat()
         if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
                 or stat.S_IMODE(info.st_mode) != 0o700 or root.resolve() != root):
@@ -97,7 +102,8 @@ class Journal:
         self.root = root
         self.path = root / (identity["operation_id"] + ".json")
         self.identity = dict(identity)
-        self.value = {"schema": "belib-retained-db-transaction/v1", **identity,
+        schema="belib-retained-db-transaction/v2" if generation else "belib-retained-db-transaction/v1"
+        self.value = {"schema": schema, **identity,
                       "phase": "prepared", "backup_sha256": None}
         if self.path.exists() or self.path.is_symlink():
             fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)

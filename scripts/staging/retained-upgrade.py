@@ -53,6 +53,10 @@ MANIFEST_FIELDS = {
     "prior_frontend_image_digest", "database_lineage", "db_container_id",
     "db_image_digest", "volumes", "network_ids", "book_files",
 }
+MANIFEST_V3_FIELDS = (MANIFEST_FIELDS - {"schema", "prior_application_sha", "prior_backend_image_digest",
+    "prior_frontend_image_digest", "db_image_digest"}) | {"schema", "prior_application_sha", "prior_project",
+    "prior_generation_sha256", "prior_backend_image_digest", "prior_frontend_image_digest",
+    "database_lineage", "db_container_id", "db_image_digest", "db_image_id"}
 ATTESTATION_FIELDS = {
     "schema", "evidence_issuer", "backup_sha256", "manifest_sha256",
     "postgresql_major_version", "restore_target_identity", "integrity_query_sha256",
@@ -68,6 +72,8 @@ BACKUP_ROOT_CONTRACT_FIELDS = {
     "principal", "uid", "project", "repository_root", "retained_db_root",
     "retained_books_root", "issued_at", "expires_at",
 }
+BACKUP_ROOT_CONTRACT_V2_FIELDS = BACKUP_ROOT_CONTRACT_FIELDS | {"prior_project", "prior_generation_sha256"}
+NETWORK_INVENTORY_V2_FIELDS = NETWORK_INVENTORY_FIELDS | {"prior_project", "prior_generation_sha256"}
 
 
 class UpgradePreflightError(Exception):
@@ -88,6 +94,16 @@ def _validate_stage_identity(payload: dict, label: str) -> None:
         raise UpgradePreflightError(f"{label} does not bind the exact expected staging identity")
     if type(payload["pull_request"]) is not int or type(payload["uid"]) is not int:
         raise UpgradePreflightError(f"{label} numeric staging identity fields must be integers")
+
+
+def _validate_prior_generation(payload: dict) -> None:
+    prior = payload.get("prior_project")
+    digest = payload.get("prior_generation_sha256")
+    prefix = EXPECTED_PROJECT + "-upgrade-"
+    if (not isinstance(prior, str) or not prior.startswith(prefix)
+            or not re.fullmatch(re.escape(prefix) + r"[0-9a-f]{32}", prior)
+            or not isinstance(digest, str) or not HEX_SHA256.fullmatch(digest)):
+        raise UpgradePreflightError("Prior active-generation identity is malformed")
 
 
 def _pairs_no_duplicates(pairs):
@@ -178,16 +194,28 @@ def _trusted_signed_payload(
 
 def _trusted_backup_roots(
     envelope: Any, *, trusted_issuer: str, public_key_pem: bytes | None,
-    trusted_fingerprint: str | None,
+    trusted_fingerprint: str | None, expected_prior_project: str | None = None,
+    expected_prior_generation_sha256: str | None = None,
 ) -> tuple[Path, ...]:
     """Resolve the complete signed repo, retained DB, and retained books exclusion set."""
+    parsed = _canonical_object(envelope, "Backup root contract envelope")
+    schema = parsed.get("payload", {}).get("schema") if isinstance(parsed, dict) else None
+    version2 = schema == "belib-retained-upgrade-backup-roots/v2"
     payload = _trusted_signed_payload(
-        envelope, fields=BACKUP_ROOT_CONTRACT_FIELDS,
-        schema="belib-retained-upgrade-backup-roots/v1", trusted_issuer=trusted_issuer,
+        envelope, fields=BACKUP_ROOT_CONTRACT_V2_FIELDS if version2 else BACKUP_ROOT_CONTRACT_FIELDS,
+        schema="belib-retained-upgrade-backup-roots/v2" if version2 else "belib-retained-upgrade-backup-roots/v1", trusted_issuer=trusted_issuer,
         public_key_pem=public_key_pem, trusted_fingerprint=trusted_fingerprint,
         label="Backup root contract",
     )
     _validate_stage_identity(payload, "Backup root contract")
+    if version2:
+        _validate_prior_generation(payload)
+        if (expected_prior_project is not None and payload["prior_project"] != expected_prior_project
+                or expected_prior_generation_sha256 is not None
+                and payload["prior_generation_sha256"] != expected_prior_generation_sha256):
+            raise UpgradePreflightError("Backup roots do not bind the manifest's exact predecessor")
+    elif expected_prior_project is not None or expected_prior_generation_sha256 is not None:
+        raise UpgradePreflightError("Generation v3 requires a predecessor-bound backup-root contract")
     roots = []
     for field in ("repository_root", "retained_db_root", "retained_books_root"):
         value = payload[field]
@@ -212,6 +240,7 @@ def validate_backup_artifact(
     backup_path: str | os.PathLike[str], *, uid: int,
     trusted_root_contract: Any, trusted_root_contract_issuer: str | None,
     root_contract_public_key_pem: bytes | None, trusted_root_contract_fingerprint: str | None,
+    expected_prior_project: str | None = None, expected_prior_generation_sha256: str | None = None,
     extra_exclusion_roots: tuple[Path, ...] = (),
 ) -> str:
     """Fixture-level backup check; caller-supplied pins do not establish independent trust."""
@@ -228,6 +257,8 @@ def validate_backup_artifact(
             trusted_root_contract, trusted_issuer=trusted_root_contract_issuer,
             public_key_pem=root_contract_public_key_pem,
             trusted_fingerprint=trusted_root_contract_fingerprint,
+            expected_prior_project=expected_prior_project,
+            expected_prior_generation_sha256=expected_prior_generation_sha256,
         )
         for root in extra_exclusion_roots:
             try:
@@ -314,9 +345,12 @@ def validate_manifest(
     """Fixture-level manifest check; caller-supplied pins do not establish authority."""
     _sha(expected_source_sha, "Expected candidate source SHA", HEX_SHA1)
     manifest = _canonical_object(manifest, "Manifest")
-    item = _exact_fields(manifest, MANIFEST_FIELDS, "Manifest")
+    if not isinstance(manifest, dict):
+        raise UpgradePreflightError("Manifest must be an object")
+    version3 = manifest.get("schema") == "belib-retained-upgrade-manifest/v3"
+    item = _exact_fields(manifest, MANIFEST_V3_FIELDS if version3 else MANIFEST_FIELDS, "Manifest")
     fixed = {
-        "schema": "belib-retained-upgrade-manifest/v2",
+        "schema": "belib-retained-upgrade-manifest/v3" if version3 else "belib-retained-upgrade-manifest/v2",
         "repository": EXPECTED_REPOSITORY,
         "pull_request": EXPECTED_PULL_REQUEST,
         "branch": EXPECTED_BRANCH,
@@ -325,36 +359,58 @@ def validate_manifest(
         "uid": EXPECTED_UID,
         "project": EXPECTED_PROJECT,
         "source_sha": expected_source_sha,
-        "prior_application_sha": OLD_APPLICATION_SHA,
-        "prior_backend_image_digest": OLD_BACKEND_IMAGE,
-        "prior_frontend_image_digest": OLD_FRONTEND_IMAGE,
         "database_lineage": OLD_DATABASE_LINEAGE,
-        "db_container_id": OLD_DB_CONTAINER_ID,
-        "db_image_digest": OLD_DB_IMAGE,
     }
+    if not version3:
+        fixed.update(prior_application_sha=OLD_APPLICATION_SHA,
+            prior_backend_image_digest=OLD_BACKEND_IMAGE, prior_frontend_image_digest=OLD_FRONTEND_IMAGE,
+            db_container_id=OLD_DB_CONTAINER_ID, db_image_digest=OLD_DB_IMAGE)
     if any(item.get(name) != value for name, value in fixed.items()):
         raise UpgradePreflightError("Manifest staging, source, OCI, or retained DB identity mismatch")
     if any(type(item[name]) is not int for name in ("pull_request", "uid")):
         raise UpgradePreflightError("Manifest numeric identity fields must be integers")
+    if version3:
+        _validate_prior_generation(item)
+        if (not isinstance(item["prior_application_sha"], str) or not HEX_SHA1.fullmatch(item["prior_application_sha"])
+                or not isinstance(item["db_container_id"], str) or not VOLUME_ID.fullmatch(item["db_container_id"])
+                or not isinstance(item["db_image_id"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["db_image_id"])
+                or item["db_image_digest"] != OLD_DB_IMAGE
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["prior_backend_image_digest"])
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["prior_frontend_image_digest"])):
+            raise UpgradePreflightError("Manifest v3 prior generation identity is malformed")
     volumes = item["volumes"]
+    expected_volume_names = ([item["prior_project"] + "_staging-book-files", item["prior_project"] + "_staging-postgres-data"]
+                             if version3 else list(RETAINED_VOLUMES))
+    # The shared books volume remains owned by the original logical project.
+    if version3:
+        expected_volume_names[0] = EXPECTED_PROJECT + "_staging-book-files"
     if (not isinstance(volumes, list) or len(volumes) != 2
-            or [v.get("name") if isinstance(v, dict) else None for v in volumes] != list(RETAINED_VOLUMES)):
+            or [v.get("name") if isinstance(v, dict) else None for v in volumes] != expected_volume_names):
         raise UpgradePreflightError("Manifest must name both retained volumes in canonical order")
     for volume in volumes:
         _exact_fields(volume, {"name", "identity_sha256"}, "Volume identity")
         _sha(volume["identity_sha256"], "Volume identity digest")
     if trusted_network_inventory_issuer is None:
         raise UpgradePreflightError("Caller-provided network-inventory fixture pins are missing")
+    parsed_network = _canonical_object(trusted_network_inventory, "Network inventory envelope")
+    network_payload = parsed_network.get("payload") if isinstance(parsed_network, dict) else None
+    network_schema = network_payload.get("schema") if isinstance(network_payload, dict) else None
+    network_v2 = network_schema == "belib-retained-upgrade-network-inventory/v2"
+    if version3 != network_v2:
+        raise UpgradePreflightError("Network inventory generation does not match the retained manifest")
     network_pin = _trusted_signed_payload(
-        trusted_network_inventory, fields=NETWORK_INVENTORY_FIELDS,
-        schema="belib-retained-upgrade-network-inventory/v1",
+        trusted_network_inventory, fields=NETWORK_INVENTORY_V2_FIELDS if network_v2 else NETWORK_INVENTORY_FIELDS,
+        schema="belib-retained-upgrade-network-inventory/v2" if network_v2 else "belib-retained-upgrade-network-inventory/v1",
         trusted_issuer=trusted_network_inventory_issuer,
         public_key_pem=network_inventory_public_key_pem,
         trusted_fingerprint=trusted_network_inventory_fingerprint,
         label="Network inventory",
     )
     _validate_stage_identity(network_pin, "Network inventory")
-    if network_pin["prior_application_sha"] != OLD_APPLICATION_SHA:
+    if (network_pin["prior_application_sha"] != item["prior_application_sha"]
+            or (version3 and (network_pin["prior_project"] != item["prior_project"]
+                or network_pin["prior_generation_sha256"] != item["prior_generation_sha256"]))
+            or (not version3 and network_pin["prior_application_sha"] != OLD_APPLICATION_SHA)):
         raise UpgradePreflightError("Network inventory does not bind the exact prior application")
     expected_networks = network_pin["network_ids"]
     if (not isinstance(expected_networks, list) or len(expected_networks) != 2

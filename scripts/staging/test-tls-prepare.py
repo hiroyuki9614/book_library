@@ -188,6 +188,22 @@ class FakeEffects:
 
 
 class TlsPrepareTests(unittest.TestCase):
+    def test_v3_active_serve_requires_root_linked_digest_etag_and_exact_forward(self):
+        raw = json.dumps({"TCP": {"443": {"TCPForward": "127.0.0.1:18443"}}, "Web": {}},
+            sort_keys=True, separators=(",", ":")).encode()
+        prior = {"owner_nonce": "1"*64, "completion_sha256": "2"*64,
+            "serve_config_sha256": cli.digest(raw), "serve_etag": "3"*64,
+            "certificate_sha256": tls.EXPECTED_CERT_SHA256}
+        self.assertEqual(cli._v3_validate_active_serve(raw, prior["serve_etag"], prior)["TCP"]["443"],
+            {"TCPForward": "127.0.0.1:18443"})
+        with self.assertRaises(cli.PrepareError):
+            cli._v3_validate_active_serve(raw, "4"*64, prior)
+        changed = json.dumps({"TCP": {"443": {"TCPForward": "127.0.0.1:18444"}}, "Web": {}},
+            sort_keys=True, separators=(",", ":")).encode()
+        bad_prior = {**prior, "serve_config_sha256": cli.digest(changed)}
+        with self.assertRaisesRegex(cli.PrepareError, "exact Tailnet-only TLS ingress"):
+            cli._v3_validate_active_serve(changed, prior["serve_etag"], bad_prior)
+
     def test_v2_plan_is_bound_to_exact_root_receipt_and_nonce_scoped_manifest(self):
         source_sha, operation, owner_nonce, receipt_nonce = "a" * 40, "b" * 32, "c" * 64, "d" * 64
         project = "belib-isolated-i5-upgrade-" + operation

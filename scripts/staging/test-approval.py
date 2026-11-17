@@ -215,6 +215,25 @@ class ApprovalTests(unittest.TestCase):
             approval.request_and_wait("a" * 40, "tls-ingress", "d" * 64, uid=os.getuid(),
                                       output=io.StringIO(), timeout=0)
 
+    def test_tls_v3_grant_uses_v2_schema_and_binds_exact_active_generation(self):
+        binding = {"prior_application_sha": "8" * 40, "retained_state_sha256": "1" * 64,
+            "serve_config_sha256": "2" * 64, "serve_etag": "9" * 64,
+            "certificate_sha256": "4" * 64, "tls_config_sha256": "5" * 64,
+            "owner_plan_sha256": "7" * 64, "tls_state_sha256": "6" * 64,
+            "prior_generation_sha256": "a" * 64, "prior_tls_owner_nonce": "b" * 64,
+            "prior_tls_completion_sha256": "c" * 64}
+        now = int(time.time())
+        payload = approval.expected_payload("a" * 40, "tls-ingress", "c" * 64, now, "d" * 64,
+            tls_binding=binding)
+        self.assertEqual(payload["schema"], "belib-staging-bootstrap-approval/v2")
+        approval.validate_payload(payload, "a" * 40, "tls-ingress", "c" * 64, "d" * 64,
+            now, tls_binding=binding)
+        for name in ("prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"):
+            changed = dict(payload, **{name: "e" * 64})
+            with self.subTest(name=name), self.assertRaises(approval.ApprovalError):
+                approval.validate_payload(changed, "a" * 40, "tls-ingress", "c" * 64, "d" * 64,
+                    now, tls_binding=binding)
+
     def test_retained_upgrade_signature_binds_prior_state_backup_and_restore_pins(self):
         now = int(time.time())
         binding = self.retained_upgrade_binding()
@@ -331,6 +350,28 @@ class ApprovalTests(unittest.TestCase):
                 approval.request_and_wait("a" * 40, operation, "d" * 64, uid=os.getuid(),
                     output=io.StringIO(), timeout=0, **kwargs)
         self.assertFalse(state_root.exists())
+
+    def test_retained_upgrade_v2_binds_prior_generation_without_relaxing_v1(self):
+        binding = {**self.retained_upgrade_binding(), "prior_application_sha":"9"*40,
+                   "prior_generation_sha256":"8"*64}
+        now = int(time.time())
+        payload = approval.expected_payload("a"*40, "upgrade-retained", "c"*64, now, "d"*64,
+            retained_upgrade_binding=binding)
+        self.assertEqual(payload["schema"], "belib-staging-bootstrap-approval/v2")
+        approval.validate_payload(payload, "a"*40, "upgrade-retained", "c"*64, "d"*64,
+            now, retained_upgrade_binding=binding)
+        changed = dict(payload, prior_generation_sha256="7"*64)
+        with self.assertRaisesRegex(approval.ApprovalError, "current retained state"):
+            approval.validate_payload(changed, "a"*40, "upgrade-retained", "c"*64, "d"*64,
+                now, retained_upgrade_binding=binding)
+        legacy = self.retained_upgrade_binding()
+        legacy_payload = approval.expected_payload("a"*40, "upgrade-retained", "c"*64, now, "d"*64,
+            retained_upgrade_binding=legacy)
+        self.assertEqual(legacy_payload["schema"], "belib-staging-bootstrap-approval/v1")
+        with self.assertRaises(approval.ApprovalError):
+            approval.validate_payload(dict(legacy_payload, prior_application_sha="9"*40),
+                "a"*40, "upgrade-retained", "c"*64, "d"*64, now,
+                retained_upgrade_binding=legacy)
 
     def verify_tls_tamper(self, binding, name, value):
         envelope = self.tls_envelope(binding, **{name: value})

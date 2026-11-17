@@ -58,6 +58,11 @@ HEALTH_PATH = "/health"
 MAX_HANDOFF_BYTES = 2 * 1024 * 1024
 MAX_GRANT_BYTES = 16 * 1024
 MAX_ENV_BYTES = 16 * 1024
+F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1034)
+F_SEAL_SEAL = getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+F_SEAL_SHRINK = getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+F_SEAL_GROW = getattr(fcntl, "F_SEAL_GROW", 0x0004)
+F_SEAL_WRITE = getattr(fcntl, "F_SEAL_WRITE", 0x0008)
 TLS_LOOPBACK_PORT = 18443
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 SHA64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -275,13 +280,18 @@ def decode_grant(raw: bytes, *, expected_source_sha: str, now: int) -> tuple[dic
         raise ExecutorError("Grant payload must be an object")
     operation = grant.get("operation")
     expected_fields = set(COMMON_GRANT_FIELDS)
+    version2 = grant.get("schema") == "belib-staging-bootstrap-approval/v2"
+    if version2 and operation != "upgrade-retained":
+        raise ExecutorError("Approval v2 is restricted to retained-generation upgrades")
     if operation == "resume-ingress":
         expected_fields |= {"prior_source_sha", "retained_state_sha256"}
     elif operation == "upgrade-retained":
         expected_fields |= {"prior_application_sha", "retained_state_sha256", "backup_sha256",
                             "restore_attestation_sha256"}
+        if version2:
+            expected_fields.add("prior_generation_sha256")
     if (operation not in OPERATIONS or set(grant) != expected_fields
-            or grant.get("schema") != "belib-staging-bootstrap-approval/v1"
+            or grant.get("schema") not in {"belib-staging-bootstrap-approval/v1", "belib-staging-bootstrap-approval/v2"}
             or any(grant.get(key) != value for key, value in TARGET.items())
             or grant.get("source_sha") != expected_source_sha
             or not _is_sha(grant.get("source_sha"), SHA40)
@@ -294,10 +304,12 @@ def decode_grant(raw: bytes, *, expected_source_sha: str, now: int) -> tuple[dic
     ):
         raise ExecutorError("Resume grant prior-state binding is invalid")
     if operation == "upgrade-retained" and (
-        grant["prior_application_sha"] != OLD_APPLICATION
+        (not version2 and grant["prior_application_sha"] != OLD_APPLICATION)
+        or not _is_sha(grant.get("prior_application_sha"), SHA40)
         or any(not _is_sha(grant[field]) for field in (
             "retained_state_sha256", "backup_sha256", "restore_attestation_sha256"
         ))
+        or (version2 and not _is_sha(grant.get("prior_generation_sha256")))
     ):
         raise ExecutorError("Retained-upgrade grant evidence binding is invalid")
     if not (now - 300 <= grant["issued_at"] <= now + 5
@@ -317,8 +329,11 @@ RESULT_FIELDS = {
 def validate_expected_runtime(value: Any) -> dict:
     if isinstance(value, dict) and "authority_pins_sha256" not in value:
         raise ExecutorError("Expected retained runtime lacks authority pin binding; legacy receipt is unsupported")
-    expected = _require_fields(value, {"project", "services", "retained", "port", "plan_sha256",
-                                       "operation_id", "plan", "authority_pins_sha256"},
+    generation = isinstance(value, dict) and value.get("prior_generation_sha256") is not None
+    expected_fields = {"project", "services", "retained", "port", "plan_sha256",
+                       "operation_id", "plan", "authority_pins_sha256"}
+    if generation: expected_fields |= {"prior_project", "prior_application_sha", "prior_generation_sha256", "prior_tls_completion"}
+    expected = _require_fields(value, expected_fields,
                                "Expected retained runtime")
     project = expected.get("project")
     operation_id = expected.get("operation_id")
@@ -329,17 +344,40 @@ def validate_expected_runtime(value: Any) -> dict:
                                "Expected upgrade services")
     retained = _require_fields(expected.get("retained"), {"project", "db", "stopped_application_ids", "volumes"},
                                "Expected retained services")
-    plan = _require_fields(expected.get("plan"), {"cutover_plan", "candidate_database", "source_database"}, "Expected cutover plan")
-    cutover = _require_fields(plan.get("cutover_plan"), {"schema", "source_sha", "operation_id", "port", "old", "new"},
+    plan_fields={"cutover_plan", "candidate_database", "source_database"}
+    if generation: plan_fields.add("environment_transition")
+    plan = _require_fields(expected.get("plan"), plan_fields, "Expected cutover plan")
+    cutover_fields={"schema", "source_sha", "operation_id", "port", "old", "new"}
+    if generation: cutover_fields |= {"prior_project", "prior_application_sha", "prior_generation_sha256", "prior_http_port", "prior_tls_loopback_port"}
+    cutover = _require_fields(plan.get("cutover_plan"), cutover_fields,
                               "Cutover plan")
+    if generation:
+        transition=_require_fields(plan.get("environment_transition"),
+            {"prior_sha256","candidate_sha256","prior_source_sha","candidate_source_sha"},"Environment transition")
+        if (not _is_sha(transition["prior_sha256"]) or not _is_sha(transition["candidate_sha256"])
+                or transition["prior_source_sha"]!=expected["prior_application_sha"]
+                or transition["candidate_source_sha"]!=cutover.get("source_sha")):
+            raise ExecutorError("Environment transition does not bind the prior and candidate sources")
     candidate_db = _require_fields(plan.get("candidate_database"),
                                    {"id", "configuration_sha256", "volume_name", "network_id"},
                                    "Candidate database plan")
     source_db = _require_fields(plan.get("source_database"),
-                                {"id", "configuration_sha256", "network_ids", "volume_name"},
+                                {"id", "configuration_sha256", "network_ids", "volume_name"} | ({"image_id"} if generation else set()),
                                 "Retained source database plan")
+    prior_project = expected["prior_project"] if generation else PROJECT
+    prior_sha = expected["prior_application_sha"] if generation else OLD_APPLICATION
+    prior_digest = expected["prior_generation_sha256"] if generation else None
+    if generation:
+        prior_tls = _require_fields(expected["prior_tls_completion"],
+            {"owner_nonce", "completion_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256"},
+            "Prior TLS completion")
+        if (any(not _is_sha(prior_tls.get(name)) for name in ("owner_nonce", "completion_sha256", "serve_config_sha256", "certificate_sha256"))
+                or not isinstance(prior_tls.get("serve_etag"), str) or not prior_tls["serve_etag"]
+                or len(prior_tls["serve_etag"]) > 256):
+            raise ExecutorError("Prior TLS completion pins are malformed")
+    prior_db_id = source_db.get("id") if generation else RETAINED_DATABASE_ID
     if (any(not _is_sha(item) for item in services.values())
-            or retained.get("project") != PROJECT or retained.get("db") != RETAINED_DATABASE_ID
+            or retained.get("project") != prior_project or retained.get("db") != prior_db_id
             or not isinstance(retained.get("stopped_application_ids"), list)
             or len(retained["stopped_application_ids"]) != 3
             or any(not _is_sha(item) for item in retained["stopped_application_ids"])
@@ -347,21 +385,28 @@ def validate_expected_runtime(value: Any) -> dict:
             or type(expected.get("port")) is not int or not 1024 <= expected["port"] <= 65535
             or not _is_sha(expected.get("plan_sha256"))
             or not _is_sha(expected.get("authority_pins_sha256"))
-            or cutover.get("schema") != "belib-isolated-copy-cutover/v1"
+            or cutover.get("schema") != ("belib-isolated-copy-cutover/v2" if generation else "belib-isolated-copy-cutover/v1")
             or cutover.get("operation_id") != operation_id or cutover.get("port") != expected["port"]
+            or (generation and (cutover.get("prior_project") != prior_project
+                or cutover.get("prior_application_sha") != prior_sha
+                or cutover.get("prior_generation_sha256") != prior_digest
+                or not _is_sha(prior_digest) or not _is_sha(prior_sha, SHA40)
+                or cutover.get("prior_http_port") is None or cutover.get("prior_tls_loopback_port") is None))
             or not isinstance(retained.get("volumes"), dict)
-            or retained["volumes"] != {"database": PROJECT + "_staging-postgres-data",
+            or retained["volumes"] != {"database": prior_project + "_staging-postgres-data",
                                         "books": PROJECT + "_staging-book-files"}
             or candidate_db.get("id") != services.get("db")
             or candidate_db.get("volume_name") != project + "_staging-postgres-data"
             or not _is_sha(candidate_db.get("configuration_sha256"))
             or not _is_sha(candidate_db.get("network_id"))
             or source_db.get("id") != retained.get("db")
-            or source_db.get("volume_name") != PROJECT + "_staging-postgres-data"
+            or source_db.get("volume_name") != prior_project + "_staging-postgres-data"
             or not _is_sha(source_db.get("configuration_sha256"))
             or not isinstance(source_db.get("network_ids"), dict)
-            or set(source_db["network_ids"]) != {PROJECT + "_isolated"}
-            or not _is_sha(source_db["network_ids"].get(PROJECT + "_isolated"))):
+            or set(source_db["network_ids"]) != {prior_project + "_isolated"}
+            or not _is_sha(source_db["network_ids"].get(prior_project + "_isolated"))
+            or (generation and (not isinstance(source_db.get("image_id"), str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", source_db["image_id"])))):
         raise ExecutorError("Expected retained runtime pins are malformed")
     ids = list(services.values()) + [retained["db"], *retained["stopped_application_ids"]]
     if len(set(ids)) != 8:
@@ -372,17 +417,21 @@ def validate_expected_runtime(value: Any) -> dict:
     for side, expected_ids in (("old", dict(zip(("backend", "frontend", "nginx"), retained["stopped_application_ids"]))),
                                ("new", {name: services[name] for name in ("backend", "frontend", "nginx")})):
         for service, pin in cutover[side].items():
-            pin = _require_fields(pin, {"id", "configuration_sha256", "network_ids"},
+            pin_fields={"id", "configuration_sha256", "network_ids"}
+            if generation and side == "old": pin_fields.add("image_id")
+            pin = _require_fields(pin, pin_fields,
                                  f"Cutover {side} {service}")
             if (pin.get("id") != expected_ids[service] or not _is_sha(pin.get("configuration_sha256"))
+                    or (generation and side == "old" and (not isinstance(pin.get("image_id"), str)
+                        or not re.fullmatch(r"sha256:[0-9a-f]{64}", pin["image_id"])))
                     or not isinstance(pin.get("network_ids"), dict) or not pin["network_ids"]
                     or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", name)
                            or not _is_sha(network_id) for name, network_id in pin["network_ids"].items())):
                 raise ExecutorError("Cutover service identity or network pins are invalid")
     new_isolated = project + "_isolated"
     new_ingress = project + "_ingress"
-    old_isolated = PROJECT + "_isolated"
-    old_ingress = PROJECT + "_ingress"
+    old_isolated = prior_project + "_isolated"
+    old_ingress = prior_project + "_ingress"
     if (set(cutover["new"]["nginx"]["network_ids"])
             != {new_isolated, new_ingress}):
         raise ExecutorError("Candidate nginx networks do not match the isolated-copy layout")
@@ -393,7 +442,8 @@ def validate_expected_runtime(value: Any) -> dict:
             or any(set(cutover["old"][service]["network_ids"]) != {old_isolated}
                    for service in ("backend", "frontend"))
             or candidate_db["network_id"] != cutover["new"]["backend"]["network_ids"].get(new_isolated)
-            or source_db["network_ids"][old_isolated] != cutover["old"]["backend"]["network_ids"].get(old_isolated)):
+            or source_db["network_ids"][old_isolated] != cutover["old"]["backend"]["network_ids"].get(old_isolated)
+            ):
         raise ExecutorError("Retained or candidate network plan differs from the fixed topology")
     if hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                                  allow_nan=False).encode("utf-8")).hexdigest() != expected["plan_sha256"]:
@@ -427,7 +477,14 @@ def validate_bootstrap_result(value: Any, grant: dict, grant_sha256: str) -> dic
         raise ExecutorError("Installed operator receipt result fields are invalid")
     if "expected_runtime" in result:
         expected_runtime = validate_expected_runtime(result["expected_runtime"])
-        if expected_runtime["plan"]["cutover_plan"]["source_sha"] != grant["source_sha"]:
+        generation = grant.get("schema") == "belib-staging-bootstrap-approval/v2"
+        cutover = expected_runtime["plan"]["cutover_plan"]
+        if (expected_runtime["plan"]["cutover_plan"]["source_sha"] != grant["source_sha"]
+                or (generation and (expected_runtime.get("prior_generation_sha256") != grant.get("prior_generation_sha256")
+                    or expected_runtime.get("prior_application_sha") != grant.get("prior_application_sha")
+                    or cutover.get("prior_generation_sha256") != grant.get("prior_generation_sha256")
+                    or cutover.get("prior_application_sha") != grant.get("prior_application_sha")))
+                or (not generation and cutover.get("schema") != "belib-isolated-copy-cutover/v1")):
             raise ExecutorError("Expected runtime plan source differs from the signed grant")
     return result
 
@@ -800,23 +857,29 @@ def _collect_upgrade_runtime_readback(expected: dict, source_sha: str, port: int
             image_id = container.get("Image")
             if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
                 raise ExecutorError("Retained/candidate image ID is malformed")
+            if (side == "old" and service in cutover["old"] and "image_id" in cutover["old"][service]
+                    and image_id != cutover["old"][service]["image_id"]):
+                raise ExecutorError("Prior-generation image ID differs from its sealed projection")
             image = inspect_image(image_id)
             if service in {"backend", "frontend"}:
-                expected_revision = source_sha if side == "new" else OLD_APPLICATION
+                expected_revision = source_sha if side == "new" else (
+                    expected["prior_application_sha"] if "prior_application_sha" in expected else OLD_APPLICATION)
                 image_labels = image.get("Config", {}).get("Labels") or {}
                 if image_labels.get("org.opencontainers.image.revision") != expected_revision:
                     raise ExecutorError("Retained/candidate application OCI revision differs from its authorized SHA")
             elif service == "db":
-                if (config["Image"] != DATABASE_IMAGE or not any(
-                    isinstance(digest, str) and digest.endswith("@" + DATABASE_IMAGE.split("@", 1)[1])
-                    for digest in image.get("RepoDigests", [])
-                )):
+                if ((side == "old" and "image_id" in source_db and image_id != source_db["image_id"])
+                        or (side == "new" and (config["Image"] != DATABASE_IMAGE or not any(
+                            isinstance(digest, str) and digest.endswith("@" + DATABASE_IMAGE.split("@", 1)[1])
+                            for digest in image.get("RepoDigests", []))))):
                     raise ExecutorError("Retained/candidate database image digest is not the fixed PostgreSQL pin")
             elif service == "nginx":
-                if (config["Image"] != NGINX_IMAGE or not any(
+                old_image_pin = side == "old" and "image_id" in cutover["old"][service]
+                if ((old_image_pin and image_id != cutover["old"][service]["image_id"])
+                        or (not old_image_pin and (config["Image"] != NGINX_IMAGE or not any(
                     isinstance(digest, str) and digest.endswith("@" + NGINX_IMAGE.split("@", 1)[1])
                     for digest in image.get("RepoDigests", [])
-                )):
+                )))):
                     raise ExecutorError("Retained/candidate nginx image digest is not the fixed pin")
                 if side == "new" and tls_owner_nonce is not None:
                     image_labels = image.get("Config", {}).get("Labels") or {}
@@ -861,6 +924,11 @@ def _collect_upgrade_runtime_readback(expected: dict, source_sha: str, port: int
             if service == "nginx":
                 bindings = container.get("HostConfig", {}).get("PortBindings", {})
                 expected_bindings = {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(port)}]}
+                if side == "old" and "prior_tls_loopback_port" in cutover:
+                    expected_bindings = {
+                        "8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(cutover["prior_http_port"])}],
+                        "8443/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(cutover["prior_tls_loopback_port"])}],
+                    }
                 if side == "new" and nginx_mode == "tls":
                     expected_bindings["8443/tcp"] = [
                         {"HostIp": "127.0.0.1", "HostPort": str(TLS_LOOPBACK_PORT)}]
@@ -993,12 +1061,15 @@ def _negative_tls_sni_rejected(server_name: str | None) -> None:
 
 
 TLS_COMPLETION_SCHEMA = "belib-tls-owner-completion/v1"
+TLS_COMPLETION_SCHEMA_V2 = "belib-tls-owner-completion/v2"
 TLS_COMPLETION_FIELDS = {"schema", "owner_nonce", "plan_sha256", "prepare_receipt_sha256",
                          "upgrade_receipt_nonce", "upgrade_receipt_sha256", "source_sha", "operation_id",
                          "project", "previous_nginx_id", "nginx_id", "nginx_configuration_sha256",
                          "nginx_image_id", "nginx_network_ids", "tls_config_sha256", "certificate_sha256",
                          "unchanged_runtime_sha256", "approval_nonce", "evidence_sha256",
                          "serve_config_sha256", "serve_etag", "completed_at", "status"}
+TLS_COMPLETION_FIELDS_V2 = TLS_COMPLETION_FIELDS | {
+    "prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"}
 
 
 def read_tls_completion(owner_nonce: str, *, runner: Callable[..., Any] = subprocess.run) -> dict:
@@ -1011,8 +1082,9 @@ def read_tls_completion(owner_nonce: str, *, runner: Callable[..., Any] = subpro
     if result.returncode != 0:
         raise ExecutorError("The installed root bootstrap has no requested TLS completion")
     completion = _last_json_line(result.stdout)
-    if (not isinstance(completion, dict) or set(completion) != TLS_COMPLETION_FIELDS
-            or completion.get("schema") != TLS_COMPLETION_SCHEMA or completion.get("owner_nonce") != owner_nonce
+    completion_v2 = isinstance(completion, dict) and completion.get("schema") == TLS_COMPLETION_SCHEMA_V2
+    if (not isinstance(completion, dict) or set(completion) != (TLS_COMPLETION_FIELDS_V2 if completion_v2 else TLS_COMPLETION_FIELDS)
+            or completion.get("schema") != (TLS_COMPLETION_SCHEMA_V2 if completion_v2 else TLS_COMPLETION_SCHEMA) or completion.get("owner_nonce") != owner_nonce
             or completion.get("status") != "complete" or type(completion.get("completed_at")) is not int
             or completion["completed_at"] <= 0):
         raise ExecutorError("Root TLS completion does not match the fixed immutable schema")
@@ -1026,6 +1098,9 @@ def read_tls_completion(owner_nonce: str, *, runner: Callable[..., Any] = subpro
             raise ExecutorError("Root TLS completion contains a malformed ID")
     if completion["previous_nginx_id"] == completion["nginx_id"]:
         raise ExecutorError("Root TLS completion has no nginx transition")
+    if completion_v2 and any(not _is_sha(completion.get(name)) for name in (
+            "prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256")):
+        raise ExecutorError("Root TLS completion predecessor links are malformed")
     if (not _is_sha(completion.get("source_sha"), SHA40)
             or not isinstance(completion.get("operation_id"), str)
             or not re.fullmatch(r"[0-9a-f]{32}", completion["operation_id"])
@@ -1050,6 +1125,7 @@ def validate_tls_completion_links(completion: dict, upgrade_receipt: dict, owner
         raise ExecutorError("TLS completion chain records are not objects")
     expected_runtime = validate_expected_runtime(upgrade_receipt.get("expected_runtime"))
     cutover = expected_runtime["plan"]["cutover_plan"]
+    generation = expected_runtime.get("prior_generation_sha256") is not None
     if (completion.get("owner_nonce") != owner_nonce
             or completion.get("upgrade_receipt_nonce") != upgrade_receipt.get("nonce")
             or completion.get("upgrade_receipt_sha256") != hashlib.sha256(
@@ -1062,6 +1138,18 @@ def validate_tls_completion_links(completion: dict, upgrade_receipt: dict, owner
             or completion.get("nginx_network_ids") != cutover["new"]["nginx"]["network_ids"]
             or completion.get("nginx_id") == expected_runtime["services"]["nginx"]):
         raise ExecutorError("Root TLS completion does not chain to the exact original upgrade receipt")
+    if generation:
+        prior_tls = expected_runtime["prior_tls_completion"]
+        if (completion.get("schema") != TLS_COMPLETION_SCHEMA_V2
+                or completion.get("prior_generation_sha256") != expected_runtime["prior_generation_sha256"]
+                or completion.get("prior_tls_owner_nonce") != prior_tls["owner_nonce"]
+                or completion.get("prior_tls_completion_sha256") != prior_tls["completion_sha256"]
+                or completion.get("serve_config_sha256") != prior_tls["serve_config_sha256"]
+                or completion.get("serve_etag") != prior_tls["serve_etag"]
+                or completion.get("certificate_sha256") != prior_tls["certificate_sha256"]):
+            raise ExecutorError("Root TLS completion does not bind the active TLS predecessor")
+    elif completion.get("schema") != TLS_COMPLETION_SCHEMA:
+        raise ExecutorError("Legacy upgrade receipt cannot adopt a v2 TLS completion")
     stable = json.loads(json.dumps(expected_runtime, sort_keys=True, separators=(",", ":"),
                                    ensure_ascii=False, allow_nan=False))
     del stable["services"]["nginx"]
@@ -1224,17 +1312,48 @@ def execute_handoff(
     grant, grant_sha = decode_grant(grant_raw, expected_source_sha=source_sha,
                                     now=int(time.time()) if now is None else now)
     stage_port, env_digest = _staging_port(env_file_path, owner_uid=owner_uid)
+    stage_source, stage_source_digest = _staging_source(env_file_path, owner_uid=owner_uid)
+    completed_candidate_retry = None
+    if grant.get("schema") == "belib-staging-bootstrap-approval/v2":
+        prior_source = grant.get("prior_application_sha")
+        if not isinstance(grant.get("prior_generation_sha256"), str):
+            raise ExecutorError("V2 upgrade grant lacks its active-generation predecessor")
+        if stage_source == prior_source and stage_source_digest == env_digest:
+            pass
+        elif stage_source == source_sha and stage_source_digest == env_digest:
+            # A completed same-operation response-loss retry may observe the
+            # candidate env after commit. Permit it only when the fixed root
+            # query already has the exact successful durable result and env CAS.
+            queried = runner(_bootstrap_command(["--receipt", grant["nonce"]]),
+                env={"PATH": "/usr/bin:/bin", "HOME": "/home/hiroyuki", "LANG": "C"},
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=10, check=False)
+            if queried.returncode != 0:
+                raise ExecutorError("V2 candidate env has no durable completed root receipt")
+            durable = validate_bootstrap_result(_last_json_line(queried.stdout), grant, grant_sha)
+            transition = durable.get("expected_runtime", {}).get("plan", {}).get("environment_transition", {})
+            if (durable.get("exit_code") != 0 or transition.get("candidate_source_sha") != source_sha
+                    or transition.get("candidate_sha256") != stage_source_digest):
+                raise ExecutorError("V2 candidate env does not match the completed operation receipt")
+            completed_candidate_retry = durable
+        else:
+            raise ExecutorError("V2 upgrade env does not match the signed active predecessor")
+    elif stage_source != source_sha or stage_source_digest != env_digest:
+        raise ExecutorError("Fixed staging env source differs from the v1 admitted source")
 
     # The fixed root-owned entry alone verifies the Ed25519 signature and consumes
     # the nonce. No handoff field grants authority, and no arbitrary command path
     # or operation arguments can be supplied by this caller.
-    executed = runner(_bootstrap_command(["--grant", str(grant_path)]),
-                      env={"PATH": "/usr/bin:/bin", "HOME": "/home/hiroyuki", "LANG": "C"},
-                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                      text=True, timeout=1830, check=False)
+    if completed_candidate_retry is None:
+        executed = runner(_bootstrap_command(["--grant", str(grant_path)]),
+                          env={"PATH": "/usr/bin:/bin", "HOME": "/home/hiroyuki", "LANG": "C"},
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, timeout=1830, check=False)
+    else:
+        executed = subprocess.CompletedProcess([], 1, "", "completed same-operation receipt; readback only")
     if executed.returncode not in (0, 1):
         raise ExecutorError("Installed operator command did not return a bounded result")
-    execute_receipt = None
+    execute_receipt = completed_candidate_retry
     if executed.stdout:
         try:
             execute_receipt = _last_json_line(executed.stdout)
@@ -1266,7 +1385,16 @@ def execute_handoff(
         try:
             with readback_lock():
                 final_port, final_env_digest = _staging_port(env_file_path, owner_uid=owner_uid)
-                if final_port != stage_port or final_env_digest != env_digest:
+                expected_env_digest=env_digest
+                expected_env_source=stage_source
+                if grant.get("schema") == "belib-staging-bootstrap-approval/v2":
+                    expected_runtime=durable.get("expected_runtime")
+                    transition=expected_runtime.get("plan",{}).get("environment_transition",{}) if isinstance(expected_runtime,dict) else {}
+                    expected_env_digest=transition.get("candidate_sha256")
+                    expected_env_source=source_sha
+                final_source, final_source_digest = _staging_source(env_file_path, owner_uid=owner_uid)
+                if (final_port != stage_port or final_env_digest != expected_env_digest
+                        or final_source != expected_env_source or final_source_digest != final_env_digest):
                     raise ExecutorError("Staging environment changed during the admitted operation")
                 local_health = health_probe(stage_port)
                 if local_health != {"url": f"http://127.0.0.1:{stage_port}{HEALTH_PATH}", "http_status": 200}:
@@ -1414,31 +1542,118 @@ def write_result(path: Path, result: dict) -> None:
         raise ExecutorError("Could not create the one-time execution result") from error
 
 
+def inspect_completed_generation(upgrade_receipt: dict, completion: dict, *,
+                                 runtime_readback: Callable[..., dict] = collect_tls_final_readback,
+                                 ingress_probe: Callable[[str], dict] = verify_tls_ingress,
+                                 health_probe: Callable[[int], dict] = loopback_health_probe,
+                                 env_file_path: Path = ENV_FILE,
+                                 file_owner_uid: int = UID,
+                                 readback_lock: Callable[[], Any] = existing_project_readback_lock) -> dict:
+    """Read-only projection for the root's active-generation CAS."""
+    expected = validate_tls_completion_links(completion, upgrade_receipt, completion.get("owner_nonce"))
+    port, env_digest = _staging_port(env_file_path, owner_uid=file_owner_uid)
+    source_sha, source_digest = _staging_source(env_file_path, owner_uid=file_owner_uid)
+    if port != expected["port"] or source_sha != upgrade_receipt["source_sha"] or source_digest != env_digest:
+        raise ExecutorError("Fixed staging environment differs from the linked completed generation")
+    with readback_lock():
+        current_port, current_env_digest = _staging_port(env_file_path, owner_uid=file_owner_uid)
+        current_sha, current_source_digest = _staging_source(env_file_path, owner_uid=file_owner_uid)
+        if (current_port != port or current_env_digest != env_digest
+                or current_sha != source_sha or current_source_digest != env_digest):
+            raise ExecutorError("Fixed staging environment changed during generation inspection")
+        health = health_probe(expected["port"])
+        if health != {"url": f"http://127.0.0.1:{expected['port']}{HEALTH_PATH}", "http_status": 200}:
+            raise ExecutorError("Completed generation loopback health differs from its pinned HTTP port")
+        runtime = runtime_readback(upgrade_receipt, completion, expected["port"])
+        if (not isinstance(runtime, dict)
+                or set(runtime) != {"status", "source_sha", "operation_id", "project", "completion", "observed_runtime"}
+                or runtime.get("status") != "verified"
+                or runtime.get("source_sha") != upgrade_receipt.get("source_sha")
+                or runtime.get("operation_id") != expected["operation_id"]
+                or runtime.get("project") != expected["project"]
+                or runtime.get("completion") != completion):
+            raise ExecutorError("Completed generation live runtime differs from its linked receipts")
+        live = runtime.get("observed_runtime")
+        if (not isinstance(live, dict) or live.get("status") != "verified"
+                or live.get("source_sha") != upgrade_receipt.get("source_sha")
+                or live.get("app_image_revisions") != {
+                    "backend": upgrade_receipt["source_sha"], "frontend": upgrade_receipt["source_sha"]}):
+            raise ExecutorError("Completed generation runtime projection is malformed")
+        ingress = ingress_probe(completion["certificate_sha256"])
+        if ingress != {"status": 200, "certificate_sha256": completion["certificate_sha256"]}:
+            raise ExecutorError("Completed generation TLS ingress differs from its root certificate pin")
+        final_port, final_env_digest = _staging_port(env_file_path, owner_uid=file_owner_uid)
+        final_sha, final_source_digest = _staging_source(env_file_path, owner_uid=file_owner_uid)
+        if (final_port != port or final_env_digest != env_digest
+                or final_sha != source_sha or final_source_digest != env_digest):
+            raise ExecutorError("Fixed staging environment changed during generation inspection")
+    return {"schema": "belib-active-generation-observation/v1",
+            "upgrade_receipt": upgrade_receipt, "tls_completion": completion,
+            "expected_runtime": expected, "runtime_readback": runtime, "observed_runtime": live,
+            "loopback_health": health,
+            "tls_ingress": ingress, "staging_env_sha256": env_digest}
+
+
+def inspect_completed_generation_fd(fd: int) -> dict:
+    if type(fd) is not int or fd < 0:
+        raise ExecutorError("Sealed generation descriptor is invalid")
+    try:
+        info = os.fstat(fd)
+        seals = fcntl.fcntl(fd, F_GET_SEALS)
+        required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 0 or info.st_uid != 0
+                or info.st_size > 128 * 1024 or seals & required != required):
+            raise ExecutorError("Generation descriptor is not a bounded root-sealed regular file")
+        raw = os.pread(fd, info.st_size + 1, 0)
+    except OSError as error:
+        raise ExecutorError("Cannot read sealed generation descriptor") from error
+    value = _parse_json(raw, 128 * 1024, canonical=True)
+    if (not isinstance(value, dict) or set(value) != {"schema", "upgrade_receipt", "tls_completion"}
+            or value.get("schema") != "belib-active-generation-inspection/v1"):
+        raise ExecutorError("Sealed generation descriptor fields or schema are invalid")
+    return inspect_completed_generation(value["upgrade_receipt"], value["tls_completion"])
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--handoff", required=True, type=Path,
+    parser.add_argument("--handoff", type=Path,
                         help="Downloaded belib-staging-handoff/v1 JSON from the existing supervisor workflow")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--grant", type=Path, help="Existing supervisor's signed one-use operator grant")
     mode.add_argument("--upgrade-receipt", help="Read-only original root upgrade receipt nonce")
+    mode.add_argument("--inspect-completed-generation-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--owner-nonce", help="Read-only adopted TLS completion nonce; required with --upgrade-receipt")
-    parser.add_argument("--result", required=True, type=Path,
+    parser.add_argument("--result", type=Path,
                         help="New absolute path for this adapter's local execution receipt")
     args = parser.parse_args(argv)
     try:
-        if args.upgrade_receipt is not None:
+        if args.inspect_completed_generation_fd is not None:
+            if args.handoff is not None or args.owner_nonce is not None or args.result is not None:
+                raise ExecutorError("Internal generation inspection accepts only its sealed descriptor")
+            if (os.getuid() != UID or os.geteuid() != UID or os.getgid() != UID
+                    or pwd.getpwuid(UID).pw_name != PRINCIPAL or socket.gethostname() != HOST):
+                raise ExecutorError("Completed-generation inspection requires the fixed staging owner")
+            result = inspect_completed_generation_fd(args.inspect_completed_generation_fd)
+        elif args.upgrade_receipt is not None:
+            if args.handoff is None or args.result is None:
+                raise ExecutorError("Read-only TLS inspection requires its handoff and result paths")
             if args.owner_nonce is None:
                 raise ExecutorError("--owner-nonce is required with --upgrade-receipt")
             result = readback_tls_handoff(args.handoff, args.upgrade_receipt, args.owner_nonce)
         else:
+            if args.handoff is None or args.result is None:
+                raise ExecutorError("Handoff execution requires its handoff and result paths")
             if args.owner_nonce is not None:
                 raise ExecutorError("--owner-nonce is read-only and requires --upgrade-receipt")
             result = execute_handoff(args.handoff, args.grant)
-        write_result(args.result, result)
+        if args.inspect_completed_generation_fd is None:
+            write_result(args.result, result)
     except (ExecutorError, OSError, subprocess.SubprocessError, ValueError) as error:
         print(f"Staging local execution blocked: {error}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    if args.inspect_completed_generation_fd is not None:
+        return 0
     return execution_exit_code(result)
 
 

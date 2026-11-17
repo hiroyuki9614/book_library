@@ -90,6 +90,26 @@ class TlsIngressTests(unittest.TestCase):
             tls.make_tls_state_v2(binding, source, project="belib-isolated-i5",
                 upgrade_receipt_nonce="1" * 64, upgrade_receipt_sha256="2" * 64, operation_id=operation)
 
+    def test_v3_tls_state_binds_exact_predecessor_and_accepts_active_serve_etag(self):
+        source, operation = "a" * 40, "f" * 32
+        project = "belib-isolated-i5-upgrade-" + operation
+        binding = {"prior_application_sha": source, "retained_state_sha256": "b" * 64,
+            "serve_config_sha256": "c" * 64, "serve_etag": "active-etag-from-linked-completion",
+            "certificate_sha256": tls.EXPECTED_CERT_SHA256, "tls_config_sha256": "d" * 64,
+            "owner_plan_sha256": "e" * 64, "prior_generation_sha256": "1" * 64,
+            "prior_tls_owner_nonce": "2" * 64, "prior_tls_completion_sha256": "3" * 64}
+        signed = tls.signed_tls_binding_v3(binding, source, project=project,
+            upgrade_receipt_nonce="4" * 64, upgrade_receipt_sha256="5" * 64, operation_id=operation)
+        state = tls.make_tls_state_v3(binding, source, project=project,
+            upgrade_receipt_nonce="4" * 64, upgrade_receipt_sha256="5" * 64, operation_id=operation)
+        self.assertEqual(state["schema"], "belib-staging-tls-state/v3")
+        self.assertEqual(tls.tls_state_sha256_v3(state), signed["tls_state_sha256"])
+        for field in ("prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"):
+            changed = dict(binding); changed[field] = "9" * 64
+            changed_signed = tls.signed_tls_binding_v3(changed, source, project=project,
+                upgrade_receipt_nonce="4" * 64, upgrade_receipt_sha256="5" * 64, operation_id=operation)
+            self.assertNotEqual(changed_signed["tls_state_sha256"], signed["tls_state_sha256"])
+
     def test_nginx_sni_allowlist_contains_only_custom_host_and_rejects_default(self):
         config = Path(__file__).with_name("nginx-tls.conf").read_text(encoding="utf-8")
         self.assertIn("stg-bl.hiroyuki9614.com belib_custom_tls;", config)

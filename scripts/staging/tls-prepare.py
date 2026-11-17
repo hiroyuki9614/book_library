@@ -482,6 +482,7 @@ V2_PLAN_FIELDS = {"schema", "disposition", "source_sha", "prior_application_sha"
     "upgrade_receipt_nonce", "upgrade_receipt_sha256", "operation_id", "project"}
 V2_MANIFEST_FIELDS = {"schema", "upgrade_receipt_nonce", "upgrade_receipt_sha256", "source_sha", "operation_id",
     "project", "expected_runtime", "observed_runtime"}
+V3_MANIFEST_FIELDS = V2_MANIFEST_FIELDS | {"prior_application_sha", "prior_project", "prior_generation_sha256"}
 V2_RECEIPT_FIELDS = {"schema", "plan_sha256", "retained_state_sha256", "nginx_id", "source_sha", "tls_config_sha256",
     "certificate_sha256", "approval_nonce", "evidence_sha256", "prepared", "owner_nonce",
     "upgrade_receipt_nonce", "upgrade_receipt_sha256", "operation_id", "project", "previous_nginx_id",
@@ -682,18 +683,21 @@ def _v2_validate_plan(raw: bytes, plan_sha: str, source_sha: str, receipt_nonce:
                       receipt_sha: str, expected: dict, *, now: int | None = None,
                       allow_expired_readonly: bool = False) -> dict:
     plan = _v2_json(raw)
-    fields = V2_PLAN_FIELDS
+    generation_v3 = expected.get("prior_generation_sha256") is not None
+    fields = V2_PLAN_FIELDS | ({"prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"}
+        if generation_v3 else set())
     operation_id = expected.get("operation_id")
     project = PROJECT + "-upgrade-" + str(operation_id)
     instant = int(time.time()) if now is None else now
     if (digest(raw) != plan_sha or _v2_digest(plan) != plan_sha or not isinstance(plan, dict)
-            or set(plan) != fields or plan.get("schema") != "belib-tls-owner-retirement-plan/v2"
-            or plan.get("disposition") != TLS.OWNER_PLAN_DISPOSITION
+            or set(plan) != fields or plan.get("schema") != (
+                "belib-tls-owner-stable-serve-plan/v3" if generation_v3 else "belib-tls-owner-retirement-plan/v2")
+            or plan.get("disposition") != ("reuse-exact-active-custom-tls-ingress" if generation_v3 else TLS.OWNER_PLAN_DISPOSITION)
             or plan.get("source_sha") != source_sha
             or plan.get("prior_application_sha") != source_sha or plan.get("operation_id") != operation_id
             or plan.get("project") != project or plan.get("upgrade_receipt_nonce") != receipt_nonce
             or plan.get("upgrade_receipt_sha256") != receipt_sha
-            or plan.get("serve_etag") != TLS.EXPECTED_SERVE_ETAG
+            or (not generation_v3 and plan.get("serve_etag") != TLS.EXPECTED_SERVE_ETAG)
             or plan.get("certificate_sha256") != TLS.EXPECTED_CERT_SHA256
             or any(not re.fullmatch(r"[0-9a-f]{64}", plan.get(key, "")) for key in (
                 "retained_state_sha256", "serve_config_sha256", "certificate_sha256", "tls_config_sha256", "nonce",
@@ -702,6 +706,16 @@ def _v2_validate_plan(raw: bytes, plan_sha: str, source_sha: str, receipt_nonce:
             or (not allow_expired_readonly and not instant < plan["expires_at"] <= instant + 1800)
             or (allow_expired_readonly and plan["expires_at"] > instant + 1800)):
         raise PrepareError("V2 owner plan does not match the exact fresh root receipt")
+    if generation_v3:
+        prior = expected.get("prior_tls_completion")
+        if (not isinstance(prior, dict)
+                or plan.get("prior_generation_sha256") != expected.get("prior_generation_sha256")
+                or plan.get("prior_tls_owner_nonce") != prior.get("owner_nonce")
+                or plan.get("prior_tls_completion_sha256") != prior.get("completion_sha256")
+                or plan.get("serve_config_sha256") != prior.get("serve_config_sha256")
+                or plan.get("serve_etag") != prior.get("serve_etag")
+                or plan.get("certificate_sha256") != prior.get("certificate_sha256")):
+            raise PrepareError("V3 owner plan differs from the exact active TLS predecessor")
     return plan
 
 
@@ -824,9 +838,14 @@ def _v2_validate_recovery_context(source: Path, expected: dict, executor, recove
     intent = _v2_json(intent_raw)
     before_raw = _v2_read_private(context, "before-manifest.json")
     before_manifest = _v2_json(before_raw)
+    generation_v3 = expected.get("prior_generation_sha256") is not None
+    manifest_fields = V3_MANIFEST_FIELDS if generation_v3 else V2_MANIFEST_FIELDS
+    plan_schema = "belib-tls-owner-stable-serve-plan/v3" if generation_v3 else "belib-tls-owner-retirement-plan/v2"
     if (digest(intent_raw) != recovery["prior_intent_sha256"]
             or not isinstance(intent, dict) or set(intent) != V2_INTENT_FIELDS
-            or not isinstance(plan, dict) or set(plan) != V2_PLAN_FIELDS
+            or not isinstance(plan, dict) or set(plan) != (V2_PLAN_FIELDS | (
+                {"prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"} if generation_v3 else set()))
+            or plan.get("schema") != plan_schema
             or intent.get("owner_nonce") != prior_nonce or intent.get("plan_sha256") != digest(plan_raw)
             or intent.get("source_sha") != plan.get("source_sha")
             or intent.get("project") != expected["project"]
@@ -836,11 +855,15 @@ def _v2_validate_recovery_context(source: Path, expected: dict, executor, recove
             or plan.get("upgrade_receipt_nonce") != receipt_nonce
             or plan.get("upgrade_receipt_sha256") != receipt_sha
             or plan.get("retained_state_sha256") != digest(before_raw)
-            or not isinstance(before_manifest, dict) or set(before_manifest) != V2_MANIFEST_FIELDS
+            or not isinstance(before_manifest, dict) or set(before_manifest) != manifest_fields
+            or before_manifest.get("schema") != ("belib-staging-upgrade-tls-manifest/v3" if generation_v3 else "belib-staging-upgrade-tls-manifest/v2")
             or before_manifest.get("expected_runtime") != expected
             or before_manifest.get("source_sha") != plan.get("source_sha")
             or before_manifest.get("upgrade_receipt_nonce") != receipt_nonce
             or before_manifest.get("upgrade_receipt_sha256") != receipt_sha
+            or (generation_v3 and (before_manifest.get("prior_application_sha") != expected.get("prior_application_sha")
+                or before_manifest.get("prior_project") != expected.get("prior_project")
+                or before_manifest.get("prior_generation_sha256") != expected.get("prior_generation_sha256")))
             or (isinstance(before_manifest.get("observed_runtime"), dict)
                 and before_manifest["observed_runtime"].get("schema") == "belib-staging-upgrade-tls-recovery-readback/v1")
             or plan.get("project") != expected["project"]
@@ -909,9 +932,14 @@ def v2_create_plan(source: Path, receipt_nonce: str, *, runner=subprocess.run,
         serve_raw, etag = client.get()
     else:
         serve_raw, etag = serve
-    TLS.validate_original_serve_config(serve_raw)
-    if etag != TLS.EXPECTED_SERVE_ETAG:
-        raise PrepareError("Tailscale Serve ETag differs from the fixed owner-reviewed baseline")
+    generation_v3 = expected.get("prior_generation_sha256") is not None
+    prior_tls = expected.get("prior_tls_completion") if generation_v3 else None
+    if generation_v3:
+        active = _v3_validate_active_serve(serve_raw, etag, prior_tls)
+    else:
+        TLS.validate_original_serve_config(serve_raw)
+        if etag != TLS.EXPECTED_SERVE_ETAG:
+            raise PrepareError("Tailscale Serve ETag differs from the fixed owner-reviewed baseline")
     if certificate_sha is None:
         certificate_sha = TLS.inspect_certificate(TLS.CERT_PATH, TLS.KEY_PATH)
     if certificate_sha != TLS.EXPECTED_CERT_SHA256:
@@ -919,29 +947,55 @@ def v2_create_plan(source: Path, receipt_nonce: str, *, runner=subprocess.run,
     config_sha = tls_config_sha or bundle_digest(source)
     if not re.fullmatch(r"[0-9a-f]{64}", config_sha):
         raise PrepareError("TLS configuration digest is malformed")
-    manifest = {"schema": "belib-staging-upgrade-tls-manifest/v2",
+    manifest = {"schema": "belib-staging-upgrade-tls-manifest/v3" if generation_v3 else "belib-staging-upgrade-tls-manifest/v2",
         "upgrade_receipt_nonce": receipt_nonce, "upgrade_receipt_sha256": receipt_sha,
         "source_sha": source_sha, "operation_id": expected["operation_id"], "project": expected["project"],
         "expected_runtime": expected, "observed_runtime": observed}
+    if generation_v3:
+        manifest.update(prior_application_sha=expected["prior_application_sha"],
+            prior_project=expected["prior_project"], prior_generation_sha256=expected["prior_generation_sha256"])
     manifest_raw = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                               allow_nan=False).encode("utf-8")
     manifest_sha = digest(manifest_raw)
     binding = {"prior_application_sha": source_sha, "retained_state_sha256": manifest_sha,
         "serve_config_sha256": digest(serve_raw), "serve_etag": etag,
         "certificate_sha256": certificate_sha, "tls_config_sha256": config_sha, "owner_plan_sha256": "0" * 64}
-    plan = {"schema": "belib-tls-owner-retirement-plan/v2", "disposition": TLS.OWNER_PLAN_DISPOSITION,
+    plan = {"schema": "belib-tls-owner-stable-serve-plan/v3" if generation_v3 else "belib-tls-owner-retirement-plan/v2",
+        "disposition": "reuse-exact-active-custom-tls-ingress" if generation_v3 else TLS.OWNER_PLAN_DISPOSITION,
         "source_sha": source_sha, "prior_application_sha": source_sha, "retained_state_sha256": manifest_sha,
         "serve_config_sha256": binding["serve_config_sha256"], "serve_etag": etag,
         "certificate_sha256": certificate_sha, "tls_config_sha256": config_sha,
         "nonce": owner_nonce or secrets.token_hex(32), "expires_at": int(time.time()) + 1800,
         "upgrade_receipt_nonce": receipt_nonce, "upgrade_receipt_sha256": receipt_sha,
         "operation_id": expected["operation_id"], "project": expected["project"]}
+    if generation_v3:
+        plan.update(prior_generation_sha256=expected["prior_generation_sha256"],
+            prior_tls_owner_nonce=prior_tls["owner_nonce"],
+            prior_tls_completion_sha256=prior_tls["completion_sha256"])
     plan_raw = json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                           allow_nan=False).encode("utf-8")
     context = _v2_make_context(plan["nonce"])
     _v2_create_once(context, "owner-plan.json", plan_raw)
     _v2_create_once(context, "before-manifest.json", manifest_raw)
     return plan_raw, context
+
+
+def _v3_validate_active_serve(serve_raw, etag, prior_tls):
+    if (not isinstance(prior_tls, dict)
+            or set(prior_tls) != {"owner_nonce", "completion_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256"}
+            or not isinstance(serve_raw, bytes) or digest(serve_raw) != prior_tls.get("serve_config_sha256")
+            or etag != prior_tls.get("serve_etag")
+            or prior_tls.get("certificate_sha256") != TLS.EXPECTED_CERT_SHA256):
+        raise PrepareError("Active Serve or certificate differs from the root-linked predecessor completion")
+    try:
+        state = json.loads(serve_raw.decode("utf-8", "strict"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise PrepareError("Active Serve configuration is malformed") from error
+    expected = {"TCP": {"443": {"TCPForward": "127.0.0.1:18443"}}, "Web": {}}
+    if state not in (expected, {"TCP": expected["TCP"]},
+                     {"TCP": expected["TCP"], "Web": {}, "AllowFunnel": {}}):
+        raise PrepareError("Active Serve does not match the exact Tailnet-only TLS ingress")
+    return state
 
 
 def _v2_read_private(directory: Path, name: str, *, maximum: int = 2 * 1024 * 1024) -> bytes:
@@ -996,10 +1050,14 @@ def _v2_prepare_live_locked(plan_raw: bytes, plan_sha: str, evidence_sha256: str
                       allow_expired_readonly=has_intent)
     manifest_raw = _v2_read_private(context, "before-manifest.json")
     manifest = _v2_json(manifest_raw)
-    if (not isinstance(manifest, dict) or set(manifest) != V2_MANIFEST_FIELDS
-            or manifest.get("schema") != "belib-staging-upgrade-tls-manifest/v2"
+    generation_v3 = expected.get("prior_generation_sha256") is not None
+    if (not isinstance(manifest, dict) or set(manifest) != (V3_MANIFEST_FIELDS if generation_v3 else V2_MANIFEST_FIELDS)
+            or manifest.get("schema") != ("belib-staging-upgrade-tls-manifest/v3" if generation_v3 else "belib-staging-upgrade-tls-manifest/v2")
             or manifest.get("expected_runtime") != expected
             or manifest.get("upgrade_receipt_sha256") != receipt_sha
+            or (generation_v3 and (manifest.get("prior_application_sha") != expected.get("prior_application_sha")
+                or manifest.get("prior_project") != expected.get("prior_project")
+                or manifest.get("prior_generation_sha256") != expected.get("prior_generation_sha256")))
             or digest(manifest_raw) != plan["retained_state_sha256"]):
         raise PrepareError("V2 before-manifest does not match the independent root receipt")
     executor = _v2_load_executor(source)
@@ -1054,7 +1112,12 @@ def _v2_prepare_live_locked(plan_raw: bytes, plan_sha: str, evidence_sha256: str
             raise PrepareError("Candidate runtime changed after the v2 owner plan was created")
     serve = TLS.TailscaleServeClient()
     serve_raw, etag = serve.get()
-    TLS.validate_original_serve_config(serve_raw)
+    generation_v3 = expected.get("prior_generation_sha256") is not None
+    prior_tls = expected.get("prior_tls_completion") if generation_v3 else None
+    if generation_v3:
+        _v3_validate_active_serve(serve_raw, etag, prior_tls)
+    else:
+        TLS.validate_original_serve_config(serve_raw)
     certificate_sha = TLS.inspect_certificate(TLS.CERT_PATH, TLS.KEY_PATH)
     config_sha = bundle_digest(source)
     if (digest(serve_raw) != plan["serve_config_sha256"] or etag != plan["serve_etag"]
@@ -1063,9 +1126,17 @@ def _v2_prepare_live_locked(plan_raw: bytes, plan_sha: str, evidence_sha256: str
     binding = {"prior_application_sha": source_sha, "retained_state_sha256": plan["retained_state_sha256"],
         "serve_config_sha256": digest(serve_raw), "serve_etag": etag, "certificate_sha256": certificate_sha,
         "tls_config_sha256": config_sha, "owner_plan_sha256": plan_sha}
-    tls_binding = TLS.signed_tls_binding_v2(binding, source_sha, project=plan["project"],
-        upgrade_receipt_nonce=plan["upgrade_receipt_nonce"], upgrade_receipt_sha256=receipt_sha,
-        operation_id=plan["operation_id"])
+    if generation_v3:
+        binding.update(prior_generation_sha256=plan["prior_generation_sha256"],
+            prior_tls_owner_nonce=plan["prior_tls_owner_nonce"],
+            prior_tls_completion_sha256=plan["prior_tls_completion_sha256"])
+        tls_binding = TLS.signed_tls_binding_v3(binding, source_sha, project=plan["project"],
+            upgrade_receipt_nonce=plan["upgrade_receipt_nonce"], upgrade_receipt_sha256=receipt_sha,
+            operation_id=plan["operation_id"])
+    else:
+        tls_binding = TLS.signed_tls_binding_v2(binding, source_sha, project=plan["project"],
+            upgrade_receipt_nonce=plan["upgrade_receipt_nonce"], upgrade_receipt_sha256=receipt_sha,
+            operation_id=plan["operation_id"])
     approval = GUARD.load_approval_module()
     if approval_callback is None:
         request_approval = lambda: approval.request_and_wait(source_sha, "tls-ingress", evidence_sha256,
@@ -1240,6 +1311,11 @@ def _v2_validate_prepared_inputs(source: Path, prepared: Path, expected: dict) -
     operation, source_sha = expected["operation_id"], expected["plan"]["cutover_plan"]["source_sha"]
     project = expected["project"]
     plan = expected["plan"]
+    generation = plan["cutover_plan"].get("schema") == "belib-isolated-copy-cutover/v2"
+    config_fields={"schema", "enabled", "source_sha", "topology", "prepared_directory", "authorities",
+                   "cutover_plan", "candidate_database", "source_database", "migration_image"}
+    if generation:
+        config_fields|={"prior_project", "prior_generation_sha256", "environment_transition"}
     authorities = config.get("authorities") if isinstance(config, dict) else None
     if (not isinstance(authorities, dict) or set(authorities) != {"restore", "network", "roots"}
             or any(not isinstance(pin, dict) or set(pin) != {"issuer", "public_key_pem", "fingerprint"}
@@ -1251,14 +1327,16 @@ def _v2_validate_prepared_inputs(source: Path, prepared: Path, expected: dict) -
             or _v2_digest(authorities) != expected.get("authority_pins_sha256")):
         raise PrepareError("Disabled candidate authority pins differ from the root-adopted configuration")
     if (not isinstance(config, dict)
-            or set(config) != {"schema", "enabled", "source_sha", "topology", "prepared_directory", "authorities",
-                               "cutover_plan", "candidate_database", "source_database", "migration_image"}
-            or config.get("schema") != "belib-retained-operator/v1"
+            or set(config) != config_fields
+            or config.get("schema") != ("belib-retained-operator/v2" if generation else "belib-retained-operator/v1")
             or config.get("enabled") is not False or config.get("source_sha") != source_sha
             or config.get("topology") != "isolated-copy" or config.get("prepared_directory") != str(prepared)
             or config.get("cutover_plan") != plan["cutover_plan"]
             or config.get("candidate_database") != plan["candidate_database"]
-            or config.get("source_database") != plan["source_database"]):
+            or config.get("source_database") != plan["source_database"]
+            or (generation and (config.get("prior_project") != plan["cutover_plan"].get("prior_project")
+                or config.get("prior_generation_sha256") != plan["cutover_plan"].get("prior_generation_sha256")
+                or config.get("environment_transition") != plan.get("environment_transition")))):
         raise PrepareError("Disabled candidate configuration differs from the root-admitted plan")
     receipt_fields = {"schema", "source_sha", "operation_id", "image_tags", "image_ids", "build_inputs_sha256",
         "candidate_container_ids", "old_container_pins", "old_container_oci", "old_database_pin",
@@ -1272,6 +1350,10 @@ def _v2_validate_prepared_inputs(source: Path, prepared: Path, expected: dict) -
     expected_container_pins = {service: pin["configuration_sha256"]
                                for service, pin in plan["cutover_plan"]["new"].items()}
     expected_container_pins["db"] = candidate_db["configuration_sha256"]
+    expected_old_container_pins = {service: {key:value for key,value in pin.items() if key!="image_id"}
+        for service,pin in plan["cutover_plan"]["old"].items()}
+    prior_project = plan["cutover_plan"].get("prior_project", PROJECT)
+    expected_old_volume_names = {PROJECT + "_staging-book-files", prior_project + "_staging-postgres-data"}
     if (not isinstance(receipt, dict) or set(receipt) != receipt_fields
             or not isinstance(journal, dict)
             or receipt.get("schema") != "belib-retained-preparation-receipt/v1"
@@ -1283,7 +1365,7 @@ def _v2_validate_prepared_inputs(source: Path, prepared: Path, expected: dict) -
                    for value in receipt["image_ids"].values())
             or receipt.get("image_tags") != {name: "belib-retained:" + operation + "-" + name for name in image_names}
             or receipt.get("build_inputs_sha256") != expected_build_inputs
-            or receipt.get("old_container_pins") != plan["cutover_plan"]["old"]
+            or receipt.get("old_container_pins") != expected_old_container_pins
             or receipt.get("old_database_pin") != plan["source_database"]
             or not isinstance(receipt.get("old_container_oci"), dict)
             or set(receipt["old_container_oci"]) != {"db", "backend", "frontend", "nginx"}
@@ -1293,7 +1375,7 @@ def _v2_validate_prepared_inputs(source: Path, prepared: Path, expected: dict) -
                    or not isinstance(pin.get("image_ref"), str) or not pin["image_ref"]
                    for pin in receipt["old_container_oci"].values())
             or not isinstance(receipt.get("old_volume_sha256"), dict)
-            or set(receipt["old_volume_sha256"]) != {PROJECT + "_staging-book-files", PROJECT + "_staging-postgres-data"}
+            or set(receipt["old_volume_sha256"]) != expected_old_volume_names
             or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
                    for value in receipt["old_volume_sha256"].values())
             or not isinstance(receipt.get("manifest_sha256"), str)

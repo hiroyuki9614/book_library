@@ -115,13 +115,21 @@ def make_loader_command(source_sha: str, helper_sha: str, plan_sha: str) -> str:
 
 
 def make_loader_command_v2(source_sha: str, helper_sha: str, plan_sha: str,
-                           owner_nonce: str, prepare_receipt_sha256: str) -> str:
+                           owner_nonce: str, prepare_receipt_sha256: str, *,
+                           prior_generation_sha256: str | None = None,
+                           prior_tls_owner_nonce: str | None = None,
+                           prior_tls_completion_sha256: str | None = None) -> str:
     """Pin the v2 owner plan and candidate receipt from one nonce-scoped directory."""
     if (not re.fullmatch(r"[0-9a-f]{40}", source_sha)
             or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in
                    (helper_sha, plan_sha, prepare_receipt_sha256))
             or not re.fullmatch(r"[0-9a-f]{64}", owner_nonce)):
         raise PackageError("V2 source, digests, or owner nonce are malformed")
+    links = (prior_generation_sha256, prior_tls_owner_nonce, prior_tls_completion_sha256)
+    if any(value is not None for value in links) and any(
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in links):
+        raise PackageError("V3 predecessor links must be supplied together")
+    requested_v3 = all(value is not None for value in links)
     source_root = HOME / ".local/state/belib-staging/snapshots" / source_sha
     helper_path = source_root / "scripts/staging/owner-serve-cas.py"
     context = HOME / ".local/state/belib-staging/tls-work-context" / owner_nonce
@@ -135,17 +143,27 @@ def make_loader_command_v2(source_sha: str, helper_sha: str, plan_sha: str,
         receipt = json.loads(prepared_raw.decode("utf-8", "strict"), object_pairs_hook=_unique_pairs)
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise PackageError("V2 owner inputs are malformed") from exc
+    is_v3 = isinstance(plan, dict) and plan.get("schema") == "belib-tls-owner-stable-serve-plan/v3"
+    if is_v3:
+        plan_links = tuple(plan.get(name) for name in (
+            "prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"))
+        if (any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in plan_links)
+                or (requested_v3 and plan_links != links)):
+            raise PackageError("V3 plan predecessor links are malformed or conflict with the requested links")
     plan_fields = {"schema", "disposition", "source_sha", "prior_application_sha", "retained_state_sha256",
         "serve_config_sha256", "serve_etag", "certificate_sha256", "tls_config_sha256", "nonce", "expires_at",
         "upgrade_receipt_nonce", "upgrade_receipt_sha256", "operation_id", "project"}
+    if is_v3:
+        plan_fields |= {"prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"}
     receipt_fields = {"schema", "plan_sha256", "retained_state_sha256", "nginx_id", "source_sha", "tls_config_sha256",
         "certificate_sha256", "approval_nonce", "evidence_sha256", "prepared", "owner_nonce",
         "upgrade_receipt_nonce", "upgrade_receipt_sha256", "operation_id", "project", "previous_nginx_id",
         "nginx_configuration_sha256", "nginx_image_id", "nginx_network_ids", "unchanged_runtime_sha256"}
     operation = plan.get("operation_id") if isinstance(plan, dict) else None
     project = PROJECT + "-upgrade-" + str(operation)
-    if (not isinstance(plan, dict) or set(plan) != plan_fields or plan.get("schema") != "belib-tls-owner-retirement-plan/v2"
-            or plan.get("disposition") != "retire-old-fedora-bri-image-publication-handler-only"
+    if (not isinstance(plan, dict) or set(plan) != plan_fields or plan.get("schema") != (
+                "belib-tls-owner-stable-serve-plan/v3" if is_v3 else "belib-tls-owner-retirement-plan/v2")
+            or plan.get("disposition") != ("reuse-exact-active-custom-tls-ingress" if is_v3 else "retire-old-fedora-bri-image-publication-handler-only")
             or plan.get("source_sha") != source_sha or plan.get("project") != project
             or plan.get("prior_application_sha") != source_sha
             or plan.get("nonce") != owner_nonce
@@ -156,6 +174,8 @@ def make_loader_command_v2(source_sha: str, helper_sha: str, plan_sha: str,
             or receipt.get("source_sha") != source_sha or receipt.get("project") != project
             or receipt.get("operation_id") != operation or receipt.get("prepared") is not True
             or receipt.get("retained_state_sha256") != plan.get("retained_state_sha256")
+            or (is_v3 and any(plan.get(name) != value for name, value in zip(
+                ("prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"), plan_links)))
             or json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode() != prepared_raw):
         raise PackageError("V2 owner plan and prepare receipt do not form the exact pinned pair")
     helper_literal = json.dumps(str(helper_path))
@@ -194,12 +214,18 @@ def main(argv=None):
     parser.add_argument("--plan-sha256", required=True)
     parser.add_argument("--owner-nonce")
     parser.add_argument("--prepare-receipt-sha256")
+    parser.add_argument("--prior-generation-sha256")
+    parser.add_argument("--prior-tls-owner-nonce")
+    parser.add_argument("--prior-tls-completion-sha256")
     args = parser.parse_args(argv)
     if args.owner_nonce is None and args.prepare_receipt_sha256 is None:
         command = make_loader_command(args.source_sha, args.helper_sha256, args.plan_sha256)
     elif args.owner_nonce is not None and args.prepare_receipt_sha256 is not None:
         command = make_loader_command_v2(args.source_sha, args.helper_sha256, args.plan_sha256,
-                                         args.owner_nonce, args.prepare_receipt_sha256)
+            args.owner_nonce, args.prepare_receipt_sha256,
+            prior_generation_sha256=args.prior_generation_sha256,
+            prior_tls_owner_nonce=args.prior_tls_owner_nonce,
+            prior_tls_completion_sha256=args.prior_tls_completion_sha256)
     else:
         raise PackageError("V2 owner nonce and prepare-receipt digest must be supplied together")
     print(command)
