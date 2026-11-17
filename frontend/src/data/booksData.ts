@@ -9,6 +9,7 @@ export type Book = {
 	category: 'Frontend' | 'Backend' | 'Design' | 'DevOps' | 'Database' | 'Architecture' | 'Security';
 
 	currentPage: number;
+	progressPercentage?: number | null;
 	createdAt?: string;
 	updatedAt?: string;
 	coverImage?: string;

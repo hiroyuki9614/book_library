@@ -7,6 +7,25 @@ const state = {
 	totalPages: 5,
 };
 
+const createCommandProps = (currentPage: number, totalPages: number) => ({
+	state: { currentPage, totalPages },
+	pageInput: String(currentPage),
+	setPageInput: vi.fn(),
+	handleGoToPage: vi.fn(),
+	prevResolved: {
+		visible: true,
+		disabled: false,
+		execute: vi.fn(),
+		label: '<',
+	},
+	nextResolved: {
+		visible: true,
+		disabled: false,
+		execute: vi.fn(),
+		label: '>',
+	},
+});
+
 describe('CommandButton', () => {
 	test('renders page navigation state', async () => {
 		const { getByText, getByRole } = await render(
@@ -92,5 +111,30 @@ describe('CommandButton', () => {
 		);
 
 		await expect.element(getByText('Page')).not.toBeInTheDocument();
+	});
+
+	test.each([
+		{ currentPage: 1, totalPages: 7, percentage: 14 },
+		{ currentPage: 2, totalPages: 7, percentage: 29 },
+		{ currentPage: 5, totalPages: 8, percentage: 63 },
+		{ currentPage: 7, totalPages: 7, percentage: 100 },
+	])('shows a rounded percentage for $currentPage / $totalPages pages', async ({ currentPage, totalPages, percentage }) => {
+		const { getByRole, getByText } = await render(
+			<CommandButton {...createCommandProps(currentPage, totalPages)} />,
+		);
+
+		await expect.element(getByRole('status')).toHaveTextContent(
+			`${currentPage} / ${totalPages} ページ ${percentage}%`,
+		);
+		await expect.element(getByText(`/ ${totalPages}`, { exact: true })).toBeInTheDocument();
+	});
+
+	test('omits the percentage when there are no pages', async () => {
+		const { getByRole, getByText } = await render(
+			<CommandButton {...createCommandProps(0, 0)} />,
+		);
+
+		await expect.element(getByRole('status')).not.toBeInTheDocument();
+		await expect.element(getByText('/ 0', { exact: true })).toBeInTheDocument();
 	});
 });

@@ -6,12 +6,13 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/hooks/useBook', () => ({ default: mocks.useBook }));
+vi.mock('@/contexts/useAuth', () => ({ useAuth: () => ({ user: { id: 7 } }) }));
 vi.mock('react-router-dom', () => ({ useParams: () => ({ id: '7' }) }));
 vi.mock('@/features/components/PdfReader', () => ({
 	default: ({ bookId, pageTurnDirection }: { bookId: number; pageTurnDirection: string }) => <div>PDF reader {bookId} {pageTurnDirection}</div>,
 }));
 vi.mock('@/features/components/EpubReader', () => ({
-	default: ({ bookId, pageTurnDirection }: { bookId: number; pageTurnDirection: string }) => <div>EPUB reader {bookId} {pageTurnDirection}</div>,
+	default: ({ bookId, pageTurnDirection, userId }: { bookId: number; pageTurnDirection: string; userId?: number }) => <div>EPUB reader {bookId} {pageTurnDirection} user {userId}</div>,
 }));
 
 import ReaderPage from './index';
@@ -26,6 +27,6 @@ describe('ReaderPage EPUB routing', () => {
 
 		const { getByText } = await render(<ReaderPage />);
 
-		await expect.element(getByText('EPUB reader 7 rtl')).toBeInTheDocument();
+		await expect.element(getByText('EPUB reader 7 rtl user 7')).toBeInTheDocument();
 	});
 });

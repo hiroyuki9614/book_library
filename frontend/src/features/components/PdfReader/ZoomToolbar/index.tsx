@@ -15,7 +15,7 @@ export const ZoomToolbar = ({ documentId, compact = false }: ZoomToolbarProps) =
 	}
 
 	return (
-		<div className='flex items-center justify-center gap-2'>
+		<div className={`flex items-center justify-center gap-2${compact ? ' flex-wrap' : ''}`}>
 			<Button onClick={zoomProvides.zoomOut} className='size-11 p-0 text-lg' title='縮小' aria-label='縮小'>-</Button>
 			<span className='min-w-12 text-center text-sm'>{Math.round(zoomState.currentZoomLevel * 100)}%</span>
 			<Button onClick={zoomProvides.zoomIn} className='size-11 p-0 text-lg' title='拡大' aria-label='拡大'>+</Button>

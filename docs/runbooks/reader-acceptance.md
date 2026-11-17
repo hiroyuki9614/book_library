@@ -13,6 +13,10 @@ insufficient. After each UI action, match the visible body or page image with it
 position. EPUB observations include current CFI, chapter screen page, character
 location, PATCH payload/result, subsequent GET, and restored visible body.
 
+The save label stays unconfirmed for a fresh GET response (`currentPosition: null`,
+page 1, `unread`). It reports saved only when GET returns an existing position or
+a position PATCH succeeds.
+
 EPUB has two position scales:
 
 - **章内ページ**: screen pages within the current spine section, recalculated for

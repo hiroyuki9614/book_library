@@ -40,12 +40,14 @@ describe('OpenAPI', () => {
 			headers: {
 				Origin: 'http://localhost:5173',
 				'Access-Control-Request-Method': 'GET',
+				'Access-Control-Request-Headers': 'X-BeLib-User-Id',
 			},
 		});
 
 		expect(res.status).toBe(204);
 		expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
 		expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+		expect(res.headers.get('access-control-allow-headers')).toContain('X-BeLib-User-Id');
 	});
 
 	test('公開メールサインアップを拒否する', async () => {
