@@ -276,10 +276,10 @@ test('demo user reads protected PDF and restores its saved page', async ({ page 
 	await page.getByRole('button', { name: '目次' }).click();
 	await expect(page.getByRole('button', { name: 'First chapter' })).toBeVisible();
 	await page.getByRole('button', { name: 'First chapter' }).click();
-	if (mobileControls) {
-		await page.getByRole('button', { name: '閉じる', exact: true }).click();
-	}
 	await expect(page.getByRole('dialog')).toBeHidden();
+	if (mobileControls) {
+		await expect(page.getByRole('button', { name: '操作メニューを開く' })).toBeFocused();
+	}
 
 	const saveResponse = page.waitForResponse((response) => response.url().endsWith(`${readingInfoPath}/cas-v1`)
 		&& response.request().method() === 'PATCH'

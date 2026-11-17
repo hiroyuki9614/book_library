@@ -1,5 +1,5 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
-import { epubFixture } from './fixtures';
+import { expect, test, type Locator, type Page, type Request } from '@playwright/test';
+import { epubFixture, outlinedPdfFixture } from './fixtures';
 
 // Observe production-built Tailwind CSS, not Vitest's unstyled component DOM.
 async function useProtectedBook(page: Page, file: Buffer, kind: 'epub' | 'pdf') {
@@ -117,6 +117,157 @@ for (const width of [320, 393, 1280, 1440, 1663]) {
 		}
 	});
 }
+
+test('PDF mobile menu releases its modal overlay and focus on transition to desktop', async ({ page }) => {
+	test.setTimeout(150_000);
+	await useProtectedBook(page, outlinedPdfFixture(), 'pdf');
+	const positionWrites: string[] = [];
+	page.on('request', (request) => {
+		if (request.method() === 'PATCH' && request.url().includes('/api/v1/books/1/reading-info')) {
+			positionWrites.push(request.postData() ?? '');
+		}
+	});
+	await page.setViewportSize({ width: 393, height: 851 });
+	await page.goto('/e2e/readers/harness.html?kind=pdf');
+	await expect(page.locator('[data-pdf-page="1"] img')).toBeVisible({ timeout: 45_000 });
+
+	await page.getByRole('button', { name: '操作メニューを開く' }).click();
+	const menu = page.getByRole('dialog', { name: '操作メニュー' });
+	const footer = page.getByTestId('pdf-reader-footer');
+	await expect(menu).toBeVisible();
+	await expect(footer).toHaveAttribute('aria-hidden', 'true');
+	// Closing on resize must also discard the expanded mobile outline, not just the overlay.
+	await menu.getByRole('button', { name: '目次', exact: true }).click();
+	await expect(page.getByTestId('pdf-mobile-toc')).toBeVisible();
+
+	// Exactly below Tailwind's md breakpoint the mobile menu must remain usable.
+	await page.setViewportSize({ width: 767, height: 851 });
+	await expect(menu).toBeVisible();
+	await expect(footer).toHaveAttribute('inert');
+
+	// At md=768 the opener is hidden; close the modal without leaving a stale overlay.
+	await page.setViewportSize({ width: 768, height: 851 });
+	await expect(menu).toBeHidden();
+
+	// Keep the desktop reader functional at a common larger width as well.
+	await page.setViewportSize({ width: 1280, height: 851 });
+	await expect(menu).toBeHidden();
+	await expect(footer).not.toHaveAttribute('aria-hidden', 'true');
+	await expect(footer).not.toHaveAttribute('inert', '');
+	await expect(page.getByRole('link', { name: '本棚に戻る' })).toBeFocused();
+
+	// Desktop reader controls must be operable after the transition.
+	await page.getByRole('button', { name: '目次', exact: true }).click();
+	const desktopToc = page.getByRole('dialog', { name: 'このPDFの目次' });
+	await expect(desktopToc).toBeVisible();
+	await page.keyboard.press('Escape');
+	await expect(desktopToc).toBeHidden();
+
+	// Returning to the phone layout must restore a usable opener without a stale overlay.
+	await page.setViewportSize({ width: 393, height: 851 });
+	const opener = page.getByRole('button', { name: '操作メニューを開く' });
+	await expect(opener).toBeVisible();
+	await opener.click();
+	await expect(menu).toBeVisible();
+	await expect(page.getByTestId('pdf-mobile-toc')).toHaveCount(0);
+	await expect(menu.getByRole('button', { name: '目次', exact: true })).toHaveAttribute('aria-expanded', 'false');
+	await page.keyboard.press('Escape');
+	await expect(menu).toBeHidden();
+	await expect(opener).toBeFocused();
+	await expect(footer).not.toHaveAttribute('inert');
+	// A pure layout/menu transition must never persist a new reading position.
+	await page.waitForTimeout(850);
+	expect(positionWrites, 'responsive menu changes must not issue position PATCH').toEqual([]);
+});
+
+for (const [controlName, dialogName] of [['目次', 'このPDFの目次'], ['表示設定', '表示設定']] as const) {
+	test(`PDF desktop ${controlName} sheet releases its modal and focus on transition to mobile`, async ({ page }) => {
+		test.setTimeout(150_000);
+		await useProtectedBook(page, outlinedPdfFixture(), 'pdf');
+		const positionWrites: string[] = [];
+		page.on('request', (request) => {
+			if (request.method() === 'PATCH' && request.url().includes('/api/v1/books/1/reading-info')) {
+				positionWrites.push(request.postData() ?? '');
+			}
+		});
+		await page.setViewportSize({ width: 1280, height: 851 });
+		await page.goto('/e2e/readers/harness.html?kind=pdf');
+		await expect(page.locator('[data-pdf-page="1"] img')).toBeVisible({ timeout: 45_000 });
+
+		await page.getByRole('button', { name: controlName, exact: true }).click();
+		const desktopSheet = page.getByRole('dialog', { name: dialogName });
+		await expect(desktopSheet).toBeVisible();
+
+		// The desktop trigger remains visible exactly at md=768.
+		await page.setViewportSize({ width: 768, height: 851 });
+		await expect(desktopSheet).toBeVisible();
+		// At 767 the desktop-only trigger disappears; its active modal must close.
+		await page.setViewportSize({ width: 767, height: 851 });
+		await expect(desktopSheet).toBeHidden();
+		const mobileOpener = page.getByRole('button', { name: '操作メニューを開く' });
+		await expect(mobileOpener).toBeVisible();
+		await expect(mobileOpener).toBeFocused();
+
+		await mobileOpener.click();
+		const mobileSheet = page.getByRole('dialog', { name: '操作メニュー' });
+		await expect(mobileSheet).toBeVisible();
+		await page.keyboard.press('Escape');
+		await expect(mobileSheet).toBeHidden();
+		await expect(mobileOpener).toBeFocused();
+		await page.waitForTimeout(850);
+		expect(positionWrites, 'layout-only desktop/mobile transition must not save position').toEqual([]);
+	});
+}
+
+test('PDF mobile TOC jump closes the operation sheet and the next open starts collapsed', async ({ page }) => {
+	test.setTimeout(150_000);
+	// Real /Outlines and /Dest bookmarks, not Chromium's experimental PDF outline generator.
+	await useProtectedBook(page, outlinedPdfFixture(), 'pdf');
+
+	for (const width of [320, 393]) {
+		const positionWrites: Array<{ url: string; body: { currentPage?: number; progressPercentage?: number; readStatus?: string } }> = [];
+		const recordPositionWrite = (request: Request) => {
+			if (request.method() !== 'PATCH') return;
+			const url = new URL(request.url()).pathname;
+			if (url !== '/api/v1/books/1/reading-info' && url !== '/api/v1/books/1/reading-info/cas-v1') return;
+			positionWrites.push({ url, body: request.postDataJSON() as { currentPage?: number; progressPercentage?: number; readStatus?: string } });
+		};
+		page.on('request', recordPositionWrite);
+		await page.setViewportSize({ width, height: 851 });
+		await page.goto('/e2e/readers/harness.html?kind=pdf');
+		await expect(page.locator('[data-pdf-page="1"] img')).toBeVisible({ timeout: 45_000 });
+		await page.getByRole('button', { name: '操作メニューを開く' }).click();
+		const menu = page.getByRole('dialog', { name: '操作メニュー' });
+		await menu.getByRole('button', { name: '目次', exact: true }).click();
+		const toc = page.getByTestId('pdf-mobile-toc');
+		await expect(toc).toBeVisible();
+		const chapterTwoSave = page.waitForRequest((request) => {
+			const url = new URL(request.url()).pathname;
+			if (request.method() !== 'PATCH' || (url !== '/api/v1/books/1/reading-info' && url !== '/api/v1/books/1/reading-info/cas-v1')) return false;
+			const body = request.postDataJSON() as { currentPage?: number; progressPercentage?: number; readStatus?: string };
+			return body.currentPage === 2 && body.readStatus === 'completed' && (body.progressPercentage === undefined || body.progressPercentage === 100);
+		});
+		await toc.getByRole('button', { name: 'Chapter Two', exact: true }).click();
+		await chapterTwoSave;
+		await expect(menu).toBeHidden();
+		await expect(page.getByRole('spinbutton', { name: 'ページ番号' })).toHaveValue('2');
+		const chapterTwoImage = page.locator('[data-pdf-page="2"] img');
+		await expect(chapterTwoImage).toBeVisible();
+		await expect(chapterTwoImage).toBeInViewport();
+		const opener = page.getByRole('button', { name: '操作メニューを開く' });
+		await expect(opener).toBeFocused();
+		await opener.click();
+		await expect(page.getByTestId('pdf-mobile-toc')).toHaveCount(0);
+		await expect(menu.getByRole('button', { name: '目次', exact: true })).toHaveAttribute('aria-expanded', 'false');
+		await page.keyboard.press('Escape');
+		await expect(opener).toBeFocused();
+		await page.waitForTimeout(850);
+		page.off('request', recordPositionWrite);
+		expect(positionWrites, 'chapter selection saves completed page 2 once; reopen/Escape does not write position').toHaveLength(1);
+		expect(positionWrites[0]).toMatchObject({ body: { currentPage: 2, readStatus: 'completed' } });
+		if (positionWrites[0].body.progressPercentage !== undefined) expect(positionWrites[0].body.progressPercentage).toBe(100);
+	}
+});
 
 test('PDF mobile reader chrome keeps its header, reading surface and footer within 320/393px viewports', async ({ page, browser }) => {
 	test.setTimeout(150_000);
