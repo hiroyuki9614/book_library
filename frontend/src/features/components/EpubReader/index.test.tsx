@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
 	fetchBookFile: vi.fn(),
 	fetchReadingInfo: vi.fn(),
 	saveReadingInfo: vi.fn(),
+	reserveReadingSave: vi.fn(() => Promise.resolve('23')),
 	ePub: vi.fn(),
 }));
 
@@ -12,6 +13,7 @@ vi.mock('@/api/books', () => ({ fetchBookFile: mocks.fetchBookFile }));
 vi.mock('@/api/readingInfo', () => ({
 	fetchReadingInfo: mocks.fetchReadingInfo,
 	saveReadingInfo: mocks.saveReadingInfo,
+	reserveReadingSave: mocks.reserveReadingSave,
 	registerReadingFlush: () => () => {},
 }));
 vi.mock('epubjs', () => ({ default: mocks.ePub }));
@@ -86,6 +88,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 			readStatus: 'completed',
 		});
 		mocks.ePub.mockReturnValue(runtime.book);
+		mocks.reserveReadingSave.mockResolvedValue('23');
 	});
 
 	afterEach(async () => {
@@ -94,6 +97,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 		mocks.fetchBookFile.mockReset();
 		mocks.fetchReadingInfo.mockReset();
 		mocks.saveReadingInfo.mockReset();
+		mocks.reserveReadingSave.mockReset();
 		mocks.ePub.mockReset();
 	});
 
@@ -137,7 +141,7 @@ describe('EpubReader protected source and ReadingInfo', () => {
 
 		const secondRelocated = renditionHandler<(value: { start: { cfi: string } }) => void>(second, 'relocated');
 		secondRelocated?.({ start: { cfi: 'epubcfi(account-two-next)' } });
-		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(account-two-next)', 'reading', 0, 22, undefined, false, undefined));
+		await vi.waitFor(() => expect(mocks.saveReadingInfo).toHaveBeenCalledWith(7, 'epubcfi(account-two-next)', 'reading', 0, 22, undefined, false, '23'));
 	});
 
 	test('スマホ幅では単ページ表示を初期値にする', async () => {

@@ -771,6 +771,22 @@ describe('reading-info API client', () => {
 		}
 	});
 
+	test('logout flush waits for a registered deferred save handoff', async () => {
+		let finish!: (saved: boolean) => void;
+		const handoff = new Promise<boolean>((resolve) => { finish = resolve; });
+		const unregister = registerReadingFlush(99, () => handoff, 7);
+		try {
+			let settled = false;
+			const logoutFlush = flushReadingSaves(7).then((result) => { settled = true; return result; });
+			await Promise.resolve();
+			expect(settled).toBe(false);
+			finish(true);
+			await expect(logoutFlush).resolves.toBe(true);
+		} finally {
+			unregister();
+		}
+	});
+
 	test('保留中の旧アカウント保存は新しいセッションへ書き込まれない', async () => {
 		vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3000');
 		await seedReadingSaveBaseline(99, 7);
