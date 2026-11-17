@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { renderHook } from 'vitest-browser-react';
 
 const mocks = vi.hoisted(() => ({
-	registerReadingFlush: vi.fn(() => () => {}),
+	registerReadingFlush: vi.fn<(...args: [number, () => Promise<boolean> | void, number?]) => () => void>(() => () => {}),
 	saveReadingInfo: vi.fn(),
 	getReadingSaveGeneration: vi.fn(() => 11),
 	reserveReadingSave: vi.fn(() => Promise.resolve('23')),
@@ -43,6 +43,16 @@ afterEach(() => {
 });
 
 describe('useReadingSave', () => {
+	test('保存intentがないreaderの登録flushは成功する', async () => {
+		const hook = await renderHook(() => useReadingSave(99, 7));
+		const registeredFlush = mocks.registerReadingFlush.mock.calls[0]?.[1];
+
+		expect(registeredFlush).toBeTypeOf('function');
+		await expect(registeredFlush?.()).resolves.toBe(true);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+		hook.unmount();
+	});
+
 	test('キュー投入時に保存シーケンス予約をすぐ開始する', async () => {
 		const { result, unmount, act } = await renderHook(({ userId }: { userId?: number } = {}) => useReadingSave(99, userId), {
 			initialProps: { userId: 7 },
@@ -58,7 +68,7 @@ describe('useReadingSave', () => {
 		unmount();
 	});
 
-	test.each(['pagehide', 'visibilitychange', 'unmount'] as const)('%s は予約完了を待たず keepalive 保存を開始する', async (lifecycle) => {
+	test.each(['pagehide', 'visibilitychange', 'unmount'] as const)('%s は予約確定後に keepalive 保存を開始する', async (lifecycle) => {
 		const reservation = deferred<string>();
 		mocks.reserveReadingSave.mockReturnValue(reservation.promise);
 		const { result, unmount, act } = await renderHook(() => useReadingSave(99, 7));
@@ -74,29 +84,117 @@ describe('useReadingSave', () => {
 			});
 			await act(() => {
 				window.dispatchEvent(new Event('pagehide'));
-				expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+				expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 				pagehideReturned = true;
 			});
 		} else if (lifecycle === 'visibilitychange') {
 			const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
 			await act(() => {
 				document.dispatchEvent(new Event('visibilitychange'));
-				expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+				expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 			});
 			hidden.mockRestore();
 		} else {
 			const unmountPromise = unmount();
-			expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+			expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 			await unmountPromise;
 		}
 
-		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
-		expect(mocks.saveReadingInfo).toHaveBeenCalledWith(99, 2, 'reading', 20, 7, 11, true, undefined);
 		reservation.resolve('23');
-		await act(async () => {
-			await Promise.resolve();
-		});
+		await act(async () => { await reservation.promise; await Promise.resolve(); });
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo).toHaveBeenCalledWith(99, 2, 'reading', 20, 7, 11, true, '23');
 		if (lifecycle !== 'unmount') unmount();
+	});
+
+	test('completed は予約完了を待ち、通常の 750ms debounce を待たない', async () => {
+		const reservation = deferred<string>();
+		mocks.reserveReadingSave.mockReturnValue(reservation.promise);
+		const { result, unmount, act } = await renderHook(() => useReadingSave(99, 7));
+
+		await act(async () => { result.current.save(5, 'completed', 100); });
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+		reservation.resolve('24');
+		await act(async () => { await reservation.promise; await Promise.resolve(); });
+		expect(mocks.saveReadingInfo).toHaveBeenCalledWith(99, 5, 'completed', 100, 7, 11, false, '24');
+		unmount();
+	});
+
+	test('予約待ち中の completed flush にpagehideが参加するとkeepaliveを付ける', async () => {
+		const reservation = deferred<string>();
+		mocks.reserveReadingSave.mockReturnValue(reservation.promise);
+		const { result, unmount, act } = await renderHook(() => useReadingSave(99, 7));
+
+		await act(async () => { result.current.save(5, 'completed', 100); });
+		await act(async () => { window.dispatchEvent(new Event('pagehide')); });
+		reservation.resolve('24');
+		await act(async () => { await reservation.promise; await Promise.resolve(); });
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo).toHaveBeenCalledWith(99, 5, 'completed', 100, 7, 11, true, '24');
+		unmount();
+	});
+
+	test('pagehide後に置き換わったunsent intentへkeepaliveを引き継ぐ', async () => {
+		const firstReservation = deferred<string>();
+		const secondReservation = deferred<string>();
+		mocks.reserveReadingSave.mockReturnValueOnce(firstReservation.promise).mockReturnValueOnce(secondReservation.promise);
+		const { result, unmount, act } = await renderHook(() => useReadingSave(99, 7));
+
+		await act(async () => { result.current.save(2); });
+		await act(async () => { window.dispatchEvent(new Event('pagehide')); });
+		await act(async () => { result.current.save(3); });
+		expect(mocks.reserveReadingSave).toHaveBeenCalledTimes(2);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+
+		firstReservation.resolve('23');
+		await act(async () => { await firstReservation.promise; await Promise.resolve(); });
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+		secondReservation.resolve('24');
+		await act(async () => { await secondReservation.promise; await Promise.resolve(); });
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo).toHaveBeenCalledWith(99, 3, 'reading', undefined, 7, 11, true, '24');
+		unmount();
+	});
+
+	test('通常保存は早い予約解決でも 750ms debounce を保つ', async () => {
+		vi.useFakeTimers();
+		try {
+			const { result, unmount, act } = await renderHook(() => useReadingSave(99, 7));
+			await act(async () => { result.current.save(2); await Promise.resolve(); });
+			expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+			await act(async () => { await vi.advanceTimersByTimeAsync(749); });
+			expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+			await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+			expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+			unmount();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test('登録された読込 flush は予約待ち中に置き換わった最新intentまで待つ', async () => {
+		const firstReservation = deferred<string>();
+		const secondReservation = deferred<string>();
+		mocks.reserveReadingSave.mockReturnValueOnce(firstReservation.promise).mockReturnValueOnce(secondReservation.promise);
+		const { result, unmount, act } = await renderHook(() => useReadingSave(99, 7));
+		const registeredFlush = mocks.registerReadingFlush.mock.calls[0]?.[1];
+		expect(registeredFlush).toBeTypeOf('function');
+
+		await act(async () => { result.current.save(2); });
+		let flushResult: boolean | undefined;
+		const handoff = Promise.resolve(registeredFlush?.()).then((saved) => { flushResult = saved === true; });
+		await act(async () => { result.current.save(3); });
+		firstReservation.resolve('23');
+		await act(async () => { await firstReservation.promise; await Promise.resolve(); });
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+		expect(flushResult).toBeUndefined();
+		secondReservation.resolve('24');
+		await act(async () => { await secondReservation.promise; await Promise.resolve(); });
+		await act(async () => { await handoff; });
+		expect(flushResult).toBe(true);
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo).toHaveBeenCalledWith(99, 3, 'reading', undefined, 7, 11, false, '24');
+		unmount();
 	});
 
 	test('予約失敗後のretryは新しい予約を開始し、保存要求を再試行する', async () => {
@@ -119,12 +217,14 @@ describe('useReadingSave', () => {
 		});
 
 		expect(mocks.reserveReadingSave).toHaveBeenCalledTimes(2);
-		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
-		expect(mocks.saveReadingInfo).toHaveBeenCalledWith(99, 2, 'reading', undefined, 7, 11, false, undefined);
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
 		secondReservation.resolve('24');
 		await act(async () => {
+			await secondReservation.promise;
 			await Promise.resolve();
 		});
+		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(1);
+		expect(mocks.saveReadingInfo).toHaveBeenCalledWith(99, 2, 'reading', undefined, 7, 11, false, '24');
 		unmount();
 	});
 
@@ -208,10 +308,9 @@ describe('useReadingSave', () => {
 		unmount();
 	});
 
-	test('pagehide中の遅延予約をretryのシーケンスとして再利用しない', async () => {
+	test('pagehide中の遅延予約後は同じ確定シーケンスでretryする', async () => {
 		const oldReservation = deferred<string>();
-		const secondReservation = deferred<string>();
-		mocks.reserveReadingSave.mockReturnValueOnce(oldReservation.promise).mockReturnValueOnce(secondReservation.promise);
+		mocks.reserveReadingSave.mockReturnValueOnce(oldReservation.promise);
 		mocks.saveReadingInfo.mockRejectedValueOnce(new Error('network failure'));
 		const { result, rerender, unmount, act } = await renderHook(({ userId }: { userId: number } = { userId: 7 }) => useReadingSave(99, userId), {
 			initialProps: { userId: 7 },
@@ -223,21 +322,17 @@ describe('useReadingSave', () => {
 		});
 		await act(async () => {
 			oldReservation.resolve('23');
+			await oldReservation.promise;
 			await Promise.resolve();
 		});
 
 		await act(async () => {
 			result.current.retry();
 		});
-		expect(mocks.reserveReadingSave).toHaveBeenCalledTimes(2);
+		expect(mocks.reserveReadingSave).toHaveBeenCalledTimes(1);
 		expect(mocks.saveReadingInfo).toHaveBeenCalledTimes(2);
-		expect(mocks.saveReadingInfo).toHaveBeenLastCalledWith(99, 2, 'reading', undefined, 7, 11, false, undefined);
-		expect(mocks.saveReadingInfo).not.toHaveBeenCalledWith(99, 2, 'reading', undefined, 7, 11, false, '23');
-		secondReservation.resolve('24');
-		await act(async () => {
-			await Promise.resolve();
-		});
-		expect(mocks.saveReadingInfo).toHaveBeenLastCalledWith(99, 2, 'reading', undefined, 7, 11, false, undefined);
+		expect(mocks.saveReadingInfo).toHaveBeenNthCalledWith(1, 99, 2, 'reading', undefined, 7, 11, true, '23');
+		expect(mocks.saveReadingInfo).toHaveBeenLastCalledWith(99, 2, 'reading', undefined, 7, 11, false, '23');
 
 		await act(async () => {
 			rerender({ userId: 8 });
@@ -246,7 +341,7 @@ describe('useReadingSave', () => {
 			result.current.save(3);
 			window.dispatchEvent(new Event('pagehide'));
 		});
-		expect(mocks.saveReadingInfo).toHaveBeenLastCalledWith(99, 3, 'reading', undefined, 8, 11, true, undefined);
+		expect(mocks.saveReadingInfo).toHaveBeenLastCalledWith(99, 3, 'reading', undefined, 8, 11, true, '23');
 		unmount();
 	});
 
@@ -281,22 +376,31 @@ describe('useReadingSave', () => {
 		unmount();
 	});
 
-	test('予約拒否を処理し、認証世代無効化時も未処理rejectionを残さない', async () => {
+	test.each(['rejection', 'undefined'] as const)('予約%s後は送信せずretryで新しい予約を使う', async (failure) => {
 		const reservation = deferred<string>();
-		mocks.reserveReadingSave.mockReturnValue(reservation.promise);
+		if (failure === 'rejection') mocks.reserveReadingSave.mockReturnValueOnce(reservation.promise).mockResolvedValueOnce('24');
+		else mocks.reserveReadingSave.mockResolvedValueOnce(undefined as unknown as string).mockResolvedValueOnce('24');
 		const { result, unmount, act } = await renderHook(() => useReadingSave(99, 7));
 
 		await act(async () => {
 			result.current.save(2);
-			reservation.reject(new Error('reading save invalidated by authentication change'));
-			await Promise.resolve();
 		});
 		await act(async () => {
 			window.dispatchEvent(new Event('pagehide'));
 		});
+		if (failure === 'rejection') reservation.reject(new Error('reservation failed'));
+		else await Promise.resolve();
+		if (failure === 'rejection') {
+			await act(async () => { await reservation.promise.catch(() => undefined); await Promise.resolve(); });
+		} else {
+			await act(async () => { await Promise.resolve(); });
+		}
 
-		expect(mocks.saveReadingInfo).toHaveBeenCalledWith(99, 2, 'reading', undefined, 7, 11, true, undefined);
-		expect(result.current.status).toBe('saved');
+		expect(mocks.saveReadingInfo).not.toHaveBeenCalled();
+		expect(result.current.status).toBe('error');
+		await act(async () => { result.current.retry(); });
+		expect(mocks.reserveReadingSave).toHaveBeenCalledTimes(2);
+		expect(mocks.saveReadingInfo).toHaveBeenCalledWith(99, 2, 'reading', undefined, 7, 11, false, '24');
 		unmount();
 	});
 

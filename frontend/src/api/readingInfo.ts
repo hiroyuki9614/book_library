@@ -512,7 +512,8 @@ export async function fetchReadingInfo(bookId: number, userId?: number): Promise
 	const requestGeneration = readingSaveGeneration;
 	const sessionUserId = getReadingUserId(userId);
 	const scopeKey = getReadingScopeKey(bookId, sessionUserId ?? undefined);
-	for (const flush of readingFlushes.get(scopeKey) ?? []) flush();
+	const flushResults = Array.from(readingFlushes.get(scopeKey) ?? [], (flush) => Promise.resolve().then(async () => (await flush()) !== false));
+	await Promise.allSettled(flushResults);
 	await pendingSaves.get(scopeKey)?.catch(() => undefined);
 	assertReadingSaveGeneration(requestGeneration);
 
@@ -582,7 +583,7 @@ type PendingReadingSaveSubmission = {
 	promise?: Promise<ReadingInfo>;
 };
 const pendingReadingSaveSubmissions = new Map<string, PendingReadingSaveSubmission>();
-const readingFlushes = new Map<string, Set<() => void>>();
+const readingFlushes = new Map<string, Set<() => Promise<boolean> | void>>();
 
 export function getReadingSaveGeneration() {
 	return readingSaveGeneration;
@@ -600,9 +601,9 @@ export function invalidateReadingSaves() {
 	return Promise.resolve();
 }
 
-export function registerReadingFlush(bookId: number, flush: () => void, userId?: number) {
+export function registerReadingFlush(bookId: number, flush: () => Promise<boolean> | void, userId?: number) {
 	const scopeKey = getReadingScopeKey(bookId, getReadingUserId(userId) ?? undefined);
-	const callbacks = readingFlushes.get(scopeKey) ?? new Set<() => void>();
+	const callbacks = readingFlushes.get(scopeKey) ?? new Set<() => Promise<boolean> | void>();
 	callbacks.add(flush);
 	readingFlushes.set(scopeKey, callbacks);
 	return () => {
@@ -616,16 +617,20 @@ export async function flushReadingSaves(userId: number): Promise<boolean> {
 	if (sessionUserId === null) return true;
 	const scopePrefix = `user:${sessionUserId}:book:`;
 	let callbacksSucceeded = true;
+	const callbackResults: Promise<boolean>[] = [];
 	for (const [scopeKey, callbacks] of readingFlushes) {
 		if (!scopeKey.startsWith(scopePrefix)) continue;
 		for (const flush of callbacks) {
 			try {
-				flush();
+				const result = flush();
+				if (result) callbackResults.push(result);
 			} catch {
 				callbacksSucceeded = false;
 			}
 		}
 	}
+	const callbackOutcomes = await Promise.allSettled(callbackResults);
+	callbacksSucceeded = callbacksSucceeded && callbackOutcomes.every((result) => result.status === 'fulfilled' && result.value !== false);
 	const pending = Array.from(pendingSaves.entries())
 		.filter(([scopeKey]) => scopeKey.startsWith(scopePrefix))
 		.map(([, save]) => save);
