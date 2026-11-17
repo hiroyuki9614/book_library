@@ -133,12 +133,13 @@ describe('PdfReader navigation, outline, and progress', () => {
 	});
 
 	test('places title, save state, outline and display settings in the header with reading controls below the page', async () => {
+		await page.viewport(1280, 800);
 		const { getByRole, getByTestId } = await render(<PdfReader bookId={7} bookTitle='A long PDF title' pageTurnDirection='ltr' />);
 
 		const header = getByRole('banner');
 		await expect.element(header).toHaveTextContent('A long PDF title');
-		await expect.element(getByRole('button', { name: '目次' })).toBeInTheDocument();
-		await expect.element(getByRole('button', { name: '表示設定' })).toBeInTheDocument();
+		await expect.element(getByRole('button', { name: '目次' })).toBeVisible();
+		await expect.element(getByRole('button', { name: '表示設定' })).toBeVisible();
 		await expect.element(header).toHaveTextContent('読書位置を保存済み');
 		await expect.element(getByTestId('pdf-reader-footer')).toHaveTextContent('2 / 5 ページ 40%');
 	});
