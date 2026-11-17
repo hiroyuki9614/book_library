@@ -386,7 +386,11 @@ class RetainedTlsContinuationIntegration(unittest.TestCase):
         f = self.fixture
         work = f.sources / ("continuation-work-" + uuid.uuid4().hex)
         subprocess.run(["/usr/bin/git", "clone", "--quiet", "--no-hardlinks", str(f.source), str(work)],
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, umask=0o022)
+        roles_hook = work / "scripts/staging/10-belib-staging-roles.sh"
+        self.assertTrue(roles_hook.is_file(), str(roles_hook))
+        self.assertEqual(stat.S_IMODE(roles_hook.stat().st_mode), 0o644,
+                         "the cloned production preparation hook must retain its readable 0644 mode")
         subprocess.run(["/usr/bin/git", "-C", str(work), "-c", "user.name=Fixture",
                         "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-qm",
                         "disposable second generation"], check=True, stdout=subprocess.DEVNULL,
