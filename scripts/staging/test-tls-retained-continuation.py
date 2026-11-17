@@ -412,7 +412,9 @@ class RetainedTlsContinuationIntegration(unittest.TestCase):
 
     def invoke_generation_v2(self, active, *, predecessor_digest=None, interrupt=False):
         """Use the existing signed root->sealed launch path for a v2 grant."""
-        f, b, l = self.fixture, self.bootstrap, self.fixture.launch
+        f, b = self.fixture, self.bootstrap
+        l = load(f.source / "scripts/staging/launch-guard.py",
+                 "c2b_launch_guard_" + f.sha[:12])
         revision = f.sha
         issued = int(time.time())
         grant = {**b.TARGET, "schema": "belib-staging-bootstrap-approval/v2",
@@ -449,23 +451,40 @@ class RetainedTlsContinuationIntegration(unittest.TestCase):
                 "source_root": str(root), "pid": os.getpid(),
                 "argv_sha256": sha(canonical(arguments)), "retained_config": config}
             descriptor = os.memfd_create("fixture-root-admission", os.MFD_ALLOW_SEALING)
-            os.write(descriptor, canonical(admission))
-            fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS,
-                fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
-            def root_descriptor(number):
-                info = real_fstat(number)
-                if number == descriptor and info.st_nlink == 0:
-                    return SimpleNamespace(st_mode=info.st_mode, st_uid=0, st_nlink=0, st_size=info.st_size)
-                return info
+            descriptor_closed = False
+            real_close = os.close
+
+            def close_admission_descriptor(number):
+                nonlocal descriptor_closed
+                result = real_close(number)
+                if number == descriptor:
+                    descriptor_closed = True
+                return result
+
             try:
-                with patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": str(f.home),
+                os.write(descriptor, canonical(admission))
+                fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS,
+                    fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+
+                def root_descriptor(number):
+                    info = real_fstat(number)
+                    if number == descriptor and info.st_nlink == 0:
+                        return SimpleNamespace(st_mode=info.st_mode, st_uid=0, st_nlink=0, st_size=info.st_size)
+                    return info
+
+                with patch.object(os, "close", side_effect=close_admission_descriptor), \
+                     patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": str(f.home),
                                              "BELIB_BOOTSTRAP_FD": str(descriptor)}, clear=True), \
                      patch.object(os, "fstat", side_effect=root_descriptor), \
                      patch.object(sys, "argv", ["launch-guard.py", *arguments]):
                     l.ROOT_ADMISSION = None
+                    # The real launch-guard admission function owns and closes
+                    # this sealed FD on entry. The wrapper records that close;
+                    # setup failures before this call are closed below.
                     return l.main(arguments)
             finally:
-                os.close(descriptor)
+                if not descriptor_closed:
+                    real_close(descriptor)
 
         lock_path = Path("/tmp") / ("belib-c2b-v2-" + grant["nonce"] + ".lock")
         actual_lock = l.project_lock
@@ -487,9 +506,11 @@ class RetainedTlsContinuationIntegration(unittest.TestCase):
             stack.enter_context(patch.object(b.os, "geteuid", side_effect=lambda: 1000 if child["active"] else 0))
             stack.enter_context(patch.object(sys, "argv", ["operator-bootstrap.py", "--grant", str(grant_path)]))
             if interrupt:
+                self._c2b_injected_migration_ran = False
                 original_migrate = f.executor.IsolatedCopyOperations.migrate
                 def fail_after_candidate_migration(operations):
                     original_migrate(operations)
+                    self._c2b_injected_migration_ran = True
                     raise RuntimeError("injected post-migration generation-2 recovery")
                 stack.enter_context(patch.object(f.executor.IsolatedCopyOperations, "migrate",
                                                   fail_after_candidate_migration))
@@ -822,23 +843,46 @@ class RetainedTlsContinuationIntegration(unittest.TestCase):
         # A signed but stale predecessor is rejected by bootstrap before its
         # nonce journal is created or any Docker command is issued.
         before_calls = len(f.prep_calls)
-        stale_status, _, stale_errors, stale_grant = self.invoke_generation_v2(
+        stale_pointer_bytes = (f.state / "active-generation.json").read_bytes()
+        stale_env_bytes = f.env.read_bytes()
+        stale_config_bytes = f.retained_config.read_bytes()
+        stale_status, stale_output, stale_errors, stale_grant = self.invoke_generation_v2(
             active, predecessor_digest="0" * 64)
-        self.assertEqual(stale_status, 1, stale_errors)
-        self.assertFalse((f.state / (stale_grant["nonce"] + ".used")).exists())
-        self.assertEqual(len(f.prep_calls), before_calls)
+        self.assertEqual(stale_status, 1, stale_errors + stale_output)
+        self.assertEqual(stale_errors,
+            "BLOCKED: Retained operator configuration does not enable this exact source/topology\n",
+            stale_output)
+        self.assertEqual(stale_output, "")
+        stale_used = f.state / (stale_grant["nonce"] + ".used")
+        stale_result = f.state / (stale_grant["nonce"] + ".result.json")
+        self.assertFalse(stale_used.exists(), "stale grant unexpectedly consumed its nonce")
+        self.assertFalse(stale_result.exists(), "stale grant unexpectedly wrote a result")
+        self.assertEqual(len(f.prep_calls), before_calls, "stale grant reached preparation Docker commands")
+        self.assertEqual((f.state / "active-generation.json").read_bytes(), stale_pointer_bytes)
+        self.assertEqual(f.env.read_bytes(), stale_env_bytes)
+        self.assertEqual(f.retained_config.read_bytes(), stale_config_bytes)
 
         # Inject a process interruption after the actual candidate migration.
         # The transaction must restore the exact active generation and env;
         # then a fresh operation re-prepares against the same signed pointer.
         prior_env = f.env.read_bytes()
+        prior_pointer_bytes = (f.state / "active-generation.json").read_bytes()
         prior_serve, prior_etag = self.serve_raw, self.serve_etag
-        interrupted_status, _, interrupted_errors, interrupted_grant = self.invoke_generation_v2(
+        interrupted_status, interrupted_output, interrupted_errors, interrupted_grant = self.invoke_generation_v2(
             active, interrupt=True)
-        self.assertEqual(interrupted_status, 1, interrupted_errors)
-        interrupted_result = json.loads((f.state / (interrupted_grant["nonce"] + ".result.json")).read_bytes())
-        self.assertNotEqual(interrupted_result["exit_code"], 0)
+        diagnostic = "stdout=" + repr(interrupted_output) + " stderr=" + repr(interrupted_errors)
+        self.assertTrue(self._c2b_injected_migration_ran,
+                        "the real generation-2 migration did not complete before interruption; " + diagnostic)
+        self.assertEqual(interrupted_status, 1, diagnostic)
+        interrupted_used = f.state / (interrupted_grant["nonce"] + ".used")
+        interrupted_result_path = f.state / (interrupted_grant["nonce"] + ".result.json")
+        self.assertTrue(interrupted_used.is_file(), "interrupted grant nonce journal missing; " + diagnostic)
+        self.assertTrue(interrupted_result_path.is_file(), "interrupted failure result missing; " + diagnostic)
+        interrupted_result = json.loads(interrupted_result_path.read_bytes())
+        self.assertIs(interrupted_result["nonce_consumed"], True, diagnostic)
+        self.assertNotEqual(interrupted_result["exit_code"], 0, diagnostic)
         self.assertEqual(f.env.read_bytes(), prior_env)
+        self.assertEqual((f.state / "active-generation.json").read_bytes(), prior_pointer_bytes)
         self.assertEqual((self.serve_raw, self.serve_etag), (prior_serve, prior_etag))
         self.cd.loopback_health_probe(active["http_port"])
         self.cd.verify_tls_ingress(genesis_completion["certificate_sha256"])
