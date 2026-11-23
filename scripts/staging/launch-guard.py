@@ -130,6 +130,8 @@ def _require_operation_approval(args) -> None:
     if args.operation == "upgrade-retained":
         expected.update({name: getattr(args, name) for name in
                          ("prior_application_sha", "retained_state_sha256", "backup_sha256", "restore_attestation_sha256")})
+        if args.prior_generation_sha256 is not None:
+            expected["prior_generation_sha256"] = args.prior_generation_sha256
     if any(grant.get(name) != value for name, value in expected.items()) or int(time.time()) >= grant["expires_at"]:
         raise LaunchBlocked("Admitted operation differs from the one-use root-verified grant")
 
@@ -1101,6 +1103,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument("--prior-application-sha")
         parser.add_argument("--backup-sha256")
         parser.add_argument("--restore-attestation-sha256")
+        parser.add_argument("--prior-generation-sha256")
         parser.add_argument("--env-file", type=Path, required=True)
         parser.add_argument("operation", choices=("deploy", "resume-ingress", "manifest-ingress", "upgrade-retained"))
         args = parser.parse_args(argv)

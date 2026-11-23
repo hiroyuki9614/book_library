@@ -91,6 +91,18 @@ class MemoryOperations:
 
 
 class TransactionTests(unittest.TestCase):
+    def test_v2_journal_binds_predecessor_and_environment_cas(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary);directory.chmod(0o700)
+            identity={"operation_id":"a"*32,"source_sha":"b"*40,"retained_state_sha256":"c"*64,
+                "prior_generation_sha256":"d"*64,"env_prior_sha256":"e"*64,"env_candidate_sha256":"f"*64}
+            journal=tx.Journal(directory,identity)
+            self.assertEqual(journal.value["schema"],"belib-retained-db-transaction/v2")
+            self.assertTrue(all(journal.value[name]==value for name,value in identity.items()))
+            changed=dict(identity,prior_generation_sha256="1"*64)
+            with self.assertRaises(tx.UpgradeError):
+                tx.Journal(directory,changed)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="belib-transaction-test-")
         self.addCleanup(self.temp.cleanup)

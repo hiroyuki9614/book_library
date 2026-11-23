@@ -108,12 +108,303 @@ class OperatorBootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(bootstrap.Blocked, "authority pins are malformed"):
             bootstrap.expected_retained_runtime({**config, "authorities": {"restore": authorities["restore"]}})
 
+    def _completed_generation_fixture(self):
+        operation = "d" * 32
+        project = bootstrap.TARGET["project"] + "-upgrade-" + operation
+        source_sha = "a" * 40
+        services = {name: str(index) * 64 for index, name in enumerate(("db", "backend", "frontend", "nginx"), 1)}
+        expected = {"project": project, "operation_id": operation, "services": services,
+            "authority_pins_sha256": "e" * 64, "port": 18083,
+            "retained": {"volumes": {"books": bootstrap.TARGET["project"] + "_staging-book-files"}},
+            "plan": {"candidate_database": {"id": services["db"],
+                    "configuration_sha256": "1" * 64, "volume_name": project + "_staging-postgres-data",
+                    "network_id": "2" * 64},
+                "cutover_plan": {"new": {
+                    "backend": {"configuration_sha256": "3" * 64,
+                                "network_ids": {project + "_isolated": "2" * 64}},
+                    "frontend": {"configuration_sha256": "4" * 64,
+                                 "network_ids": {project + "_isolated": "2" * 64}}}}}}
+        upgrade = {"nonce": "b" * 64, "source_sha": source_sha, "operation": "upgrade-retained",
+            "exit_code": 0, "expected_runtime": expected, "host": bootstrap.TARGET["host"],
+            "principal": bootstrap.TARGET["principal"], "uid": bootstrap.TARGET["uid"],
+            "project": bootstrap.TARGET["project"], "nonce_consumed": True}
+        completion = {"schema": bootstrap.TLS_COMPLETION_SCHEMA, "owner_nonce": "c" * 64, "upgrade_receipt_nonce": upgrade["nonce"],
+            "upgrade_receipt_sha256": hashlib.sha256(bootstrap.canonical(upgrade)).hexdigest(),
+            "source_sha": source_sha, "operation_id": operation, "project": project,
+            "previous_nginx_id": services["nginx"], "nginx_id": "5" * 64,
+            "nginx_configuration_sha256": "6" * 64, "nginx_image_id": "sha256:" + "7" * 64,
+            "nginx_network_ids": {project + "_isolated": "2" * 64, project + "_ingress": "8" * 64},
+            "certificate_sha256": "9" * 64, "serve_config_sha256": "a" * 64,
+            "serve_etag": "b" * 64}
+        live_services = {**services, "nginx": completion["nginx_id"]}
+        observed = {"container_ids": {"candidate": live_services},
+            "image_digests": {"candidate": {"db": "sha256:" + "1" * 64,
+                "backend": "sha256:" + "2" * 64, "frontend": "sha256:" + "3" * 64,
+                "nginx": completion["nginx_image_id"]}},
+            "app_image_revisions": {"backend": source_sha, "frontend": source_sha}}
+        return upgrade, completion, {"schema": "belib-active-generation-observation/v1",
+            "upgrade_receipt": upgrade, "tls_completion": completion, "expected_runtime": expected,
+            "runtime_readback":{"status":"verified","source_sha":source_sha,"operation_id":operation,
+                "project":project,"completion":completion,"observed_runtime":observed},
+            "observed_runtime": observed,
+            "loopback_health": {"url": f"http://127.0.0.1:{expected['port']}/health", "http_status": 200},
+            "tls_ingress": {"status": 200, "certificate_sha256": completion["certificate_sha256"]},
+            "staging_env_sha256": "a" * 64}
+
+    def test_completed_generation_promotion_is_linked_and_exact_retry_only(self):
+        upgrade, completion, observation = self._completed_generation_fixture()
+        observed_writes = []
+        with patch.object(bootstrap, "read_result", return_value=upgrade), \
+                patch.object(bootstrap, "read_tls_receipt", return_value=completion), \
+                patch.object(bootstrap, "_inspect_completed_generation", return_value=observation), \
+                patch.object(bootstrap, "_read_active_generation", return_value=None), \
+                patch.object(bootstrap, "_atomic_active_pointer", side_effect=observed_writes.append), \
+                patch.object(bootstrap, "trusted_path"):
+            generation = bootstrap._promote_completed(upgrade["nonce"], completion["owner_nonce"], self.root)
+        self.assertEqual(observed_writes, [generation])
+        self.assertEqual(generation["services"]["nginx"]["id"], completion["nginx_id"])
+        self.assertEqual(generation["database_volume"], upgrade["expected_runtime"]["plan"]["candidate_database"]["volume_name"])
+        self.assertEqual(generation["shared_books_volume"], bootstrap.TARGET["project"] + "_staging-book-files")
+        bootstrap.validate_active_generation(generation)
+        with patch.object(bootstrap, "read_result", return_value=upgrade), \
+                patch.object(bootstrap, "read_tls_receipt", return_value=completion), \
+                patch.object(bootstrap, "_inspect_completed_generation", return_value=observation), \
+                patch.object(bootstrap, "_read_active_generation", return_value=generation), \
+                patch.object(bootstrap, "_atomic_active_pointer") as write_pointer, \
+                patch.object(bootstrap, "trusted_path"):
+            self.assertEqual(bootstrap._promote_completed(upgrade["nonce"], completion["owner_nonce"], self.root), generation)
+        write_pointer.assert_not_called()
+        drifted = {**observation, "observed_runtime": {**observation["observed_runtime"],
+                                                        "image_digests": {"candidate": {}}}}
+        drifted["runtime_readback"] = {**observation["runtime_readback"],
+            "observed_runtime":drifted["observed_runtime"]}
+        with patch.object(bootstrap, "read_result", return_value=upgrade), \
+                patch.object(bootstrap, "read_tls_receipt", return_value=completion), \
+                patch.object(bootstrap, "_inspect_completed_generation", return_value=drifted), \
+                self.assertRaisesRegex(bootstrap.Blocked, "runtime IDs or source revisions"):
+            bootstrap._promote_completed(upgrade["nonce"], completion["owner_nonce"], self.root)
+
+    def test_initial_promotion_recovers_exact_pair_after_journal_before_pointer(self):
+        upgrade, completion, observation = self._completed_generation_fixture()
+        real_lstat = Path.lstat
+        state = self.root / "operator-state"
+        def root_lstat(path):
+            info = real_lstat(path)
+            try:
+                path.relative_to(state)
+            except ValueError:
+                return info
+            return SimpleNamespace(st_uid=0, st_mode=info.st_mode, st_nlink=info.st_nlink,
+                st_size=info.st_size, st_dev=info.st_dev, st_ino=info.st_ino,
+                st_mtime_ns=info.st_mtime_ns, st_ctime_ns=info.st_ctime_ns)
+        with patch.object(Path, "lstat", root_lstat), \
+                patch.object(bootstrap, "read_result", return_value=upgrade), \
+                patch.object(bootstrap, "read_tls_receipt", return_value=completion), \
+                patch.object(bootstrap, "_inspect_completed_generation", return_value=observation), \
+                patch.object(bootstrap, "trusted_path"):
+            atomic = bootstrap._atomic_active_pointer
+            attempts = 0
+            def interrupt_once(value):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise OSError("interrupted after journal")
+                return atomic(value)
+            with patch.object(bootstrap, "_atomic_active_pointer", side_effect=interrupt_once):
+                with self.assertRaisesRegex(OSError, "interrupted after journal"):
+                    bootstrap._promote_completed(upgrade["nonce"], completion["owner_nonce"], self.root)
+                self.assertFalse((state / "active-generation.json").exists())
+                generation = bootstrap._promote_completed(upgrade["nonce"], completion["owner_nonce"], self.root)
+            self.assertEqual(bootstrap._read_active_generation(), generation)
+
+    def test_v2_promotion_advances_only_the_exact_pointer_predecessor(self):
+        first_upgrade, first_tls, first_observation=self._completed_generation_fixture()
+        with patch.object(bootstrap,"read_result",return_value=first_upgrade), \
+             patch.object(bootstrap,"read_tls_receipt",return_value=first_tls), \
+             patch.object(bootstrap,"_inspect_completed_generation",return_value=first_observation), \
+             patch.object(bootstrap,"_read_active_generation",return_value=None), \
+             patch.object(bootstrap,"_atomic_active_pointer"), patch.object(bootstrap,"trusted_path"):
+            predecessor=bootstrap._promote_completed(first_upgrade["nonce"],first_tls["owner_nonce"],self.root)
+        predecessor_sha=hashlib.sha256(bootstrap.canonical(predecessor)).hexdigest()
+        upgrade,tls,observation=self._completed_generation_fixture()
+        upgrade={**upgrade,"nonce":"1"*64,"source_sha":"f"*40}
+        plan=upgrade["expected_runtime"]["plan"]
+        plan["cutover_plan"].update(schema="belib-isolated-copy-cutover/v2",prior_project=predecessor["project"],
+            prior_application_sha=predecessor["source_sha"],prior_generation_sha256=predecessor_sha,
+            prior_http_port=predecessor["http_port"],prior_tls_loopback_port=predecessor["tls_loopback_port"],
+            source_sha=upgrade["source_sha"])
+        plan["environment_transition"]={"prior_sha256":"a"*64,"candidate_sha256":"b"*64,
+            "prior_source_sha":predecessor["source_sha"],"candidate_source_sha":upgrade["source_sha"]}
+        upgrade["expected_runtime"].update(prior_project=predecessor["project"],
+            prior_application_sha=predecessor["source_sha"],prior_generation_sha256=predecessor_sha)
+        upgrade["expected_runtime"]["prior_tls_completion"]={
+            "owner_nonce":first_tls["owner_nonce"],
+            "completion_sha256":hashlib.sha256(bootstrap.canonical(first_tls)).hexdigest(),
+            "serve_config_sha256":first_tls["serve_config_sha256"],
+            "serve_etag":first_tls["serve_etag"],
+            "certificate_sha256":first_tls["certificate_sha256"]}
+        tls={**tls,"owner_nonce":"2"*64,"source_sha":upgrade["source_sha"],
+            "schema":bootstrap.TLS_COMPLETION_SCHEMA_V2,
+            "prior_generation_sha256":predecessor_sha,
+            "prior_tls_owner_nonce":first_tls["owner_nonce"],
+            "prior_tls_completion_sha256":hashlib.sha256(bootstrap.canonical(first_tls)).hexdigest(),
+            "upgrade_receipt_nonce":upgrade["nonce"],"operation_id":upgrade["expected_runtime"]["operation_id"],
+            "project":upgrade["expected_runtime"]["project"],"previous_nginx_id":upgrade["expected_runtime"]["services"]["nginx"],
+            "upgrade_receipt_sha256":hashlib.sha256(bootstrap.canonical(upgrade)).hexdigest()}
+        observation={**observation,"upgrade_receipt":upgrade,"tls_completion":tls,
+            "expected_runtime":upgrade["expected_runtime"],"staging_env_sha256":"b"*64,
+            "observed_runtime":{**observation["observed_runtime"],"app_image_revisions":{
+                "backend":upgrade["source_sha"],"frontend":upgrade["source_sha"]}}}
+        observation["runtime_readback"]={**observation["runtime_readback"],"source_sha":upgrade["source_sha"],
+            "operation_id":upgrade["expected_runtime"]["operation_id"],
+            "project":upgrade["expected_runtime"]["project"],"completion":tls,
+            "observed_runtime":observation["observed_runtime"]}
+        written=[]
+        def read_active(**_kwargs): return predecessor
+        with patch.object(bootstrap,"read_result",return_value=upgrade), \
+             patch.object(bootstrap,"read_tls_receipt",return_value=tls), \
+             patch.object(bootstrap,"_inspect_completed_generation",return_value=observation), \
+             patch.object(bootstrap,"_read_active_generation",side_effect=read_active), \
+             patch.object(bootstrap,"_atomic_active_pointer",side_effect=written.append), patch.object(bootstrap,"trusted_path"):
+            generation=bootstrap._promote_completed(upgrade["nonce"],tls["owner_nonce"],self.root)
+        self.assertEqual(generation["schema"],"belib-active-generation/v2")
+        self.assertEqual(generation["previous_generation_sha256"],predecessor_sha)
+        self.assertEqual(generation["genesis_generation_sha256"],predecessor_sha)
+        self.assertEqual(generation["staging_env_sha256"],"b"*64)
+        self.assertEqual(written,[generation])
+        with patch.object(bootstrap,"trusted_path"):
+            bootstrap._atomic_active_pointer(generation)
+        self.assertEqual(json.loads((bootstrap.STATE/"active-generation.json").read_text()),generation)
+        with patch.object(bootstrap,"read_result",return_value=upgrade), \
+             patch.object(bootstrap,"read_tls_receipt",return_value=tls), \
+             patch.object(bootstrap,"_inspect_completed_generation",return_value=observation), \
+             patch.object(bootstrap,"_read_active_generation",return_value=generation), \
+             patch.object(bootstrap,"_atomic_active_pointer") as pointer, patch.object(bootstrap,"trusted_path"):
+            self.assertEqual(bootstrap._promote_completed(upgrade["nonce"],tls["owner_nonce"],self.root),generation)
+        pointer.assert_not_called()
+        stale_upgrade={**upgrade,"expected_runtime":{**upgrade["expected_runtime"],
+            "prior_generation_sha256":"0"*64}}
+        stale_tls={**tls,"upgrade_receipt_sha256":hashlib.sha256(bootstrap.canonical(stale_upgrade)).hexdigest()}
+        stale_observation={**observation,"upgrade_receipt":stale_upgrade,"tls_completion":stale_tls,
+            "expected_runtime":stale_upgrade["expected_runtime"]}
+        stale_observation["runtime_readback"]={**observation["runtime_readback"],"completion":stale_tls}
+        with patch.object(bootstrap,"read_result",return_value=stale_upgrade), \
+             patch.object(bootstrap,"read_tls_receipt",return_value=stale_tls), \
+             patch.object(bootstrap,"_inspect_completed_generation",return_value=stale_observation), \
+             patch.object(bootstrap,"_read_active_generation",return_value=generation), \
+             self.assertRaisesRegex(bootstrap.Blocked,"current active predecessor"):
+            bootstrap._promote_completed(stale_upgrade["nonce"],stale_tls["owner_nonce"],self.root)
+
+    def test_active_generation_malformed_pointer_cannot_be_treated_as_absent(self):
+        pointer = self.root / "operator-state" / "active-generation.json"
+        pointer.write_text("not canonical json")
+        pointer.chmod(0o600)
+        with patch.object(bootstrap, "trusted_path"):
+            with self.assertRaises(bootstrap.Blocked):
+                bootstrap._read_active_generation()
+
+    def test_missing_pointer_with_durable_generation_journal_cannot_fall_back_to_v1(self):
+        state = self.root / "operator-state"
+        journal = state / ("generation-" + "a" * 64 + "-" + "b" * 64 + ".json")
+        journal.write_text("{}")
+        journal.chmod(0o600)
+        with patch.object(bootstrap, "trusted_path"):
+            with self.assertRaisesRegex(bootstrap.Blocked, "missing beside a durable promotion journal"):
+                bootstrap._read_active_generation()
+            self.assertIsNone(bootstrap._read_active_generation(allow_journaled_initial_promotion=True))
+
+    def test_generation_journal_publication_is_atomic_no_replace_with_single_link(self):
+        state = self.root / "operator-state"
+        journal = state / ("generation-" + "a" * 64 + "-" + "b" * 64 + ".json")
+        raw = b'{"generation":"fixture"}'
+        with patch.object(bootstrap, "trusted_path"):
+            bootstrap._write_immutable(journal, raw)
+        self.assertEqual(journal.read_bytes(), raw)
+        self.assertEqual(journal.stat().st_nlink, 1)
+        self.assertEqual(list(state.glob(".generation.*.pending")), [])
+
+    def test_active_pointer_symlink_mode_and_link_count_are_rejected(self):
+        state = self.root / "operator-state"
+        pointer = state / "active-generation.json"
+        target = state / "target.json"
+        target.write_bytes(b"{}")
+        target.chmod(0o600)
+        real_lstat = Path.lstat
+        with patch.object(bootstrap, "trusted_path"):
+            pointer.symlink_to(target)
+            with self.assertRaises((OSError, bootstrap.Blocked)):
+                bootstrap._read_active_generation()
+            pointer.unlink()
+
+            pointer.write_bytes(b"{}")
+            pointer.chmod(0o644)
+            def root_lstat(path):
+                info = real_lstat(path)
+                if path == pointer:
+                    return SimpleNamespace(st_uid=0, st_mode=info.st_mode, st_nlink=info.st_nlink)
+                return info
+            with patch.object(Path, "lstat", root_lstat):
+                with self.assertRaisesRegex(bootstrap.Blocked, "metadata is unsafe"):
+                    bootstrap._read_active_generation()
+            pointer.unlink()
+
+            pointer.write_bytes(b"{}")
+            pointer.chmod(0o600)
+            hardlink = state / "active-generation-copy.json"
+            os.link(pointer, hardlink)
+            with self.assertRaisesRegex(bootstrap.Blocked, "regular file"):
+                bootstrap._read_active_generation()
+
     def test_valid_external_signature_derives_only_fixed_launcher_arguments(self):
         with patch.object(bootstrap, "trusted_path"):
             grant = bootstrap.validate_grant(self.signed(), "a" * 40)
         self.assertEqual(grant, self.grant)
         self.assertEqual(bootstrap.launcher_arguments(grant), ["--source-sha", "a" * 40,
             "--evidence-sha256", "c" * 64, "--env-file", "/home/hiroyuki/.config/belib-staging/i5.env", "deploy"])
+
+    def test_v2_upgrade_grant_binds_prior_generation_and_is_upgrade_only(self):
+        grant={**self.grant,"schema":"belib-staging-bootstrap-approval/v2","operation":"upgrade-retained",
+            "prior_application_sha":"d"*40,"prior_generation_sha256":"e"*64,
+            "retained_state_sha256":"1"*64,"backup_sha256":"2"*64,"restore_attestation_sha256":"3"*64}
+        with patch.object(bootstrap,"trusted_path"):
+            validated=bootstrap.validate_grant(self.signed(grant),grant["source_sha"])
+        arguments=bootstrap.launcher_arguments(validated)
+        self.assertIn("--prior-generation-sha256",arguments)
+        self.assertEqual(arguments[arguments.index("--prior-generation-sha256")+1],"e"*64)
+        with patch.object(bootstrap,"trusted_path"), self.assertRaisesRegex(bootstrap.Blocked,"restricted"):
+            bootstrap.validate_grant(self.signed({**grant,"operation":"deploy"}),grant["source_sha"])
+
+    def test_v2_retained_config_must_match_all_active_database_and_application_pins(self):
+        project=bootstrap.TARGET["project"]+"-upgrade-"+"a"*32
+        services={}
+        for index,name in enumerate(("db","backend","frontend","nginx"),1):
+            networks={project+"_isolated":str(index)*64}
+            if name=="nginx": networks[project+"_ingress"]="9"*64
+            services[name]={"id":str(index+1)*64,"configuration_sha256":str(index+2)*64,
+                "image_id":"sha256:"+str(index+3)*64,"network_ids":networks}
+        active={"project":project,"source_sha":"b"*40,"http_port":18123,"tls_loopback_port":18443,
+            "database_volume":project+"_staging-postgres-data","services":services}
+        predecessor=hashlib.sha256(bootstrap.canonical(active)).hexdigest()
+        old={name:{"id":services[name]["id"],"configuration_sha256":services[name]["configuration_sha256"],
+                   "network_ids":services[name]["network_ids"],"image_id":services[name]["image_id"]}
+             for name in ("backend","frontend","nginx")}
+        config={"prior_project":project,"prior_generation_sha256":predecessor,
+            "source_database":{"id":services["db"]["id"],
+                "configuration_sha256":services["db"]["configuration_sha256"],
+                "network_ids":services["db"]["network_ids"],"volume_name":active["database_volume"],
+                "image_id":services["db"]["image_id"]},
+            "cutover_plan":{"schema":"belib-isolated-copy-cutover/v2","prior_project":project,
+                "prior_application_sha":active["source_sha"],"prior_generation_sha256":predecessor,
+                "prior_http_port":active["http_port"],"prior_tls_loopback_port":active["tls_loopback_port"],
+                "old":old}}
+        bootstrap.validate_generation_predecessor(active,config)
+        changed={**config,"cutover_plan":{**config["cutover_plan"],"old":{
+            **old,"backend":{**old["backend"],"image_id":"sha256:"+"f"*64}}}}
+        with self.assertRaisesRegex(bootstrap.Blocked,"application pins differ"):
+            bootstrap.validate_generation_predecessor(active,changed)
+        changed={**config,"source_database":{**config["source_database"],"volume_name":bootstrap.TARGET["project"]+"_staging-postgres-data"}}
+        with self.assertRaisesRegex(bootstrap.Blocked,"exact active predecessor"):
+            bootstrap.validate_generation_predecessor(active,changed)
 
     def test_forged_wrong_target_expired_and_unknown_operation_fail(self):
         for changes in ({"uid": 0}, {"host": "other"}, {"source_sha": "d" * 40},
@@ -178,8 +469,22 @@ class OperatorBootstrapTests(unittest.TestCase):
         with patch.object(bootstrap, "STATE", state), patch.object(bootstrap, "trusted_path"):
             bootstrap.consume_nonce(self.grant)
             self.assertTrue((state / (self.grant["nonce"] + ".used")).is_file())
-            with self.assertRaises(FileExistsError):
+            # Same signed nonce can resume its journal only until a durable result exists.
+            real_lstat=Path.lstat
+            def root_lstat(path):
+                info=real_lstat(path)
+                try: path.relative_to(state)
+                except ValueError: return info
+                return SimpleNamespace(st_uid=0,st_mode=info.st_mode,st_nlink=info.st_nlink,
+                    st_size=info.st_size,st_dev=info.st_dev,st_ino=info.st_ino,st_mtime_ns=info.st_mtime_ns,st_ctime_ns=info.st_ctime_ns)
+            with patch.object(Path,"lstat",root_lstat), \
+                    patch.object(bootstrap,"read_regular",return_value=bootstrap.canonical({
+                        "grant_sha256":hashlib.sha256(bootstrap.canonical(self.grant)).hexdigest(),
+                        "source_sha":self.grant["source_sha"]})):
                 bootstrap.consume_nonce(self.grant)
+                bootstrap.write_result(self.grant,0)
+                with self.assertRaisesRegex(bootstrap.Blocked,"durable result"):
+                    bootstrap.consume_nonce(self.grant)
 
     def test_result_is_durable_exact_grant_bound_and_immutable(self):
         with patch.object(bootstrap, "trusted_path"):
@@ -352,6 +657,56 @@ class OperatorBootstrapTests(unittest.TestCase):
         write.assert_not_called()
         self.assertFalse((bootstrap.STATE / (self.grant["nonce"] + ".used")).exists())
         self.assertFalse((bootstrap.STATE / (self.grant["nonce"] + ".result.json")).exists())
+
+    def test_v2_prior_tls_receipt_is_authenticated_before_nonce_or_spawn(self):
+        source = "a"*40
+        project="belib-isolated-i5-upgrade-"+"7"*32
+        active={"schema":"belib-active-generation/v1", "host":bootstrap.TARGET["host"],
+            "principal":bootstrap.TARGET["principal"], "uid":bootstrap.TARGET["uid"],
+            "source_sha":"6"*40, "operation_id":"7"*32, "project":project,
+            "upgrade_receipt_nonce":"8"*64, "upgrade_receipt_sha256":"9"*64,
+            "tls_owner_nonce":"a"*64, "tls_completion_sha256":"b"*64,
+            "authority_pins_sha256":"c"*64, "database_volume":project+"_staging-postgres-data",
+            "shared_books_volume":bootstrap.TARGET["project"]+"_staging-book-files",
+            "http_port":18083, "tls_loopback_port":18443, "certificate_sha256":"d"*64,
+            "services":{}}
+        for index,service in enumerate(("db","backend","frontend","nginx"),start=1):
+            network_ids={project+"_isolated":str(index+3)*64}
+            if service=="nginx": network_ids[project+"_ingress"]="8"*64
+            active["services"][service]={"id":str(index)*64,
+                "configuration_sha256":str(index+4)*64,
+                "image_id":"sha256:"+str(index+5)*64,
+                "network_ids":network_ids}
+        bootstrap.validate_active_generation(active)
+        grant = {**bootstrap.TARGET, "schema":"belib-staging-bootstrap-approval/v2",
+            "source_sha":source, "operation":"upgrade-retained", "nonce":"d"*64,
+            "evidence_sha256":"e"*64, "issued_at":int(time.time()), "expires_at":int(time.time())+300,
+            "prior_application_sha":"6"*40,
+            "prior_generation_sha256":hashlib.sha256(bootstrap.canonical(active)).hexdigest(),
+            "retained_state_sha256":"1"*64, "backup_sha256":"2"*64,
+            "restore_attestation_sha256":"3"*64}
+        grant_path=self.root/"generation-grant.json";grant_path.write_bytes(self.signed(grant))
+        config_path=self.root/"operator-config.json"
+        config_path.write_bytes(bootstrap.canonical({"schema":"belib-staging-operator/v1",
+            "enabled":True,"source_sha":source,"manifest":{"fixture.py":{"sha256":"a"*64,"mode":0o644}}}))
+        retained={"schema":"belib-retained-operator/v2","source_sha":source,
+            "prior_project":active["project"],"prior_generation_sha256":grant["prior_generation_sha256"],
+            "environment_transition":{"prior_sha256":"4"*64,"candidate_sha256":"5"*64,
+                "prior_source_sha":"6"*40,"candidate_source_sha":source}}
+        consume,spawn,write=Mock(),Mock(),Mock()
+        with patch.object(bootstrap,"CONFIG",config_path), patch.object(bootstrap,"INSTALL",Path(bootstrap.__file__).resolve()), \
+                patch.object(bootstrap,"verify_source",return_value=self.root), \
+                patch.object(bootstrap,"verify_staging_source_access"), \
+                patch.object(bootstrap,"load_retained_config",return_value=retained), \
+                patch.object(bootstrap,"_read_active_generation",return_value=active), \
+                patch.object(bootstrap,"validate_generation_predecessor"), \
+                patch.object(bootstrap,"read_tls_receipt",side_effect=bootstrap.Blocked("linked TLS receipt missing")) as read_tls, \
+                patch.object(bootstrap,"consume_nonce",consume), patch.object(bootstrap,"spawn_admitted",spawn), \
+                patch.object(bootstrap,"write_result",write), redirect_stderr(io.StringIO()), \
+                self.main_identity(["--grant",str(grant_path)]):
+            self.assertEqual(bootstrap.main(),1)
+        read_tls.assert_called_once_with(active["tls_owner_nonce"])
+        consume.assert_not_called();spawn.assert_not_called();write.assert_not_called()
 
     def test_denied_worker_access_blocks_retained_prepare_before_spawn(self):
         config_path = self.root / "config.json"

@@ -84,18 +84,36 @@ class RetainedPostgres:
 
     @classmethod
     def for_retained(cls, directory: Path, operation_id: str):
+        return cls.for_generation(directory, operation_id, None)
+
+    @classmethod
+    def for_generation(cls, directory: Path, operation_id: str, baseline: dict | None):
         if os.getuid() != 1000:
             raise PostgresBlocked("Retained PostgreSQL requires staging UID 1000")
-        port = cls(RETAINED_ID, directory, operation_id)
-        source = port.inspect(RETAINED_ID)
+        identity = RETAINED_ID if baseline is None else baseline.get("id")
+        project = PROJECT if baseline is None else baseline.get("project")
+        volume = PROJECT + "_staging-postgres-data" if baseline is None else baseline.get("volume_name")
+        port = cls(identity, directory, operation_id)
+        source = port.inspect(identity)
         labels = source.get("Config", {}).get("Labels") or {}
         mounts = [m for m in source.get("Mounts", []) if m.get("Destination") == "/var/lib/postgresql/data"]
-        if (source.get("Id") != RETAINED_ID or source.get("Config", {}).get("Image") != IMAGE
-                or labels.get("com.docker.compose.project") != PROJECT
+        networks = {name: row.get("NetworkID") for name,row in source.get("NetworkSettings",{}).get("Networks",{}).items()}
+        if (source.get("Id") != identity or (baseline is None and source.get("Config", {}).get("Image") != IMAGE)
+                or labels.get("com.docker.compose.project") != project
                 or labels.get("com.docker.compose.service") != "db"
                 or len(mounts) != 1 or mounts[0].get("Type") != "volume"
-                or mounts[0].get("Name") != PROJECT + "_staging-postgres-data"):
+                or mounts[0].get("Name") != volume
+                or (baseline is not None and (networks != baseline.get("network_ids")
+                    or source.get("Image") != baseline.get("image_id")
+                    or not re.fullmatch("[0-9a-f]{64}", baseline.get("configuration_sha256", ""))))):
             raise PostgresBlocked("Retained database identity or volume changed")
+        if baseline is not None:
+            from importlib.util import spec_from_file_location, module_from_spec
+            cutover_path = Path(__file__).with_name("retained-cutover.py")
+            spec = spec_from_file_location("retained_postgres_cutover_digest", cutover_path)
+            module = module_from_spec(spec); spec.loader.exec_module(module)
+            if module.configuration_digest(source) != baseline["configuration_sha256"]:
+                raise PostgresBlocked("Retained database configuration differs from active-generation pin")
         return port
 
     def docker(self, *args, input=None, stdout=subprocess.PIPE, timeout=120):

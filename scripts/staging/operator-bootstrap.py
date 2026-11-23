@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import fcntl
 import hashlib
 import json
 import os
 import pwd
 import re
+import secrets
 import signal
 import socket
 import stat
@@ -43,6 +45,7 @@ MAX_GRANT = 16384
 MAX_CONFIG = 4 * 1024 * 1024
 MAX_TLS_COMPLETION = 16384
 TLS_COMPLETION_SCHEMA = "belib-tls-owner-completion/v1"
+TLS_COMPLETION_SCHEMA_V2 = "belib-tls-owner-completion/v2"
 TLS_COMPLETION_FIELDS = {
     "schema", "owner_nonce", "plan_sha256", "prepare_receipt_sha256",
     "upgrade_receipt_nonce", "upgrade_receipt_sha256", "source_sha", "operation_id", "project",
@@ -50,6 +53,8 @@ TLS_COMPLETION_FIELDS = {
     "nginx_network_ids", "tls_config_sha256", "certificate_sha256", "unchanged_runtime_sha256",
     "approval_nonce", "evidence_sha256", "serve_config_sha256", "serve_etag", "completed_at", "status",
 }
+TLS_COMPLETION_FIELDS_V2 = TLS_COMPLETION_FIELDS | {
+    "prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"}
 
 
 class Blocked(RuntimeError):
@@ -131,13 +136,18 @@ def validate_grant(envelope_raw, source_sha):
     fields = set(TARGET) | {"schema", "source_sha", "operation", "nonce", "evidence_sha256", "issued_at", "expires_at"}
     if not isinstance(grant, dict):
         raise Blocked("Grant payload must be an object")
+    version2 = grant.get("schema") == "belib-staging-bootstrap-approval/v2"
+    if version2 and grant.get("operation") != "upgrade-retained":
+        raise Blocked("Approval v2 is restricted to retained-generation upgrades")
     if grant.get("operation") == "resume-ingress":
         fields |= {"prior_source_sha", "retained_state_sha256"}
     if grant.get("operation") == "upgrade-retained":
         fields |= {"prior_application_sha", "retained_state_sha256", "backup_sha256", "restore_attestation_sha256"}
+        if version2:
+            fields |= {"prior_generation_sha256"}
     if (not isinstance(grant, dict) or set(grant) != fields
             or grant.get("operation") not in {"deploy", "resume-ingress", "upgrade-retained"}
-            or grant.get("schema") != "belib-staging-bootstrap-approval/v1"
+            or grant.get("schema") not in {"belib-staging-bootstrap-approval/v1", "belib-staging-bootstrap-approval/v2"}
             or grant.get("source_sha") != source_sha
             or any(grant.get(k) != v for k, v in TARGET.items())
             or any(type(grant.get(k)) is not int for k in ("uid", "pull_request", "issued_at", "expires_at"))
@@ -151,9 +161,11 @@ def validate_grant(envelope_raw, source_sha):
             or not re.fullmatch(r"[0-9a-f]{64}", grant["retained_state_sha256"])):
         raise Blocked("Retained-state binding is invalid")
     if grant["operation"] == "upgrade-retained" and (
-            grant["prior_application_sha"] != "81256268276d7ead95029849037f69ec6beec202"
+            (not version2 and grant["prior_application_sha"] != "81256268276d7ead95029849037f69ec6beec202")
+            or not re.fullmatch(r"[0-9a-f]{40}", grant.get("prior_application_sha", ""))
             or any(not isinstance(grant[name], str) or not re.fullmatch(r"[0-9a-f]{64}", grant[name])
-                   for name in ("retained_state_sha256", "backup_sha256", "restore_attestation_sha256"))):
+                   for name in ("retained_state_sha256", "backup_sha256", "restore_attestation_sha256"))
+            or (version2 and not re.fullmatch(r"[0-9a-f]{64}", grant.get("prior_generation_sha256", "")))):
         raise Blocked("Retained upgrade prior state or evidence binding is invalid")
     if len(signature) != 64 or hashlib.sha256(PUBLIC_KEY).hexdigest() != PUBLIC_FINGERPRINT:
         raise Blocked("Signature or adopted public-key pin is invalid")
@@ -225,6 +237,8 @@ def launcher_arguments(grant):
     if grant["operation"] == "upgrade-retained":
         for name in ("prior_application_sha", "retained_state_sha256", "backup_sha256", "restore_attestation_sha256"):
             arguments += ["--" + name.replace("_", "-"), grant[name]]
+        if "prior_generation_sha256" in grant:
+            arguments += ["--prior-generation-sha256", grant["prior_generation_sha256"]]
     return [*arguments, grant["operation"]]
 
 
@@ -234,8 +248,14 @@ def load_retained_config(grant):
     if not path.exists():
         raise Blocked("Retained topology and independent evidence authorities are not adopted")
     value = parse(read_regular(path, 65536, trusted=True), 65536)
-    if (not isinstance(value, dict) or value.get("schema") != "belib-retained-operator/v1"
+    expected_schema = "belib-retained-operator/v2" if "prior_generation_sha256" in grant else "belib-retained-operator/v1"
+    config_fields={"schema","enabled","source_sha","topology","prepared_directory","authorities",
+        "cutover_plan","candidate_database","source_database","migration_image"}
+    if expected_schema.endswith("/v2"):
+        config_fields|={"prior_project","prior_generation_sha256","environment_transition"}
+    if (not isinstance(value, dict) or set(value)!=config_fields or value.get("schema") != expected_schema
             or value.get("source_sha") != grant["source_sha"] or value.get("topology") != "isolated-copy"
+            or (expected_schema.endswith("/v2") and value.get("prior_generation_sha256") != grant["prior_generation_sha256"])
             or value.get("enabled") is not True):
         raise Blocked("Retained operator configuration does not enable this exact source/topology")
     return value
@@ -281,13 +301,63 @@ def verify_staging_source_access(root, fixed_entry):
             "verify source directory traversal and fixed entry permissions"
         )
 
+def validate_generation_predecessor(active, config):
+    """Require the adopted cutover source pins to be the exact active pointer."""
+    plan = config.get("cutover_plan") if isinstance(config, dict) else None
+    source = config.get("source_database") if isinstance(config, dict) else None
+    if not isinstance(plan, dict) or not isinstance(source, dict):
+        raise Blocked("Retained v2 configuration lacks predecessor resource pins")
+    prior_project = active["project"]
+    old = plan.get("old")
+    expected_db = active["services"]["db"]
+    if (plan.get("schema") != "belib-isolated-copy-cutover/v2"
+            or plan.get("prior_project") != prior_project
+            or plan.get("prior_application_sha") != active["source_sha"]
+            or plan.get("prior_generation_sha256") != hashlib.sha256(canonical(active)).hexdigest()
+            or plan.get("prior_http_port") != active["http_port"]
+            or plan.get("prior_tls_loopback_port") != active["tls_loopback_port"]
+            or config.get("prior_project") != prior_project
+            or config.get("prior_generation_sha256") != plan.get("prior_generation_sha256")
+            or source != {"id": expected_db["id"],
+                          "configuration_sha256": expected_db["configuration_sha256"],
+                          "network_ids": expected_db["network_ids"],
+                          "volume_name": active["database_volume"],
+                          "image_id": expected_db["image_id"]}
+            or not isinstance(old, dict) or set(old) != {"backend", "frontend", "nginx"}):
+        raise Blocked("Retained v2 configuration does not bind the exact active predecessor")
+    for service, pin in old.items():
+        active_pin = active["services"][service]
+        if pin != {"id": active_pin["id"],
+                   "configuration_sha256": active_pin["configuration_sha256"],
+                   "network_ids": active_pin["network_ids"],
+                   "image_id": active_pin["image_id"]}:
+            raise Blocked("Retained v2 application pins differ from the active predecessor")
+
 
 def consume_nonce(grant):
     trusted_path(STATE, directory=True)
     if stat.S_IMODE(STATE.stat().st_mode) != 0o700:
         raise Blocked("Replay directory must be root-only")
     path = STATE / (grant["nonce"] + ".used")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        info=path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_nlink!=1
+                or stat.S_IMODE(info.st_mode)!=0o600):
+            raise Blocked("Replay journal metadata is unsafe")
+        recorded=parse(read_regular(path,4096,trusted=True),4096)
+        expected={"grant_sha256":hashlib.sha256(canonical(grant)).hexdigest(),"source_sha":grant["source_sha"]}
+        if recorded!=expected:
+            raise Blocked("Nonce was already consumed by a different grant")
+        result_path=_result_path(grant["nonce"])
+        try:
+            result_info=result_path.lstat()
+        except FileNotFoundError:
+            return
+        if stat.S_ISREG(result_info.st_mode) and result_info.st_uid==0 and result_info.st_nlink==1 and stat.S_IMODE(result_info.st_mode)==0o600:
+            raise Blocked("Nonce already has a durable result; use the read-only receipt query")
+        raise Blocked("Existing nonce result metadata is unsafe")
     with os.fdopen(fd, "wb") as stream:
         stream.write(canonical({"grant_sha256": hashlib.sha256(canonical(grant)).hexdigest(), "source_sha": grant["source_sha"]}))
         stream.flush()
@@ -308,8 +378,24 @@ def _result_path(nonce):
     return STATE / (nonce + ".result.json")
 
 
-def expected_retained_runtime(config):
+def expected_retained_runtime(config, active_generation=None, prior_tls_completion=None):
     plan = config["cutover_plan"]
+    generation = plan.get("schema") == "belib-isolated-copy-cutover/v2"
+    config_fields={"schema","enabled","source_sha","topology","prepared_directory","authorities",
+        "cutover_plan","candidate_database","source_database","migration_image"}
+    if generation: config_fields|={"prior_project","prior_generation_sha256","environment_transition"}
+    if not isinstance(config,dict) or (generation and set(config)!=config_fields):
+        raise Blocked("Retained operator configuration fields do not match its version")
+    if generation:
+        transition=config.get("environment_transition")
+        if (not isinstance(transition,dict) or set(transition)!={"prior_sha256","candidate_sha256","prior_source_sha","candidate_source_sha"}
+                or any(not isinstance(transition.get(name),str) or not re.fullmatch(r"[0-9a-f]{64}",transition[name])
+                       for name in ("prior_sha256","candidate_sha256"))
+                or transition.get("prior_source_sha")!=plan.get("prior_application_sha")
+                or transition.get("candidate_source_sha")!=config.get("source_sha")
+                or config.get("prior_generation_sha256")!=plan.get("prior_generation_sha256")
+                or config.get("prior_project")!=plan.get("prior_project")):
+            raise Blocked("Retained environment transition does not match the adopted predecessor")
     authorities = config.get("authorities")
     if (not isinstance(authorities, dict) or set(authorities) != {"restore", "network", "roots"}
             or any(not isinstance(pin, dict) or set(pin) != {"issuer", "public_key_pem", "fingerprint"}
@@ -321,22 +407,39 @@ def expected_retained_runtime(config):
         raise Blocked("Retained authority pins are malformed")
     public_plan = {"cutover_plan": plan, "candidate_database": config["candidate_database"],
                    "source_database": config["source_database"]}
+    if generation:
+        public_plan["environment_transition"] = config["environment_transition"]
     value = {"project": TARGET["project"] + "-upgrade-" + plan["operation_id"],
              "operation_id": plan["operation_id"], "plan": public_plan,
              "services": {"db": config["candidate_database"]["id"],
                           **{service: plan["new"][service]["id"] for service in ("backend", "frontend", "nginx")}},
-             "retained": {"project": TARGET["project"],
-                          "db": RETAINED_DB_ID,
-                          "volumes": {"database": TARGET["project"] + "_staging-postgres-data",
+             "retained": {"project": plan.get("prior_project", TARGET["project"]),
+                          "db": config["source_database"].get("id", RETAINED_DB_ID),
+                          "volumes": {"database": config["source_database"].get("volume_name", TARGET["project"] + "_staging-postgres-data"),
                                       "books": TARGET["project"] + "_staging-book-files"},
                           "stopped_application_ids": [plan["old"][service]["id"] for service in ("backend", "frontend", "nginx")]},
              "port": plan["port"],
              "authority_pins_sha256": hashlib.sha256(canonical(authorities)).hexdigest(),
              "plan_sha256": hashlib.sha256(canonical(public_plan)).hexdigest()}
+    if generation:
+        value["prior_project"] = plan["prior_project"]
+        value["prior_application_sha"] = plan["prior_application_sha"]
+        value["prior_generation_sha256"] = plan["prior_generation_sha256"]
+        if (not isinstance(active_generation, dict) or not isinstance(prior_tls_completion, dict)
+                or prior_tls_completion.get("owner_nonce") != active_generation.get("tls_owner_nonce")
+                or hashlib.sha256(canonical(prior_tls_completion)).hexdigest() != active_generation.get("tls_completion_sha256")
+                or prior_tls_completion.get("source_sha") != plan.get("prior_application_sha")
+                or prior_tls_completion.get("project") != plan.get("prior_project")):
+            raise Blocked("Prior TLS completion does not match the active-generation predecessor")
+        value["prior_tls_completion"] = {"owner_nonce": prior_tls_completion["owner_nonce"],
+            "completion_sha256": active_generation["tls_completion_sha256"],
+            "serve_config_sha256": prior_tls_completion["serve_config_sha256"],
+            "serve_etag": prior_tls_completion["serve_etag"],
+            "certificate_sha256": prior_tls_completion["certificate_sha256"]}
     return value
 
 
-def write_result(grant, code, retained_config=None):
+def write_result(grant, code, retained_config=None, active_generation=None, expected_runtime=None):
     if type(code) is not int or not -128 <= code <= 255:
         raise Blocked("Executor exit status is invalid")
     result = {"schema": "belib-staging-operation-result/v1", "nonce": grant["nonce"],
@@ -346,7 +449,16 @@ def write_result(grant, code, retained_config=None):
     if code == 0 and grant["operation"] == "upgrade-retained" and retained_config is not None:
         # This is an expected adopted topology, NOT an observation of Docker.
         # The nonroot CD adapter independently inspects these IDs and revisions.
-        result["expected_runtime"] = expected_retained_runtime(retained_config)
+        if expected_runtime is None:
+            prior_tls = None
+            if "prior_generation_sha256" in grant:
+                if (active_generation is None
+                        or hashlib.sha256(canonical(active_generation)).hexdigest() != grant["prior_generation_sha256"]
+                        or active_generation.get("source_sha") != grant.get("prior_application_sha")):
+                    raise Blocked("Prior TLS completion selector differs from the active-generation pointer")
+                prior_tls = read_tls_receipt(active_generation["tls_owner_nonce"])
+            expected_runtime = expected_retained_runtime(retained_config, active_generation, prior_tls)
+        result["expected_runtime"] = expected_runtime
     path = _result_path(grant["nonce"])
     # A result is immutable. Duplicate execution is already denied by the nonce
     # journal; never replace a completed result with a second claimant's result.
@@ -401,8 +513,9 @@ def read_tls_receipt(owner_nonce):
             or stat.S_IMODE(info.st_mode) != 0o600):
         raise Blocked("TLS completion record metadata is unsafe")
     value = parse(raw, MAX_TLS_COMPLETION)
-    if (not isinstance(value, dict) or set(value) != TLS_COMPLETION_FIELDS
-            or canonical(value) != raw or value.get("schema") != TLS_COMPLETION_SCHEMA
+    completion_v2 = isinstance(value, dict) and value.get("schema") == TLS_COMPLETION_SCHEMA_V2
+    if (not isinstance(value, dict) or set(value) != (TLS_COMPLETION_FIELDS_V2 if completion_v2 else TLS_COMPLETION_FIELDS)
+            or canonical(value) != raw or value.get("schema") != (TLS_COMPLETION_SCHEMA_V2 if completion_v2 else TLS_COMPLETION_SCHEMA)
             or value.get("owner_nonce") != owner_nonce or value.get("status") != "complete"):
         raise Blocked("TLS completion fields, encoding, or identity are invalid")
     for field in ("plan_sha256", "prepare_receipt_sha256", "upgrade_receipt_nonce", "upgrade_receipt_sha256",
@@ -410,6 +523,11 @@ def read_tls_receipt(owner_nonce):
                   "unchanged_runtime_sha256", "approval_nonce", "evidence_sha256", "serve_config_sha256"):
         if not isinstance(value[field], str) or not re.fullmatch(r"[0-9a-f]{64}", value[field]):
             raise Blocked("TLS completion digest or nonce is malformed")
+    if completion_v2 and (any(not isinstance(value.get(name), str) or not re.fullmatch(r"[0-9a-f]{64}", value[name])
+            for name in ("prior_generation_sha256", "prior_tls_completion_sha256"))
+            or not isinstance(value.get("prior_tls_owner_nonce"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value["prior_tls_owner_nonce"])):
+        raise Blocked("TLS v2 completion predecessor link is malformed")
     if (not isinstance(value["source_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", value["source_sha"])
             or not isinstance(value["operation_id"], str) or not re.fullmatch(r"[0-9a-f]{32}", value["operation_id"])
             or value["project"] != TARGET["project"] + "-upgrade-" + value["operation_id"]):
@@ -435,6 +553,398 @@ def read_tls_receipt(owner_nonce):
     if type(value["completed_at"]) is not int or value["completed_at"] <= 0:
         raise Blocked("TLS completion timestamp is malformed")
     return value
+
+
+def _active_generation_path():
+    trusted_path(STATE, directory=True)
+    if stat.S_IMODE(STATE.stat().st_mode) != 0o700:
+        raise Blocked("Active-generation state directory must be root-only")
+    return STATE / "active-generation.json"
+
+
+def _read_active_generation(*, allow_journaled_initial_promotion=False):
+    path = _active_generation_path()
+    try:
+        raw = read_regular(path, 128 * 1024, trusted=True)
+    except FileNotFoundError:
+        # A journal is durable evidence that an initial promotion (or later
+        # generation CAS) began. Preparation must never interpret a missing
+        # pointer beside such evidence as permission to use the literal v1
+        # baseline. The promoter may inspect this state only to reconcile the
+        # exact receipt-pair journal it is about to commit.
+        with os.scandir(STATE) as entries:
+            journaled = any(entry.name.startswith("generation-") and entry.name.endswith(".json")
+                            for entry in entries)
+        if not allow_journaled_initial_promotion and journaled:
+            raise Blocked("Active-generation pointer is missing beside a durable promotion journal")
+        return None
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise Blocked("Active-generation pointer metadata is unsafe")
+    value = parse(raw, 128 * 1024)
+    if (not isinstance(value, dict) or value.get("schema") not in
+            {"belib-active-generation/v1", "belib-active-generation/v2"}
+            or canonical(value) != raw):
+        raise Blocked("Active-generation pointer is malformed")
+    validate_active_generation(value)
+    journal_rows = {}
+    for entry in os.scandir(STATE):
+        if not entry.name.startswith("generation-") or not entry.name.endswith(".json"):
+            continue
+        journal_path = STATE / entry.name
+        try:
+            journal_raw = read_regular(journal_path, 256 * 1024, trusted=True)
+            journal_info = journal_path.lstat()
+        except OSError as error:
+            raise Blocked("Active-generation journal chain is unavailable") from error
+        if (not stat.S_ISREG(journal_info.st_mode) or journal_info.st_uid != 0
+                or journal_info.st_nlink != 1 or stat.S_IMODE(journal_info.st_mode) != 0o600):
+            raise Blocked("Active-generation journal metadata is unsafe")
+        journal = parse(journal_raw, 256 * 1024)
+        if (not isinstance(journal, dict) or canonical(journal) != journal_raw
+                or journal.get("schema") not in {"belib-active-generation-journal/v1", "belib-active-generation-journal/v2"}
+                or set(journal) != {"schema", "previous_sha256", "generation_sha256", "generation"}
+                or not isinstance(journal.get("generation"), dict)
+                or hashlib.sha256(canonical(journal["generation"])).hexdigest() != journal.get("generation_sha256")):
+            raise Blocked("Active-generation journal record is malformed")
+        journal_rows[journal["generation_sha256"]] = journal
+    active_digest = hashlib.sha256(canonical(value)).hexdigest()
+    current_journal = journal_rows.get(active_digest)
+    if (current_journal is None or current_journal["generation"] != value
+            or current_journal["schema"] != ("belib-active-generation-journal/v2" if value["schema"] == "belib-active-generation/v2"
+                                               else "belib-active-generation-journal/v1")):
+        raise Blocked("Active-generation pointer is not backed by its immutable journal")
+    if value["schema"] == "belib-active-generation/v2":
+        if (current_journal["previous_sha256"] != value["previous_generation_sha256"]
+                or value["previous_generation_sha256"] not in journal_rows
+                or value["genesis_generation_sha256"] not in journal_rows
+                or value["previous_generation_sha256"] == active_digest):
+            raise Blocked("Active-generation pointer has a broken immutable predecessor chain")
+        cursor=value["previous_generation_sha256"]
+        visited=set()
+        while cursor != value["genesis_generation_sha256"]:
+            if cursor in visited:
+                raise Blocked("Active-generation journal chain contains a cycle")
+            visited.add(cursor)
+            parent=journal_rows.get(cursor)
+            if (parent is None or parent.get("schema")!="belib-active-generation-journal/v2"
+                    or not isinstance(parent.get("previous_sha256"),str)
+                    or not re.fullmatch(r"[0-9a-f]{64}",parent["previous_sha256"])):
+                raise Blocked("Active-generation journal chain skips an immutable predecessor")
+            cursor=parent["previous_sha256"]
+        genesis=journal_rows[value["genesis_generation_sha256"]]
+        if genesis.get("schema")!="belib-active-generation-journal/v1" or genesis.get("previous_sha256") is not None:
+            raise Blocked("Active-generation ancestry does not terminate at the v1 genesis")
+    elif current_journal["previous_sha256"] is not None:
+        raise Blocked("Genesis active-generation journal has an unexpected predecessor")
+    return value
+
+
+def validate_active_generation(value):
+    fields = {"schema", "host", "principal", "uid", "source_sha", "operation_id", "project",
+        "upgrade_receipt_nonce", "upgrade_receipt_sha256", "tls_owner_nonce", "tls_completion_sha256",
+        "authority_pins_sha256", "services", "database_volume", "shared_books_volume", "http_port",
+        "tls_loopback_port", "certificate_sha256"}
+    version = value.get("schema") if isinstance(value, dict) else None
+    if version == "belib-active-generation/v2":
+        fields |= {"previous_generation_sha256", "genesis_generation_sha256", "staging_env_sha256",
+                   "serve_config_sha256", "serve_etag"}
+    if (not isinstance(value, dict) or set(value) != fields or version not in
+            {"belib-active-generation/v1", "belib-active-generation/v2"}
+            or any(value.get(name) != TARGET[name] for name in ("host", "principal", "uid"))
+            or not isinstance(value.get("source_sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", value["source_sha"])
+            or not isinstance(value.get("operation_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", value["operation_id"])
+            or value.get("project") != TARGET["project"] + "-upgrade-" + value["operation_id"]):
+        raise Blocked("Active-generation identity is malformed")
+    if version == "belib-active-generation/v2" and any(
+            not isinstance(value.get(name), str) or not re.fullmatch(r"[0-9a-f]{64}", value[name])
+            for name in ("previous_generation_sha256", "genesis_generation_sha256", "staging_env_sha256")):
+        raise Blocked("Active-generation lineage digest is malformed")
+    if version == "belib-active-generation/v2" and (
+            not isinstance(value.get("serve_config_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value["serve_config_sha256"])
+            or not isinstance(value.get("serve_etag"), str) or not value["serve_etag"]
+            or len(value["serve_etag"]) > 256
+            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in value["serve_etag"])):
+        raise Blocked("Active-generation Serve config pin is malformed")
+    for name in ("upgrade_receipt_nonce", "upgrade_receipt_sha256", "tls_owner_nonce",
+                 "tls_completion_sha256", "authority_pins_sha256", "certificate_sha256"):
+        if not isinstance(value.get(name), str) or not re.fullmatch(r"[0-9a-f]{64}", value[name]):
+            raise Blocked("Active-generation receipt or configuration digest is malformed")
+    project = value["project"]
+    if (value.get("database_volume") != project + "_staging-postgres-data"
+            or value.get("shared_books_volume") != TARGET["project"] + "_staging-book-files"
+            or type(value.get("http_port")) is not int or not 1024 <= value["http_port"] <= 65535
+            or value.get("tls_loopback_port") != 18443):
+        raise Blocked("Active-generation resource or endpoint identity is malformed")
+    services = value.get("services")
+    if not isinstance(services, dict) or set(services) != {"db", "backend", "frontend", "nginx"}:
+        raise Blocked("Active-generation service map is malformed")
+    for service, pin in services.items():
+        if (not isinstance(pin, dict) or set(pin) != {"id", "configuration_sha256", "image_id", "network_ids"}
+                or not isinstance(pin.get("id"), str) or not re.fullmatch(r"[0-9a-f]{64}", pin["id"])
+                or not isinstance(pin.get("configuration_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", pin["configuration_sha256"])
+                or not isinstance(pin.get("image_id"), str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", pin["image_id"])
+                or not isinstance(pin.get("network_ids"), dict)):
+            raise Blocked("Active-generation service pin is malformed")
+        expected_networks = {project + "_isolated"}
+        if service == "nginx":
+            expected_networks.add(project + "_ingress")
+        networks = pin["network_ids"]
+        if (set(networks) != expected_networks
+                or any(not isinstance(network_id, str) or not re.fullmatch(r"[0-9a-f]{64}", network_id)
+                       for network_id in networks.values())):
+            raise Blocked("Active-generation network pin is malformed")
+    return value
+
+
+def _write_immutable(path, raw):
+    pending = STATE / (".generation." + secrets.token_hex(16) + ".pending")
+    fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise Blocked("Atomic no-replace generation journal publication is unavailable")
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+        if renameat2(-100, os.fsencode(pending), -100, os.fsencode(path), 1) != 0:
+            error = ctypes.get_errno()
+            if error == 17:
+                info = path.lstat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) != 0o600
+                        or read_regular(path, 256 * 1024, trusted=True) != raw):
+                    raise Blocked("Existing generation journal conflicts with this receipt pair")
+                return
+            raise OSError(error, os.strerror(error))
+    finally:
+        try:
+            pending.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _fsync_state_directory():
+    directory = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _atomic_active_pointer(value):
+    path = _active_generation_path()
+    raw = canonical(value)
+    pending = STATE / (".active-generation." + secrets.token_hex(16) + ".pending")
+    fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(pending, path)
+        directory = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            pending.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _inspect_completed_generation(root, upgrade_receipt, tls_completion):
+    payload = {"schema": "belib-active-generation-inspection/v1",
+               "upgrade_receipt": upgrade_receipt, "tls_completion": tls_completion}
+    raw = canonical(payload)
+    if len(raw) > 128 * 1024:
+        raise Blocked("Completed-generation evidence exceeds its size limit")
+    fd = os.memfd_create("belib-active-generation", os.MFD_ALLOW_SEALING)
+    try:
+        offset = 0
+        while offset < len(raw):
+            offset += os.write(fd, raw[offset:])
+        seals = (fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, seals)
+        os.lseek(fd, 0, os.SEEK_SET)
+        helper = root / "scripts/staging/cd-handoff-executor.py"
+        trusted_path(helper)
+        try:
+            result = subprocess.run(["/usr/bin/python3", "-I", "-B", str(helper),
+                                     "--inspect-completed-generation-fd", str(fd)],
+                env=SAFE_ENV, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=180, check=False, pass_fds=(fd,), user=TARGET["uid"],
+                group=TARGET["uid"], extra_groups=())
+        except (OSError, subprocess.SubprocessError) as error:
+            raise Blocked("Fixed owner runtime inspection could not run") from error
+        if result.returncode != 0 or len(result.stdout.encode()) > 1024 * 1024:
+            raise Blocked("Fixed owner runtime inspection did not verify the completed generation")
+        projection = parse(result.stdout.rstrip("\n").encode(), 1024 * 1024)
+        if not isinstance(projection, dict) or projection.get("schema") != "belib-active-generation-observation/v1":
+            raise Blocked("Fixed owner runtime inspection returned an invalid projection")
+        return projection
+    finally:
+        os.close(fd)
+
+
+def _promote_completed(upgrade_nonce, owner_nonce, root):
+    if not re.fullmatch(r"[0-9a-f]{64}", upgrade_nonce or "") or not re.fullmatch(r"[0-9a-f]{64}", owner_nonce or ""):
+        raise Blocked("Completed-generation receipt selectors are malformed")
+    upgrade = read_result(upgrade_nonce)
+    completion = read_tls_receipt(owner_nonce)
+    expected = upgrade.get("expected_runtime")
+    if (upgrade.get("exit_code") != 0 or upgrade.get("operation") != "upgrade-retained"
+            or not isinstance(expected, dict)
+            or completion.get("upgrade_receipt_nonce") != upgrade_nonce
+            or completion.get("upgrade_receipt_sha256") != hashlib.sha256(canonical(upgrade)).hexdigest()
+            or completion.get("source_sha") != upgrade.get("source_sha")
+            or completion.get("operation_id") != expected.get("operation_id")
+            or completion.get("project") != expected.get("project")
+            or completion.get("previous_nginx_id") != expected.get("services", {}).get("nginx")):
+        raise Blocked("TLS completion does not link to this exact successful upgrade")
+    generation_v2 = expected.get("prior_generation_sha256") is not None
+    if generation_v2:
+        prior_tls = expected.get("prior_tls_completion")
+        if (completion.get("schema") != TLS_COMPLETION_SCHEMA_V2
+                or not isinstance(prior_tls, dict)
+                or completion.get("prior_generation_sha256") != expected.get("prior_generation_sha256")
+                or completion.get("prior_tls_owner_nonce") != prior_tls.get("owner_nonce")
+                or completion.get("prior_tls_completion_sha256") != prior_tls.get("completion_sha256")
+                or completion.get("serve_config_sha256") != prior_tls.get("serve_config_sha256")
+                or completion.get("serve_etag") != prior_tls.get("serve_etag")
+                or completion.get("certificate_sha256") != prior_tls.get("certificate_sha256")):
+            raise Blocked("TLS completion does not bind the current active predecessor")
+    elif completion.get("schema") != TLS_COMPLETION_SCHEMA:
+        raise Blocked("Genesis upgrade receipt cannot adopt a v2 TLS completion")
+    observation = _inspect_completed_generation(root, upgrade, completion)
+    if (observation.get("upgrade_receipt") != upgrade or observation.get("tls_completion") != completion
+            or observation.get("expected_runtime") != expected):
+        raise Blocked("Owner runtime observation differs from the selected root receipts")
+    runtime = observation.get("runtime_readback")
+    live = observation.get("observed_runtime")
+    if (not isinstance(runtime, dict)
+            or set(runtime) != {"status", "source_sha", "operation_id", "project", "completion", "observed_runtime"}
+            or runtime.get("status") != "verified" or runtime.get("source_sha") != upgrade["source_sha"]
+            or runtime.get("operation_id") != expected.get("operation_id")
+            or runtime.get("project") != expected.get("project")
+            or runtime.get("completion") != completion or runtime.get("observed_runtime") != live):
+        raise Blocked("Owner runtime readback wrapper differs from the exact TLS completion")
+    ids = live.get("container_ids", {}).get("candidate", {}) if isinstance(live, dict) else {}
+    images = live.get("image_digests", {}).get("candidate", {}) if isinstance(live, dict) else {}
+    if (ids != {"db": expected["services"]["db"], "backend": expected["services"]["backend"],
+                "frontend": expected["services"]["frontend"], "nginx": completion["nginx_id"]}
+            or set(images) != {"db", "backend", "frontend", "nginx"}
+            or images.get("nginx") != completion.get("nginx_image_id")
+            or live.get("app_image_revisions") != {"backend": upgrade["source_sha"], "frontend": upgrade["source_sha"]}):
+        raise Blocked("Owner runtime IDs or source revisions differ from the root-pinned topology")
+    if (observation.get("loopback_health") != {"url": f"http://127.0.0.1:{expected['port']}/health",
+                                                "http_status": 200}
+            or observation.get("tls_ingress") != {"status": 200,
+                "certificate_sha256": completion.get("certificate_sha256")}
+            or not isinstance(observation.get("staging_env_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", observation["staging_env_sha256"])):
+        raise Blocked("Owner health or TLS certificate readback differs from the linked completion")
+    transition = expected.get("plan", {}).get("environment_transition", {})
+    if generation_v2 and observation.get("staging_env_sha256") != transition.get("candidate_sha256"):
+        raise Blocked("Owner staging env readback differs from the approved commit transition")
+    plan = expected["plan"]
+    cutover = plan["cutover_plan"]
+    services = {}
+    for name in ("db", "backend", "frontend"):
+        if name == "db":
+            pin = plan["candidate_database"]
+            networks = {expected["project"] + "_isolated": pin["network_id"]}
+            config_sha = pin["configuration_sha256"]
+        else:
+            pin = cutover["new"][name]
+            networks = pin["network_ids"]
+            config_sha = pin["configuration_sha256"]
+        services[name] = {"id": ids[name], "configuration_sha256": config_sha,
+                          "image_id": images[name], "network_ids": networks}
+    services["nginx"] = {"id": completion["nginx_id"],
+        "configuration_sha256": completion["nginx_configuration_sha256"],
+        "image_id": completion["nginx_image_id"], "network_ids": completion["nginx_network_ids"]}
+    prior = _read_active_generation(allow_journaled_initial_promotion=True)
+    generation_v2 = expected.get("prior_generation_sha256") is not None
+    exact_retry = bool(prior is not None
+        and prior.get("upgrade_receipt_nonce") == upgrade_nonce
+        and prior.get("tls_owner_nonce") == owner_nonce
+        and prior.get("upgrade_receipt_sha256") == hashlib.sha256(canonical(upgrade)).hexdigest()
+        and prior.get("tls_completion_sha256") == hashlib.sha256(canonical(completion)).hexdigest())
+    if generation_v2:
+        prior_digest = (prior.get("previous_generation_sha256") if exact_retry else
+                        hashlib.sha256(canonical(prior)).hexdigest() if prior is not None else None)
+        if (prior is None
+                or prior_digest != expected.get("prior_generation_sha256")
+                or (exact_retry and (prior.get("source_sha") != upgrade.get("source_sha")
+                    or prior.get("operation_id") != expected.get("operation_id")
+                    or prior.get("project") != expected.get("project")))
+                or (not exact_retry and (prior.get("source_sha") != expected.get("prior_application_sha")
+                    or prior.get("project") != expected.get("prior_project")))):
+            raise Blocked("Completed v2 generation does not name the current active predecessor")
+    elif prior is not None and prior.get("schema") != "belib-active-generation/v1":
+        raise Blocked("Legacy completed receipt cannot replace a v2 active generation")
+    generation = {"schema": "belib-active-generation/v2" if generation_v2 else "belib-active-generation/v1", "host": TARGET["host"],
+        "principal": TARGET["principal"], "uid": TARGET["uid"], "source_sha": upgrade["source_sha"],
+        "operation_id": expected["operation_id"], "project": expected["project"],
+        "upgrade_receipt_nonce": upgrade_nonce,
+        "upgrade_receipt_sha256": hashlib.sha256(canonical(upgrade)).hexdigest(),
+        "tls_owner_nonce": owner_nonce,
+        "tls_completion_sha256": hashlib.sha256(canonical(completion)).hexdigest(),
+        "authority_pins_sha256": expected["authority_pins_sha256"], "services": services,
+        "database_volume": plan["candidate_database"]["volume_name"],
+        "shared_books_volume": expected["retained"]["volumes"]["books"],
+        "http_port": expected["port"], "tls_loopback_port": 18443,
+        "certificate_sha256": completion["certificate_sha256"]}
+    if generation_v2:
+        if (not isinstance(completion.get("serve_config_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", completion["serve_config_sha256"])
+                or not isinstance(completion.get("serve_etag"), str) or not completion["serve_etag"]):
+            raise Blocked("Completed v2 generation omits its exact Serve configuration digest")
+        generation["serve_config_sha256"] = completion["serve_config_sha256"]
+        generation["serve_etag"] = completion["serve_etag"]
+        generation["previous_generation_sha256"] = prior_digest
+        generation["genesis_generation_sha256"] = (prior["genesis_generation_sha256"]
+            if prior.get("schema") == "belib-active-generation/v2" else prior_digest)
+        generation["staging_env_sha256"] = observation["staging_env_sha256"]
+    if prior is not None:
+        if canonical(prior) == canonical(generation):
+            return generation
+        if exact_retry:
+            raise Blocked("Repeated completion receipt pair conflicts with its active generation")
+        if not generation_v2:
+            raise Blocked("A different active generation already exists; lineage CAS is not enabled")
+    journal = STATE / ("generation-" + upgrade_nonce + "-" + owner_nonce + ".json")
+    journals = {entry.name for entry in os.scandir(STATE)
+                if entry.name.startswith("generation-") and entry.name.endswith(".json")}
+    if (prior is None and journals and journal.name not in journals):
+        raise Blocked("An unresolved generation journal blocks a different initial promotion")
+    journal_raw = canonical({"schema": "belib-active-generation-journal/v2" if generation_v2 else "belib-active-generation-journal/v1",
+                             "previous_sha256": (hashlib.sha256(canonical(prior)).hexdigest() if prior else None),
+                             "generation_sha256": hashlib.sha256(canonical(generation)).hexdigest(),
+                             "generation": generation})
+    try:
+        _write_immutable(journal, journal_raw)
+        _fsync_state_directory()
+    except FileExistsError:
+        info = journal.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600 or read_regular(journal, 256 * 1024, trusted=True) != journal_raw):
+            raise Blocked("Existing generation journal conflicts with this receipt pair")
+    if canonical(_read_active_generation(allow_journaled_initial_promotion=True)) != canonical(prior):
+        raise Blocked("Active-generation predecessor changed before pointer commit")
+    _atomic_active_pointer(generation)
+    return generation
 
 
 def spawn_admitted(root, grant, retained_config=None):
@@ -475,7 +985,7 @@ def spawn_admitted(root, grant, retained_config=None):
     return 124
 
 
-def spawn_preparation(root, operation_id):
+def spawn_preparation(root, operation_id, active_generation=None):
     """An explicit root operator prepares candidates; this never authorizes cutover."""
     if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
         raise Blocked("Preparation requires one lowercase 32-hex operation identity")
@@ -489,6 +999,10 @@ def spawn_preparation(root, operation_id):
                          "prepared_directory": str(PREPARATIONS / operation_id),
                          "env_file": "/home/hiroyuki/.config/belib-staging/i5.env",
                          "pid": os.getpid()}
+            if active_generation is not None:
+                validate_active_generation(active_generation)
+                admission["active_generation"] = active_generation
+                admission["active_generation_sha256"] = hashlib.sha256(canonical(active_generation)).hexdigest()
             fd = os.memfd_create("belib-preparation-admission", os.MFD_ALLOW_SEALING)
             os.fchmod(fd, 0o400)
             os.write(fd, canonical(admission))
@@ -521,6 +1035,8 @@ def main():
     request.add_argument("--grant", type=Path)
     request.add_argument("--receipt")
     request.add_argument("--tls-receipt", metavar="OWNER_NONCE")
+    request.add_argument("--promote-completed", nargs=2, metavar=("UPGRADE_NONCE", "TLS_OWNER_NONCE"),
+                         help="promote one linked, live-verified completed retained generation")
     request.add_argument("--prepare-retained", metavar="OPERATION_ID",
                          help="explicit operator preparation only; does not sign, adopt or activate an upgrade")
     args = parser.parse_args()
@@ -542,6 +1058,16 @@ def main():
             return 0
         config = parse(read_regular(CONFIG, MAX_CONFIG, trusted=True), MAX_CONFIG)
         root = verify_source(config)
+        if args.promote_completed is not None:
+            trusted_path(STATE, directory=True)
+            lock_fd = os.open(STATE / "project.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                generation = _promote_completed(args.promote_completed[0], args.promote_completed[1], root)
+            finally:
+                os.close(lock_fd)
+            print(canonical(generation).decode())
+            return 0
         if args.prepare_retained is not None:
             if not re.fullmatch(r"[0-9a-f]{32}", args.prepare_retained):
                 raise Blocked("Preparation operation identity is invalid")
@@ -550,7 +1076,11 @@ def main():
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 verify_staging_source_access(root, "scripts/staging/prepare-retained.py")
-                code = spawn_preparation(root, args.prepare_retained)
+                active = _read_active_generation()
+                if active is not None:
+                    _promote_completed(active["upgrade_receipt_nonce"], active["tls_owner_nonce"], root)
+                    active = _read_active_generation()
+                code = spawn_preparation(root, args.prepare_retained, active)
             finally:
                 os.close(lock_fd)
             print(canonical({"schema": "belib-retained-preparation-result/v1",
@@ -566,9 +1096,32 @@ def main():
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             verify_staging_source_access(root, "scripts/staging/launch-guard.py")
+            active = _read_active_generation() if grant["operation"] == "upgrade-retained" else None
+            if "prior_generation_sha256" in grant:
+                if (active is None or hashlib.sha256(canonical(active)).hexdigest() != grant["prior_generation_sha256"]
+                        or active.get("source_sha") != grant.get("prior_application_sha")
+                        or active.get("project") != retained_config.get("prior_project")):
+                    raise Blocked("Approval v2 predecessor differs from the current active-generation pointer")
+                validate_generation_predecessor(active, retained_config)
+                if (active.get("schema") == "belib-active-generation/v2"
+                        and retained_config.get("environment_transition", {}).get("prior_sha256")
+                            != active.get("staging_env_sha256")):
+                    raise Blocked("Approval v2 environment predecessor differs from the active-generation pointer")
+            elif grant["operation"] == "upgrade-retained" and active is not None:
+                raise Blocked("Legacy retained approval is restricted to the genesis baseline")
+            expected_runtime = None
+            if retained_config is not None:
+                prior_tls = None
+                if "prior_generation_sha256" in grant:
+                    if (active is None
+                            or hashlib.sha256(canonical(active)).hexdigest() != grant["prior_generation_sha256"]
+                            or active.get("source_sha") != grant.get("prior_application_sha")):
+                        raise Blocked("Prior TLS completion selector differs from the active-generation pointer")
+                    prior_tls = read_tls_receipt(active["tls_owner_nonce"])
+                expected_runtime = expected_retained_runtime(retained_config, active, prior_tls)
             consume_nonce(grant)
             code = spawn_admitted(root, grant, retained_config) if retained_config is not None else spawn_admitted(root, grant)
-            result = write_result(grant, code, retained_config)
+            result = write_result(grant, code, retained_config, active, expected_runtime)
         finally:
             os.close(lock_fd)
         print(canonical(result).decode())

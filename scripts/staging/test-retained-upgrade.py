@@ -346,6 +346,49 @@ class RetainedUpgradeTests(unittest.TestCase):
         changed = {**self.manifest, "db_container_id": "0" * 64}
         with self.assertRaises(upgrade.UpgradePreflightError):
             self.manifest_digest(changed)
+
+    def test_manifest_v3_and_signed_v2_inventory_bind_exact_predecessor(self):
+        prior_project=upgrade.EXPECTED_PROJECT+"-upgrade-"+"a"*32
+        prior_digest="b"*64
+        network_payload={"schema":"belib-retained-upgrade-network-inventory/v2",
+            "evidence_issuer":self.network_issuer,**self.stage_pin,"prior_project":prior_project,
+            "prior_application_sha":"c"*40,"prior_generation_sha256":prior_digest,
+            "network_ids":self.network_ids,"issued_at":1000,"expires_at":1200}
+        network=self.sign_with(self.network_private_key,network_payload)
+        manifest={"schema":"belib-retained-upgrade-manifest/v3","repository":upgrade.EXPECTED_REPOSITORY,
+            "pull_request":upgrade.EXPECTED_PULL_REQUEST,"branch":upgrade.EXPECTED_BRANCH,
+            "host":upgrade.EXPECTED_HOST,"principal":upgrade.EXPECTED_PRINCIPAL,"uid":upgrade.EXPECTED_UID,
+            "project":upgrade.EXPECTED_PROJECT,"source_sha":self.source_sha,"prior_application_sha":"c"*40,
+            "prior_project":prior_project,"prior_generation_sha256":prior_digest,
+            "prior_backend_image_digest":"sha256:"+"d"*64,"prior_frontend_image_digest":"sha256:"+"e"*64,
+            "database_lineage":upgrade.OLD_DATABASE_LINEAGE,"db_container_id":"f"*64,
+            "db_image_digest":upgrade.OLD_DB_IMAGE,"db_image_id":"sha256:"+"1"*64,
+            "volumes":[{"name":upgrade.EXPECTED_PROJECT+"_staging-book-files","identity_sha256":"2"*64},
+                       {"name":prior_project+"_staging-postgres-data","identity_sha256":"3"*64}],
+            "network_ids":self.network_ids,"book_files":self.manifest["book_files"]}
+        manifest_sha=upgrade.validate_manifest(manifest,self.source_sha,trusted_network_inventory=network,
+            trusted_network_inventory_issuer=self.network_issuer,network_inventory_public_key_pem=self.network_public_pem,
+            trusted_network_inventory_fingerprint=self.network_fingerprint)
+        root_payload={"schema":"belib-retained-upgrade-backup-roots/v2","evidence_issuer":self.root_issuer,
+            **self.stage_pin,"prior_project":prior_project,"prior_generation_sha256":prior_digest,
+            "repository_root":str(self.repository_root),"retained_db_root":str(self.db_root),
+            "retained_books_root":str(self.books_root),"issued_at":1000,"expires_at":1200}
+        roots=self.sign_with(self.root_private_key,root_payload)
+        backup_sha=upgrade.validate_backup_artifact(self.backup_path,uid=os.getuid(),trusted_root_contract=roots,
+            trusted_root_contract_issuer=self.root_issuer,root_contract_public_key_pem=self.root_public_pem,
+            trusted_root_contract_fingerprint=self.root_fingerprint,expected_prior_project=prior_project,
+            expected_prior_generation_sha256=prior_digest)
+        self.assertEqual(backup_sha,self.backup_sha)
+        with self.assertRaisesRegex(upgrade.UpgradePreflightError,"exact predecessor"):
+            upgrade.validate_backup_artifact(self.backup_path,uid=os.getuid(),trusted_root_contract=roots,
+                trusted_root_contract_issuer=self.root_issuer,root_contract_public_key_pem=self.root_public_pem,
+                trusted_root_contract_fingerprint=self.root_fingerprint,expected_prior_project=prior_project,
+                expected_prior_generation_sha256="9"*64)
+        changed_network=self.sign_with(self.network_private_key,{**network_payload,"prior_generation_sha256":"9"*64})
+        with self.assertRaisesRegex(upgrade.UpgradePreflightError,"exact prior application"):
+            upgrade.validate_manifest(manifest,self.source_sha,trusted_network_inventory=changed_network,
+                trusted_network_inventory_issuer=self.network_issuer,network_inventory_public_key_pem=self.network_public_pem,
+                trusted_network_inventory_fingerprint=self.network_fingerprint)
         changed = {**self.manifest, "volumes": [
             {"name": upgrade.RETAINED_VOLUMES[0], "identity_sha256": "0" * 64},
             {"name": "unexpected-volume", "identity_sha256": "1" * 64},

@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import unittest
 import sys
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 
@@ -185,14 +185,15 @@ def runtime_snapshot(source_sha: str = SOURCE_SHA, *, wrong_revision: bool = Fal
     return list(ids.values()), containers, images
 
 
-def upgrade_runtime_fixture(source_sha: str = SOURCE_SHA) -> tuple[dict, dict, dict, dict]:
+def upgrade_runtime_fixture(source_sha: str = SOURCE_SHA, *, generation: bool = False) -> tuple[dict, dict, dict, dict]:
     """Build a root-bootstrap-shaped expected plan and exact read-only Docker fixture."""
     operation_id = "9" * 32
-    old_project = executor.PROJECT
-    new_project = old_project + "-upgrade-" + operation_id
+    prior_operation = "7" * 32
+    old_project = executor.PROJECT + "-upgrade-" + prior_operation if generation else executor.PROJECT
+    new_project = executor.PROJECT + "-upgrade-" + operation_id
     ids = {name: f"{index:064x}" for index, name in enumerate(range(1, 9), start=1)}
     old_ids = dict(zip(("db", "backend", "frontend", "nginx"), [ids[i] for i in range(1, 5)]))
-    old_ids["db"] = executor.RETAINED_DATABASE_ID
+    old_ids["db"] = "9" * 64 if generation else executor.RETAINED_DATABASE_ID
     new_ids = dict(zip(("db", "backend", "frontend", "nginx"), [ids[i] for i in range(5, 9)]))
     old_network_id, old_ingress_id = "a" * 64, "b" * 64
     new_network_id, new_ingress_id = "c" * 64, "d" * 64
@@ -221,7 +222,7 @@ def upgrade_runtime_fixture(source_sha: str = SOURCE_SHA) -> tuple[dict, dict, d
             mounts = []
         else:
             config_image = f"{project}-{service}"
-            mounts = ([{"Type": "volume", "Name": old_project + "_staging-book-files",
+            mounts = ([{"Type": "volume", "Name": executor.PROJECT + "_staging-book-files",
                         "Destination": "/home/node"}] if service == "backend" else [])
         labels = {"com.docker.compose.project": project, "com.docker.compose.service": service,
                   "com.docker.compose.oneoff": "False"}
@@ -229,8 +230,10 @@ def upgrade_runtime_fixture(source_sha: str = SOURCE_SHA) -> tuple[dict, dict, d
             labels["belib.retained-prepare-intent"] = "e" * 64
         if service == "nginx":
             labels["maintainer"] = "NGINX Docker Maintainers <docker-maint@nginx.com>"
-        host = {"PortBindings": ({"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18083"}]}
-                                  if service == "nginx" else {})}
+        ports = {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18083"}]} if service == "nginx" else {}
+        if service == "nginx" and old and generation:
+            ports["8443/tcp"] = [{"HostIp":"127.0.0.1","HostPort":"18443"}]
+        host = {"PortBindings": ports}
         container = {
             "Id": container_id, "Image": "sha256:" + (
                 {("old", "db"): "1", ("old", "backend"): "2", ("old", "frontend"): "3", ("old", "nginx"): "4",
@@ -241,7 +244,7 @@ def upgrade_runtime_fixture(source_sha: str = SOURCE_SHA) -> tuple[dict, dict, d
         }
         image_id = container["Image"]
         if service in {"backend", "frontend"}:
-            revision = executor.OLD_APPLICATION if old else source_sha
+            revision = ("6" * 40 if generation else executor.OLD_APPLICATION) if old else source_sha
             image = {"Id": image_id, "RepoDigests": [],
                      "Config": {"Labels": {"org.opencontainers.image.revision": revision}}}
         elif service == "db":
@@ -271,24 +274,47 @@ def upgrade_runtime_fixture(source_sha: str = SOURCE_SHA) -> tuple[dict, dict, d
                                        "configuration_sha256": executor._configuration_digest(container),
                                        "network_ids": network_ids}
 
-    cutover = {"schema": "belib-isolated-copy-cutover/v1", "source_sha": source_sha,
-               "operation_id": operation_id, "port": 18083,
+    cutover = {"schema": "belib-isolated-copy-cutover/v2" if generation else "belib-isolated-copy-cutover/v1",
+               "source_sha": source_sha,"operation_id": operation_id,"port": 18083,
                "old": app_plan["old"], "new": app_plan["new"]}
+    if generation:
+        for service in ("backend","frontend","nginx"):
+            cutover["old"][service]["image_id"] = containers[old_ids[service]]["Image"]
+        cutover.update(prior_project=old_project,prior_application_sha="6"*40,
+                       prior_generation_sha256="8"*64,prior_http_port=18083,prior_tls_loopback_port=18443)
     candidate = {"id": new_db["Id"], "configuration_sha256": executor._configuration_digest(new_db),
                  "volume_name": new_project + "_staging-postgres-data", "network_id": new_network_id}
     source_db = {"id": old_db["Id"], "configuration_sha256": executor._configuration_digest(old_db),
                  "volume_name": old_project + "_staging-postgres-data",
                  "network_ids": {old_project + "_isolated": old_network_id}}
-    config = {"cutover_plan": cutover, "candidate_database": candidate, "source_database": source_db,
+    if generation:
+        source_db["image_id"] = old_db["Image"]
+    config = {"schema":"belib-retained-operator/v2" if generation else "belib-retained-operator/v1",
+              "enabled":True,"source_sha":source_sha,"topology":"isolated-copy","prepared_directory":"/tmp/prepared",
+              "migration_image":"sha256:"+"e"*64,
+              "cutover_plan": cutover, "candidate_database": candidate, "source_database": source_db,
               "authorities": {name: {"issuer": name + ".example", "public_key_pem": "test-key-" + name,
                   "fingerprint": (str(index) * 64)}
                   for index, name in enumerate(("restore", "network", "roots"), start=1)}}
+    if generation:
+        config.update(prior_project=old_project, prior_generation_sha256="8"*64,
+                      environment_transition={"prior_sha256":"1"*64,"candidate_sha256":"2"*64,
+                          "prior_source_sha":"6"*40,"candidate_source_sha":source_sha})
     bootstrap_spec = importlib.util.spec_from_file_location(
         "operator_bootstrap_fixture", Path(__file__).with_name("operator-bootstrap.py"))
     assert bootstrap_spec is not None and bootstrap_spec.loader is not None
     bootstrap = importlib.util.module_from_spec(bootstrap_spec)
     bootstrap_spec.loader.exec_module(bootstrap)
-    expected_runtime = bootstrap.expected_retained_runtime(config)
+    prior_completion = None
+    active_generation = None
+    if generation:
+        prior_completion = {"owner_nonce": "a"*64, "source_sha": "6"*40,
+            "project": old_project, "serve_config_sha256": "3"*64,
+            "serve_etag": "prior-active-serve-etag", "certificate_sha256": "4"*64}
+        active_generation = {"tls_owner_nonce": prior_completion["owner_nonce"],
+            "tls_completion_sha256": hashlib.sha256(bootstrap.canonical(prior_completion)).hexdigest(),
+            "source_sha": "6"*40, "project": old_project}
+    expected_runtime = bootstrap.expected_retained_runtime(config, active_generation, prior_completion)
     network_objects = {}
     for full_name, network_id in networks.items():
         project, network_name = full_name.rsplit("_", 1)[0], full_name.rsplit("_", 1)[1]
@@ -621,7 +647,7 @@ class CDHandoffExecutorTests(unittest.TestCase):
             "project": executor.PROJECT, "exit_code": 0, "completed_at": NOW,
             "nonce_consumed": True, "expected_runtime": expected,
         }
-        completion = {"owner_nonce": "b" * 64,
+        completion = {"schema": executor.TLS_COMPLETION_SCHEMA, "owner_nonce": "b" * 64,
                       "upgrade_receipt_nonce": "a" * 64,
                       "upgrade_receipt_sha256": hashlib.sha256(canonical(root_upgrade)).hexdigest(),
                       "source_sha": SOURCE_SHA, "operation_id": expected["operation_id"],
@@ -635,6 +661,59 @@ class CDHandoffExecutorTests(unittest.TestCase):
                              ("nginx_network_ids", {})):
             with self.subTest(field=field), self.assertRaises(executor.ExecutorError):
                 executor.validate_tls_completion_links({**completion, field: value}, root_upgrade, "b" * 64)
+
+    def test_completed_generation_inspector_links_receipts_and_reads_live_projection(self):
+        expected, _, _, _ = upgrade_runtime_fixture()
+        upgrade = {"schema": "belib-staging-operation-result/v1", "nonce": "a" * 64,
+            "grant_sha256": "c" * 64, "source_sha": SOURCE_SHA, "operation": "upgrade-retained",
+            "host": executor.HOST, "principal": executor.PRINCIPAL, "uid": executor.UID,
+            "project": executor.PROJECT, "exit_code": 0, "completed_at": NOW,
+            "nonce_consumed": True, "expected_runtime": expected}
+        cutover = expected["plan"]["cutover_plan"]
+        completion = {"schema": executor.TLS_COMPLETION_SCHEMA, "owner_nonce": "b" * 64, "upgrade_receipt_nonce": "a" * 64,
+            "upgrade_receipt_sha256": hashlib.sha256(canonical(upgrade)).hexdigest(),
+            "source_sha": SOURCE_SHA, "operation_id": expected["operation_id"],
+            "project": expected["project"], "previous_nginx_id": expected["services"]["nginx"],
+            "nginx_network_ids": cutover["new"]["nginx"]["network_ids"], "nginx_id": "f" * 64,
+            "unchanged_runtime_sha256": executor._unchanged_runtime_digest(expected),
+            "certificate_sha256": "3" * 64}
+        live = {"status": "verified", "source_sha": SOURCE_SHA,
+            "operation_id": expected["operation_id"], "project": expected["project"],
+            "container_ids": {"candidate": {"db": expected["services"]["db"],
+                "backend": expected["services"]["backend"], "frontend": expected["services"]["frontend"],
+                "nginx": completion["nginx_id"]}},
+            "image_digests": {"candidate": {name: "sha256:" + str(index) * 64
+                for index, name in enumerate(("db", "backend", "frontend", "nginx"), 1)}},
+            "app_image_revisions": {"backend": SOURCE_SHA, "frontend": SOURCE_SHA}}
+        wrapper = {"status":"verified","source_sha":SOURCE_SHA,"operation_id":expected["operation_id"],
+            "project":expected["project"],"completion":completion,"observed_runtime":live}
+        readback = Mock(return_value=wrapper)
+        ingress = Mock(return_value={
+            "status": 200, "certificate_sha256": completion["certificate_sha256"]})
+        result = executor.inspect_completed_generation(upgrade, completion,
+            runtime_readback=readback, ingress_probe=ingress,
+            health_probe=lambda port: {"url": f"http://127.0.0.1:{port}{executor.HEALTH_PATH}", "http_status": 200},
+            env_file_path=self.env_path, file_owner_uid=os.getuid(),
+            readback_lock=contextlib.nullcontext)
+        readback.assert_called_once_with(upgrade, completion, expected["port"])
+        self.assertEqual(result["observed_runtime"], live)
+        with self.assertRaisesRegex(executor.ExecutorError, "differs from its linked receipts"):
+            executor.inspect_completed_generation(upgrade, completion,
+                runtime_readback=lambda *args: {**wrapper, "project": "wrong"},
+                ingress_probe=lambda fingerprint: {"status": 200, "certificate_sha256": fingerprint},
+                health_probe=lambda port: {"url": f"http://127.0.0.1:{port}{executor.HEALTH_PATH}", "http_status": 200},
+                env_file_path=self.env_path, file_owner_uid=os.getuid(),
+                readback_lock=contextlib.nullcontext)
+
+    def test_completed_generation_inspector_rejects_unsealed_descriptor(self):
+        fd = os.memfd_create("unsealed-generation-test", os.MFD_ALLOW_SEALING)
+        try:
+            os.write(fd, canonical({"schema": "belib-active-generation-inspection/v1",
+                                   "upgrade_receipt": {}, "tls_completion": {}}))
+            with self.assertRaisesRegex(executor.ExecutorError, "root-sealed"):
+                executor.inspect_completed_generation_fd(fd)
+        finally:
+            os.close(fd)
 
     def test_valid_signed_fixture_traverses_fixed_bootstrap_and_checks_receipts_health(self):
         self.signed_grant(make_grant())
@@ -867,6 +946,103 @@ class CDHandoffExecutorTests(unittest.TestCase):
         self.assertEqual(observed["container_ids"]["candidate"], expected_runtime["services"])
         self.assertEqual(observed["app_image_revisions"], {"backend": SOURCE_SHA, "frontend": SOURCE_SHA})
         self.assertEqual(observed["retained_app_states"], {name: "exited" for name in ("backend", "frontend", "nginx")})
+
+    def test_v2_expected_runtime_binds_dynamic_predecessor_and_tls_topology(self):
+        expected, _containers, _images, _inventory = upgrade_runtime_fixture(generation=True)
+        validated = executor.validate_expected_runtime(expected)
+        self.assertEqual(validated["prior_project"], executor.PROJECT + "-upgrade-" + "7"*32)
+        self.assertEqual(validated["retained"]["db"], "9"*64)
+        self.assertEqual(validated["plan"]["cutover_plan"]["prior_generation_sha256"], "8"*64)
+        changed = json.loads(json.dumps(expected))
+        changed["plan"]["cutover_plan"]["prior_tls_loopback_port"] = 18444
+        with self.assertRaises(executor.ExecutorError):
+            executor.validate_expected_runtime(changed)
+
+    def test_v2_tls_completion_requires_exact_predecessor_tls_receipt_links(self):
+        expected, _, _, _ = upgrade_runtime_fixture(generation=True)
+        upgrade = {"schema": "belib-staging-operation-result/v1", "nonce": "a"*64,
+            "grant_sha256": "b"*64, "source_sha": SOURCE_SHA, "operation": "upgrade-retained",
+            "host": executor.HOST, "principal": executor.PRINCIPAL, "uid": executor.UID,
+            "project": executor.PROJECT, "exit_code": 0, "completed_at": NOW,
+            "nonce_consumed": True, "expected_runtime": expected}
+        prior = expected["prior_tls_completion"]
+        completion = {"schema": executor.TLS_COMPLETION_SCHEMA_V2, "owner_nonce": "c"*64,
+            "plan_sha256": "d"*64, "prepare_receipt_sha256": "e"*64,
+            "upgrade_receipt_nonce": upgrade["nonce"],
+            "upgrade_receipt_sha256": hashlib.sha256(canonical(upgrade)).hexdigest(),
+            "source_sha": SOURCE_SHA, "operation_id": expected["operation_id"],
+            "project": expected["project"], "previous_nginx_id": expected["services"]["nginx"],
+            "nginx_id": "f"*64, "nginx_configuration_sha256": "1"*64,
+            "nginx_image_id": "sha256:"+"2"*64,
+            "nginx_network_ids": expected["plan"]["cutover_plan"]["new"]["nginx"]["network_ids"],
+            "tls_config_sha256": "3"*64, "certificate_sha256": "4"*64,
+            "unchanged_runtime_sha256": executor._unchanged_runtime_digest(expected),
+            "approval_nonce": "5"*64, "evidence_sha256": "6"*64,
+            "serve_config_sha256": prior["serve_config_sha256"], "serve_etag": prior["serve_etag"],
+            "completed_at": NOW, "status": "complete",
+            "prior_generation_sha256": expected["prior_generation_sha256"],
+            "prior_tls_owner_nonce": prior["owner_nonce"],
+            "prior_tls_completion_sha256": prior["completion_sha256"]}
+        self.assertEqual(executor.validate_tls_completion_links(completion, upgrade, completion["owner_nonce"]), expected)
+        changed = {**completion, "prior_tls_completion_sha256": "9"*64}
+        with self.assertRaisesRegex(executor.ExecutorError, "active TLS predecessor"):
+            executor.validate_tls_completion_links(changed, upgrade, completion["owner_nonce"])
+        changed = json.loads(json.dumps(expected))
+        changed["prior_generation_sha256"] = "f"*64
+        with self.assertRaises(executor.ExecutorError):
+            executor.validate_expected_runtime(changed)
+
+    def test_v2_retained_grant_requires_predecessor_hash(self):
+        grant={**make_grant(operation="upgrade-retained"),
+            "schema":"belib-staging-bootstrap-approval/v2","prior_application_sha":"7"*40,
+            "prior_generation_sha256":"8"*64,"retained_state_sha256":"9"*64,
+            "backup_sha256":"1"*64,"restore_attestation_sha256":"2"*64}
+        envelope={"payload":base64.b64encode(canonical(grant)).decode(),
+                  "signature":base64.b64encode(b"x"*64).decode()}
+        decoded,_=executor.decode_grant(canonical(envelope),expected_source_sha=SOURCE_SHA,now=NOW)
+        self.assertEqual(decoded["prior_generation_sha256"],"8"*64)
+        missing={key:value for key,value in grant.items() if key!="prior_generation_sha256"}
+        envelope["payload"]=base64.b64encode(canonical(missing)).decode()
+        with self.assertRaises(executor.ExecutorError):
+            executor.decode_grant(canonical(envelope),expected_source_sha=SOURCE_SHA,now=NOW)
+
+    def test_candidate_env_retry_uses_only_durable_receipt_and_never_replays_grant(self):
+        prior_source = "6"*40
+        grant = {**make_grant(SOURCE_SHA, operation="upgrade-retained"),
+            "schema":"belib-staging-bootstrap-approval/v2", "prior_application_sha":prior_source,
+            "prior_generation_sha256":"8"*64, "retained_state_sha256":"9"*64,
+            "backup_sha256":"1"*64, "restore_attestation_sha256":"2"*64}
+        self.signed_grant(grant)
+        expected, _, _, _ = upgrade_runtime_fixture(generation=True)
+        prior_raw = self.env_path.read_bytes()
+        # Make the predecessor distinct from the now-committed candidate.
+        prior_raw = prior_raw.replace(b"BELIB_STAGE_VCS_REF="+SOURCE_SHA.encode(),
+            b"BELIB_STAGE_VCS_REF="+prior_source.encode())
+        candidate_raw = prior_raw.replace(b"BELIB_STAGE_VCS_REF="+prior_source.encode(),
+            b"BELIB_STAGE_VCS_REF="+SOURCE_SHA.encode())
+        self.env_path.write_bytes(candidate_raw)
+        transition = expected["plan"]["environment_transition"]
+        transition.update(prior_sha256=hashlib.sha256(prior_raw).hexdigest(),
+            candidate_sha256=hashlib.sha256(candidate_raw).hexdigest(),
+            prior_source_sha=prior_source, candidate_source_sha=SOURCE_SHA)
+        expected["plan_sha256"] = hashlib.sha256(canonical(expected["plan"])).hexdigest()
+        durable = {"schema":"belib-staging-operation-result/v1", "nonce":grant["nonce"],
+            "grant_sha256":hashlib.sha256(canonical(grant)).hexdigest(), "source_sha":SOURCE_SHA,
+            "operation":"upgrade-retained", "host":executor.HOST, "principal":executor.PRINCIPAL,
+            "uid":executor.UID, "project":executor.PROJECT, "exit_code":0, "completed_at":NOW,
+            "nonce_consumed":True, "expected_runtime":expected}
+        def read_only_receipt(command, **_kwargs):
+            self.assertEqual(command[7:9], ["--receipt", grant["nonce"]])
+            return subprocess.CompletedProcess(command, 0, json.dumps(durable), "")
+        observed = {"status":"verified", "source_sha":SOURCE_SHA,
+            "container_ids":{"candidate":{},"retained":{}},
+            "image_digests":{"candidate":{},"retained":{}},
+            "app_image_revisions":{"backend":SOURCE_SHA,"frontend":SOURCE_SHA},
+            "nginx_loopback_binding":{"host_ip":"127.0.0.1","host_port":18083,
+                "container_port":"8080/tcp"}}
+        result = self.execute(read_only_receipt,
+            runtime_readback=lambda *_args, **_kwargs: observed)
+        self.assertEqual(result["status"], "LOCAL_DEPLOYMENT_CONFIRMED")
 
     def test_tls_candidate_readback_allows_only_pinned_nginx_transition(self):
         expected, containers, images, inventory = upgrade_runtime_fixture()

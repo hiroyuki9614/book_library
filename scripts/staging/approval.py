@@ -41,6 +41,10 @@ RETAINED_UPGRADE_PRIOR_APPLICATION_SHA = "81256268276d7ead95029849037f69ec6beec2
 RETAINED_UPGRADE_BINDING_FIELDS = frozenset({
     "prior_application_sha", "retained_state_sha256", "backup_sha256", "restore_attestation_sha256",
 })
+RETAINED_UPGRADE_V2_BINDING_FIELDS = RETAINED_UPGRADE_BINDING_FIELDS | {"prior_generation_sha256"}
+TLS_BINDING_V3_EXTRA = {"prior_generation_sha256", "prior_tls_owner_nonce", "prior_tls_completion_sha256"}
+TLS_BINDING_V3_FIELDS = {"prior_application_sha", "retained_state_sha256", "serve_config_sha256",
+    "serve_etag", "certificate_sha256", "tls_config_sha256", "owner_plan_sha256", "tls_state_sha256"} | TLS_BINDING_V3_EXTRA
 
 
 class ApprovalError(Exception):
@@ -111,11 +115,15 @@ def expected_payload(
     elif operation == TLS_OPERATION:
         if tls_binding is None:
             raise ApprovalError("TLS approval requires a fresh retained-state binding")
+        if set(tls_binding) == TLS_BINDING_V3_FIELDS:
+            payload["schema"] = "belib-staging-bootstrap-approval/v2"
         payload.update(tls_binding)
     elif operation == RETAINED_UPGRADE_OPERATION:
         if (not isinstance(retained_upgrade_binding, dict)
-                or set(retained_upgrade_binding) != RETAINED_UPGRADE_BINDING_FIELDS):
+                or set(retained_upgrade_binding) not in (RETAINED_UPGRADE_BINDING_FIELDS, RETAINED_UPGRADE_V2_BINDING_FIELDS)):
             raise ApprovalError("Retained-upgrade approval requires the exact prior-state and evidence pins")
+        schema = "belib-staging-bootstrap-approval/v2" if "prior_generation_sha256" in retained_upgrade_binding else "belib-staging-bootstrap-approval/v1"
+        payload["schema"] = schema
         payload.update(retained_upgrade_binding)
     return payload
 
@@ -139,7 +147,12 @@ def validate_payload(
     for name, value in TARGET.items():
         if payload[name] != value:
             raise ApprovalError("Approval target does not match this staging host")
-    if (payload["schema"] != "belib-staging-bootstrap-approval/v1" or payload["source_sha"] != source_sha
+    tls_v3 = operation == TLS_OPERATION and isinstance(tls_binding, dict) and set(tls_binding) == TLS_BINDING_V3_FIELDS
+    expected_schema = ("belib-staging-bootstrap-approval/v2" if tls_v3 or operation == RETAINED_UPGRADE_OPERATION
+                       and isinstance(retained_upgrade_binding, dict)
+                       and "prior_generation_sha256" in retained_upgrade_binding
+                       else "belib-staging-bootstrap-approval/v1")
+    if (payload["schema"] != expected_schema or payload["source_sha"] != source_sha
             or payload["operation"] != operation or payload["nonce"] != nonce
             or payload["evidence_sha256"] != evidence_sha256):
         raise ApprovalError("Approval does not match the current challenge")
@@ -154,29 +167,34 @@ def validate_payload(
     ):
         raise ApprovalError("Resume approval does not match the retained source and state")
     if operation == TLS_OPERATION:
-        if tls_binding is None or set(tls_binding) != {
+        if tls_binding is None or set(tls_binding) not in ({
             "prior_application_sha", "retained_state_sha256", "serve_config_sha256", "serve_etag",
             "certificate_sha256", "tls_config_sha256", "owner_plan_sha256", "tls_state_sha256",
-        }:
+        }, TLS_BINDING_V3_FIELDS):
             raise ApprovalError("TLS approval requires the exact custom-ingress state tuple")
         if (not re.fullmatch(r"[0-9a-f]{40}", tls_binding["prior_application_sha"])
                 or any(not re.fullmatch(r"[0-9a-f]{64}", tls_binding[name]) for name in (
                     "retained_state_sha256", "serve_config_sha256", "serve_etag", "certificate_sha256", "tls_config_sha256", "owner_plan_sha256", "tls_state_sha256"
-                )) or tls_binding["serve_etag"] != TLS_SERVE_ETAG):
+                )) or (set(tls_binding) != TLS_BINDING_V3_FIELDS
+                       and tls_binding["serve_etag"] != TLS_SERVE_ETAG)):
             raise ApprovalError("TLS state binding is malformed")
         if any(payload[name] != value for name, value in tls_binding.items()):
             raise ApprovalError("TLS approval does not match the current retained state")
+        if set(tls_binding) == TLS_BINDING_V3_FIELDS and any(
+                not re.fullmatch(r"[0-9a-f]{64}", tls_binding[name]) for name in TLS_BINDING_V3_EXTRA):
+            raise ApprovalError("TLS v3 approval predecessor links are malformed")
     if operation == RETAINED_UPGRADE_OPERATION:
         if (not isinstance(retained_upgrade_binding, dict)
-                or set(retained_upgrade_binding) != RETAINED_UPGRADE_BINDING_FIELDS):
+                or set(retained_upgrade_binding) not in (RETAINED_UPGRADE_BINDING_FIELDS, RETAINED_UPGRADE_V2_BINDING_FIELDS)):
             raise ApprovalError("Retained-upgrade approval requires the exact prior-state and evidence pins")
+        v2 = "prior_generation_sha256" in retained_upgrade_binding
         if (not isinstance(retained_upgrade_binding["prior_application_sha"], str)
-                or retained_upgrade_binding["prior_application_sha"] != RETAINED_UPGRADE_PRIOR_APPLICATION_SHA
+                or (not v2 and retained_upgrade_binding["prior_application_sha"] != RETAINED_UPGRADE_PRIOR_APPLICATION_SHA)
                 or not re.fullmatch(r"[0-9a-f]{40}", retained_upgrade_binding["prior_application_sha"])
                 or any(not isinstance(retained_upgrade_binding[name], str)
                        or not re.fullmatch(r"[0-9a-f]{64}", retained_upgrade_binding[name]) for name in (
                            "retained_state_sha256", "backup_sha256", "restore_attestation_sha256"
-                       ))):
+                       )) or (v2 and not re.fullmatch(r"[0-9a-f]{64}", retained_upgrade_binding["prior_generation_sha256"]))):
             raise ApprovalError("Retained-upgrade prior application or evidence pin is malformed")
         if any(payload[name] != value for name, value in retained_upgrade_binding.items()):
             raise ApprovalError("Retained-upgrade approval does not match the current retained state and evidence")
