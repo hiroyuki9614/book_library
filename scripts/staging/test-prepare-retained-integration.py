@@ -239,6 +239,10 @@ class PrepareFinalizeExecutorIntegration(entry.RetainedEntrypointTests):
         if args and args[0] == "build":
             # Build is the sole mocked phase. Use fixed, local fixture images;
             # actual Compose create/start, PostgreSQL, backup and restore run.
+            self.assertEqual(docker.env["HOME"], str(directory / "docker-home"))
+            self.assertEqual(docker.env["DOCKER_CONFIG"], str(directory / "docker-config"))
+            self.assertEqual(docker.env["BUILDX_CONFIG"], str(directory / "buildx-state"))
+            self.assertEqual(docker.umask, 0o077)
             return b"fixture application build skipped\n"
         return self.prep_module._compose_original(directory, source, env_file, project, override,
                                                   docker, *args, timeout=timeout)

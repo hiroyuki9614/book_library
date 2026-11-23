@@ -23,6 +23,61 @@ spec.loader.exec_module(prepare)
 
 
 class PreparationContractTests(unittest.TestCase):
+    def test_build_only_docker_uses_empty_private_operation_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = Path(temporary) / ("a" * 32)
+            prepared.mkdir(mode=0o700)
+            spec = prepare._build_environment_spec(prepared)
+            self.assertFalse(any(Path(path).exists() for path in spec.values()))
+            default = prepare.Docker()
+            default_env = dict(default.env)
+            build = prepare._build_docker(prepared, default)
+            self.assertEqual(default.env, default_env)
+
+            self.assertEqual(build.env["HOME"], str(prepared / "docker-home"))
+            self.assertEqual(build.env["DOCKER_CONFIG"], str(prepared / "docker-config"))
+            self.assertEqual(build.env["BUILDX_CONFIG"], str(prepared / "buildx-state"))
+            for name in ("docker-home", "docker-config", "buildx-state"):
+                path = prepared / name
+                self.assertEqual(path.stat().st_uid, os.getuid())
+                self.assertEqual(path.stat().st_gid, os.getgid())
+                self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(list((prepared / "docker-home").iterdir()), [])
+            self.assertEqual(list((prepared / "docker-config").iterdir()), [])
+            with patch.object(prepare.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=b"ok")) as run:
+                self.assertEqual(build.run("version"), b"ok")
+            self.assertEqual(run.call_args.kwargs["env"], build.env)
+            self.assertEqual(run.call_args.kwargs["umask"], 0o077)
+            self.assertEqual(default.env, default_env)
+
+    def test_default_docker_run_preserves_process_umask_argument(self):
+        docker = prepare.Docker()
+        docker.prefix = ["/usr/bin/true"]
+        self.assertEqual(docker.run(), b"")
+
+    def test_build_only_docker_resumes_private_buildx_state_without_importing_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = Path(temporary) / ("b" * 32)
+            prepared.mkdir(mode=0o700)
+            default = prepare.Docker()
+            first = prepare._build_docker(prepared, default)
+            state = Path(first.env["BUILDX_CONFIG"])
+            (state / "builder-state.json").write_text("{}")
+            (state / "builder-state.json").chmod(0o600)
+            resumed = prepare._build_docker(prepared, default)
+            self.assertEqual(resumed.env, first.env)
+            (Path(first.env["DOCKER_CONFIG"]) / "config.json").write_text('{"auths":{}}')
+            with self.assertRaisesRegex(prepare.PreparationBlocked, "must not import"):
+                prepare._build_docker(prepared, default)
+
+    def test_build_only_docker_rejects_symlinked_buildx_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = Path(temporary) / ("c" * 32)
+            prepared.mkdir(mode=0o700)
+            (prepared / "buildx-state").symlink_to(Path(temporary))
+            with self.assertRaisesRegex(prepare.PreparationBlocked, "state path is unsafe"):
+                prepare._build_docker(prepared, prepare.Docker())
+
     def test_admission_must_have_exact_trusted_fields(self):
         for value in (None, {}, {"source_root": "/tmp", "source_sha": "a" * 40}):
             with self.subTest(value=value), self.assertRaises(prepare.PreparationBlocked):

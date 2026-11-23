@@ -195,6 +195,118 @@ def _private_dir(path: Path) -> None:
         raise PreparationBlocked("Prepared directory must be private, owned, and symlink-free")
 
 
+def _build_environment_spec(prepared: Path) -> dict[str, str]:
+    """Return the fixed, operation-private env paths without touching disk."""
+    if (not isinstance(prepared, Path) or not prepared.is_absolute()
+            or prepared != Path(os.path.abspath(prepared))
+            or not HEX32.fullmatch(prepared.name)):
+        raise PreparationBlocked("Build state must stay in the fixed operation directory")
+    return {"HOME": str(prepared / "docker-home"),
+            "DOCKER_CONFIG": str(prepared / "docker-config"),
+            "BUILDX_CONFIG": str(prepared / "buildx-state")}
+
+
+def _check_private_state_tree(fd: int, *, depth: int = 0, budget: list[int] | None = None) -> None:
+    if budget is None:
+        budget = [0, 0]
+    if depth > 8:
+        raise PreparationBlocked("Buildx private state nesting exceeds its bound")
+    try:
+        names = os.listdir(fd)
+        if any(not name or name in (".", "..") or "/" in name or "\\" in name for name in names):
+            raise PreparationBlocked("Buildx private state entry name is invalid")
+        budget[0] += len(names)
+        if budget[0] > 512:
+            raise PreparationBlocked("Buildx private state entry count exceeds its bound")
+        for name in names:
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if info.st_uid != os.getuid() or info.st_gid != os.getgid():
+                raise PreparationBlocked("Buildx private state ownership or ACL is unsafe")
+            if stat.S_ISDIR(info.st_mode):
+                if stat.S_IMODE(info.st_mode) != 0o700:
+                    raise PreparationBlocked("Buildx private state directory mode is unsafe")
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                try:
+                    after = os.fstat(child)
+                    if (after.st_dev, after.st_ino) != (info.st_dev, info.st_ino):
+                        raise PreparationBlocked("Buildx private state directory changed")
+                    if any(key in os.listxattr(child) for key in ("system.posix_acl_access", "system.posix_acl_default")):
+                        raise PreparationBlocked("Buildx private state ownership or ACL is unsafe")
+                    _check_private_state_tree(child, depth=depth + 1, budget=budget)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(info.st_mode):
+                if (info.st_nlink != 1 or info.st_size > 16 * 1024 * 1024
+                        or stat.S_IMODE(info.st_mode) & 0o077):
+                    raise PreparationBlocked("Buildx private state file is unsafe")
+                budget[1] += info.st_size
+                if budget[1] > 64 * 1024 * 1024:
+                    raise PreparationBlocked("Buildx private state size exceeds its bound")
+                child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=fd)
+                try:
+                    after = os.fstat(child)
+                    if (not stat.S_ISREG(after.st_mode)
+                            or (after.st_dev, after.st_ino, after.st_size) != (info.st_dev, info.st_ino, info.st_size)):
+                        raise PreparationBlocked("Buildx private state file changed")
+                    if any(key in os.listxattr(child) for key in ("system.posix_acl_access", "system.posix_acl_default")):
+                        raise PreparationBlocked("Buildx private state ownership or ACL is unsafe")
+                finally:
+                    os.close(child)
+            else:
+                raise PreparationBlocked("Buildx private state contains a link or special file")
+    except OSError as exc:
+        raise PreparationBlocked("Buildx private state could not be safely inspected") from exc
+
+
+def _open_private_state_dir(parent_fd: int, name: str, *, require_empty: bool) -> None:
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    except FileNotFoundError:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+        except OSError as exc:
+            raise PreparationBlocked("Operation-private Docker state could not be created") from exc
+    except OSError as exc:
+        raise PreparationBlocked("Operation-private Docker state path is unsafe") from exc
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_gid != os.getgid()
+                or stat.S_IMODE(info.st_mode) != 0o700
+                or any(key in os.listxattr(fd) for key in ("system.posix_acl_access", "system.posix_acl_default"))):
+            raise PreparationBlocked("Operation-private Docker state identity is unsafe")
+        if require_empty and os.listdir(fd):
+            raise PreparationBlocked("Private Docker config or HOME must not import existing state")
+        if not require_empty:
+            _check_private_state_tree(fd)
+    finally:
+        os.close(fd)
+
+
+def _build_docker(prepared: Path, docker: Docker) -> Docker:
+    spec = _build_environment_spec(prepared)
+    _private_dir(prepared)
+    parent_fd = os.open(prepared, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        prepared_info = os.fstat(parent_fd)
+        if (prepared_info.st_uid != os.getuid() or prepared_info.st_gid != os.getgid()
+                or stat.S_IMODE(prepared_info.st_mode) != 0o700
+                or any(key in os.listxattr(parent_fd) for key in ("system.posix_acl_access", "system.posix_acl_default"))):
+            raise PreparationBlocked("Prepared directory identity is unsafe for Docker build state")
+        _open_private_state_dir(parent_fd, "docker-home", require_empty=True)
+        _open_private_state_dir(parent_fd, "docker-config", require_empty=True)
+        _open_private_state_dir(parent_fd, "buildx-state", require_empty=False)
+    finally:
+        os.close(parent_fd)
+    child = object.__new__(Docker)
+    child.prefix = list(docker.prefix)
+    child.env = dict(docker.env)
+    child.env.update(spec)
+    child.umask = 0o077
+    return child
+
+
 def _ensure_prepared_dir(path: Path) -> None:
     if not path.is_absolute() or path != Path(os.path.abspath(path)):
         raise PreparationBlocked("Prepared directory path must be absolute and canonical")
@@ -234,7 +346,7 @@ class Docker:
         try:
             result = subprocess.run([*self.prefix, *args], input=input, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, env=self.env, stdin=subprocess.DEVNULL if input is None else None,
-                timeout=timeout, check=False)
+                timeout=timeout, check=False, umask=getattr(self, "umask", -1))
         except (OSError, subprocess.SubprocessError) as exc:
             raise PreparationBlocked("Fixed Docker operation failed") from exc
         if result.returncode or len(result.stdout) > maximum:
@@ -640,7 +752,9 @@ def _prepare_admitted(admission: dict, *, docker: Docker | None = None) -> dict:
     if journal["phase"] == "building":
         # The durable building intent makes this safe to repeat after a lost
         # Docker response, while the checks above rule out unrelated resources.
-        _compose(prepared, source, compose_env, project, override_path, docker, "build", "backend", "frontend", "migrate", timeout=7200)
+        build_docker = _build_docker(prepared, docker)
+        _compose(prepared, source, compose_env, project, override_path, build_docker,
+                 "build", "backend", "frontend", "migrate", timeout=7200)
         image_ids = {}
         for service, tag in tags.items():
             image = json.loads(docker.run("image", "inspect", tag, maximum=4 * 1024 * 1024))[0]
