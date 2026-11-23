@@ -346,7 +346,7 @@ class Docker:
         try:
             result = subprocess.run([*self.prefix, *args], input=input, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, env=self.env, stdin=subprocess.DEVNULL if input is None else None,
-                timeout=timeout, check=False, umask=getattr(self, "umask", None))
+                timeout=timeout, check=False, umask=getattr(self, "umask", -1))
         except (OSError, subprocess.SubprocessError) as exc:
             raise PreparationBlocked("Fixed Docker operation failed") from exc
         if result.returncode or len(result.stdout) > maximum:

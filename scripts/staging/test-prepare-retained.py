@@ -33,6 +33,7 @@ class PreparationContractTests(unittest.TestCase):
             default_env = dict(default.env)
             build = prepare._build_docker(prepared, default)
             self.assertEqual(default.env, default_env)
+
             self.assertEqual(build.env["HOME"], str(prepared / "docker-home"))
             self.assertEqual(build.env["DOCKER_CONFIG"], str(prepared / "docker-config"))
             self.assertEqual(build.env["BUILDX_CONFIG"], str(prepared / "buildx-state"))
@@ -48,6 +49,11 @@ class PreparationContractTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs["env"], build.env)
             self.assertEqual(run.call_args.kwargs["umask"], 0o077)
             self.assertEqual(default.env, default_env)
+
+    def test_default_docker_run_preserves_process_umask_argument(self):
+        docker = prepare.Docker()
+        docker.prefix = ["/usr/bin/true"]
+        self.assertEqual(docker.run(), b"")
 
     def test_build_only_docker_resumes_private_buildx_state_without_importing_config(self):
         with tempfile.TemporaryDirectory() as temporary:
