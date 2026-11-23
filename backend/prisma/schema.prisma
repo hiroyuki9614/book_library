@@ -140,15 +140,17 @@ model BookFile {
 }
 
 model ReadingInfo {
-  id              Int      @id @default(autoincrement())
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
-  currentPosition String?  @map("current_position") @db.VarChar(255)
-  readStatus      String   @default("unread") @map("read_status") @db.VarChar(50)
-  userId          Int      @map("user_id")
-  bookId          Int      @map("book_id")
-  book            Book     @relation(fields: [bookId], references: [id])
-  user            User     @relation(fields: [userId], references: [id])
+	id                Int      @id @default(autoincrement())
+	createdAt         DateTime @default(now()) @map("created_at")
+	updatedAt         DateTime @updatedAt @map("updated_at")
+	currentPosition   String?  @map("current_position")
+	progressPercentage Int?     @map("progress_percentage")
+	readStatus        String   @default("unread") @map("read_status") @db.VarChar(50)
+	saveSequence      BigInt   @default(0) @map("save_sequence")
+	userId            Int      @map("user_id")
+	bookId            Int      @map("book_id")
+  book               Book     @relation(fields: [bookId], references: [id])
+  user               User     @relation(fields: [userId], references: [id])
 
   @@unique([userId, bookId])
   @@index([userId])

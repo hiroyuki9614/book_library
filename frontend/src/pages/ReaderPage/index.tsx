@@ -1,11 +1,13 @@
 import EpubReader from '@/features/components/EpubReader';
 import PdfReader from '@/features/components/PdfReader';
 import useBook from '@/hooks/useBook';
+import { useAuth } from '@/contexts/useAuth';
 import { useParams } from 'react-router-dom';
 
 export default function ReaderPage() {
 	const { id } = useParams();
 	const bookId = Number(id);
+	const { user } = useAuth();
 	const { book, isLoading, error } = useBook(bookId);
 
 	if (isLoading) {
@@ -17,11 +19,11 @@ export default function ReaderPage() {
 	}
 
 	if (book.fileType === 'epub') {
-		return <EpubReader key={book.id} bookId={book.id} bookTitle={book.title} pageTurnDirection={book.pageTurnDirection} />;
+		return <EpubReader key={book.id} bookId={book.id} bookTitle={book.title} pageTurnDirection={book.pageTurnDirection} userId={user?.id} />;
 	}
 
 	if (book.fileType === 'pdf') {
-		return <PdfReader key={book.id} bookId={book.id} bookTitle={book.title} pageTurnDirection={book.pageTurnDirection} />;
+		return <PdfReader key={book.id} bookId={book.id} bookTitle={book.title} pageTurnDirection={book.pageTurnDirection} userId={user?.id} />;
 	}
 
 	return <p>この書籍ファイル形式は閲覧できません。</p>;
