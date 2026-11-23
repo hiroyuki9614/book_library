@@ -43,7 +43,7 @@ class TransientGitHubAPIError(GateError):
 
 
 class GitHubAPI:
-    def __init__(self, repository: str = REPOSITORY, token: [REDACTED] | None = None) -> None:
+    def __init__(self, repository: str = REPOSITORY, token: str | None = None) -> None:
         self.repository = repository
         self.api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
         self.token = token if token is not None else os.environ.get("GITHUB_TOKEN")
@@ -55,7 +55,7 @@ class GitHubAPI:
             "X-GitHub-Api-Version": "2022-11-28",
         }
         if self.token:
-            [REDACTED]"Authorization"] = f"Bearer [REDACTED]"
+            headers["Authorization"] = f"Bearer {self.token}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         if data is not None:
             headers["Content-Type"] = "application/json"
@@ -389,7 +389,7 @@ def _parse_review_timestamp(value: object) -> datetime:
     return datetime.fromisoformat(value[:-1] + "+00:00")
 
 
-def _reject_nonstandard_json_constant(_token: [REDACTED] -> None:
+def _reject_nonstandard_json_constant(_token: str) -> None:
     # Python's json.loads otherwise accepts NaN/Infinity, which are not JSON.
     raise ValueError("Nonstandard JSON constants are forbidden")
 
