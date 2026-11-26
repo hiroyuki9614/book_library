@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from public_demo_accounts import PublicDemoError, drop_legacy_admin_build_args
+
 
 EXPECTED_PROJECT = "belib-production"
 EXPECTED_ACTIVE_SERVICES = {"db", "backend", "frontend", "nginx"}
@@ -353,7 +355,7 @@ def validate_frontend_service(
             raise ComposeIdentityError("The frontend build arguments differ from the operator-approved values")
     else:
         old_keys = {'VCS_REF', 'VITE_API_BASE_URL', 'VITE_PUBLIC_DEMO_EMAIL', 'VITE_PUBLIC_DEMO_PASSWORD'}
-        new_keys = old_keys | {'VITE_PUBLIC_DEMO_ADMIN_EMAIL', 'VITE_PUBLIC_DEMO_ADMIN_PASSWORD', 'PUBLIC_DEMO_ACCOUNTS_SHA256'}
+        new_keys = old_keys | {'PUBLIC_DEMO_USER_BUILD_SHA256'}
         if not isinstance(args, dict) or set(args) not in (old_keys, new_keys):
             raise ComposeIdentityError("The frontend build argument set differs from the approved contract")
         if (
@@ -363,8 +365,14 @@ def validate_frontend_service(
         ):
             raise ComposeIdentityError("The frontend public demo credential shape is invalid")
         public_args = {'VITE_PUBLIC_DEMO_EMAIL': public_demo_credentials[0], 'VITE_PUBLIC_DEMO_PASSWORD': public_demo_credentials[1],
-                       'VITE_PUBLIC_DEMO_ADMIN_EMAIL': '', 'VITE_PUBLIC_DEMO_ADMIN_PASSWORD': '', 'PUBLIC_DEMO_ACCOUNTS_SHA256': ''}
+                       'PUBLIC_DEMO_USER_BUILD_SHA256': ''}
         if expected_public_demo_args is not None:
+            if not isinstance(expected_public_demo_args, dict):
+                raise ComposeIdentityError('The expected public demo argument set is invalid')
+            try:
+                expected_public_demo_args = drop_legacy_admin_build_args(expected_public_demo_args)
+            except PublicDemoError:
+                raise ComposeIdentityError('The expected public demo argument names are invalid') from None
             if set(expected_public_demo_args) != set(public_args):
                 raise ComposeIdentityError('The expected public demo argument set is invalid')
             public_args = expected_public_demo_args
@@ -464,6 +472,10 @@ def bootstrap_preflight(container_name: str, production_env_file: str, *, agent_
     clean_env = os.environ.copy()
     clean_env.pop("VITE_API_BASE_URL", None)
     clean_env.pop("COMPOSE_PROFILES", None)
+    try:
+        clean_env = drop_legacy_admin_build_args(clean_env)
+    except PublicDemoError:
+        raise ComposeIdentityError('The environment contains an unsupported public demo variable name') from None
     clean_env.update(
         {
             "COMPOSE_PROFILES": "",
@@ -471,9 +483,7 @@ def bootstrap_preflight(container_name: str, production_env_file: str, *, agent_
             "BELIB_FRONTEND_IMAGE": f"belib-frontend:{PROBE_SHA}",
             "VITE_PUBLIC_DEMO_EMAIL": "",
             "VITE_PUBLIC_DEMO_PASSWORD": "",
-            "VITE_PUBLIC_DEMO_ADMIN_EMAIL": "",
-            "VITE_PUBLIC_DEMO_ADMIN_PASSWORD": "",
-            "PUBLIC_DEMO_ACCOUNTS_SHA256": "",
+            "PUBLIC_DEMO_USER_BUILD_SHA256": "",
         }
     )
     project_dir = Path(identity["project_dir"])
