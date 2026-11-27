@@ -70,13 +70,13 @@ def solo_comments(*, head_sha=PR_HEAD_SHA, review_comment_id=501, release_commen
             SOLO_REVIEW_MARKER,
             review_payload,
             review_comment_id,
-            created_at="2026-11-02T00:00:00Z",
+            created_at="2026-11-01T23:58:00Z",
         ),
         structured_comment(
             SOLO_RELEASE_MARKER,
             release_payload,
             release_comment_id,
-            created_at="2026-11-02T00:01:00Z",
+            created_at="2026-11-01T23:59:00Z",
         ),
     ]
 
@@ -517,6 +517,80 @@ class ReleaseGateTests(unittest.TestCase):
         proof = validate_release(api, SOURCE_SHA, expected_main_run_id=MAIN_RUN_ID)
 
         self.assertEqual(proof["pr_head_sha"], PR_HEAD_SHA)
+
+    def test_rejects_solo_review_comment_after_merge(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        api.comments[0]["created_at"] = "2026-11-02T00:00:01Z"
+        api.comments[0]["updated_at"] = api.comments[0]["created_at"]
+
+        with self.assertRaisesRegex(GateError, "must predate the PR merge"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_solo_release_comment_after_merge(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        api.comments[1]["created_at"] = "2026-11-02T00:00:01Z"
+        api.comments[1]["updated_at"] = api.comments[1]["created_at"]
+
+        with self.assertRaisesRegex(GateError, "must predate the PR merge"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_solo_review_and_release_comments_both_after_merge(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        for comment, timestamp in zip(
+            api.comments,
+            ("2026-11-02T00:00:01Z", "2026-11-02T00:00:02Z"),
+        ):
+            comment["created_at"] = timestamp
+            comment["updated_at"] = timestamp
+
+        with self.assertRaisesRegex(GateError, "must predate the PR merge"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_same_second_solo_review_and_release_as_ambiguous(self):
+        api = FakeAPI()
+        api.reviews = []
+        api.comments = solo_comments()
+        api.comments[0]["created_at"] = "2026-11-01T23:58:01.100Z"
+        api.comments[0]["updated_at"] = api.comments[0]["created_at"]
+        api.comments[1]["created_at"] = "2026-11-01T23:58:01.900Z"
+        api.comments[1]["updated_at"] = api.comments[1]["created_at"]
+
+        with self.assertRaisesRegex(GateError, "ambiguous within one second"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_non_author_approval_after_merge(self):
+        api = FakeAPI()
+        api.reviews[0]["submitted_at"] = "2026-11-02T00:00:01Z"
+
+        with self.assertRaisesRegex(GateError, "exact merged PR head SHA"):
+            validate_release(api, SOURCE_SHA)
+
+    def test_rejects_missing_or_malformed_non_author_review_timestamps(self):
+        for timestamp in (None, "not-a-github-timestamp"):
+            with self.subTest(timestamp=timestamp):
+                api = FakeAPI()
+                api.reviews[0]["submitted_at"] = timestamp
+
+                with self.assertRaisesRegex(GateError, "missing or invalid timestamp"):
+                    validate_release(api, SOURCE_SHA)
+
+    def test_rejects_missing_or_malformed_solo_comment_timestamps(self):
+        for timestamp in (None, "not-a-github-timestamp"):
+            with self.subTest(timestamp=timestamp):
+                api = FakeAPI()
+                api.reviews = []
+                api.comments = solo_comments()
+                api.comments[0]["created_at"] = timestamp
+                api.comments[0]["updated_at"] = timestamp
+
+                with self.assertRaisesRegex(GateError, "invalid comment timestamp"):
+                    validate_release(api, SOURCE_SHA)
 
     def test_accepts_solo_owner_policy_with_github_crlf_comment_separator(self):
         api = FakeAPI()

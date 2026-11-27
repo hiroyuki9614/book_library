@@ -383,6 +383,12 @@ def _parse_github_timestamp(value: object) -> datetime:
         raise GateError("Solo-owner evidence has an invalid comment timestamp") from None
 
 
+def _parse_review_timestamp(value: object) -> datetime:
+    if not _is_github_timestamp(value):
+        raise GateError("The pull-request review history has a missing or invalid timestamp")
+    return datetime.fromisoformat(value[:-1] + "+00:00")
+
+
 def _reject_nonstandard_json_constant(_token: str) -> None:
     # Python's json.loads otherwise accepts NaN/Infinity, which are not JSON.
     raise ValueError("Nonstandard JSON constants are forbidden")
@@ -525,7 +531,7 @@ def _validate_solo_revoke_payload(payload: dict, *, head_sha: str) -> None:
 
 
 def _verify_solo_owner_policy(
-    api: GitHubAPI, pull: dict, head_sha: str, reviews: list[dict]
+    api: GitHubAPI, pull: dict, head_sha: str, reviews: list[dict], merged_at: datetime
 ) -> None:
     owner_login = _repository_owner_login(api)
     merged_by = pull.get("merged_by")
@@ -575,9 +581,13 @@ def _verify_solo_owner_policy(
             continue
         created_at = _validate_policy_comment_metadata(comment, owner_login)
         if marker == SOLO_REVIEW_MARKER:
+            if created_at >= merged_at:
+                raise GateError("Solo-owner review and release evidence must predate the PR merge")
             _validate_solo_review_payload(payload, head_sha=head_sha)
             review_comments.append((comment, created_at, payload))
         elif marker == SOLO_RELEASE_MARKER:
+            if created_at >= merged_at:
+                raise GateError("Solo-owner review and release evidence must predate the PR merge")
             _validate_solo_release_payload(payload, head_sha=head_sha)
             release_comments.append((comment, created_at, payload))
         else:
@@ -602,6 +612,8 @@ def _verify_solo_owner_policy(
         raise GateError("Solo-owner release approval must reference the exact review comment")
     if release_created_at <= review_created_at:
         raise GateError("Solo-owner release approval must follow the review comment")
+    if release_created_at.replace(microsecond=0) == review_created_at.replace(microsecond=0):
+        raise GateError("Solo-owner review and release timestamps are ambiguous within one second")
 
 
 def _verify_pr_review(api: GitHubAPI, pull: dict, release_workflow_id: int) -> None:
@@ -610,8 +622,10 @@ def _verify_pr_review(api: GitHubAPI, pull: dict, release_workflow_id: int) -> N
     if not _is_full_sha(raw_head_sha):
         raise GateError("The merged PR head SHA is missing or invalid")
     head_sha = raw_head_sha.lower()
+    merged_at = _parse_github_timestamp(pull.get("merged_at"))
     reviews = _pull_request_reviews(api, int(pull["number"]))
     latest_by_user: dict[str, dict] = {}
+    review_times: dict[int, datetime] = {}
     for review in reviews:
         reviewer = review.get("user", {}).get("login")
         if not reviewer or reviewer == pull.get("user", {}).get("login"):
@@ -620,10 +634,10 @@ def _verify_pr_review(api: GitHubAPI, pull: dict, release_workflow_id: int) -> N
             continue
         if review.get("state") in {"PENDING", "COMMENTED"}:
             continue
+        submitted_at = _parse_review_timestamp(review.get("submitted_at"))
+        review_times[id(review)] = submitted_at
         previous = latest_by_user.get(reviewer)
-        if previous is None or (review.get("submitted_at") or "") >= (
-            previous.get("submitted_at") or ""
-        ):
+        if previous is None or submitted_at >= review_times[id(previous)]:
             latest_by_user[reviewer] = review
     if any(
         review.get("state") == "CHANGES_REQUESTED"
@@ -634,10 +648,11 @@ def _verify_pr_review(api: GitHubAPI, pull: dict, release_workflow_id: int) -> N
     approved = any(
         review.get("state") == "APPROVED"
         and review.get("commit_id", "").lower() == head_sha
+        and review_times[id(review)] < merged_at
         for review in latest_by_user.values()
     )
     if not approved:
-        _verify_solo_owner_policy(api, pull, head_sha, reviews)
+        _verify_solo_owner_policy(api, pull, head_sha, reviews, merged_at)
 
     query = urlencode({"head_sha": head_sha, "event": "pull_request", "per_page": 100})
     runs = api.get(f"/repos/{api.repository}/actions/runs?{query}").get("workflow_runs", [])
