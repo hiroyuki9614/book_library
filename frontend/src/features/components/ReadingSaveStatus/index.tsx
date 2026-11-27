@@ -33,7 +33,7 @@ export default function ReadingSaveStatus({ status, retry }: ReadingSaveStatusPr
 			) : (
 				<>
 					<span aria-hidden='true' title={detail} className={`whitespace-nowrap${status === 'conflict' || status === 'stale' ? ' text-amber-700' : ''}`}>
-						{status === 'conflict' ? '最新の保存位置を読み込み済み' : status === 'stale' ? '保存競合' : status === 'saving' ? '保存中…' : status === 'saved' ? '✓ 保存済み' : '未確認'}
+						{status === 'conflict' ? '最新位置を読込' : status === 'stale' ? '保存競合' : status === 'saving' ? '保存中…' : status === 'saved' ? '✓ 保存済み' : '未確認'}
 					</span>
 					<span className='sr-only'>{detail}</span>
 				</>
